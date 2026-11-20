@@ -1,0 +1,375 @@
+use super::*;
+
+impl Workbench {
+    pub(in crate::workbench) fn default_directory(&self) -> PathBuf {
+        self.project_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents")))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+    }
+
+    pub(in crate::workbench) fn file_picker_pending(&self) -> bool {
+        self.file_picker.is_some()
+            || self.startup_wizard_picker_pending()
+            || self.tab_group_dialog.is_some()
+            || self.choosing_save_as
+            || self.ext_import.picker_pending()
+            || self.intruder_close_blocks_transition()
+            || self.intruder_task_name_pending()
+    }
+
+    pub(in crate::workbench) fn finish_file_picker(
+        &mut self,
+        picker: mio_core::Uuid,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.file_picker != Some(picker) {
+            return false;
+        }
+        self.file_picker = None;
+        cx.notify();
+        true
+    }
+
+    pub(in crate::workbench) fn choose_open(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition.is_some() || self.file_picker_pending() || !self.backend_available() {
+            return;
+        }
+        if self.ext_import.blocks_transition() {
+            self.ext_import.visible = true;
+            self.fail(
+                "请先取消导入或关闭预检，并等待后台清理完成后再打开其他项目。",
+                cx,
+            );
+            return;
+        }
+        let project = self.project;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let paths = crate::native_terminate::prompt_for_paths(
+            window,
+            cx,
+            PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("打开 MIO 项目".into()),
+            },
+        );
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let _ = owner.update(cx, |_, window, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                        return;
+                    }
+                    if view.project != project {
+                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(paths))) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                view.request_transition(AfterSave::OpenProject(path), window, cx);
+                            }
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => view.fail(format!("无法选择项目：{error}"), cx),
+                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::workbench) fn save_project(
+        &mut self,
+        save_as: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.intruder.resource_pools.management.delete_pending() {
+            self.fail("资源池删除尚未确认；当前编辑保留，确认后可保存。", cx);
+            return;
+        }
+        if self.cancel_expired_quit(cx) {
+            return;
+        }
+        if !self.backend_available() {
+            if self.after_save.is_some() {
+                self.cancel_transition(cx);
+            }
+            return;
+        }
+        if self
+            .transition
+            .as_ref()
+            .is_some_and(|phase| *phase != TransitionPhase::Ready)
+            || self.file_picker_pending()
+        {
+            return;
+        }
+        if self.websocket_notes_pending()
+            || self.http_notes_pending()
+            || self.http_highlights_pending()
+        {
+            self.notes_save_wait = Some(save_as);
+            self.status = "正在等待注解保存确认；随后保存最新项目。".into();
+            cx.notify();
+            return;
+        }
+        self.notes_save_wait = None;
+        self.begin_project_save(save_as, window, cx);
+    }
+
+    pub(in crate::workbench) fn begin_project_save(
+        &mut self,
+        save_as: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project else { return };
+        if !save_as && self.project_path.is_some() {
+            if !self.flush_workspace(window, cx) {
+                self.fail_intruder_result_close("项目工作区未保存；结果和当前编辑仍保留。", cx);
+                self.cancel_transition(cx);
+                return;
+            }
+            self.pending_project_save = Some(None);
+            self.flush_project_save(window, cx);
+            return;
+        }
+        match self.capture_drafts(window, cx) {
+            Ok(changed) => self.workspace_dirty |= changed,
+            Err(error) => {
+                self.cancel_save_as(cx);
+                self.fail(error, cx);
+                return;
+            }
+        }
+        // Save As can escape an unwritable source; it must not require another source write.
+        self.choosing_save_as = true;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let for_transition = self.after_save.is_some();
+        let attempt = self.quit_attempt;
+        let result_close = self.intruder_close_save_operation();
+        #[cfg(not(test))]
+        let path = crate::native_terminate::prompt_for_new_path(
+            window,
+            cx,
+            &self.default_directory(),
+            Some("Untitled.mio"),
+        );
+        #[cfg(test)]
+        let path = if let Some(path) = self.save_picker_override.take() {
+            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
+        } else {
+            let path = crate::native_terminate::prompt_for_new_path(
+                window,
+                cx,
+                &self.default_directory(),
+                Some("Untitled.mio"),
+            );
+            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
+        };
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = path.await;
+            let _ = owner.update(cx, |_, window, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) {
+                        return;
+                    }
+                    view.choosing_save_as = false;
+                    if !view.intruder_close_save_is_current(result_close) {
+                        view.cancel_save_as(cx);
+                        view.fail(
+                            "结果关闭等待已结束；本次路径未用于保存，当前结果仍保留。",
+                            cx,
+                        );
+                        return;
+                    }
+                    if view.project != Some(project) {
+                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
+                        return;
+                    }
+                    if for_transition
+                        && (view.after_save.is_none() || !view.quit_answer_is_current(attempt, cx))
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(path))) => match view.capture_drafts(window, cx) {
+                            Ok(changed) => {
+                                view.workspace_dirty |= changed;
+                                view.pending_project_save = Some(Some(path));
+                                view.flush_project_save(window, cx);
+                            }
+                            Err(error) => {
+                                view.cancel_save_as(cx);
+                                view.fail(error, cx);
+                            }
+                        },
+                        Ok(Ok(None)) => {
+                            view.cancel_save_as(cx);
+                        }
+                        Ok(Err(error)) => {
+                            view.cancel_save_as(cx);
+                            view.fail(format!("无法选择保存位置：{error}"), cx);
+                        }
+                        Err(_) => {
+                            view.cancel_save_as(cx);
+                            view.fail("文件选择器已意外关闭。", cx);
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::workbench) fn cancel_save_as(&mut self, cx: &mut Context<Self>) {
+        self.notes_save_wait = None;
+        if self.intruder_close_save_operation().is_some() {
+            self.fail_intruder_result_close(
+                "项目文件保存未完成；结果和最新输入仍保留，请再次明确选择。",
+                cx,
+            );
+        }
+        if self.transition.is_some() {
+            self.cancel_transition(cx);
+        } else if self.discard_pending_sends(cx) {
+            self.status = "另存为未完成；等待保存的请求已取消，尚未建立网络连接。".into();
+        }
+        self.send_http_notes(false, cx);
+        self.send_http_highlights(false, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn choose_slim_save_as(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.backend_available() || self.transition.is_some() || self.file_picker_pending() {
+            return;
+        }
+        let Some(project) = self.project else { return };
+        if !self.flush_workspace(window, cx) {
+            return;
+        }
+        let default_name = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|stem| format!("{}-slim.mio", stem.to_string_lossy()))
+            .unwrap_or_else(|| "Untitled-slim.mio".into());
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        #[cfg(not(test))]
+        let path = crate::native_terminate::prompt_for_new_path(
+            window,
+            cx,
+            &self.default_directory(),
+            Some(&default_name),
+        );
+        #[cfg(test)]
+        let path = if let Some(path) = self.save_picker_override.take() {
+            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
+        } else {
+            let path = crate::native_terminate::prompt_for_new_path(
+                window,
+                cx,
+                &self.default_directory(),
+                Some(&default_name),
+            );
+            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
+        };
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = path.await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                        return;
+                    }
+                    if view.project != Some(project) {
+                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(path))) => {
+                            view.status = format!("正在执行瘦身另存为：{}…", path.display());
+                            view.enqueue(
+                                Command::SlimSaveProjectAs {
+                                    project,
+                                    path,
+                                    options: mio_core::SlimSaveOptions::default(),
+                                    cancel: CancellationToken::new(),
+                                },
+                                cx,
+                            );
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => view.fail(format!("无法选择瘦身保存位置：{error}"), cx),
+                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::workbench) fn export_ca(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.backend_available() || self.transition.is_some() || self.file_picker_pending() {
+            return;
+        }
+        let project = self.project;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let path = crate::native_terminate::prompt_for_new_path(
+            window,
+            cx,
+            &self.default_directory(),
+            Some("mio-ca.cer"),
+        );
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = path.await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                        return;
+                    }
+                    if view.project != project {
+                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(path))) => {
+                            view.enqueue(Command::ExportCa { path }, cx);
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => view.fail(format!("无法导出 CA：{error}"), cx),
+                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+}

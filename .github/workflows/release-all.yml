@@ -1,0 +1,226 @@
+# Disabled when idle (`gh workflow disable release-all.yml`).
+# Trigger on Release publish or manual dispatch (`gh workflow enable release-all.yml` first).
+name: Release (All Platforms)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach build artifacts to"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build macOS .app, .dmg, and .zip
+        run: bash scripts/package-macos.sh --release --target ${{ matrix.target }}
+
+      - name: Stage macOS release artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp dist/macos-${{ matrix.arch }}/MIO-v*-macos-${{ matrix.arch }}.dmg release-artifacts/
+          cp dist/macos-${{ matrix.arch }}/MIO-v*-macos-${{ matrix.arch }}.zip release-artifacts/
+
+      - name: Upload macOS staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-macos-${{ matrix.arch }}
+          path: release-artifacts/*
+
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.34
+            gnu_triple: x86_64-linux-gnu
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools and target static dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config meson ninja-build bison git x11proto-dev \
+            libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-xkb-dev libxcb1-dev libxau-dev libxdmcp-dev libbsd-dev libmd-dev
+
+      - name: Populate Linux static archives (.local/linux-static-libs/${{ matrix.arch }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest=".local/linux-static-libs/${{ matrix.arch }}"
+          mkdir -p "$dest"
+          syslibdir="/usr/lib/${{ matrix.gnu_triple }}"
+          for lib in libxcb-xkb.a libxcb.a libXau.a libXdmcp.a libbsd.a libmd.a; do
+            cp "$syslibdir/$lib" "$dest/$lib"
+          done
+
+          rm -rf /tmp/libxkbcommon /tmp/xkb-build
+          git clone --depth 1 --branch xkbcommon-1.7.0 https://github.com/xkbcommon/libxkbcommon.git /tmp/libxkbcommon
+          PKG_CONFIG_LIBDIR="$syslibdir/pkgconfig:/usr/share/pkgconfig" \
+          meson setup /tmp/xkb-build /tmp/libxkbcommon \
+            --prefix=/usr \
+            -Ddefault_library=static \
+            -Denable-docs=false \
+            -Denable-wayland=false \
+            -Denable-tools=false \
+            -Denable-x11=true
+          ninja -C /tmp/xkb-build libxkbcommon.a libxkbcommon-x11.a
+          cp /tmp/xkb-build/libxkbcommon.a "$dest/libxkbcommon.a"
+          cp /tmp/xkb-build/libxkbcommon-x11.a "$dest/libxkbcommon-x11.a"
+          ls -lh "$dest"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@cargo-zigbuild
+
+      - name: Build & package Linux release
+        env:
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_LIBDIR: /usr/lib/${{ matrix.gnu_triple }}/pkgconfig:/usr/share/pkgconfig
+        run: bash scripts/package-linux.sh --release --target "${{ matrix.zig_target }}"
+
+      - name: Pack Linux tar.gz release artifact
+        shell: bash
+        run: |
+          version="$(awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version *= *"/{sub(/^version *= *"/,""); sub(/".*/,""); print; exit}' Cargo.toml)"
+          mkdir -p release-artifacts
+          tar -C "dist/linux-${{ matrix.arch }}" -czf "release-artifacts/MIO-v${version}-linux-${{ matrix.arch }}.tar.gz" .
+
+      - name: Upload Linux staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-linux-${{ matrix.arch }}
+          path: release-artifacts/*
+
+  build-windows:
+    name: Build Windows (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - target: aarch64-pc-windows-msvc
+            arch: aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure MSVC ARM64 build tools when targeting aarch64
+        if: matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = (& $vsWhere -latest -property installationPath | Select-Object -First 1).Trim()
+          if (-not $vsPath) { throw "Visual Studio installation not found" }
+          $arm64Lib = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC\*\lib\arm64\libcmt.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $arm64Lib) {
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            Write-Host "Installing Microsoft.VisualStudio.Component.VC.Tools.ARM64..."
+            $proc = Start-Process -FilePath $installer -ArgumentList @(
+              "modify",
+              "--installPath", "`"$vsPath`"",
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--quiet", "--wait", "--norestart"
+            ) -Wait -PassThru
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+              throw "vs_installer failed with exit code $($proc.ExitCode)"
+            }
+          }
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build & package Windows release
+        shell: pwsh
+        run: .\scripts\package-windows.ps1 -Profile release -Target ${{ matrix.target }}
+
+      - name: Pack Windows zip release artifact
+        shell: pwsh
+        run: |
+          $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $version = $versionLine.Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
+          Compress-Archive -Path "dist\windows-${{ matrix.arch }}\*" -DestinationPath "release-artifacts\MIO-v$version-windows-${{ matrix.arch }}.zip" -Force
+
+      - name: Upload Windows staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-windows-${{ matrix.arch }}
+          path: release-artifacts/*
+
+  publish-release:
+    name: Upload All Platform Artifacts & SHA256SUMS.txt
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: artifacts
+        run: |
+          sha256sum MIO-v* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Ensure release exists and upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "MIO $TAG" --generate-notes --repo "${{ github.repository }}"
+          gh release upload "$TAG" artifacts/* --clobber --repo "${{ github.repository }}"

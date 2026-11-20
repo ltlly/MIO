@@ -1,0 +1,809 @@
+use super::*;
+
+pub(crate) struct HttpMatchReplaceTable {
+    pub(super) owner: WeakEntity<Settings>,
+}
+
+const HTTP_MR_COLUMNS: [(&str, f32); 7] = [
+    ("Enabled", 64.),
+    ("Item", 110.),
+    ("Name", 110.),
+    ("Match", 164.),
+    ("Replace", 164.),
+    ("Type", 86.),
+    ("Comment", 118.),
+];
+
+impl TableDelegate for HttpMatchReplaceTable {
+    fn columns_count(&self, _: &App) -> usize {
+        HTTP_MR_COLUMNS.len()
+    }
+    fn column(&self, index: usize, _: &App) -> Column {
+        let scale = theme::ui_scale();
+        Column::new(index.to_string(), HTTP_MR_COLUMNS[index].0)
+            .width((HTTP_MR_COLUMNS[index].1 * scale).round())
+            .p_0()
+            .movable(false)
+    }
+    fn rows_count(&self, cx: &App) -> usize {
+        self.owner
+            .upgrade()
+            .map_or(0, |owner| owner.read(cx).proxy_advanced.http_rules.len())
+    }
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        settings_table_th(HTTP_MR_COLUMNS[col_ix].0, HTTP_MR_COLUMNS[col_ix].1)
+    }
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+    fn render_tr(
+        &mut self,
+        row: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div().id(("proxy-http-mr-row", row)).border_b_0()
+    }
+    fn render_td(
+        &mut self,
+        row: usize,
+        column: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(owner) = self.owner.upgrade() else {
+            return div().into_any_element();
+        };
+        let (rule, enabled) = {
+            let settings = owner.read(cx);
+            let Some(rule) = settings.proxy_advanced.http_rules.get(row).cloned() else {
+                return div().into_any_element();
+            };
+            (rule, settings.state.enabled)
+        };
+        match column {
+            0 => {
+                let id = rule.id;
+                let wb = owner.read(cx).owner.clone();
+                settings_table_checkbox_cell(
+                    adv_checkbox(("proxy-http-mr-toggle", row), "", rule.enabled, enabled)
+                        .p_0()
+                        .gap_0()
+                        .accessibility_label(format!("启用 HTTP 规则 {}", rule.match_pattern))
+                        .on_change(move |_, _, _, cx| {
+                            let _ = wb.update(cx, |view, cx| {
+                                view.toggle_http_match_replace_rule(id, cx);
+                            });
+                        }),
+                )
+                .into_any_element()
+            }
+            _ => div()
+                .px(px(6.))
+                .truncate()
+                .child(crate::workbench::tools_extra::mr_rule_cell(&rule, column))
+                .into_any_element(),
+        }
+    }
+    fn cell_label(&self, row: usize, column: usize, cx: &App) -> Option<SharedString> {
+        let owner = self.owner.upgrade()?;
+        let rule = owner.read(cx).proxy_advanced.http_rules.get(row)?;
+        Some(crate::workbench::tools_extra::mr_rule_cell(rule, column).into())
+    }
+}
+
+pub(crate) struct SslPassThroughTable {
+    pub(super) owner: WeakEntity<Settings>,
+}
+
+const SSL_PT_COLUMNS: [(&str, f32); 4] = [
+    ("Enabled", 72.),
+    ("Host / IP range", 516.),
+    ("Port", 114.),
+    ("Regex", 114.),
+];
+
+impl TableDelegate for SslPassThroughTable {
+    fn columns_count(&self, _: &App) -> usize {
+        SSL_PT_COLUMNS.len()
+    }
+    fn column(&self, index: usize, _: &App) -> Column {
+        let scale = theme::ui_scale();
+        Column::new(index.to_string(), SSL_PT_COLUMNS[index].0)
+            .width((SSL_PT_COLUMNS[index].1 * scale).round())
+            .p_0()
+            .movable(false)
+    }
+    fn rows_count(&self, cx: &App) -> usize {
+        self.owner
+            .upgrade()
+            .map_or(0, |owner| owner.read(cx).proxy_advanced.ssl_rules.len())
+    }
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        settings_table_th(SSL_PT_COLUMNS[col_ix].0, SSL_PT_COLUMNS[col_ix].1)
+    }
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+    fn render_tr(
+        &mut self,
+        row: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div().id(("proxy-ssl-pt-row", row)).border_b_0()
+    }
+    fn render_td(
+        &mut self,
+        row: usize,
+        column: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(owner) = self.owner.upgrade() else {
+            return div().into_any_element();
+        };
+        let (rule, enabled, project) = {
+            let settings = owner.read(cx);
+            let Some(rule) = settings.proxy_advanced.ssl_rules.get(row).cloned() else {
+                return div().into_any_element();
+            };
+            (rule, settings.state.enabled, settings.state.project)
+        };
+        match column {
+            0 => {
+                let id = rule.id;
+                let wb = owner.read(cx).owner.clone();
+                settings_table_checkbox_cell(
+                    adv_checkbox(("proxy-ssl-pt-toggle", row), "", rule.enabled, enabled)
+                        .p_0()
+                        .gap_0()
+                        .accessibility_label(format!("启用 TLS pass through {}", rule.host_pattern))
+                        .on_change(move |state, _, _, cx| {
+                            let checked = state == CheckboxState::Checked;
+                            let _ = wb.update(cx, |view, cx| {
+                                let _ = view.update_proxy_advanced(
+                                    project,
+                                    |ssl, _, _| {
+                                        if let Some(r) = ssl.iter_mut().find(|r| r.id == id) {
+                                            r.enabled = checked;
+                                        }
+                                    },
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+                .into_any_element()
+            }
+            1 => div().px(px(6.)).truncate().child(rule.host_pattern).into_any_element(),
+            2 => div()
+                .px(px(6.))
+                .child(rule.port.map_or_else(|| "Any".into(), |p| p.to_string()))
+                .into_any_element(),
+            _ => div()
+                .px(px(6.))
+                .child(if rule.is_regex { "Yes" } else { "No" })
+                .into_any_element(),
+        }
+    }
+    fn cell_label(&self, row: usize, column: usize, cx: &App) -> Option<SharedString> {
+        let owner = self.owner.upgrade()?;
+        let rule = owner.read(cx).proxy_advanced.ssl_rules.get(row)?;
+        Some(match column {
+            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            1 => rule.host_pattern.clone().into(),
+            2 => rule.port.map_or_else(|| "Any".into(), |p| p.to_string()).into(),
+            _ => if rule.is_regex { "Yes" } else { "No" }.into(),
+        })
+    }
+}
+
+impl Settings {
+    pub(in crate::workbench::settings) fn render_proxy_advanced_cards(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .gap(px(16.))
+            .child(self.render_proxy_misc_extended_card(window))
+            .child(self.render_http_match_replace_card(cx))
+            .child(self.render_ssl_passthrough_card(cx))
+            .child(self.render_ws_match_replace_card(window, cx))
+            .child(self.render_response_modification_card(window))
+    }
+
+    fn render_http_match_replace_card(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let enabled = self.state.enabled && !self.proxy_advanced.http_editor_open;
+        let selected_id = self.proxy_advanced.http_selected;
+        let selected = selected_id.and_then(|id| {
+            self.proxy_advanced
+                .http_rules
+                .iter()
+                .position(|rule| rule.id == id)
+        });
+        let http_len = self.proxy_advanced.http_rules.len();
+        let http_rules = self.proxy_advanced.http_rules.clone();
+
+        let mut actions = div()
+            .w(theme::scaled_px(84.).max(px(84.)))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(5.));
+        for (id, label, tip, available, action) in [
+            ("proxy-http-mr-add", "添加", "新增 HTTP 匹配替换规则", enabled, 0u8),
+            ("proxy-http-mr-edit", "编辑", "编辑选中的 HTTP 匹配替换规则", enabled && selected.is_some(), 1u8),
+            ("proxy-http-mr-remove", "移除", "移除选中的 HTTP 匹配替换规则", enabled && selected.is_some(), 2u8),
+            ("proxy-http-mr-up", "上移", "上移选中的 HTTP 匹配替换规则", enabled && selected.is_some_and(|i| i > 0), 3u8),
+            ("proxy-http-mr-down", "下移", "下移选中的 HTTP 匹配替换规则", enabled && selected.is_some_and(|i| i + 1 < http_len), 4u8),
+        ] {
+            let rule = selected.and_then(|i| http_rules.get(i)).cloned();
+            actions = actions.child(
+                settings_action_button(id, label, !available)
+                    .w_full()
+                    .tooltip(tip)
+                    .tab_stop(false)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if action == 0 {
+                            this.proxy_advanced.http_editor_open = true;
+                            this.proxy_advanced.http_editing = None;
+                            this.proxy_advanced.http_error = None;
+                            this.proxy_advanced.http_is_regex = false;
+                            this.proxy_advanced.http_target = MatchReplaceTarget::RequestHeader;
+                            this.proxy_advanced.http_target_select.update(cx, |s, cx| {
+                                s.set_selected_index(
+                                    Some(gpui_kit::component::IndexPath::new(0)),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            for input in [
+                                &this.proxy_advanced.http_match,
+                                &this.proxy_advanced.http_replace,
+                                &this.proxy_advanced.http_comment,
+                            ] {
+                                input.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            if let Some(project) = this.state.project {
+                                if let Some(prev) = this.proxy_advanced.http_dialog.take() {
+                                    let _ = prev.update(cx, |_, window, _| window.remove_window());
+                                }
+                                this.proxy_advanced.http_dialog = crate::workbench::tools_extra::open_http_match_replace_dialog(
+                                    this.owner.clone(), this.owner_window, project, None, "proxy-http-mr", window, cx,
+                                ).ok();
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        let Some(id) = selected_id else {
+                            return;
+                        };
+                        match action {
+                            1 => {
+                                if let Some(rule) = &rule {
+                                    this.load_http_rule_into_editor(rule, window, cx);
+                                    if let Some(project) = this.state.project {
+                                        if let Some(prev) = this.proxy_advanced.http_dialog.take() {
+                                            let _ = prev.update(cx, |_, window, _| window.remove_window());
+                                        }
+                                        this.proxy_advanced.http_dialog = crate::workbench::tools_extra::open_http_match_replace_dialog(
+                                            this.owner.clone(), this.owner_window, project, Some(rule.clone()), "proxy-http-mr", window, cx,
+                                        ).ok();
+                                    }
+                                }
+                            }
+                            2 => {
+                                if this.proxy_advanced.http_editing == Some(id) {
+                                    this.proxy_advanced.http_editing = None;
+                                }
+                                let _ = this.owner.update(cx, |view, cx| {
+                                    view.remove_http_match_replace_rule(id, cx);
+                                });
+                                cx.notify();
+                            }
+                            3 => {
+                                let _ = this.owner.update(cx, |view, cx| {
+                                    view.move_http_match_replace_rule(id, false, cx);
+                                });
+                            }
+                            4 => {
+                                let _ = this.owner.update(cx, |view, cx| {
+                                    view.move_http_match_replace_rule(id, true, cx);
+                                });
+                            }
+                            _ => {}
+                        }
+                    })),
+            );
+        }
+
+        let regex_entity = cx.entity();
+        let is_editing = self.proxy_advanced.http_editing.is_some();
+        let scope_owner = self.owner.clone();
+        let project = self.state.project;
+        let in_scope_only = self.state.proxy_messages.match_replace_in_scope_only;
+        div()
+            .pt(px(16.))
+            .border_t_1()
+            .border_color(theme::border())
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(settings_section_heading(
+                "proxy-http-match-replace-heading",
+                "HTTP match and replace rules",
+                project_scope_badge(),
+            ))
+            .child(settings_desc_row(
+                "按顺序自动匹配并改写流经 Proxy 的 HTTP 请求头、请求体、响应头与响应体。",
+            ))
+            .child(
+                div()
+                    .pl(px(31.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        adv_checkbox(
+                            "proxy-http-mr-in-scope-only",
+                            "Only apply to in-scope items",
+                            in_scope_only,
+                            self.state.enabled,
+                        )
+                        .on_change(move |state, _, _, cx| {
+                            let checked = state == CheckboxState::Checked;
+                            let _ = scope_owner.update(cx, |view, cx| {
+                                view.set_proxy_message_flag(
+                                    project,
+                                    |m| m.match_replace_in_scope_only = checked,
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(9.))
+                            .h(theme::scaled_px(168.).max(px(168.)))
+                            .child(actions)
+                            .child(settings_table_frame(
+                                DataTable::new(&self.proxy_advanced.http_table)
+                                    .with_size(px(22.))
+                                    .header_row_height(px(24.))
+                                    .bordered(false)
+                                    .stripe(false)
+                                    .scrollbar_visible(true, false)
+                                    .scroll_bounce(false)
+                                    .accessibility_label("HTTP match and replace rules"),
+                                true,
+                            )),
+                    ),
+            )
+            .when(self.proxy_advanced.http_editor_open, |this| {
+                this.child(
+                    div()
+                        .id("proxy-http-mr-editor")
+                        .test_support()
+                        .ml(px(26.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .p(px(10.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::background())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .w(theme::scaled_px(88.).max(px(88.)))
+                                        .flex_shrink_0()
+                                        .child("Rule type:"),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Select::new(&self.proxy_advanced.http_target_select)
+                                            .id("proxy-http-mr-target-select")
+                                            .small()
+                                            .w_full(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Match:"))
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.proxy_advanced.http_match)
+                                            .id("proxy-http-mr-match-input")
+                                            .aria_label("HTTP 匹配模式")
+                                            .small(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Replace:"))
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.proxy_advanced.http_replace)
+                                            .id("proxy-http-mr-replace-input")
+                                            .aria_label("HTTP 替换内容")
+                                            .small(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Comment:"))
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.proxy_advanced.http_comment)
+                                            .id("proxy-http-mr-comment-input")
+                                            .aria_label("HTTP 替换规则备注")
+                                            .small(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            adv_checkbox(
+                                "proxy-http-mr-regex",
+                                "Regex match",
+                                self.proxy_advanced.http_is_regex,
+                                true,
+                            )
+                            .on_change(move |state, _, _, cx| {
+                                regex_entity.update(cx, |this, cx| {
+                                    this.proxy_advanced.http_is_regex = state == CheckboxState::Checked;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .when_some(self.proxy_advanced.http_error.clone(), |this, err| {
+                            this.child(
+                                div()
+                                    .id("proxy-http-mr-error")
+                                    .test_support()
+                                    .role(Role::Alert)
+                                    .aria_label(err.clone())
+                                    .text_color(theme::danger_fg())
+                                    .child(err),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.))
+                                .child(
+                                    button("proxy-http-mr-submit", "OK")
+                                        .primary()
+                                        .tooltip(if is_editing {
+                                            "保存当前修改的 HTTP 匹配与替换规则"
+                                        } else {
+                                            "添加新的 HTTP 匹配与替换规则"
+                                        })
+                                        .tab_stop(false)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_http_match_replace(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    settings_action_button("proxy-http-mr-cancel-edit", "Cancel", false)
+                                        .tab_stop(false)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if let Some(dlg) = this.proxy_advanced.http_dialog.take() {
+                                                let _ = dlg.update(cx, |_, window, _| window.remove_window());
+                                            }
+                                            this.proxy_advanced.http_editing = None;
+                                            this.proxy_advanced.http_editor_open = false;
+                                            this.proxy_advanced.http_error = None;
+                                            this.proxy_advanced.http_is_regex = false;
+                                            for input in [
+                                                &this.proxy_advanced.http_match,
+                                                &this.proxy_advanced.http_replace,
+                                                &this.proxy_advanced.http_comment,
+                                            ] {
+                                                input.update(cx, |s, cx| s.set_value("", window, cx));
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+            })
+    }
+
+    fn render_ssl_passthrough_card(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let enabled = self.state.enabled && !self.proxy_advanced.ssl_editor_open;
+        let selected_id = self.proxy_advanced.ssl_selected;
+        let selected = selected_id.and_then(|id| {
+            self.proxy_advanced
+                .ssl_rules
+                .iter()
+                .position(|rule| rule.id == id)
+        });
+        let ssl_rules = self.proxy_advanced.ssl_rules.clone();
+        let project = self.state.project;
+
+        let mut actions = div()
+            .w(theme::scaled_px(88.).max(px(84.)))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(5.));
+        for (id, label, tip, available, action) in [
+            ("proxy-ssl-pt-add", "添加", "新增 TLS pass through 目标", enabled, 0u8),
+            ("proxy-ssl-pt-edit", "编辑", "编辑选中的 TLS pass through 目标", enabled && selected.is_some(), 1u8),
+            ("proxy-ssl-pt-remove", "移除", "移除选中的 TLS pass through 目标", enabled && selected.is_some(), 2u8),
+            ("proxy-ssl-pt-paste-url", "粘贴 URL", "从剪贴板解析 URL 并添加主机与端口", enabled, 3u8),
+        ] {
+            let rule = selected.and_then(|i| ssl_rules.get(i)).cloned();
+            actions = actions.child(
+                settings_action_button(id, label, !available)
+                    .w_full()
+                    .tooltip(tip)
+                    .tab_stop(false)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if action == 0 {
+                            this.proxy_advanced.ssl_editor_open = true;
+                            this.proxy_advanced.ssl_editing = None;
+                            this.proxy_advanced.ssl_error = None;
+                            this.proxy_advanced.ssl_is_regex = false;
+                            for input in [
+                                &this.proxy_advanced.ssl_host,
+                                &this.proxy_advanced.ssl_port,
+                            ] {
+                                input.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        if action == 3 {
+                            this.paste_ssl_pass_through_url(window, cx);
+                            return;
+                        }
+                        let Some(id) = selected_id else {
+                            return;
+                        };
+                        match action {
+                            1 => {
+                                if let Some(rule) = &rule {
+                                    this.load_ssl_rule_into_editor(rule, window, cx);
+                                }
+                            }
+                            2 => {
+                                if this.proxy_advanced.ssl_editing == Some(id) {
+                                    this.proxy_advanced.ssl_editing = None;
+                                }
+                                let _ = this.owner.update(cx, |view, cx| {
+                                    let _ = view.update_proxy_advanced(
+                                        project,
+                                        |ssl, _, _| ssl.retain(|r| r.id != id),
+                                        cx,
+                                    );
+                                });
+                                cx.notify();
+                            }
+                            _ => {}
+                        }
+                    })),
+            );
+        }
+
+        let regex_entity = cx.entity();
+        let ssl_auto_owner = self.owner.clone();
+        let ssl_auto_add = self.state.proxy_messages.ssl_pass_through_auto_add_on_failure;
+        div()
+            .pt(px(16.))
+            .border_t_1()
+            .border_color(theme::border())
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(settings_section_heading(
+                "proxy-ssl-passthrough-heading",
+                "TLS pass through",
+                project_scope_badge(),
+            ))
+            .child(settings_desc_row(
+                "匹配的 CONNECT 目标跳过动态证书签发，直接透传端到端原生 TLS 字节流。",
+            ))
+            .child(
+                div()
+                    .pl(px(31.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        adv_checkbox(
+                            "proxy-ssl-pt-auto-add",
+                            "Automatically add entries on client TLS negotiation failure",
+                            ssl_auto_add,
+                            self.state.enabled,
+                        )
+                        .on_change(move |state, _, _, cx| {
+                            let checked = state == CheckboxState::Checked;
+                            let _ = ssl_auto_owner.update(cx, |view, cx| {
+                                view.set_proxy_message_flag(
+                                    project,
+                                    |m| m.ssl_pass_through_auto_add_on_failure = checked,
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(9.))
+                            .h(theme::scaled_px(136.).max(px(136.)))
+                            .child(actions)
+                            .child(settings_table_frame(
+                                DataTable::new(&self.proxy_advanced.ssl_table)
+                                    .with_size(px(22.))
+                                    .header_row_height(px(24.))
+                                    .bordered(false)
+                                    .stripe(false)
+                                    .scrollbar_visible(true, false)
+                                    .scroll_bounce(false)
+                                    .accessibility_label("TLS pass through"),
+                                true,
+                            )),
+                    ),
+            )
+            .when(self.proxy_advanced.ssl_editor_open, |this| {
+                this.child(
+                    div()
+                        .id("proxy-ssl-pt-editor")
+                        .test_support()
+                        .ml(px(26.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .p(px(10.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::background())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("Host / IP range:"))
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.proxy_advanced.ssl_host)
+                                            .id("proxy-ssl-pt-host-input")
+                                            .aria_label("TLS pass through 主机模式")
+                                            .small(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("Port:"))
+                                .child(
+                                    div().w(theme::scaled_px(140.).max(px(140.))).child(
+                                        Input::new(&self.proxy_advanced.ssl_port)
+                                            .id("proxy-ssl-pt-port-input")
+                                            .aria_label("TLS pass through 端口")
+                                            .small(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            adv_checkbox(
+                                "proxy-ssl-pt-regex",
+                                "Regex match",
+                                self.proxy_advanced.ssl_is_regex,
+                                true,
+                            )
+                            .on_change(move |state, _, _, cx| {
+                                regex_entity.update(cx, |this, cx| {
+                                    this.proxy_advanced.ssl_is_regex = state == CheckboxState::Checked;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .when_some(self.proxy_advanced.ssl_error.clone(), |this, error| {
+                            this.child(
+                                div()
+                                    .id("proxy-ssl-pt-error")
+                                    .test_support()
+                                    .role(Role::Alert)
+                                    .aria_label(error.clone())
+                                    .text_color(theme::danger_fg())
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.))
+                                .child(
+                                    button("proxy-ssl-pt-submit", "OK")
+                                        .primary()
+                                        .tab_stop(false)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_ssl_pass_through(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    settings_action_button("proxy-ssl-pt-cancel", "Cancel", false)
+                                        .tab_stop(false)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.proxy_advanced.ssl_editing = None;
+                                            this.proxy_advanced.ssl_editor_open = false;
+                                            this.proxy_advanced.ssl_is_regex = false;
+                                            this.proxy_advanced.ssl_error = None;
+                                            this.proxy_advanced
+                                                .ssl_host
+                                                .update(cx, |s, cx| s.set_value("", window, cx));
+                                            this.proxy_advanced
+                                                .ssl_port
+                                                .update(cx, |s, cx| s.set_value("", window, cx));
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+            })
+    }
+}

@@ -1,0 +1,52 @@
+[workspace]
+members = ["crates/mio-app", "crates/mio-ui", "crates/mio-core", "crates/mio-proxy", "crates/mio-plugin-api", "crates/mio-plugin-sdk", "plugins/protocol-lab"]
+exclude = ["vendor/gpui-base", "vendor/gpui-component", "vendor/gpui-pre-windows", "vendor/gpui-pre-linux"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+authors = ["ltlly <86669384+ltlly@users.noreply.github.com>"]
+repository = "https://github.com/ltlly/MIO"
+
+[workspace.dependencies]
+anyhow = "=1.0.104"
+encoding_rs = "=0.8.44"
+gpui-kit = "=0.9.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
+uuid = { version = "=1.29.0", features = ["v4", "serde"] }
+rusqlite = { version = "=0.31.0", features = ["bundled", "backup", "hooks", "functions"] }
+tempfile = "=3.27.0"
+url = "=2.5.8"
+roxmltree = "=0.21.2"
+prost = "=0.14.4"
+base64 = "=0.22.1"
+libc = "=0.2.191"
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+brotli-decompressor = { version = "=6.2.0", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+rhai = "=1.27.0"
+rama = { version = "=0.4.0", default-features = false, features = ["http-backend", "tcp", "dns", "rustls", "ring"] }
+rama-http-backend = { version = "=0.4.0", default-features = false, features = ["tls"] }
+
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
+gpui-component = { path = "vendor/gpui-component" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev.package.gpui-base]
+opt-level = 1
+
+[profile.dev.package.gpui-component]
+opt-level = 1

@@ -1,0 +1,12 @@
+/target/
+/dist/
+/.local/
+crates/*/.local/
+vendor/*/Cargo.lock
+vendor/*/target/
+.DS_Store
+*.mio
+*.mio-wal
+*.mio-shm
+*.pem
+*.key

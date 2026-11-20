@@ -1,0 +1,30 @@
+{
+  "id": "lab.protocol",
+  "version": "0.1.0",
+  "api_version": 1,
+  "engine": "native",
+  "entry": "bin/protocol-lab",
+  "permissions": [
+    "traffic.read",
+    "draft.write",
+    "repeater.open",
+    "network.send",
+    "traffic.modify",
+    "session.hook",
+    "payload.process",
+    "storage.kv"
+  ],
+  "contributions": [
+    "suite_panel",
+    "message_editor",
+    "message_response_editor",
+    "context_menu",
+    "http_hook",
+    "ws_hook",
+    "session_action",
+    "payload_generator",
+    "payload_processor",
+    "passive_check",
+    "active_check"
+  ]
+}

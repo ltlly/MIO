@@ -1,0 +1,29 @@
+[package]
+name = "mio-protocol-lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mio-plugin-api = { path = "../../crates/mio-plugin-api" }
+base64.workspace = true
+
+[dev-dependencies]
+mio-core = { path = "../../crates/mio-core" }
+mio-proxy = { path = "../../crates/mio-proxy" }
+tokio.workspace = true
+tokio-util.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "protocol-lab"
+path = "src/main.rs"
+
+# Built for process-level regression tests; never referenced by the installable manifest.
+[[bin]]
+name = "protocol-lab-test-worker"
+path = "tests/fixtures/worker.rs"
+test = false
+bench = false

@@ -1,0 +1,417 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use super::*;
+use crate::{AiIpcPayload, AiIpcRequest, SlimSaveOptions, call_ai_ipc, default_ipc_socket_path};
+
+async fn recv_until<T>(
+    events: &mut mpsc::Receiver<Event>,
+    mut f: impl FnMut(Event) -> Option<T>,
+) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed");
+        if let Some(out) = f(event) {
+            return out;
+        }
+    }
+}
+
+#[tokio::test]
+async fn ai_ipc_status_flows_repeater_open_and_slim_save_end_to_end() {
+    assert!(
+        default_ipc_socket_path()
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            <= if cfg!(unix) { 96 } else { 4096 }
+    );
+
+    #[cfg(unix)]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    #[cfg(not(unix))]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-")
+        .tempdir()
+        .unwrap();
+    let project_path = dir.path().join("seed.mio");
+    let slim_path = dir.path().join("slim.mio");
+    let sock_path = dir.path().join("ai.sock");
+
+    let mut seed_store = ProjectStore::create(Some(&project_path)).unwrap();
+    let mut f1 = tests::completed_flow();
+    f1.summary.source = TrafficSource::Proxy;
+    f1.summary.method = "POST".into();
+    f1.summary.url = "http://127.0.0.1:18080/api/login".into();
+    f1.summary.status = Some(200);
+    f1.request.method = "POST".into();
+    f1.request.url = f1.summary.url.clone();
+    let orig_req = f1.request.clone();
+    f1.request.headers.push(Header {
+        name: "X-Rewritten".into(),
+        value: b"yes".to_vec(),
+    });
+    seed_store.put(&f1).unwrap();
+    let mut prov = FlowProvenance::default();
+    prov.push_request_step(
+        &orig_req,
+        ProvenanceActor::SessionRule {
+            rule_name: "RewriteRule".into(),
+        },
+        &f1.request,
+    );
+    seed_store
+        .put_flow_provenance(f1.summary.id, &prov)
+        .unwrap();
+
+    let mut f2 = tests::completed_flow();
+    f2.summary.id = Uuid::new_v4();
+    f2.summary.source = TrafficSource::Scanner;
+    f2.summary.method = "GET".into();
+    f2.summary.url = "http://127.0.0.1:18080/scan/noise".into();
+    f2.summary.status = Some(404);
+    f2.response.as_mut().unwrap().status = 404;
+    f2.response.as_mut().unwrap().body = vec![b'N'; 128 * 1024];
+    f2.summary.response_bytes = 128 * 1024;
+    seed_store.put(&f2).unwrap();
+    seed_store.save(None).unwrap();
+    seed_store.close().unwrap();
+
+    let (runtime, mut client) = Runtime::start_with_ipc_socket(sock_path.clone()).unwrap();
+    let meta = std::fs::symlink_metadata(&sock_path).unwrap();
+    #[cfg(unix)]
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    #[cfg(not(unix))]
+    assert!(meta.is_file());
+
+    let _initial_project = recv_until(&mut client.events, |ev| match ev {
+        Event::ProjectOpened { project, .. } => Some(project),
+        _ => None,
+    })
+    .await;
+
+    client
+        .commands
+        .send(Command::OpenProject {
+            path: project_path.clone(),
+        })
+        .await
+        .unwrap();
+    let (opened_project, mut ui_workspace) = recv_until(&mut client.events, |ev| match ev {
+        Event::ProjectOpened {
+            project,
+            path: Some(p),
+            workspace,
+        } if p == project_path => Some((project, workspace)),
+        _ => None,
+    })
+    .await;
+
+    let sock_for_blocking = sock_path.clone();
+    let f1_id = f1.summary.id;
+    let slim_dest = slim_path.to_string_lossy().into_owned();
+
+    // 1. status
+    let s1 = sock_for_blocking.clone();
+    let (status_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(&s1, &AiIpcRequest::Status, Duration::from_secs(5)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(status_env.ok);
+    match status_env.payload.unwrap() {
+        AiIpcPayload::Status {
+            project_id,
+            total_flows,
+            project_disk_bytes,
+            process_memory_bytes,
+            ..
+        } => {
+            assert_eq!(project_id, opened_project.id);
+            assert_eq!(total_flows, 2);
+            assert!(project_disk_bytes > 0);
+            assert!(process_memory_bytes > 0);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    // 2. flows_list with filter + method + status
+    let s2 = sock_for_blocking.clone();
+    let (list_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s2,
+            &AiIpcRequest::FlowsList {
+                offset: 0,
+                limit: 10,
+                filter: "login".into(),
+                method: Some("POST".into()),
+                status: Some(200),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    match list_env.payload.unwrap() {
+        AiIpcPayload::FlowsList { total, flows } => {
+            assert_eq!(total, 1);
+            assert_eq!(flows[0].id, f1_id);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    // 3. flows_get with provenance
+    let s3 = sock_for_blocking.clone();
+    let (get_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s3,
+            &AiIpcRequest::FlowsGet { flow_id: f1_id },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    match get_env.payload.unwrap() {
+        AiIpcPayload::FlowsGet(detail) => {
+            assert_eq!(detail.summary.id, f1_id);
+            assert!(
+                detail
+                    .request
+                    .headers
+                    .iter()
+                    .any(|h| h.name == "X-Rewritten")
+            );
+            assert_eq!(detail.provenance.request_steps.len(), 2);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    // 4. repeater_open emits Event::RepeaterOpened and reconciles cleanly with UI SaveWorkspace
+    let s4 = sock_for_blocking.clone();
+    let (open_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s4,
+            &AiIpcRequest::RepeaterOpen {
+                flow_id: Some(f1_id),
+                use_original: false,
+                target: None,
+                raw_request: None,
+                title: Some("AI Login Replay".into()),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    let opened_tab_id = match open_env.payload.unwrap() {
+        AiIpcPayload::RepeaterOpen { tab_id, title, .. } => {
+            assert_eq!(title, "AI Login Replay");
+            tab_id
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    };
+    let emitted_tab = recv_until(&mut client.events, |ev| match ev {
+        Event::RepeaterOpened { project, tab } if project == opened_project => Some(tab),
+        _ => None,
+    })
+    .await;
+    assert_eq!(emitted_tab.id, opened_tab_id);
+
+    // Simulate UI receiving Event::RepeaterOpened and saving its workspace at old_rev + 1
+    ui_workspace.revision += 1;
+    ui_workspace.active = Some(emitted_tab.id);
+    ui_workspace.tabs.push(emitted_tab);
+    client
+        .commands
+        .send(Command::SaveWorkspace {
+            project: opened_project,
+            workspace: ui_workspace.clone(),
+        })
+        .await
+        .unwrap();
+    let acked_ws = recv_until(&mut client.events, |ev| match ev {
+        Event::WorkspaceChanged { project, workspace } if project == opened_project => {
+            Some(workspace)
+        }
+        Event::WorkspaceRejected { message, .. } => {
+            panic!("UI workspace save after IPC repeater_open was rejected: {message}")
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(acked_ws.revision, ui_workspace.revision);
+
+    // 5. slim_save via IPC
+    let s5 = sock_for_blocking.clone();
+    let (slim_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s5,
+            &AiIpcRequest::SlimSave {
+                path: slim_dest,
+                options: Some(SlimSaveOptions::default()),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    match slim_env.payload.unwrap() {
+        AiIpcPayload::SlimSave { report } => {
+            assert_eq!(report.removed_flows, 1);
+            assert!(report.new_bytes < report.old_bytes);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    drop(client);
+    runtime.shutdown().unwrap();
+    assert!(
+        !sock_path.exists(),
+        "owned IPC socket file must be removed on shutdown"
+    );
+}
+
+#[tokio::test]
+async fn ipc_repeater_send_does_not_block_concurrent_status_and_workspace_patch_rejects_bad_revision()
+ {
+    #[cfg(unix)]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    #[cfg(not(unix))]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-")
+        .tempdir()
+        .unwrap();
+    let sock_path = dir.path().join("mio.sock");
+    let (runtime, mut client) = Runtime::start_with_ipc_socket(sock_path.clone()).unwrap();
+    let _opened = recv_until(&mut client.events, |ev| match ev {
+        Event::ProjectOpened { project, .. } => Some(project),
+        _ => None,
+    })
+    .await;
+
+    // Reject invalid workspace revision (same revision 0 instead of 1) with ok=false.
+    let s_ws = sock_path.clone();
+    let (ws_env, _) = tokio::task::spawn_blocking(move || {
+        let bad_json = serde_json::to_string(&crate::Workspace::default()).unwrap();
+        call_ai_ipc(
+            &s_ws,
+            &AiIpcRequest::WorkspacePatch {
+                workspace_json: bad_json,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!ws_env.ok, "stale workspace revision must return ok=false");
+
+    // Slow upstream holds connection for 600ms while concurrent Status completes immediately.
+    let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_addr = slow_listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = slow_listener.accept().await.unwrap();
+        let mut buf = [0u8; 512];
+        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"unpacked-ok").unwrap();
+        let gz_body = encoder.finish().unwrap();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            gz_body.len()
+        );
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes()).await;
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &gz_body).await;
+    });
+
+    let s_send = sock_path.clone();
+    let send_task = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s_send,
+            &AiIpcRequest::RepeaterSend {
+                flow_id: None,
+                use_original: false,
+                target: Some(format!("http://{slow_addr}")),
+                raw_request: Some(format!("GET /slow HTTP/1.1\r\nHost: {slow_addr}\r\n\r\n")),
+                add_headers: vec![("X-AI-Probe".into(), "1".into())],
+                remove_headers: Vec::new(),
+                override_body: None,
+                insecure: false,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    });
+
+    accepted_rx.await.unwrap();
+    let s_status = sock_path.clone();
+    let status_start = std::time::Instant::now();
+    let (status_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(&s_status, &AiIpcRequest::Status, Duration::from_secs(2)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(status_env.ok);
+    assert!(
+        status_start.elapsed() < Duration::from_millis(300),
+        "Status IPC must not wait behind in-flight RepeaterSend"
+    );
+
+    let (send_env, _) = send_task.await.unwrap();
+    assert!(send_env.ok);
+    let AiIpcPayload::FlowsGet(detail) = send_env.payload.unwrap() else {
+        panic!("expected FlowsGet payload");
+    };
+    assert_eq!(detail.response.as_ref().unwrap().body, b"unpacked-ok");
+    assert!(detail.original_request.is_some());
+    assert!(detail.original_response.is_some());
+
+    let s_get = sock_path.clone();
+    let flow_id = detail.summary.id;
+    let (get_env, _) = tokio::task::spawn_blocking(move || {
+        call_ai_ipc(
+            &s_get,
+            &AiIpcRequest::FlowsGet { flow_id },
+            Duration::from_secs(2),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(get_env.ok);
+    let AiIpcPayload::FlowsGet(persisted) = get_env.payload.unwrap() else {
+        panic!("expected persisted FlowsGet");
+    };
+    assert_eq!(persisted.response.as_ref().unwrap().body, b"unpacked-ok");
+    assert!(
+        persisted.original_request.is_some(),
+        "persisted side=2 original request must be readable"
+    );
+    assert!(
+        persisted
+            .original_response
+            .as_ref()
+            .is_some_and(|orig| orig.body != b"unpacked-ok"),
+        "persisted side=3 original compressed response must be readable"
+    );
+    server.await.unwrap();
+    drop(client);
+    runtime.shutdown().unwrap();
+}

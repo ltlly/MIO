@@ -1,0 +1,452 @@
+#[cfg(unix)]
+use std::fs;
+use std::{collections::HashSet, path::Path};
+
+use anyhow::{Context, Result, bail, ensure};
+use mio_proxy::CapturedFlow;
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use tempfile::NamedTempFile;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    AuditPhase, FlowId, FlowState, FlowSummary, SlimSaveOptions, SlimSaveReport, TrafficSource,
+    Uuid, target_issues::IssueSeverity,
+};
+
+use super::{
+    CapturedWebSocket, IntruderMutation, MAX_MESSAGE_HEAD_BYTES, OwnedResponseHead, ProjectStore,
+    ext_archive::{
+        encode_chunk,
+        http_query::filters::{HistoryMime, infer_history_mime},
+        read_chunk, source_state,
+    },
+    check_new_project_path, intruder, metadata, plugin_storage, provenance, schema_guard,
+};
+
+impl ProjectStore {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn slim_save_as(
+        &mut self,
+        destination: &Path,
+        options: &SlimSaveOptions,
+        records: &[CapturedFlow],
+        websocket_records: &[CapturedWebSocket],
+        intruder_mutations: &[IntruderMutation],
+        pending_provenance: &[(FlowId, crate::FlowProvenance)],
+        cancel: &CancellationToken,
+    ) -> Result<SlimSaveReport> {
+        ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+        ensure!(
+            self.path.as_deref() != Some(destination),
+            "瘦身另存为必须选择新的目标路径，不会原地覆盖当前项目"
+        );
+        ensure!(
+            !crate::is_external_archive_file(destination),
+            "不能覆盖外部归档项目文件"
+        );
+        check_new_project_path(destination)?;
+        self.check_path_outside_temporary(destination)?;
+        for capture in records {
+            self.reject_session_intruder_flow_write(capture.record.summary.id)?;
+        }
+        for mutation in intruder_mutations {
+            if let IntruderMutation::Result {
+                result: Ok(record), ..
+            } = mutation
+            {
+                self.reject_session_intruder_flow_write(record.summary.id)?;
+            }
+        }
+
+        let old_bytes = self.total_bytes()?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = NamedTempFile::new_in(parent)?;
+        let mut snapshot = Connection::open(temporary.path())?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut snapshot)?;
+            loop {
+                ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+                let step = backup.step(64)?;
+                ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+                match step {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => {}
+                    _ => bail!("瘦身快照拷贝未完成"),
+                }
+            }
+        }
+        snapshot.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;",
+        )?;
+        let mut staged = Self {
+            connection: snapshot,
+            id: self.id,
+            path: Some(temporary.path().to_owned()),
+            temporary: None,
+            intruder_sessions: intruder::IntruderSessions::default(),
+            cached_workspace: std::sync::Mutex::new(None),
+        };
+        staged.cancel_queries_with(cancel.clone());
+        staged.apply_pending_with_notes(
+            (None, &[], &[], &[]),
+            records,
+            websocket_records,
+            intruder_mutations,
+            cancel,
+        )?;
+        {
+            let tx = staged
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (flow_id, prov) in pending_provenance {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM main.flows WHERE id=?1)",
+                    [flow_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    provenance::write_flow_provenance(&tx, *flow_id, prov)?;
+                }
+            }
+            super::finish_pending_records(&tx, false, false)?;
+            tx.commit()?;
+        }
+
+        let (removed_flows, compacted_ext_chunks) =
+            apply_slim_passes(&mut staged, options, cancel)?;
+        ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+        staged.connection.close().map_err(|(_, err)| err)?;
+        {
+            let vacuum_conn = Connection::open(temporary.path())?;
+            vacuum_conn
+                .execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; VACUUM;")?;
+            vacuum_conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+            vacuum_conn.close().map_err(|(_, err)| err)?;
+        }
+        temporary.as_file().sync_all()?;
+        check_new_project_path(destination)?;
+        self.check_path_outside_temporary(destination)?;
+        ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|err| err.error)?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| {
+                format!("瘦身快照已发布至 {}，但目录同步失败", destination.display())
+            })?;
+
+        let mut verified = Self::open(destination)
+            .with_context(|| format!("验证瘦身后的项目文件 {} 失败", destination.display()))?;
+        verified.checkpoint()?;
+        verified.close()?;
+        let new_bytes = crate::sys_metrics::measure_project_disk_bytes(destination)?;
+        Ok(SlimSaveReport {
+            old_bytes,
+            new_bytes,
+            removed_flows,
+            compacted_ext_chunks,
+        })
+    }
+}
+
+fn apply_slim_passes(
+    staged: &mut ProjectStore,
+    options: &SlimSaveOptions,
+    cancel: &CancellationToken,
+) -> Result<(usize, usize)> {
+    let mut removed_flows = 0usize;
+    let tx = staged
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    schema_guard::validate(&tx, super::SCHEMA)?;
+
+    if options.drop_finished_intruder_results {
+        let terminal_runs: Vec<(Uuid, u64)> = {
+            let mut stmt = tx.prepare(&intruder::run_select())?;
+            let mut rows = stmt.query([])?;
+            let mut runs = Vec::new();
+            while let Some(row) = rows.next()? {
+                ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+                let run = intruder::decode_run(row)?;
+                if run.state.is_terminal() {
+                    runs.push((run.id, run.revision));
+                }
+            }
+            runs
+        };
+        for (run_id, rev) in terminal_runs {
+            ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+            let mut ws = metadata::workspace(&tx)?;
+            ws.revision = ws
+                .revision
+                .checked_add(1)
+                .context("工作区 revision 已耗尽")?;
+            let receipt = intruder::discard_project_run(&tx, staged.id, run_id, rev, ws, cancel)?;
+            removed_flows = removed_flows
+                .saturating_add(usize::try_from(receipt.deleted_flows).unwrap_or(usize::MAX));
+        }
+    }
+
+    let pinned = collect_pinned_flows(&tx)?;
+    let candidate_deletes = select_unpinned_flows_to_drop(&tx, &pinned, options, cancel)?;
+    if !candidate_deletes.is_empty() {
+        {
+            let mut del_msgs = tx.prepare("DELETE FROM main.messages WHERE flow=?1")?;
+            let mut del_flow = tx.prepare("DELETE FROM main.flows WHERE id=?1")?;
+            for &flow_id in &candidate_deletes {
+                ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+                let key = flow_id.to_string();
+                del_msgs.execute([&key])?;
+                let count = del_flow.execute([&key])?;
+                ensure!(count == 1, "瘦身删除流量 {flow_id} 数量异常");
+            }
+        }
+        plugin_storage::remove_live_http_annotations(&tx, &candidate_deletes)?;
+        provenance::remove_flow_provenance(&tx, &candidate_deletes)?;
+        {
+            let mut del_meta =
+                tx.prepare("DELETE FROM main.metadata WHERE key=?1 COLLATE BINARY")?;
+            for &flow_id in &candidate_deletes {
+                del_meta.execute([format!(
+                    "{}{flow_id}",
+                    crate::store::messages::HTTP_HISTORY_META_PREFIX
+                )])?;
+            }
+        }
+        unlink_dropped_audit_flows(&tx, &candidate_deletes, cancel)?;
+        removed_flows = removed_flows.saturating_add(candidate_deletes.len());
+    }
+
+    // Also prune orphan flow_provenance:* keys whose flows were previously discarded.
+    tx.execute(
+        "DELETE FROM main.metadata
+         WHERE key GLOB 'flow_provenance:*'
+           AND substr(key, 17) NOT IN (SELECT id FROM main.flows)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM main.metadata
+         WHERE key GLOB 'http_history_meta:*'
+           AND substr(key, 19) NOT IN (SELECT id FROM main.flows)",
+        [],
+    )?;
+
+    let compacted_chunks = if options.compact_ext_source_chunks {
+        compact_ext_chunks(&tx, cancel)?
+    } else {
+        0
+    };
+
+    ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+    tx.commit()?;
+    Ok((removed_flows, compacted_chunks))
+}
+
+fn collect_pinned_flows(tx: &Transaction<'_>) -> Result<HashSet<FlowId>> {
+    let mut pinned = HashSet::new();
+    let workspace = metadata::workspace(tx)?;
+    for tab in workspace.tabs.iter().chain(&workspace.closed) {
+        if let Some(flow_id) = tab.last_flow {
+            pinned.insert(flow_id);
+        }
+    }
+    let audit_state = plugin_storage::read_audit_state(tx)?;
+    for finding in &audit_state.findings {
+        if (finding.phase == AuditPhase::Active || finding.severity() != IssueSeverity::Information)
+            && let Some(id) = finding.flow_id
+        {
+            pinned.insert(id);
+        }
+    }
+    let annotations = plugin_storage::read_live_http_annotations(tx)?;
+    for (flow_id, entry) in annotations {
+        if !entry.notes.is_empty() || entry.highlight > 0 {
+            pinned.insert(flow_id);
+        }
+    }
+    for query in [
+        "SELECT flow FROM main.repeater_history WHERE flow IS NOT NULL",
+        "SELECT flow FROM main.websocket_connections",
+        "SELECT flow FROM main.websocket_messages",
+        "SELECT flow FROM main.intruder_results WHERE flow IS NOT NULL",
+        "SELECT substr(owner,6) FROM main.site_map_entries WHERE owner GLOB 'live:*'",
+    ] {
+        let mut stmt = tx.prepare(query)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                pinned.insert(id);
+            }
+        }
+    }
+    Ok(pinned)
+}
+
+fn unlink_dropped_audit_flows(
+    tx: &Transaction<'_>,
+    dropped: &[FlowId],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let dropped_set: HashSet<FlowId> = dropped.iter().copied().collect();
+    let mut state = plugin_storage::read_audit_state(tx)?;
+    let mut changed = false;
+    for finding in &mut state.findings {
+        if finding.flow_id.is_some_and(|id| dropped_set.contains(&id)) {
+            finding.flow_id = None;
+            changed = true;
+        }
+    }
+    if changed {
+        schema_guard::validate_update_dependencies(tx, "metadata", &["value"], cancel)?;
+        state.revision = state.revision.saturating_add(1);
+        let encoded = serde_json::to_vec(&state)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO main.metadata(key, value) VALUES('audit_state', ?1)",
+            [encoded],
+        )?;
+    }
+    Ok(())
+}
+
+fn select_unpinned_flows_to_drop(
+    tx: &Transaction<'_>,
+    pinned: &HashSet<FlowId>,
+    options: &SlimSaveOptions,
+    cancel: &CancellationToken,
+) -> Result<Vec<FlowId>> {
+    if !options.drop_scanner_and_unreferenced_tool_flows
+        && !options.drop_static_asset_flows
+        && options.max_unpinned_body_bytes.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let mut stmt = tx.prepare("SELECT id, summary FROM main.flows")?;
+    let mut rows = stmt.query([])?;
+    let mut to_drop = Vec::new();
+    while let Some(row) = rows.next()? {
+        ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+        let raw_id: String = row.get(0)?;
+        let flow_id = Uuid::parse_str(&raw_id).context("流量 ID 损坏")?;
+        if pinned.contains(&flow_id) {
+            continue;
+        }
+        let summary_bytes: Vec<u8> = row.get(1)?;
+        let summary: FlowSummary = serde_json::from_slice(&summary_bytes)?;
+        if matches!(summary.state, FlowState::Pending | FlowState::Intercepted) {
+            continue;
+        }
+        // Never drop Repeater or Intruder history flows during unpinned flow pruning;
+        // finished Intruder runs are only discarded when `drop_finished_intruder_results` is true.
+        if matches!(
+            summary.source,
+            TrafficSource::Repeater | TrafficSource::Intruder
+        ) {
+            continue;
+        }
+        if options.drop_scanner_and_unreferenced_tool_flows
+            && matches!(summary.source, TrafficSource::Scanner)
+        {
+            to_drop.push(flow_id);
+            continue;
+        }
+        if let Some(max_bytes) = options.max_unpinned_body_bytes {
+            let max_i64 = i64::try_from(max_bytes).unwrap_or(i64::MAX);
+            let over_limit: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.messages WHERE flow=?1 AND side IN (1, 3) AND length(body) > ?2)",
+                params![&raw_id, max_i64],
+                |r| r.get(0),
+            )?;
+            if over_limit || summary.response_bytes > max_bytes as u64 {
+                to_drop.push(flow_id);
+                continue;
+            }
+        }
+        if options.drop_static_asset_flows && is_static_asset_flow(tx, &raw_id)? {
+            to_drop.push(flow_id);
+        }
+    }
+    Ok(to_drop)
+}
+
+fn is_static_asset_flow(tx: &Transaction<'_>, flow_id_str: &str) -> Result<bool> {
+    let row: Option<(Vec<u8>, Vec<u8>)> = tx
+        .query_row(
+            "SELECT head, substr(body, 1, 64)
+             FROM main.messages
+             WHERE flow=?1 AND side IN (1, 3) AND typeof(head)='blob' AND length(head)<=?2
+             ORDER BY side ASC LIMIT 1",
+            params![flow_id_str, MAX_MESSAGE_HEAD_BYTES as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((head_bytes, body_prefix)) = row else {
+        return Ok(false);
+    };
+    let head: OwnedResponseHead = serde_json::from_slice(&head_bytes)?;
+    let mime = infer_history_mime(&head.headers, &body_prefix);
+    Ok(matches!(
+        mime,
+        HistoryMime::Images | HistoryMime::Css | HistoryMime::Flash
+    ))
+}
+
+fn compact_ext_chunks(tx: &Transaction<'_>, cancel: &CancellationToken) -> Result<usize> {
+    let sources: Vec<Uuid> = {
+        let mut stmt = tx.prepare("SELECT id FROM main.ext_sources")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(Uuid::parse_str(&row?)?);
+        }
+        out
+    };
+    if sources.is_empty() {
+        return Ok(0);
+    }
+    schema_guard::validate_update_dependencies(
+        tx,
+        "ext_source_chunks",
+        &["codec", "data"],
+        cancel,
+    )?;
+    let mut compacted = 0usize;
+    for source_id in sources {
+        let state = source_state(tx, source_id)?;
+        if state.source_bytes == 0 || !state.complete {
+            continue;
+        }
+        let source_str = source_id.to_string();
+        let uncompressed_ordinals: Vec<u64> = {
+            let mut stmt = tx.prepare(
+                "SELECT ordinal FROM main.ext_source_chunks WHERE source=?1 AND codec=0 ORDER BY ordinal ASC",
+            )?;
+            let rows = stmt.query_map([&source_str], |r| r.get::<_, u64>(0))?;
+            let mut list = Vec::new();
+            for row in rows {
+                list.push(row?);
+            }
+            list
+        };
+        let mut update = tx.prepare(
+            "UPDATE main.ext_source_chunks SET codec=?1, data=?2 WHERE source=?3 AND ordinal=?4",
+        )?;
+        for ordinal in uncompressed_ordinals {
+            ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
+            let raw = read_chunk(tx, source_id, state.source_bytes, ordinal)?;
+            let (codec, data) = encode_chunk(&raw)?;
+            if codec == 1 && data.len() < raw.len() {
+                update.execute(params![codec, data, &source_str, i64::try_from(ordinal)?])?;
+                compacted += 1;
+            }
+        }
+    }
+    Ok(compacted)
+}

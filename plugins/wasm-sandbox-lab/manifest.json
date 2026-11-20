@@ -1,0 +1,28 @@
+{
+  "id": "lab.wasm",
+  "version": "0.1.0",
+  "api_version": 1,
+  "engine": "wasm",
+  "entry": "sandbox.wasm",
+  "permissions": [
+    "traffic.read",
+    "draft.write",
+    "traffic.modify",
+    "session.hook",
+    "payload.process",
+    "network.send",
+    "storage.kv"
+  ],
+  "contributions": [
+    "suite_panel",
+    "message_editor",
+    "message_response_editor",
+    "context_menu",
+    "http_hook",
+    "ws_hook",
+    "session_action",
+    "payload_generator",
+    "payload_processor",
+    "passive_check"
+  ]
+}

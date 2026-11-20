@@ -1,0 +1,24 @@
+[package]
+name = "mio-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "mio"
+path = "src/main.rs"
+
+[[bin]]
+name = "mio-cli"
+path = "src/bin/mio_cli.rs"
+
+[dependencies]
+anyhow.workspace = true
+mio-core = { path = "../mio-core" }
+mio-ui = { path = "../mio-ui" }
+tokio = { workspace = true, features = ["signal"] }
+
+[build-dependencies]
+embed-resource = "=3.0.12"
