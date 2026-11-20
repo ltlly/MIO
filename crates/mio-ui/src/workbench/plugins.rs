@@ -26,6 +26,8 @@ mod response_viewers;
 mod tests;
 mod workspace_ops;
 
+pub(in crate::workbench) use repeater_editor::is_expected_plugin_stop_reason;
+
 const MAX_PLUGIN_LOGS: usize = 200;
 const MAX_PLUGIN_LOG_CHARS: usize = 512;
 
@@ -55,6 +57,9 @@ pub(super) struct Extensions {
     page: ExtensionsPage,
     detail_tab: ExtensionsDetailTab,
     add_panel_open: bool,
+    plugins_dir: Option<PathBuf>,
+    extensions_disabled: bool,
+    persisted_order: Vec<String>,
     auto_reload: HashSet<Uuid>,
     inspection: Option<Inspection>,
     instances: Vec<Instance>,
@@ -106,6 +111,7 @@ struct Instance {
     info: LoadedPlugin,
     panel: Entity<NativePanel>,
     live: bool,
+    persisted: bool,
     status: String,
     bound: Option<Draft>,
     document: Option<u64>,
@@ -216,19 +222,29 @@ pub(in crate::workbench) enum Operation {
     ContextMenu {
         instance: Uuid,
     },
+    EnableInstalled {
+        placeholder_id: Uuid,
+    },
+    Uninstall {
+        instance_id: Uuid,
+    },
 }
 
 impl Extensions {
     pub(super) fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
             directory: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("包含 manifest.json 的本地插件包目录")
+                InputState::new(window, cx)
+                    .placeholder("本地插件包目录或单文件归档（.tar.gz / .tgz / .mio-plugin）")
             }),
             search: cx.new(|cx| InputState::new(window, cx).placeholder("搜索")),
             search_subscription: None,
             page: ExtensionsPage::Installed,
             detail_tab: ExtensionsDetailTab::Details,
             add_panel_open: false,
+            plugins_dir: None,
+            extensions_disabled: false,
+            persisted_order: Vec::new(),
             auto_reload: HashSet::new(),
             inspection: None,
             instances: vec![],

@@ -548,6 +548,7 @@ impl MessageEditor {
             auto_scroll_to_match: default_auto_scroll,
             search_error,
             view: MessageView::Raw,
+            auto_hex_fallback: false,
             selection_seq,
             view_cell,
             pretty_cell,
@@ -959,6 +960,7 @@ impl MessageEditor {
         match decoded {
             Some(text) => {
                 self.view = MessageView::Raw;
+                self.auto_hex_fallback = false;
                 if !bytes.is_empty()
                     && !self.show_non_printable
                     && charset_mode != 2
@@ -1000,6 +1002,7 @@ impl MessageEditor {
                     grid.sync_bytes_and_selection(bytes.to_vec(), None, rev, cx);
                 });
                 self.view = MessageView::Hex;
+                self.auto_hex_fallback = true;
             }
         }
         if self.show_non_printable {
@@ -1297,6 +1300,7 @@ impl MessageEditor {
                 });
                 self.clear_hex_view(window, cx);
             }
+            self.auto_hex_fallback = false;
             self.pretty_active = false;
             self.pretty_cell.set(false);
             self.show_non_printable = false;
@@ -1363,6 +1367,7 @@ impl MessageEditor {
         }
         self.view = view;
         self.view_cell.set(view);
+        self.auto_hex_fallback = false;
         self.update_search(None, window, cx)?;
         if focused {
             self.state().update(cx, |state, cx| state.focus(window, cx));
@@ -1399,14 +1404,15 @@ impl MessageEditor {
             }
             state.set_line_number_mapping(pretty_mapping, cx);
         });
+        self.view = MessageView::Raw;
+        self.view_cell.set(MessageView::Raw);
+        self.auto_hex_fallback = false;
         self.pretty_active = true;
         self.pretty_cell.set(true);
         self.show_non_printable = false;
         self.non_printable_cell.set(false);
         self.clear_non_printable_view(window, cx);
-        if self.view == MessageView::Raw {
-            self.clear_hex_view(window, cx);
-        }
+        self.clear_hex_view(window, cx);
         if !self.hide_headers {
             self.clear_header_preview_view(window, cx);
         }
@@ -1827,18 +1833,26 @@ impl RenderOnce for MessageEditorElement {
             g.readonly = self.readonly;
             g.context_menu = self.context_menu;
         });
-        let mut container = div().flex().flex_col().min_w_0().min_h_0();
+        let _ = base_editor;
+        let mut container = div();
         *container.style() = caller_style;
         container
-            .child(div().flex_1().min_h_0().w_full().child(grid))
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
             .child(
                 div()
-                    .h(px(24.))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
                     .w_full()
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(crate::theme::border())
-                    .child(base_editor.size_full()),
+                    .overflow_hidden()
+                    .child(grid),
             )
             .into_any_element()
     }
@@ -2318,9 +2332,9 @@ impl Render for HexGridView {
             .text_color(crate::theme::muted_foreground())
             .child(
                 div()
-                    .w(px(76.))
+                    .w(px(68.))
                     .h_full()
-                    .px(px(6.))
+                    .px(px(5.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -2330,19 +2344,19 @@ impl Render for HexGridView {
             );
 
         let mut hex_cols_hdr = div()
-            .px(px(6.))
+            .px(px(5.))
             .h_full()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(2.))
+            .gap(px(1.5))
             .border_r_1()
             .border_color(border_col);
         for col in 0..16usize {
             hex_cols_hdr = hex_cols_hdr.child(
                 div()
-                    .w(px(20.))
-                    .when(col == 7, |el| el.mr(px(6.)))
+                    .w(px(18.))
+                    .when(col == 7, |el| el.mr(px(4.)))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2351,8 +2365,9 @@ impl Render for HexGridView {
         }
         col_header = col_header.child(hex_cols_hdr).child(
             div()
-                .px(px(8.))
+                .px(px(6.))
                 .h_full()
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .child("ASCII (0..F)"),
@@ -2387,9 +2402,9 @@ impl Render for HexGridView {
                         let offset_cell = div()
                             .id(("hex-row-offset", row_ix))
                             .test_support()
-                            .w(px(76.))
+                            .w(px(68.))
                             .h_full()
-                            .px(px(6.))
+                            .px(px(5.))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -2400,17 +2415,17 @@ impl Render for HexGridView {
                             .child(format!("{base_offset:08X}"));
 
                         let mut hex_cells = div()
-                            .px(px(6.))
+                            .px(px(5.))
                             .h_full()
                             .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap(px(2.))
+                            .gap(px(1.5))
                             .border_r_1()
                             .border_color(border_col);
 
                         let mut ascii_cells =
-                            div().px(px(8.)).h_full().flex_shrink_0().flex().items_center();
+                            div().px(px(6.)).h_full().flex_shrink_0().flex().items_center();
 
                         for col in 0..16usize {
                             let byte_ix = base_offset + col;
@@ -2471,9 +2486,9 @@ impl Render for HexGridView {
                                     div()
                                         .id(("hex-byte-cell", byte_ix))
                                         .test_support()
-                                        .w(px(20.))
+                                        .w(px(18.))
                                         .h(px(18.))
-                                        .when(col == 7, |el| el.mr(px(6.)))
+                                        .when(col == 7, |el| el.mr(px(4.)))
                                         .rounded(px(2.))
                                         .flex()
                                         .items_center()
@@ -2523,7 +2538,7 @@ impl Render for HexGridView {
                                     div()
                                         .id(("hex-ascii-cell", byte_ix))
                                         .test_support()
-                                        .w(px(9.5))
+                                        .w(px(8.5))
                                         .h(px(18.))
                                         .rounded(px(2.))
                                         .flex()
@@ -2569,11 +2584,11 @@ impl Render for HexGridView {
                             } else {
                                 hex_cells = hex_cells.child(
                                     div()
-                                        .w(px(20.))
+                                        .w(px(18.))
                                         .h(px(18.))
-                                        .when(col == 7, |el| el.mr(px(6.))),
+                                        .when(col == 7, |el| el.mr(px(4.))),
                                 );
-                                ascii_cells = ascii_cells.child(div().w(px(9.5)).h(px(18.)));
+                                ascii_cells = ascii_cells.child(div().w(px(8.5)).h(px(18.)));
                             }
                         }
 
@@ -2597,18 +2612,53 @@ impl Render for HexGridView {
         .track_scroll(&self.scroll_handle)
         .size_full();
 
+        let v_scrollbar = gpui_kit::component::scroll::Scrollbar::vertical(&self.scroll_handle)
+            .id(("hex-grid-vscroll", hex_entity_id))
+            .viewport_from_layout()
+            .mode(gpui_kit::component::scroll::ScrollbarMode::Always);
+
         div()
             .id(("hex-grid-view", hex_entity_id))
             .test_support()
             .key_context("HexGrid")
             .track_focus(&self.focus_handle)
             .size_full()
+            .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(crate::theme::surface())
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(toolbar)
             .child(col_header)
-            .child(div().flex_1().min_h_0().w_full().child(list))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(list),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(12.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(offset_bg)
+                            .border_l_1()
+                            .border_color(border_col)
+                            .child(v_scrollbar),
+                    ),
+            )
     }
 }

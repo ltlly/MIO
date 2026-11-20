@@ -43,6 +43,9 @@ impl Workbench {
                         cx.notify();
                     })),
             );
+            let active_resp_plugin_id = active_resp
+                .and_then(|id| self.extensions.instance(id))
+                .map(|inst| inst.info.manifest.id.clone());
             if let Some(instance) = active_resp.and_then(|id| self.extensions.instance(id)) {
                 let id = instance.info.identity.instance_id;
                 let title = instance.panel.read(cx).title().to_owned();
@@ -58,6 +61,9 @@ impl Workbench {
                 tabs = tabs.child("正在打开响应视图…");
             }
             for (source_id, plugin_id) in resp_plugins {
+                if active_resp_plugin_id.as_deref() == Some(plugin_id.as_str()) {
+                    continue;
+                }
                 tabs = tabs.child(
                     button(
                         SharedString::from(format!("plugin-response-tab-{source_id}")),
@@ -201,6 +207,9 @@ impl Workbench {
                         cx.notify();
                     })),
             );
+        let active_resp_plugin_id = active_instance
+            .and_then(|id| self.extensions.instance(id))
+            .map(|inst| inst.info.manifest.id.clone());
         if let Some(instance) = active_instance.and_then(|id| self.extensions.instance(id)) {
             let id = instance.info.identity.instance_id;
             let title = instance.panel.read(cx).title().to_owned();
@@ -216,6 +225,9 @@ impl Workbench {
             tabs = tabs.child("正在打开响应视图…");
         }
         for (source_id, plugin_id) in available {
+            if active_resp_plugin_id.as_deref() == Some(plugin_id.as_str()) {
+                continue;
+            }
             let read_only = !writable_sources.contains(&source_id);
             tabs = tabs.child(
                 button(
@@ -296,6 +308,9 @@ impl Workbench {
                 cx.notify();
             })),
         );
+        let active_resp_plugin_id = active_resp
+            .and_then(|id| self.extensions.instance(id))
+            .map(|inst| inst.info.manifest.id.clone());
         if let Some(instance) = active_resp.and_then(|id| self.extensions.instance(id)) {
             let id = instance.info.identity.instance_id;
             let title = instance.panel.read(cx).title().to_owned();
@@ -311,6 +326,9 @@ impl Workbench {
             tabs = tabs.child("正在打开响应视图…");
         }
         for (source_id, plugin_id) in resp_available {
+            if active_resp_plugin_id.as_deref() == Some(plugin_id.as_str()) {
+                continue;
+            }
             tabs = tabs.child(
                 button(
                     SharedString::from(format!("{owner}-plugin-response-tab-{source_id}")),

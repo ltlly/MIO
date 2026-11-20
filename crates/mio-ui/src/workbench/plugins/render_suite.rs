@@ -48,7 +48,11 @@ impl Workbench {
         let inspecting = self.extensions.operations.values().any(|operation| {
             matches!(
                 operation,
-                Operation::Inspect { .. } | Operation::Load { .. } | Operation::Reload { .. }
+                Operation::Inspect { .. }
+                    | Operation::Load { .. }
+                    | Operation::Reload { .. }
+                    | Operation::EnableInstalled { .. }
+                    | Operation::Uninstall { .. }
             )
         });
         let moving = self
@@ -224,7 +228,12 @@ impl Workbench {
 
     fn render_extensions_impact_strip(&self) -> AnyElement {
         let dark = theme::is_dark();
-        let live_count = self.extensions.instances.iter().filter(|i| i.live).count();
+        let live_count = self
+            .extensions
+            .instances
+            .iter()
+            .filter(|i| i.live && i.info.tab_id.is_none() && i.context_owner.is_none())
+            .count();
         let (impact_label, fill_fraction, fill_color): (SharedString, f32, gpui_kit::Hsla) =
             match live_count {
                 0 => ("无".into(), 0.0, rgb(0x2e8b57).into()),
@@ -320,19 +329,27 @@ impl Workbench {
         let selected_instance = self
             .extensions
             .selected
-            .and_then(|id| self.extensions.instance(id));
+            .and_then(|id| self.extensions.instance(id))
+            .filter(|inst| inst.info.tab_id.is_none() && inst.context_owner.is_none());
         let selected_id = selected_instance.map(|inst| inst.info.identity.instance_id);
         let selected_live = selected_instance.is_some_and(|inst| inst.live);
+        let selected_persisted = selected_instance.is_some_and(|inst| inst.persisted);
         let selected_movable = selected_instance.is_some_and(|inst| {
             inst.live && inst.info.tab_id.is_none() && inst.context_owner.is_none()
         });
 
-        let remove_id = match (selected_id, selected_live) {
-            (Some(_), true) => "plugin-disable",
-            (Some(_), false) => "plugin-remove-retained",
-            (None, _) => "plugin-remove",
+        let remove_id = if selected_persisted {
+            "plugin-uninstall"
+        } else {
+            match (selected_id, selected_live) {
+                (Some(_), true) => "plugin-disable",
+                (Some(_), false) => "plugin-remove-retained",
+                (None, _) => "plugin-remove",
+            }
         };
-        let remove_tip = if selected_live {
+        let remove_tip = if selected_persisted {
+            "从持久化插件目录卸载并移除选中扩展"
+        } else if selected_live {
             "停用选中扩展并将未保存的编辑保留为只读"
         } else {
             "移除已停止的插件实例及其保留的只读内容"
@@ -348,7 +365,7 @@ impl Workbench {
                 mio_neutral_button(
                     "plugin-choose",
                     "添加",
-                    "选择包含 manifest.json 的本地插件包目录并检查权限",
+                    "选择本地插件包（目录或 .tar.gz / .tgz / .mio-plugin 文件）并检查权限",
                     !busy,
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -370,7 +387,9 @@ impl Workbench {
                     if this.extensions.active_top_suite_tab == Some(id) {
                         this.extensions.active_top_suite_tab = None;
                     }
-                    if selected_live {
+                    if selected_persisted {
+                        this.uninstall_plugin(id, window, cx);
+                    } else if selected_live {
                         this.disable_plugin(id, cx);
                     } else {
                         this.remove_retained_plugin(id, window, cx);
@@ -507,10 +526,15 @@ impl Workbench {
             .flex()
             .flex_col();
 
-        let filtered: Vec<&Instance> = self
+        let top_level_instances: Vec<&Instance> = self
             .extensions
             .instances
             .iter()
+            .filter(|instance| instance.info.tab_id.is_none() && instance.context_owner.is_none())
+            .collect();
+        let has_any_installed = !top_level_instances.is_empty();
+        let filtered: Vec<&Instance> = top_level_instances
+            .into_iter()
             .filter(|instance| {
                 if search_query.is_empty() {
                     return true;
@@ -529,7 +553,7 @@ impl Workbench {
         if filtered.is_empty() {
             let empty_hint = if inspecting {
                 "正在检查插件包；尚未执行。"
-            } else if self.extensions.instances.is_empty() {
+            } else if !has_any_installed {
                 "尚未加载扩展。点击左侧「添加」选择包含 manifest.json 的本地插件包。"
             } else {
                 "没有匹配当前搜索关键词的已安装扩展。"
@@ -550,6 +574,9 @@ impl Workbench {
         } else {
             for (index, instance) in filtered.into_iter().enumerate() {
                 let id = instance.info.identity.instance_id;
+                let plugin_id = instance.info.manifest.id.clone();
+                let persisted_suite = instance.persisted;
+                let extensions_disabled = self.extensions.extensions_disabled;
                 let is_selected = self.extensions.selected == Some(id);
                 let live = instance.live;
                 let is_movable = live
@@ -601,6 +628,8 @@ impl Workbench {
                 };
 
                 let row_menu_owner = cx.weak_entity();
+                let toggle_plugin_id = plugin_id.clone();
+                let ctx_plugin_id = plugin_id.clone();
                 rows = rows.child(
                     div()
                         .id(SharedString::from(format!("plugin-instance-{id}")))
@@ -643,6 +672,7 @@ impl Workbench {
                             let o_up = row_menu_owner.clone();
                             let o_down = row_menu_owner.clone();
                             let o_remove = row_menu_owner.clone();
+                            let ctx_plugin_id = ctx_plugin_id.clone();
                             menu.compact()
                                 .item(
                                     PopupMenuItem::new("重新加载 (Reload)")
@@ -659,8 +689,9 @@ impl Workbench {
                                 )
                                 .item(
                                     PopupMenuItem::new(if live { "禁用" } else { "启用" })
-                                        .disabled(busy)
+                                        .disabled(busy || (!live && extensions_disabled))
                                         .on_click(move |_, window, cx| {
+                                            let ctx_plugin_id = ctx_plugin_id.clone();
                                             let _ = o_toggle.update(cx, |this, cx| {
                                                 this.extensions.selected = Some(id);
                                                 if live {
@@ -670,6 +701,12 @@ impl Workbench {
                                                         this.extensions.active_top_suite_tab = None;
                                                     }
                                                     this.disable_plugin(id, cx);
+                                                } else if persisted_suite {
+                                                    this.enable_installed_plugin(
+                                                        id,
+                                                        ctx_plugin_id,
+                                                        cx,
+                                                    );
                                                 } else {
                                                     this.inspect_plugin(Some(id), window, cx);
                                                 }
@@ -707,7 +744,7 @@ impl Workbench {
                                 )
                                 .separator()
                                 .item(
-                                    PopupMenuItem::new(if live {
+                                    PopupMenuItem::new(if persisted_suite || live {
                                         "移除 / 卸载"
                                     } else {
                                         "移除"
@@ -719,7 +756,9 @@ impl Workbench {
                                             if this.extensions.active_top_suite_tab == Some(id) {
                                                 this.extensions.active_top_suite_tab = None;
                                             }
-                                            if live {
+                                            if persisted_suite {
+                                                this.uninstall_plugin(id, window, cx);
+                                            } else if live {
                                                 this.disable_plugin(id, cx);
                                             } else {
                                                 this.remove_retained_plugin(id, window, cx);
@@ -741,12 +780,20 @@ impl Workbench {
                                     )))
                                     .small()
                                     .checked(live)
-                                    .disabled(busy)
+                                    .disabled(busy || (!live && extensions_disabled))
                                     .on_click(cx.listener(move |this, checked, window, cx| {
                                         cx.stop_propagation();
                                         this.extensions.selected = Some(id);
                                         if *checked {
-                                            this.inspect_plugin(Some(id), window, cx);
+                                            if persisted_suite {
+                                                this.enable_installed_plugin(
+                                                    id,
+                                                    toggle_plugin_id.clone(),
+                                                    cx,
+                                                );
+                                            } else {
+                                                this.inspect_plugin(Some(id), window, cx);
+                                            }
                                         } else {
                                             if this.extensions.active_top_suite_tab == Some(id) {
                                                 this.extensions.active_top_suite_tab = None;
@@ -1239,9 +1286,15 @@ impl Workbench {
         let selected = self
             .extensions
             .selected
-            .and_then(|id| self.extensions.instance(id));
+            .and_then(|id| self.extensions.instance(id))
+            .filter(|inst| inst.info.tab_id.is_none() && inst.context_owner.is_none());
         let selected_id = selected.map(|inst| inst.info.identity.instance_id);
         let selected_live = selected.is_some_and(|inst| inst.live);
+        let selected_persisted = selected.is_some_and(|inst| inst.persisted);
+        let selected_plugin_id = selected
+            .map(|inst| inst.info.manifest.id.clone())
+            .unwrap_or_default();
+        let extensions_disabled = self.extensions.extensions_disabled;
         let movable = selected.is_some_and(|inst| {
             inst.live && inst.info.tab_id.is_none() && inst.context_owner.is_none()
         });
@@ -1267,13 +1320,19 @@ impl Workbench {
                 Checkbox::new("extensions-detail-loaded")
                     .label("已加载扩展")
                     .checked(selected_live)
-                    .disabled(selected_id.is_none() || busy)
+                    .disabled(
+                        selected_id.is_none() || busy || (!selected_live && extensions_disabled),
+                    )
                     .on_click(cx.listener(move |this, checked, window, cx| {
                         let Some(id) = selected_id else {
                             return;
                         };
                         if *checked {
-                            this.inspect_plugin(Some(id), window, cx);
+                            if selected_persisted {
+                                this.enable_installed_plugin(id, selected_plugin_id.clone(), cx);
+                            } else {
+                                this.inspect_plugin(Some(id), window, cx);
+                            }
                         } else {
                             if this.extensions.active_top_suite_tab == Some(id) {
                                 this.extensions.active_top_suite_tab = None;
@@ -1346,8 +1405,8 @@ impl Workbench {
                                             .font_weight(gpui_kit::FontWeight::BOLD)
                                             .child("扩展详情 (Details)"),
                                     )
-                                    .child("取消勾选「已加载扩展」会安全停用插件进程，并将未保存的插件编辑内容保留为只读。")
-                                    .child("重新勾选会再次触发清单检查与显式授权，绝不静默执行。")
+                                    .child("取消勾选「已加载扩展 / Loaded」会安全停用插件进程但保留用户目录下的持久化安装；重新勾选即可按原授权启动。")
+                                    .child("点击「移除」会从用户持久化插件目录中彻底卸载并删除扩展包。")
                             }),
                     ),
             );
@@ -1881,7 +1940,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_color(theme::muted_foreground())
-                            .child("将包含 manifest.json 与 WASM 模块（或 Native worker 可执行文件）的插件目录放置于本地后，通过「添加本地扩展」检查清单并显式授予所需宿主权限。"),
+                            .child("将包含 manifest.json 的本地插件目录或单文件归档（.tar.gz / .tgz / .mio-plugin）放置于本地后，通过「添加本地扩展」检查清单并显式授予所需宿主权限。"),
                     )
                     .child(
                         div()
@@ -1891,7 +1950,7 @@ impl Workbench {
                                 mio_neutral_button(
                                     "extensions-plugin-add-local",
                                     "添加本地扩展…",
-                                    "返回已安装页并选择本地插件包目录",
+                                    "返回已安装页并选择本地插件包目录或归档文件",
                                     !busy,
                                 )
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -2157,6 +2216,12 @@ impl Workbench {
             .inspection
             .as_ref()
             .is_some_and(|inspection| inspection.info.manifest.engine == "wasm");
+        let plugins_dir_display = self
+            .extensions
+            .plugins_dir
+            .clone()
+            .or_else(|| mio_core::default_plugins_dir().ok())
+            .map_or_else(|| "仅内存会话（未配置磁盘目录）".to_owned(), |p| p.display().to_string());
 
         div()
             .id("extensions-settings-view")
@@ -2192,7 +2257,7 @@ impl Workbench {
                         div()
                             .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(theme::foreground())
-                            .child("从指定本地目录加载扩展包"),
+                            .child("从指定本地目录或单文件归档加载扩展包"),
                     )
                     .child(
                         div()
@@ -2203,9 +2268,9 @@ impl Workbench {
                                 Input::new(&self.extensions.directory).small(),
                             ))
                             .child(
-                                button("plugin-choose", "选择目录…")
+                                button("plugin-choose", "选择插件…")
                                     .icon(IconName::FolderOpen)
-                                    .tooltip("浏览并选择包含 manifest.json 的本地插件目录")
+                                    .tooltip("浏览并选择包含 manifest.json 的插件目录或单文件归档（.tar.gz / .tgz / .mio-plugin）")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_plugin(window, cx)
@@ -2244,12 +2309,24 @@ impl Workbench {
                     .child(
                         div()
                             .text_color(theme::muted_foreground())
+                            .child(format!(
+                                "• 用户持久化插件目录：{plugins_dir_display}（通过「确认并加载」安装后自动保存并跨重启/项目生效）"
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::muted_foreground())
                             .child("• 检查插件包（Inspect）仅解析 manifest.json 与入口路径，绝不执行插件代码。"),
                     )
                     .child(
                         div()
                             .text_color(theme::muted_foreground())
-                            .child("• 切换项目时不会自动重启先前项目加载的扩展，未回写编辑内容将以只读状态保留供复制。"),
+                            .child("• 已启用的持久化扩展会在启动或切换项目时按保存的权限与顺序自动加载；若启用「Disable extensions」则跳过自动加载（仍可卸载移除）。"),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::muted_foreground())
+                            .child("• 取消勾选「Loaded」仅停用插件而不删除文件；点击「移除」才会彻底卸载并清理磁盘文件。"),
                     )
                     .child(
                         div()

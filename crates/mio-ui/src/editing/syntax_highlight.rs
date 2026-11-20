@@ -6,7 +6,7 @@ use gpui_kit::base::input::{
 };
 use gpui_kit::{Context, FontWeight, HighlightStyle, Hsla, SharedString, Window, hsla, rgb};
 
-pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind {

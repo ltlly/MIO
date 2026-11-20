@@ -50,15 +50,57 @@ impl Workbench {
                 if let Some(old) = replace {
                     self.retain_plugin(old, "已重载；此旧实例的编辑内容保留供复制。", cx);
                 }
+                let plugin_id = info.manifest.id.clone();
+                let new_id = info.identity.instance_id;
+                let has_persistence = self.extensions.plugins_dir.is_some();
+                if has_persistence {
+                    let mut removed_ids = Vec::new();
+                    self.extensions.instances.retain(|inst| {
+                        let removable = !inst.live
+                            && inst.info.tab_id.is_none()
+                            && inst.context_owner.is_none()
+                            && inst.info.manifest.id == plugin_id
+                            && !inst.panel.read(cx).has_unsaved_edits(cx);
+                        if removable {
+                            removed_ids.push(inst.info.identity.instance_id);
+                        }
+                        !removable
+                    });
+                    for old_id in removed_ids {
+                        self.extensions.auto_reload.remove(&old_id);
+                    }
+                    for inst in &mut self.extensions.instances {
+                        if inst.info.tab_id.is_none()
+                            && inst.context_owner.is_none()
+                            && inst.info.manifest.id == plugin_id
+                        {
+                            inst.persisted = false;
+                        }
+                    }
+                }
                 self.extensions.add_panel_open = false;
                 self.extensions.push_log(format!(
                     "已加载插件：{} {}（{}）",
                     info.manifest.id, info.manifest.version, info.identity.instance_id
                 ));
                 self.install_plugin(info, panel, None, window, cx);
+                if has_persistence {
+                    if let Some(inst) = self.extensions.instance_mut(new_id) {
+                        inst.persisted = true;
+                    }
+                    if !self
+                        .extensions
+                        .persisted_order
+                        .iter()
+                        .any(|id| id == &plugin_id)
+                    {
+                        self.extensions.persisted_order.push(plugin_id);
+                    }
+                }
             }
             (Operation::Create(pending), PluginOutcome::Loaded { info, panel }) => {
                 let candidate = info.identity.instance_id;
+                let plugin_id = info.manifest.id.clone();
                 let captured = self.capture_drafts(window, cx);
                 if captured.as_ref().is_ok_and(|changed| *changed) {
                     self.workspace_dirty = true;
@@ -74,6 +116,22 @@ impl Workbench {
                 if valid {
                     if let Some(old) = pending.replace {
                         self.disable_plugin(old, cx);
+                    } else {
+                        let duplicates: Vec<Uuid> = self
+                            .extensions
+                            .instances
+                            .iter()
+                            .filter(|inst| {
+                                inst.live
+                                    && inst.info.tab_id == Some(pending.tab_id)
+                                    && inst.info.manifest.id == plugin_id
+                                    && inst.info.identity.instance_id != candidate
+                            })
+                            .map(|inst| inst.info.identity.instance_id)
+                            .collect();
+                        for dup in duplicates {
+                            self.disable_plugin(dup, cx);
+                        }
                     }
                     self.extensions
                         .active_messages
@@ -210,11 +268,15 @@ impl Workbench {
             (Operation::Disable, PluginOutcome::Disabled { identity }) => {
                 self.extensions
                     .push_log(format!("插件已停用：{}", identity.instance_id));
-                self.retain_plugin(
-                    identity.instance_id,
-                    "已停用；编辑内容保留供复制，未自动加载。",
-                    cx,
+                let is_persisted_suite = self.extensions.instance(identity.instance_id).is_some_and(
+                    |inst| inst.persisted && inst.info.tab_id.is_none() && inst.context_owner.is_none(),
                 );
+                let reason = if is_persisted_suite {
+                    "已停用（文件保留在持久化插件目录）；重新勾选 Loaded 即可启动。"
+                } else {
+                    "已停用；编辑内容保留供复制，未自动加载。"
+                };
+                self.retain_plugin(identity.instance_id, reason, cx);
             }
             (
                 Operation::Workspace {
@@ -375,18 +437,154 @@ impl Workbench {
                 },
             ) if instance == old_instance => {
                 let was_auto_reload = self.extensions.auto_reload.remove(&old_instance);
+                let was_persisted = self
+                    .extensions
+                    .instance(old_instance)
+                    .is_some_and(|inst| inst.persisted);
+                let old_has_edits = self
+                    .extensions
+                    .instance(old_instance)
+                    .is_some_and(|inst| inst.panel.read(cx).has_unsaved_edits(cx));
                 let new_id = info.identity.instance_id;
                 self.retain_plugin(old_instance, "已热重载；此旧实例的编辑内容保留供复制。", cx);
+                if was_persisted {
+                    if let Some(old) = self.extensions.instance_mut(old_instance) {
+                        old.persisted = false;
+                    }
+                    if !old_has_edits && self.extensions.plugins_dir.is_some() {
+                        self.extensions
+                            .instances
+                            .retain(|inst| inst.info.identity.instance_id != old_instance);
+                    }
+                }
                 self.extensions.push_log(format!(
                     "已热重载插件：{} {}（{}）",
                     info.manifest.id, info.manifest.version, new_id
                 ));
                 self.install_plugin(info, panel, None, window, cx);
+                if was_persisted && let Some(inst) = self.extensions.instance_mut(new_id) {
+                    inst.persisted = true;
+                }
                 if was_auto_reload {
                     self.extensions.auto_reload.insert(new_id);
                 } else {
                     self.extensions.auto_reload.remove(&new_id);
                 }
+            }
+            (
+                Operation::EnableInstalled { placeholder_id },
+                PluginOutcome::InstalledEnabled {
+                    info,
+                    panel,
+                    auto_reload,
+                    order,
+                },
+            ) => {
+                let plugin_id = info.manifest.id.clone();
+                let new_id = info.identity.instance_id;
+                let mut removed_ids = Vec::new();
+                self.extensions.instances.retain(|inst| {
+                    let removable = (inst.info.identity.instance_id == placeholder_id
+                        || (inst.info.tab_id.is_none()
+                            && inst.context_owner.is_none()
+                            && inst.info.manifest.id == plugin_id))
+                        && !inst.live
+                        && !inst.panel.read(cx).has_unsaved_edits(cx);
+                    if removable {
+                        removed_ids.push(inst.info.identity.instance_id);
+                    }
+                    !removable
+                });
+                for old_id in removed_ids {
+                    self.extensions.auto_reload.remove(&old_id);
+                }
+                for inst in &mut self.extensions.instances {
+                    if inst.info.tab_id.is_none()
+                        && inst.context_owner.is_none()
+                        && inst.info.manifest.id == plugin_id
+                    {
+                        inst.persisted = false;
+                    }
+                }
+                self.install_plugin(info.clone(), panel, None, window, cx);
+                if let Some(inst) = self.extensions.instance_mut(new_id) {
+                    inst.persisted = true;
+                }
+                if auto_reload {
+                    self.extensions.auto_reload.insert(new_id);
+                } else {
+                    self.extensions.auto_reload.remove(&new_id);
+                }
+                self.apply_plugin_order_with_persisted(&order);
+                self.extensions.push_log(format!(
+                    "已启用持久化扩展：{} {}（{}）",
+                    info.manifest.id, info.manifest.version, new_id
+                ));
+                self.status = format!("已启用扩展：{}", info.manifest.id);
+            }
+            (
+                Operation::Uninstall {
+                    instance_id: req_inst,
+                },
+                PluginOutcome::Uninstalled {
+                    plugin_id,
+                    identity,
+                },
+            ) => {
+                let mut removed_ids = Vec::new();
+                self.extensions.instances.retain(|inst| {
+                    let id = inst.info.identity.instance_id;
+                    let matches_target = id == req_inst
+                        || identity.is_some_and(|i| i.instance_id == id)
+                        || (inst.info.tab_id.is_none()
+                            && inst.context_owner.is_none()
+                            && inst.info.manifest.id == plugin_id);
+                    if matches_target {
+                        removed_ids.push(id);
+                    }
+                    !matches_target
+                });
+                for id in removed_ids {
+                    self.extensions.auto_reload.remove(&id);
+                    if self.extensions.active_top_suite_tab == Some(id) {
+                        self.extensions.active_top_suite_tab = None;
+                    }
+                    self.extensions
+                        .active_messages
+                        .retain(|_, active| *active != id);
+                    self.extensions
+                        .active_responses
+                        .retain(|_, active| *active != id);
+                    self.extensions
+                        .saved_commits
+                        .retain(|_, commit| commit.instance != id);
+                    self.extensions
+                        .context_viewers
+                        .retain(|_, viewer| viewer.instance_id != Some(id));
+                    self.extensions
+                        .response_viewers
+                        .retain(|_, viewer| viewer.instance_id != Some(id));
+                }
+                self.extensions
+                    .persisted_order
+                    .retain(|id| id != &plugin_id);
+                if self
+                    .extensions
+                    .selected
+                    .is_some_and(|sel| self.extensions.instance(sel).is_none())
+                {
+                    self.extensions.selected = self
+                        .extensions
+                        .instances
+                        .iter()
+                        .rfind(|inst| {
+                            inst.info.tab_id.is_none() && inst.context_owner.is_none()
+                        })
+                        .map(|inst| inst.info.identity.instance_id);
+                }
+                self.extensions
+                    .push_log(format!("已卸载并移除扩展：{plugin_id}"));
+                self.status = format!("已卸载扩展：{plugin_id}");
             }
             (
                 Operation::SetAutoReload { instance, .. },

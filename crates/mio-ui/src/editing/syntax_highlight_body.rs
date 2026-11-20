@@ -2,125 +2,176 @@ use std::ops::Range;
 
 use super::syntax_highlight::TokenKind;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonContainer {
+    Object { expect_key: bool },
+    Array,
+}
+
 pub(super) fn tokenize_json(body: &str, offset: usize, out: &mut Vec<(Range<usize>, TokenKind)>) {
-    let Ok(raw) = serde_json::from_str::<&serde_json::value::RawValue>(body) else {
-        return;
-    };
-    let start = out.len();
-    if !emit_raw_json_tokens(body, raw.get(), offset, out) {
-        out.truncate(start);
+    let bytes = body.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
     }
-}
+    if i >= len {
+        return;
+    }
+    if !matches!(
+        bytes[i],
+        b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n'
+    ) {
+        return;
+    }
 
-fn slice_range_in(whole: &str, part: &str) -> Range<usize> {
-    let start = part.as_ptr() as usize - whole.as_ptr() as usize;
-    start..start + part.len()
-}
+    let mut stack: Vec<JsonContainer> = Vec::with_capacity(16);
+    let mark_value = |stack: &mut Vec<JsonContainer>| {
+        if let Some(JsonContainer::Object { expect_key }) = stack.last_mut() {
+            *expect_key = false;
+        }
+    };
 
-fn emit_raw_json_tokens(
-    whole: &str,
-    raw: &str,
-    offset: usize,
-    out: &mut Vec<(Range<usize>, TokenKind)>,
-) -> bool {
-    let trimmed = raw.trim();
-    let range = slice_range_in(whole, trimmed);
-    match trimmed.as_bytes().first().copied() {
-        Some(b'"') => {
-            out.push((offset + range.start..offset + range.end, TokenKind::JsonString));
-            true
+    while i < len {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
         }
-        Some(b'-' | b'0'..=b'9') => {
-            out.push((offset + range.start..offset + range.end, TokenKind::JsonNumber));
-            true
-        }
-        Some(b't' | b'f' | b'n') => {
-            out.push((offset + range.start..offset + range.end, TokenKind::JsonKeyword));
-            true
-        }
-        Some(b'[') => {
-            let Ok(items) = serde_json::from_str::<Vec<&serde_json::value::RawValue>>(trimmed)
-            else {
-                return false;
-            };
-            let mut prev_end = range.start + 1;
-            for item in items {
-                let item_str = item.get();
-                let item_range = slice_range_in(whole, item_str);
-                emit_punct_between(whole, prev_end..item_range.start, offset, out);
-                if !emit_raw_json_tokens(whole, item_str, offset, out) {
-                    return false;
-                }
-                prev_end = item_range.end;
+        match bytes[i] {
+            b'{' => {
+                mark_value(&mut stack);
+                stack.push(JsonContainer::Object { expect_key: true });
+                i += 1;
             }
-            emit_punct_between(whole, prev_end..range.end.saturating_sub(1), offset, out);
-            true
-        }
-        Some(b'{') => {
-            let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
-            let mut cursor = slice_range_in(whole, inner).start;
-            let limit = slice_range_in(whole, inner).end;
-            while cursor < limit {
-                let rest = &whole[cursor..limit];
-                let ws = rest.len() - rest.trim_start().len();
-                cursor += ws;
-                if cursor >= limit {
+            b'[' => {
+                mark_value(&mut stack);
+                stack.push(JsonContainer::Array);
+                i += 1;
+            }
+            b'}' => {
+                if matches!(stack.last(), Some(JsonContainer::Object { .. })) {
+                    stack.pop();
+                }
+                i += 1;
+            }
+            b']' => {
+                if matches!(stack.last(), Some(JsonContainer::Array)) {
+                    stack.pop();
+                }
+                i += 1;
+            }
+            b':' => {
+                out.push((offset + i..offset + i + 1, TokenKind::QueryPunct));
+                if let Some(JsonContainer::Object { expect_key }) = stack.last_mut() {
+                    *expect_key = false;
+                }
+                i += 1;
+            }
+            b',' => {
+                out.push((offset + i..offset + i + 1, TokenKind::QueryPunct));
+                if let Some(JsonContainer::Object { expect_key }) = stack.last_mut() {
+                    *expect_key = true;
+                }
+                i += 1;
+            }
+            b'"' => {
+                let str_start = i;
+                i += 1;
+                while i < len {
+                    let b = bytes[i];
+                    if b == b'\\' {
+                        i += 1;
+                        if i < len {
+                            if bytes[i] < 0x80 {
+                                i += 1;
+                            } else {
+                                i += body[i..].chars().next().map_or(len - i, char::len_utf8);
+                            }
+                        }
+                    } else if b == b'"' {
+                        i += 1;
+                        break;
+                    } else if b < 0x80 {
+                        i += 1;
+                    } else {
+                        i += body[i..].chars().next().map_or(len - i, char::len_utf8);
+                    }
+                }
+                let mut j = i;
+                while j < len && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let is_key = matches!(
+                    stack.last(),
+                    Some(JsonContainer::Object { expect_key: true })
+                ) || bytes.get(j) == Some(&b':');
+                mark_value(&mut stack);
+                out.push((
+                    offset + str_start..offset + i,
+                    if is_key {
+                        TokenKind::JsonKey
+                    } else {
+                        TokenKind::JsonString
+                    },
+                ));
+            }
+            b'-' | b'0'..=b'9' => {
+                let num_start = i;
+                if bytes[i] == b'-' {
+                    i += 1;
+                }
+                let digit_start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i == digit_start {
                     break;
                 }
-                if whole.as_bytes()[cursor] == b',' {
-                    out.push((offset + cursor..offset + cursor + 1, TokenKind::QueryPunct));
-                    cursor += 1;
-                    continue;
+                if i < len && bytes[i] == b'.' {
+                    let frac_start = i + 1;
+                    if frac_start < len && bytes[frac_start].is_ascii_digit() {
+                        i = frac_start + 1;
+                        while i < len && bytes[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                    }
                 }
-                let mut stream = serde_json::Deserializer::from_str(&whole[cursor..limit])
-                    .into_iter::<&serde_json::value::RawValue>();
-                let Some(Ok(key_raw)) = stream.next() else {
-                    return false;
-                };
-                let key_range = slice_range_in(whole, key_raw.get());
-                out.push((
-                    offset + key_range.start..offset + key_range.end,
-                    TokenKind::JsonKey,
-                ));
-                cursor = key_range.end;
-                let after_key = &whole[cursor..limit];
-                let Some(colon_rel) = after_key.find(':') else {
-                    return false;
-                };
-                let colon_pos = cursor + colon_rel;
-                out.push((
-                    offset + colon_pos..offset + colon_pos + 1,
-                    TokenKind::QueryPunct,
-                ));
-                cursor = colon_pos + 1;
-                let mut val_stream = serde_json::Deserializer::from_str(&whole[cursor..limit])
-                    .into_iter::<&serde_json::value::RawValue>();
-                let Some(Ok(val_raw)) = val_stream.next() else {
-                    return false;
-                };
-                let val_str = val_raw.get();
-                let val_range = slice_range_in(whole, val_str);
-                if !emit_raw_json_tokens(whole, val_str, offset, out) {
-                    return false;
+                if i < len && matches!(bytes[i], b'e' | b'E') {
+                    let mut exp_i = i + 1;
+                    if exp_i < len && matches!(bytes[exp_i], b'+' | b'-') {
+                        exp_i += 1;
+                    }
+                    let exp_digits = exp_i;
+                    while exp_i < len && bytes[exp_i].is_ascii_digit() {
+                        exp_i += 1;
+                    }
+                    if exp_i > exp_digits {
+                        i = exp_i;
+                    }
                 }
-                cursor = val_range.end;
+                mark_value(&mut stack);
+                out.push((offset + num_start..offset + i, TokenKind::JsonNumber));
             }
-            true
-        }
-        _ => false,
-    }
-}
-
-fn emit_punct_between(
-    whole: &str,
-    span: Range<usize>,
-    offset: usize,
-    out: &mut Vec<(Range<usize>, TokenKind)>,
-) {
-    for (rel, ch) in whole[span.clone()].char_indices() {
-        if matches!(ch, ':' | ',') {
-            let pos = span.start + rel;
-            out.push((offset + pos..offset + pos + 1, TokenKind::QueryPunct));
+            b't' | b'f' | b'n' => {
+                let rest = &body[i..];
+                let kw_len = if rest.starts_with("true") || rest.starts_with("null") {
+                    4
+                } else if rest.starts_with("false") {
+                    5
+                } else {
+                    break;
+                };
+                let kw_end = i + kw_len;
+                if kw_end < len
+                    && (bytes[kw_end].is_ascii_alphanumeric() || bytes[kw_end] == b'_')
+                {
+                    break;
+                }
+                mark_value(&mut stack);
+                out.push((offset + i..offset + kw_end, TokenKind::JsonKeyword));
+                i = kw_end;
+            }
+            _ => break,
         }
     }
 }

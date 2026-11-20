@@ -22,6 +22,19 @@ pub struct LoadedPlugin {
     pub tab_id: Option<TabId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledPluginInfo {
+    pub id: String,
+    pub version: String,
+    pub engine: String,
+    pub directory: PathBuf,
+    pub entry: PathBuf,
+    pub grants: Vec<protocol::Permission>,
+    pub contributions: Vec<String>,
+    pub enabled: bool,
+    pub auto_reload: bool,
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PluginAction {
@@ -135,6 +148,13 @@ pub enum PluginAction {
         instance_id: Uuid,
         enabled: bool,
     },
+    EnableInstalled {
+        plugin_id: String,
+    },
+    Uninstall {
+        plugin_id: String,
+        instance_id: Option<Uuid>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +228,16 @@ pub enum PluginOutcome {
     AutoReloadUpdated {
         instance_id: Uuid,
         enabled: bool,
+    },
+    InstalledEnabled {
+        info: LoadedPlugin,
+        panel: Arc<panel::PanelSnapshot>,
+        auto_reload: bool,
+        order: Vec<Uuid>,
+    },
+    Uninstalled {
+        plugin_id: String,
+        identity: Option<protocol::ChannelIdentity>,
     },
     Disabled {
         identity: protocol::ChannelIdentity,

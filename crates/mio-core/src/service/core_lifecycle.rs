@@ -250,14 +250,16 @@ impl State {
         Ok(self.ca.as_ref().unwrap().clone())
     }
 
+    #[cfg(test)]
     pub(super) async fn replace_project(&mut self, next: ProjectStore) -> Result<()> {
-        self.replace_project_with(next, false).await
+        self.replace_project_with(next, false, None).await
     }
 
     pub(super) async fn replace_project_with(
         &mut self,
         mut next: ProjectStore,
         pause_automated_tasks: bool,
+        extensions_disabled: Option<bool>,
     ) -> Result<()> {
         self.require_saved()?;
         self.store.require_intruder_sessions_resolved()?;
@@ -284,6 +286,9 @@ impl State {
                 .context("项目 generation 已耗尽")?,
         };
         self.store = next;
+        if let Some(disabled) = extensions_disabled {
+            self.extensions_disabled = disabled;
+        }
         self.history_dirty = false;
         self.websocket_history_dirty = false;
         self.intruder = intruder;
@@ -323,6 +328,7 @@ impl State {
         if let Some(saved_path) = self.store.path.clone() {
             self.record_recent_project(&saved_path).await;
         }
+        self.restore_installed_plugins().await;
         Ok(())
     }
 

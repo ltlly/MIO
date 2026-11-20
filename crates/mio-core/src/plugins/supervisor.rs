@@ -75,7 +75,7 @@ impl PluginSupervisor {
         } else {
             let mut command = Command::new(&package.executable);
             command
-                .current_dir(&package.directory)
+                .current_dir(&package.work_dir)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

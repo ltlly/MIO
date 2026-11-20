@@ -1,10 +1,26 @@
+use std::sync::Arc;
+
 use mio_core::{
-    LoadedPlugin, PluginAction, Uuid, panel::EditorSnapshot, protocol::ChannelIdentity,
+    InstalledPluginInfo, LoadedPlugin, PluginAction, Uuid,
+    panel::{EditorSnapshot, Node, PanelSnapshot, node},
+    plugins::PluginManifest,
+    protocol::{ChannelIdentity, PROTOCOL_MAJOR},
 };
 
 use crate::plugin_panel::{NativePanel, PanelEvent};
 
 use super::*;
+
+pub(in crate::workbench) fn is_expected_plugin_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim(),
+        "插件已禁用"
+            | "插件已重载"
+            | "插件已卸载"
+            | "消息编辑器所属工作标签已关闭"
+            | "项目正在关闭；插件已停用"
+    )
+}
 
 impl Workbench {
     pub(in crate::workbench) fn plugin_response_editor_badge(
@@ -92,6 +108,49 @@ impl Workbench {
             instance.live && self.project == Some(instance.info.identity.project)
         }) {
             return;
+        }
+        if replace.is_none()
+            && let Some(source_manifest_id) = self
+                .extensions
+                .instance(source)
+                .map(|inst| inst.info.manifest.id.as_str())
+        {
+            if let Some(existing_id) = self
+                .extensions
+                .instances
+                .iter()
+                .find(|inst| {
+                    inst.live
+                        && inst.info.tab_id == Some(tab_id)
+                        && inst.info.manifest.id == source_manifest_id
+                })
+                .map(|inst| inst.info.identity.instance_id)
+            {
+                self.extensions.active_messages.insert(tab_id, existing_id);
+                self.tool = Tool::Repeater;
+                cx.notify();
+                return;
+            }
+            let creating_inflight = self.extensions.operations.values().any(|op| {
+                matches!(op, Operation::Create(p) if p.tab_id == tab_id
+                    && p.replace.is_none()
+                    && (p.source == source
+                        || self
+                            .extensions
+                            .instance(p.source)
+                            .is_some_and(|s| s.info.manifest.id == source_manifest_id)))
+            }) || self.extensions.create_after_save.iter().any(|p| {
+                p.tab_id == tab_id
+                    && p.replace.is_none()
+                    && (p.source == source
+                        || self
+                            .extensions
+                            .instance(p.source)
+                            .is_some_and(|s| s.info.manifest.id == source_manifest_id))
+            });
+            if creating_inflight {
+                return;
+            }
         }
         if !self.flush_workspace(window, cx) {
             return;
@@ -294,10 +353,12 @@ impl Workbench {
         } else {
             "已加载 · native worker 未受 OS 沙箱限制".into()
         };
+        let is_suite = info.tab_id.is_none() && context_owner.is_none();
         self.extensions.instances.push(Instance {
             info,
             panel,
             live: true,
+            persisted: false,
             status,
             bound,
             document: None,
@@ -307,7 +368,7 @@ impl Workbench {
         if default_auto_reload {
             self.extensions.auto_reload.insert(id);
         }
-        if context_owner.is_none() {
+        if is_suite {
             self.extensions.selected = Some(id);
         }
         self.status = "插件已加载，已申请但未授权的宿主能力保持不可用。".into();
@@ -353,11 +414,16 @@ impl Workbench {
         {
             return;
         }
-        self.extensions.push_error_log(if stopped {
-            format!("插件停止（{}）：{message}", identity.instance_id)
+        if stopped && is_expected_plugin_stop_reason(&message) {
+            self.extensions
+                .push_log(format!("插件停止（{}）：{message}", identity.instance_id));
         } else {
-            format!("插件诊断（{}）：{message}", identity.instance_id)
-        });
+            self.extensions.push_error_log(if stopped {
+                format!("插件停止（{}）：{message}", identity.instance_id)
+            } else {
+                format!("插件诊断（{}）：{message}", identity.instance_id)
+            });
+        }
         if stopped {
             self.invalidate_plugin_commits(Some(identity.instance_id), None, cx);
             self.retain_plugin(
@@ -477,5 +543,237 @@ impl Workbench {
     pub(in crate::workbench) fn plugins_save_failed(&mut self, cx: &mut Context<Self>) {
         self.invalidate_plugin_commits(None, None, cx);
         self.extensions.create_after_save.clear();
+    }
+
+    pub(in crate::workbench) fn handle_installed_plugins(
+        &mut self,
+        project: ProjectKey,
+        plugins_dir: PathBuf,
+        extensions_disabled: bool,
+        plugins: Vec<InstalledPluginInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project != Some(project) {
+            return;
+        }
+        self.extensions.plugins_dir = Some(plugins_dir);
+        self.extensions.extensions_disabled = extensions_disabled;
+        self.extensions.persisted_order = plugins.iter().map(|p| p.id.clone()).collect();
+        self.extensions.instances.retain(|inst| {
+            inst.info.identity.project == project
+                || inst.live
+                || inst.panel.read(cx).has_unsaved_edits(cx)
+        });
+        for entry in plugins {
+            let exists_for_project = self.extensions.instances.iter().any(|inst| {
+                inst.info.identity.project == project
+                    && inst.info.tab_id.is_none()
+                    && inst.context_owner.is_none()
+                    && inst.info.manifest.id == entry.id
+            });
+            if exists_for_project {
+                continue;
+            }
+            let status_text = if extensions_disabled {
+                "当前项目已禁用扩展（Disable extensions）；未自动启动。".to_owned()
+            } else if entry.enabled {
+                "正在自动加载持久化扩展…".to_owned()
+            } else {
+                "已安装（未启用）；勾选 Loaded 即可启动。".to_owned()
+            };
+            let placeholder_id = Uuid::new_v4();
+            let snapshot = Arc::new(PanelSnapshot {
+                revision: 1,
+                title: entry.id.clone(),
+                root: Some(Node::new(
+                    1,
+                    "状态",
+                    node::Kind::Text(mio_core::panel::Text {
+                        text: status_text.clone(),
+                        tone: 0,
+                    }),
+                )),
+            });
+            if snapshot.validate().is_err() {
+                continue;
+            }
+            let panel = cx.new(|cx| {
+                NativePanel::new(snapshot, window, cx)
+                    .expect("same immutable snapshot was validated")
+            });
+            panel.update(cx, |panel, cx| panel.set_enabled(false, cx));
+            let info = LoadedPlugin {
+                identity: ChannelIdentity {
+                    instance_id: placeholder_id,
+                    project,
+                },
+                directory: entry.directory,
+                manifest: PluginManifest {
+                    id: entry.id,
+                    version: entry.version,
+                    api_version: PROTOCOL_MAJOR,
+                    engine: entry.engine,
+                    entry: entry.entry,
+                    permissions: entry.grants.clone(),
+                    contributions: entry.contributions,
+                },
+                grants: entry.grants,
+                tab_id: None,
+            };
+            let sub = cx.subscribe_in(&panel, window, |_, _, _, _, _| {});
+            self.extensions.instances.push(Instance {
+                info,
+                panel,
+                live: false,
+                persisted: true,
+                status: status_text,
+                bound: None,
+                document: None,
+                context_owner: None,
+                _subscription: sub,
+            });
+            if entry.auto_reload {
+                self.extensions.auto_reload.insert(placeholder_id);
+            }
+        }
+        self.apply_plugin_order_with_persisted(&[]);
+        if self.extensions.selected.is_none() {
+            self.extensions.selected = self
+                .extensions
+                .instances
+                .iter()
+                .find(|inst| inst.info.tab_id.is_none() && inst.context_owner.is_none())
+                .map(|inst| inst.info.identity.instance_id);
+        }
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn handle_plugin_auto_loaded(
+        &mut self,
+        project: ProjectKey,
+        info: LoadedPlugin,
+        panel: std::sync::Arc<PanelSnapshot>,
+        auto_reload: bool,
+        order: Vec<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project != Some(project) {
+            return;
+        }
+        let prev_selected = self.extensions.selected;
+        let plugin_id = info.manifest.id.clone();
+        let new_id = info.identity.instance_id;
+        let mut replaced_selected = false;
+        let mut removed_ids = Vec::new();
+        self.extensions.instances.retain(|inst| {
+            let removable = !inst.live
+                && inst.info.tab_id.is_none()
+                && inst.context_owner.is_none()
+                && inst.info.manifest.id == plugin_id
+                && !inst.panel.read(cx).has_unsaved_edits(cx);
+            if removable {
+                let id = inst.info.identity.instance_id;
+                removed_ids.push(id);
+                if prev_selected == Some(id) {
+                    replaced_selected = true;
+                }
+            }
+            !removable
+        });
+        for old_id in removed_ids {
+            self.extensions.auto_reload.remove(&old_id);
+        }
+        for inst in &mut self.extensions.instances {
+            if inst.info.tab_id.is_none()
+                && inst.context_owner.is_none()
+                && inst.info.manifest.id == plugin_id
+            {
+                inst.persisted = false;
+            }
+        }
+        if !self.install_plugin_instance(info.clone(), panel, None, None, window, cx) {
+            return;
+        }
+        if let Some(inst) = self.extensions.instance_mut(new_id) {
+            inst.persisted = true;
+        }
+        if !self
+            .extensions
+            .persisted_order
+            .iter()
+            .any(|id| id == &plugin_id)
+        {
+            self.extensions.persisted_order.push(plugin_id.clone());
+        }
+        if auto_reload {
+            self.extensions.auto_reload.insert(new_id);
+        } else {
+            self.extensions.auto_reload.remove(&new_id);
+        }
+        self.apply_plugin_order_with_persisted(&order);
+        if !replaced_selected
+            && let Some(prev) = prev_selected
+            && self.extensions.instance(prev).is_some()
+        {
+            self.extensions.selected = Some(prev);
+        }
+        self.extensions.push_log(format!(
+            "已自动加载持久化扩展：{} {}（{}）",
+            info.manifest.id, info.manifest.version, new_id
+        ));
+        self.status = format!("已自动加载扩展：{}", info.manifest.id);
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn handle_plugin_auto_load_failed(
+        &mut self,
+        project: ProjectKey,
+        plugin_id: String,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project != Some(project) {
+            return;
+        }
+        for inst in &mut self.extensions.instances {
+            if !inst.live
+                && inst.info.tab_id.is_none()
+                && inst.context_owner.is_none()
+                && inst.info.manifest.id == plugin_id
+            {
+                inst.status = format!("自动加载失败：{message}");
+            }
+        }
+        self.extensions
+            .push_error_log(format!("自动加载扩展 {plugin_id} 失败：{message}"));
+        self.status = format!("扩展 {plugin_id} 自动加载失败：{message}");
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn apply_plugin_order_with_persisted(&mut self, live_order: &[Uuid]) {
+        let mut live_rank = HashMap::with_capacity(live_order.len());
+        for (idx, id) in live_order.iter().enumerate() {
+            live_rank.insert(*id, idx);
+        }
+        let mut persisted_rank = HashMap::with_capacity(self.extensions.persisted_order.len());
+        for (idx, id) in self.extensions.persisted_order.iter().enumerate() {
+            persisted_rank.insert(id.clone(), idx);
+        }
+        self.extensions.instances.sort_by_key(|instance| {
+            let is_suite =
+                instance.info.tab_id.is_none() && instance.context_owner.is_none();
+            if !is_suite {
+                return (2usize, 0usize, 0usize);
+            }
+            if let Some(&idx) = persisted_rank.get(&instance.info.manifest.id) {
+                return (0usize, idx, usize::from(!instance.live));
+            }
+            if let Some(&idx) = live_rank.get(&instance.info.identity.instance_id) {
+                return (1usize, idx, usize::from(!instance.live));
+            }
+            (1usize, usize::MAX, usize::from(!instance.live))
+        });
     }
 }

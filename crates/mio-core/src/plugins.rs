@@ -36,11 +36,13 @@ const STOP_GRACE: Duration = Duration::from_millis(150);
 const REAP_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
+mod archive;
 mod broker;
 mod handle;
 mod io;
 mod package;
 mod prefs_store;
+mod registry;
 mod running;
 mod running_host;
 mod runtime;
@@ -49,10 +51,12 @@ pub mod wasm;
 
 pub use broker::{PermissionBroker, PluginEvent, ServiceOperation, ServiceRequest, ServiceResult};
 pub use handle::PluginHandle;
-#[cfg(test)]
-use package::read_manifest;
+pub(crate) use package::read_manifest;
 pub use package::{NativeTrust, PluginManifest, VerifiedPackage};
 pub use prefs_store::{PluginPreferencesStore, default_plugin_preferences_path};
+pub use registry::{
+    InstalledPackageStaging, InstalledPluginEntry, PluginRegistryStore, default_plugins_dir,
+};
 pub use supervisor::PluginSupervisor;
 #[cfg(test)]
 pub(crate) use supervisor::test_supervisor;
@@ -347,6 +351,8 @@ mod prefs_store_tests;
 mod tests;
 #[cfg(test)]
 mod tests_package;
+#[cfg(test)]
+mod tests_registry;
 #[cfg(test)]
 mod tests_runtime;
 #[cfg(test)]

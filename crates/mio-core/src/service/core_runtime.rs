@@ -227,6 +227,9 @@ impl State {
             });
         }
         let (proxy_sender, proxy_events) = mpsc::channel(PROXY_EVENT_CAPACITY);
+        let plugin_registry = crate::plugins::PluginRegistryStore::from_env_or_user_preferences(
+            preferences_path.as_deref(),
+        );
         let plugin_prefs = if std::env::var_os("MIO_PLUGIN_PREFERENCES_PATH")
             .is_some_and(|value| !value.is_empty())
         {
@@ -284,7 +287,7 @@ impl State {
             tls_failure_rx,
             last_scheduled_fire: HashMap::new(),
             extensions_disabled: false,
-            plugins: plugin_service::PluginState::with_preferences(plugin_prefs),
+            plugins: plugin_service::PluginState::with_stores(plugin_prefs, plugin_registry),
             ext_archive: ext_service::ExtState::default(),
             intruder,
             ws_repeater,

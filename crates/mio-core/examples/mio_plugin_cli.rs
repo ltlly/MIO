@@ -200,18 +200,23 @@ fn check_no_symlinks_under_entry(base_dir: &Path, rel_entry: &Path) -> Result<()
     Ok(())
 }
 
-pub fn check_package(dir: &Path) -> Result<VerifiedPackage> {
-    let meta = fs::symlink_metadata(dir).context("插件包目录不存在")?;
-    ensure!(!meta.file_type().is_symlink(), "插件包根目录不能是软链接");
-    let manifest_meta =
-        fs::symlink_metadata(dir.join("manifest.json")).context("缺少 manifest.json")?;
-    ensure!(
-        !manifest_meta.file_type().is_symlink(),
-        "manifest.json 不能是软链接"
-    );
-    let pkg = VerifiedPackage::read(dir)?;
-    check_no_symlinks_under_entry(&pkg.directory, &pkg.manifest.entry)?;
-    let sha_manifest_path = pkg.directory.join("sha256-manifest.json");
+pub fn check_package(path: &Path) -> Result<VerifiedPackage> {
+    let meta = fs::symlink_metadata(path).context("插件包路径不存在")?;
+    ensure!(!meta.file_type().is_symlink(), "插件包路径不能是软链接");
+    if meta.is_dir() {
+        let manifest_meta =
+            fs::symlink_metadata(path.join("manifest.json")).context("缺少 manifest.json")?;
+        ensure!(
+            !manifest_meta.file_type().is_symlink(),
+            "manifest.json 不能是软链接"
+        );
+    } else if !meta.is_file() {
+        bail!("插件包必须是目录或单文件归档（.tar.gz / .tgz / .mio-plugin）");
+    }
+    let pkg = VerifiedPackage::read(path)?;
+    let work_dir = pkg.work_dir();
+    check_no_symlinks_under_entry(work_dir, &pkg.manifest.entry)?;
+    let sha_manifest_path = work_dir.join("sha256-manifest.json");
     if let Ok(sha_meta) = fs::symlink_metadata(&sha_manifest_path) {
         ensure!(
             sha_meta.is_file() && !sha_meta.file_type().is_symlink(),
@@ -219,7 +224,7 @@ pub fn check_package(dir: &Path) -> Result<VerifiedPackage> {
         );
         let expected: PackSummary = serde_json::from_slice(&fs::read(&sha_manifest_path)?)
             .context("解析 sha256-manifest.json 失败")?;
-        let actual_manifest_sha = sha256_hex(&fs::read(pkg.directory.join("manifest.json"))?);
+        let actual_manifest_sha = sha256_hex(&fs::read(work_dir.join("manifest.json"))?);
         let actual_entry_bytes = fs::read(&pkg.executable)?;
         let actual_entry_sha = sha256_hex(&actual_entry_bytes);
         ensure!(
@@ -288,7 +293,10 @@ pub fn pack_package(src_dir: &Path, dest_dir: &Path) -> Result<PackSummary> {
     };
     let summary_bytes = serde_json::to_vec_pretty(&summary)?;
     let dest_name = dest_dir.to_string_lossy();
-    if dest_name.ends_with(".tar.gz") || dest_name.ends_with(".tgz") {
+    if dest_name.ends_with(".tar.gz")
+        || dest_name.ends_with(".tgz")
+        || dest_name.ends_with(".mio-plugin")
+    {
         if let Some(parent) = dest_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).context("无法创建归档父目录")?;
         }

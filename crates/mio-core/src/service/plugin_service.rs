@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, task::Poll};
+use std::{future::Future, path::{Path, PathBuf}, pin::Pin, task::Poll};
 
 use mio_plugin_api::{
     panel::PanelSnapshot,
@@ -8,7 +8,8 @@ use tokio::task::{JoinError, JoinHandle};
 
 use super::*;
 use crate::plugins::{
-    NativeTrust, PluginEvent, PluginPreferencesStore, PluginSupervisor, ServiceOperation,
+    InstalledPackageStaging, InstalledPluginEntry, NativeTrust, PluginEvent,
+    PluginPreferencesStore, PluginRegistryStore, PluginSupervisor, ServiceOperation,
     ServiceRequest, ServiceResult, VerifiedPackage,
 };
 
@@ -35,10 +36,18 @@ struct Instance {
     resources: HashMap<Uuid, u64>,
 }
 
+struct PersistInstallCommit {
+    staging: InstalledPackageStaging,
+    original_source: Option<PathBuf>,
+}
+
 struct Candidate {
     instance: Instance,
     replace: Option<Uuid>,
     reloaded: bool,
+    autoload: bool,
+    enable_installed: bool,
+    persist_install: Option<PersistInstallCommit>,
     open: Option<(TabId, u64)>,
     context_open: Option<(Uuid, u64, bool, HttpRequest)>,
     response_open: Option<(Uuid, u64, bool, HttpResponse)>,
@@ -79,6 +88,7 @@ struct Operation {
     cleanup_failed: bool,
     background_passive: bool,
     replaces_existing: bool,
+    autoload_plugin_id: Option<String>,
     binding: Option<(TabId, u64, Option<u64>)>,
 }
 
@@ -168,6 +178,7 @@ enum Output {
         retired: Vec<Retired>,
         candidate: Option<Box<Candidate>>,
         disabled: Option<ChannelIdentity>,
+        uninstalled_plugin_id: Option<String>,
         reason: String,
     },
     Revoked,
@@ -190,6 +201,7 @@ pub(super) enum Signal {
 
 pub(super) struct PluginState {
     pub(crate) prefs: PluginPreferencesStore,
+    pub(crate) registry: PluginRegistryStore,
     pub(crate) passive_tx: mpsc::Sender<(ProjectKey, Box<FlowRecord>)>,
     passive_rx: mpsc::Receiver<(ProjectKey, Box<FlowRecord>)>,
     last_auto_reload_check: Option<Instant>,
@@ -231,4 +243,4 @@ mod tests_v14_hostcalls;
 mod viewers;
 mod workspace;
 
-use lifecycle::retire;
+use lifecycle::{retire, retire_with_uninstall};

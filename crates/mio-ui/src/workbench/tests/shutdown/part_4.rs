@@ -428,7 +428,7 @@ fn plugin_picker_disconnect_releases_busy_gate_without_loading(cx: &mut TestAppC
             view.error
                 .as_deref()
                 .unwrap()
-                .contains("插件目录选择器已关闭")
+                .contains("插件选择器已关闭")
         );
         assert_eq!(view.project, Some(fixture.project));
         assert!(!view.shutdown_requested && !view.shutdown.is_cancelled());

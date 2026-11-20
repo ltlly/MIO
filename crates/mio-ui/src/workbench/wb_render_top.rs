@@ -268,8 +268,29 @@ impl Workbench {
             Event::PluginDiagnostic { message, .. } => Some((
                 FooterLogSeverity::Warning, "扩展诊断".into(), message.clone(),
             )),
-            Event::PluginStopped { reason, .. } => Some((
-                FooterLogSeverity::Warning, "扩展已停止".into(), reason.clone(),
+            Event::PluginStopped { reason, .. } => {
+                let expected = super::plugins::is_expected_plugin_stop_reason(reason);
+                Some((
+                    if expected {
+                        FooterLogSeverity::Info
+                    } else {
+                        FooterLogSeverity::Warning
+                    },
+                    "扩展已停止".into(),
+                    reason.clone(),
+                ))
+            }
+            Event::PluginAutoLoaded { info, .. } => Some((
+                FooterLogSeverity::Info,
+                format!("已自动加载扩展：{}", info.manifest.id),
+                format!("{} · v{}", info.manifest.id, info.manifest.version),
+            )),
+            Event::PluginAutoLoadFailed {
+                plugin_id, message, ..
+            } => Some((
+                FooterLogSeverity::Error,
+                format!("扩展自动加载失败：{plugin_id}"),
+                message.clone(),
             )),
             Event::Audit(mio_core::AuditEvent::TaskUpdated { project, task, new_findings, .. })
                 if self.project == Some(*project) => Some((

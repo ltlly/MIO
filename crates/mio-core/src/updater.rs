@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crate::{Header, HttpRequest, HttpResponse, HttpVersion};
-use mio_proxy::SendConfig;
+use mio_proxy::{ProxyCredentials, ProxyEndpoint, SendConfig, UpstreamRoute, UpstreamTls};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -263,11 +263,296 @@ fn header_value(resp: &HttpResponse, name: &str) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
+fn percent_decode_component(raw: &str) -> String {
+    if !raw.contains('%') {
+        return raw.to_owned();
+    }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            out.push(val);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub(crate) fn parse_proxy_url_to_route(raw: &str) -> Option<UpstreamRoute> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let parsed = url::Url::parse(&normalized).ok()?;
+    let host = parsed
+        .host_str()?
+        .trim_matches(['[', ']'])
+        .trim()
+        .to_owned();
+    if host.is_empty() {
+        return None;
+    }
+    let default_port = match parsed.scheme() {
+        "http" => 80,
+        "https" => 443,
+        "socks5" | "socks5h" => 1080,
+        _ => return None,
+    };
+    let port = parsed.port().unwrap_or(default_port);
+    if port == 0 {
+        return None;
+    }
+    let credentials = if !parsed.username().is_empty() || parsed.password().is_some() {
+        Some(ProxyCredentials {
+            username: percent_decode_component(parsed.username()),
+            password: percent_decode_component(parsed.password().unwrap_or_default()),
+        })
+    } else {
+        None
+    };
+    let endpoint = ProxyEndpoint {
+        host,
+        port,
+        credentials,
+    };
+    match parsed.scheme() {
+        "http" => Some(UpstreamRoute::Http(endpoint)),
+        "https" => Some(UpstreamRoute::Https {
+            endpoint,
+            tls: UpstreamTls::System,
+        }),
+        "socks5" | "socks5h" => Some(UpstreamRoute::Socks5(endpoint)),
+        _ => None,
+    }
+}
+
+fn ipv4_in_cidr(pattern: &str, ip: std::net::Ipv4Addr) -> bool {
+    let Some((net_str, prefix_str)) = pattern.split_once('/') else {
+        return false;
+    };
+    let (Ok(net_ip), Ok(prefix)) = (
+        net_str.trim().parse::<std::net::Ipv4Addr>(),
+        prefix_str.trim().parse::<u32>(),
+    ) else {
+        return false;
+    };
+    if prefix > 32 {
+        return false;
+    }
+    let mask = if prefix == 0 {
+        0u32
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    (u32::from(ip) & mask) == (u32::from(net_ip) & mask)
+}
+
+fn host_matches_bypass_entry(raw_pattern: &str, host: &str) -> bool {
+    let mut pattern = raw_pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.starts_with('[')
+        && !pattern.contains('/')
+        && pattern.matches(':').count() == 1
+        && let Some((h, _port)) = pattern.split_once(':')
+    {
+        pattern = h;
+    }
+    let pattern = pattern.trim_matches(['[', ']']);
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>()
+        && ipv4_in_cidr(pattern, ip)
+    {
+        return true;
+    }
+    if mio_proxy::matches_bypass_host(pattern, host) {
+        return true;
+    }
+    if !pattern.starts_with('.') && !pattern.contains('*') && !pattern.contains('?') {
+        let dot_suffix = format!(".{}", pattern.to_ascii_lowercase());
+        return host.to_ascii_lowercase().ends_with(&dot_suffix);
+    }
+    false
+}
+
+pub(crate) fn is_loopback_or_no_proxy_with(url: &url::Url, no_proxy: Option<&str>) -> bool {
+    let Some(raw_host) = url.host_str() else {
+        return false;
+    };
+    let host = raw_host.trim().trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return true;
+    }
+    no_proxy.is_some_and(|list| {
+        list.split(',')
+            .any(|entry| host_matches_bypass_entry(entry, host))
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn parse_scutil_proxy_output(
+    output: &str,
+    is_https: bool,
+    host: &str,
+) -> Option<UpstreamRoute> {
+    let mut http_enabled = false;
+    let mut http_host = None::<String>;
+    let mut http_port = None::<u16>;
+    let mut https_enabled = false;
+    let mut https_host = None::<String>;
+    let mut https_port = None::<u16>;
+    let mut socks_enabled = false;
+    let mut socks_host = None::<String>;
+    let mut socks_port = None::<u16>;
+    let mut in_exceptions = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if in_exceptions {
+            if trimmed == "}" {
+                in_exceptions = false;
+                continue;
+            }
+            if let Some((_, val)) = trimmed.split_once(':')
+                && host_matches_bypass_entry(val.trim(), host)
+            {
+                return None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("ExceptionsList") && trimmed.contains('{') {
+            in_exceptions = true;
+            continue;
+        }
+        let Some((key, val)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim();
+        match key {
+            "HTTPEnable" => http_enabled = val == "1",
+            "HTTPProxy" => http_host = (!val.is_empty()).then(|| val.to_owned()),
+            "HTTPPort" => http_port = val.parse::<u16>().ok().filter(|p| *p > 0),
+            "HTTPSEnable" => https_enabled = val == "1",
+            "HTTPSProxy" => https_host = (!val.is_empty()).then(|| val.to_owned()),
+            "HTTPSPort" => https_port = val.parse::<u16>().ok().filter(|p| *p > 0),
+            "SOCKSEnable" => socks_enabled = val == "1",
+            "SOCKSProxy" => socks_host = (!val.is_empty()).then(|| val.to_owned()),
+            "SOCKSPort" => socks_port = val.parse::<u16>().ok().filter(|p| *p > 0),
+            _ => {}
+        }
+    }
+
+    if is_https
+        && https_enabled
+        && let (Some(h), Some(p)) = (https_host, https_port)
+    {
+        return Some(UpstreamRoute::Http(ProxyEndpoint {
+            host: h,
+            port: p,
+            credentials: None,
+        }));
+    }
+    if !is_https
+        && http_enabled
+        && let (Some(h), Some(p)) = (http_host, http_port)
+    {
+        return Some(UpstreamRoute::Http(ProxyEndpoint {
+            host: h,
+            port: p,
+            credentials: None,
+        }));
+    }
+    if socks_enabled
+        && let (Some(h), Some(p)) = (socks_host, socks_port)
+    {
+        return Some(UpstreamRoute::Socks5(ProxyEndpoint {
+            host: h,
+            port: p,
+            credentials: None,
+        }));
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_system_proxy(is_https: bool, host: &str) -> Option<UpstreamRoute> {
+    let output = std::process::Command::new("/usr/sbin/scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_scutil_proxy_output(&text, is_https, host)
+}
+
+fn env_proxy_var(keys: &[&str]) -> Option<UpstreamRoute> {
+    for key in keys {
+        if let Ok(raw) = std::env::var(key)
+            && let Some(route) = parse_proxy_url_to_route(&raw)
+        {
+            return Some(route);
+        }
+    }
+    None
+}
+
+fn resolve_update_route(target_url: &str, fallback: &UpstreamRoute) -> UpstreamRoute {
+    let Ok(parsed) = url::Url::parse(target_url) else {
+        return fallback.clone();
+    };
+    let no_proxy = std::env::var("NO_PROXY")
+        .ok()
+        .or_else(|| std::env::var("no_proxy").ok());
+    if is_loopback_or_no_proxy_with(&parsed, no_proxy.as_deref()) {
+        return UpstreamRoute::Direct;
+    }
+    let is_https = parsed.scheme().eq_ignore_ascii_case("https");
+    let keys: &[&str] = if is_https {
+        &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+    } else {
+        &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+    };
+    if let Some(route) = env_proxy_var(keys) {
+        return route;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(host) = parsed.host_str()
+        && let Some(route) = resolve_macos_system_proxy(is_https, host.trim_matches(['[', ']']))
+    {
+        return route;
+    }
+    fallback.clone()
+}
+
 async fn http_get_bytes(
     initial_url: &str,
     accept: &str,
     timeout: Duration,
     max_body_bytes: usize,
+    fallback_route: &UpstreamRoute,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let mut current_url = initial_url.to_owned();
@@ -297,6 +582,7 @@ async fn http_get_bytes(
                 value: host_hdr.into_bytes(),
             });
         }
+        let upstream_route = resolve_update_route(&current_url, fallback_route);
         let req = HttpRequest {
             method: "GET".into(),
             url: current_url.clone(),
@@ -306,6 +592,7 @@ async fn http_get_bytes(
             trailers: Vec::new(),
         };
         let cfg = SendConfig {
+            upstream_route,
             timeout,
             max_body_bytes,
             use_connection_pool: false,
@@ -398,6 +685,16 @@ pub async fn check_for_updates(
     current_version: &str,
     cancel: &CancellationToken,
 ) -> UpdateStatus {
+    check_for_updates_with_route(api_url, current_version, UpstreamRoute::Direct, cancel).await
+}
+
+/// Queries the GitHub Releases API using explicit `fallback_route` when env/system proxies are absent.
+pub async fn check_for_updates_with_route(
+    api_url: &str,
+    current_version: &str,
+    fallback_route: UpstreamRoute,
+    cancel: &CancellationToken,
+) -> UpdateStatus {
     let suffixes = current_platform_asset_suffixes();
     if suffixes.is_empty() {
         return UpdateStatus::Error(format!(
@@ -411,6 +708,7 @@ pub async fn check_for_updates(
         "application/vnd.github+json",
         Duration::from_secs(20),
         API_MAX_BYTES,
+        &fallback_route,
         cancel,
     )
     .await
@@ -429,6 +727,7 @@ pub async fn check_for_updates(
             "text/plain, */*",
             Duration::from_secs(15),
             API_MAX_BYTES,
+            &fallback_route,
             cancel,
         )
         .await
@@ -445,6 +744,15 @@ pub async fn verify_archive_checksum(
     archive_bytes: &[u8],
     cancel: &CancellationToken,
 ) -> Result<String> {
+    verify_archive_checksum_with_route(info, archive_bytes, &UpstreamRoute::Direct, cancel).await
+}
+
+async fn verify_archive_checksum_with_route(
+    info: &UpdateInfo,
+    archive_bytes: &[u8],
+    fallback_route: &UpstreamRoute,
+    cancel: &CancellationToken,
+) -> Result<String> {
     let expected = if let Some(expected) = info.asset_sha256.clone() {
         expected
     } else if let Some(sums_url) = &info.checksums_url {
@@ -453,6 +761,7 @@ pub async fn verify_archive_checksum(
             "text/plain, */*",
             Duration::from_secs(20),
             API_MAX_BYTES,
+            fallback_route,
             cancel,
         )
         .await
@@ -475,6 +784,19 @@ pub async fn verify_archive_checksum(
 /// Downloads, verifies SHA-256, extracts, swaps, and schedules relaunch.
 pub async fn download_and_install_update<F>(
     info: &UpdateInfo,
+    on_status: F,
+    cancel: &CancellationToken,
+) -> UpdateStatus
+where
+    F: FnMut(UpdateStatus) + Send,
+{
+    download_and_install_update_with_route(info, UpstreamRoute::Direct, on_status, cancel).await
+}
+
+/// Downloads, verifies SHA-256, extracts, swaps, and schedules relaunch using `fallback_route`.
+pub async fn download_and_install_update_with_route<F>(
+    info: &UpdateInfo,
+    fallback_route: UpstreamRoute,
     mut on_status: F,
     cancel: &CancellationToken,
 ) -> UpdateStatus
@@ -493,6 +815,7 @@ where
         "application/octet-stream, */*",
         Duration::from_secs(300),
         ASSET_MAX_BYTES,
+        &fallback_route,
         cancel,
     )
     .await
@@ -510,7 +833,8 @@ where
         version: version.clone(),
     });
 
-    if let Err(err) = verify_archive_checksum(info, &bytes, cancel).await {
+    if let Err(err) = verify_archive_checksum_with_route(info, &bytes, &fallback_route, cancel).await
+    {
         return UpdateStatus::Error(err.to_string());
     }
 
@@ -896,6 +1220,7 @@ mod tests {
             "*/*",
             Duration::from_secs(10),
             ASSET_MAX_BYTES,
+            &UpstreamRoute::Direct,
             &cancel,
         )
         .await
@@ -911,6 +1236,7 @@ mod tests {
             "*/*",
             Duration::from_secs(10),
             ASSET_MAX_BYTES,
+            &UpstreamRoute::Direct,
             &cancel,
         )
         .await
@@ -921,5 +1247,114 @@ mod tests {
         assert!(err.to_string().contains("SHA-256 校验失败"));
 
         server.abort();
+    }
+
+    #[test]
+    fn proxy_url_and_scutil_parsing_and_loopback_bypass_work() {
+        assert!(matches!(
+            parse_proxy_url_to_route("http://127.0.0.1:7897").unwrap(),
+            UpstreamRoute::Http(ep) if ep.host == "127.0.0.1" && ep.port == 7897 && ep.credentials.is_none()
+        ));
+        assert!(matches!(
+            parse_proxy_url_to_route("socks5h://user%40a:p%3Ass@10.0.0.2:1081").unwrap(),
+            UpstreamRoute::Socks5(ep)
+                if ep.host == "10.0.0.2"
+                    && ep.port == 1081
+                    && ep.credentials.as_ref().is_some_and(|c| c.username == "user@a" && c.password == "p:ss")
+        ));
+        assert!(parse_proxy_url_to_route("").is_none());
+
+        let local = url::Url::parse("http://127.0.0.1:18080/latest").unwrap();
+        assert!(is_loopback_or_no_proxy_with(&local, None));
+
+        let github = url::Url::parse("https://api.github.com/repos/ltlly/MIO/releases/latest").unwrap();
+        assert!(!is_loopback_or_no_proxy_with(&github, Some("localhost,10.0.0.0/8,.internal")));
+        assert!(is_loopback_or_no_proxy_with(&github, Some("github.com")));
+        let lan = url::Url::parse("http://192.168.12.34:8080/pkg.zip").unwrap();
+        assert!(is_loopback_or_no_proxy_with(&lan, Some("192.168.0.0/16")));
+
+        let sample_scutil = "\
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254/16
+  }
+  HTTPEnable : 1
+  HTTPPort : 7897
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7898
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 0
+}
+";
+        assert!(matches!(
+            parse_scutil_proxy_output(sample_scutil, true, "api.github.com").unwrap(),
+            UpstreamRoute::Http(ep) if ep.host == "127.0.0.1" && ep.port == 7898
+        ));
+        assert!(matches!(
+            parse_scutil_proxy_output(sample_scutil, false, "api.github.com").unwrap(),
+            UpstreamRoute::Http(ep) if ep.host == "127.0.0.1" && ep.port == 7897
+        ));
+        assert!(parse_scutil_proxy_output(sample_scutil, true, "printer.local").is_none());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn live_release_check_and_download_verify() {
+        let current = std::env::var("MIO_LIVE_UPDATE_CURRENT_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "0.2.0".to_owned());
+        let cancel = CancellationToken::new();
+        let status = check_for_updates(&resolved_api_url(), &current, &cancel).await;
+        let UpdateStatus::Available(info) = status else {
+            panic!("expected live update Available over {current}, got {status:?}");
+        };
+        let bytes = http_get_bytes(
+            &info.asset_url,
+            "application/octet-stream, */*",
+            Duration::from_secs(120),
+            ASSET_MAX_BYTES,
+            &UpstreamRoute::Direct,
+            &cancel,
+        )
+        .await
+        .expect("downloading live release asset must succeed");
+        let actual_sha = verify_archive_checksum(&info, &bytes, &cancel)
+            .await
+            .expect("live release asset must match SHA256SUMS.txt");
+
+        #[cfg(target_os = "macos")]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let zip_path = tmp.path().join(&info.asset_name);
+            let out_dir = tmp.path().join("extracted");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(&zip_path, &bytes).unwrap();
+            let status = std::process::Command::new("/usr/bin/ditto")
+                .args(["-x", "-k"])
+                .arg(&zip_path)
+                .arg(&out_dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ditto extraction must succeed");
+            let app = find_named_entry_recursive(&out_dir, "MIO.app", true)
+                .expect("extracted archive must contain MIO.app");
+            assert!(app.join("Contents/MacOS/mio").is_file());
+            let cs = std::process::Command::new("/usr/bin/codesign")
+                .args(["--verify", "--strict"])
+                .arg(&app)
+                .status()
+                .unwrap();
+            assert!(cs.success(), "downloaded MIO.app must pass codesign --verify --strict");
+        }
+
+        println!(
+            "LIVE_UPDATE_OK current={current} latest={} asset={} size={} sha256={actual_sha}",
+            info.latest_version,
+            info.asset_name,
+            bytes.len()
+        );
     }
 }

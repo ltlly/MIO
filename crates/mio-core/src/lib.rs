@@ -39,6 +39,7 @@ pub use http::{
 };
 pub use mio_plugin_api::*;
 pub use organiser::{next_organiser_number, validate_organiser_items};
+pub use plugins::default_plugins_dir;
 pub use preferences::{
     FinishedAttackClose, MAX_RECENT_PROJECTS, RecentProject, RunningAttackClose,
     StartupDefaultConfig, StartupPreferences, UserDisplaySettings, UserMessageEditorSettings,

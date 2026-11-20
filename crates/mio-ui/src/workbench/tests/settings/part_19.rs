@@ -173,6 +173,199 @@ fn repeater_sse_streaming_progress_and_cancel_preserves_partial_response(cx: &mu
 }
 
 #[gpui_kit::test]
+fn repeater_compressed_and_utf8_boundary_progress_do_not_lock_response_in_hex(
+    cx: &mut TestAppContext,
+) {
+    let initial = tab("Compressed & Split UTF-8 Progress");
+    let tab_id = initial.id;
+    let mut fixture = fixture(cx, vec![initial], 64);
+    drain(&mut fixture.commands);
+    activate_empty_repeater(&mut fixture, cx);
+
+    // 1. Compressed partial SendProgress must not force Pretty response into Hex.
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("repeater-send", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let (run1, rev1) = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|cmd| match cmd {
+            Command::Send {
+                tab_id: t,
+                run_id,
+                draft,
+                ..
+            } if t == tab_id => Some((run_id, draft.revision)),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .events
+        .try_send(Event::SendStarted {
+            project: fixture.project,
+            tab_id,
+            run_id: run1,
+            draft_revision: rev1,
+        })
+        .unwrap();
+    fixture
+        .events
+        .try_send(Event::SendProgress {
+            project: fixture.project,
+            tab_id,
+            run_id: run1,
+            draft_revision: rev1,
+            response: Box::new(HttpResponse {
+                version: HttpVersion::Http11,
+                status: 200,
+                reason_phrase: Some(b"OK".to_vec()),
+                headers: vec![
+                    mio_core::Header {
+                        name: "Content-Type".into(),
+                        value: b"application/json;charset=UTF-8".to_vec(),
+                    },
+                    mio_core::Header {
+                        name: "Content-Encoding".into(),
+                        value: b"gzip".to_vec(),
+                    },
+                ],
+                body: vec![0x1f, 0x8b, 0x08, 0x00, 0xff],
+                trailers: Vec::new(),
+            }),
+            elapsed_ms: 15,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
+        assert_eq!(resp_ed.view, MessageView::Raw);
+        assert!(!resp_ed.auto_hex_fallback);
+    });
+
+    let unpacked_json = HttpResponse {
+        version: HttpVersion::Http11,
+        status: 200,
+        reason_phrase: Some(b"OK".to_vec()),
+        headers: vec![mio_core::Header {
+            name: "Content-Type".into(),
+            value: b"application/json;charset=UTF-8".to_vec(),
+        }],
+        body: br#"{"ok":true,"count":2}"#.to_vec(),
+        trailers: Vec::new(),
+    };
+    let mut rec1 = record("https://api.example.test/v1/items", "");
+    rec1.summary.id = run1;
+    rec1.summary.source = TrafficSource::Repeater;
+    rec1.summary.status = Some(200);
+    rec1.summary.state = FlowState::Complete;
+    rec1.summary.response_bytes = unpacked_json.body.len() as u64;
+    rec1.response = Some(unpacked_json.clone());
+    fixture
+        .events
+        .try_send(Event::SendFinished {
+            project: fixture.project,
+            tab_id,
+            draft_revision: rev1,
+            record: Box::new(rec1),
+            persisted: true,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
+        assert_eq!(resp_ed.view, MessageView::Raw);
+        assert!(resp_ed.pretty_active);
+        assert!(resp_ed.raw.read(cx).value().contains("\"ok\": true"));
+    });
+    for cmd in drain(&mut fixture.commands) {
+        if let Command::SaveWorkspace { workspace, .. } = cmd {
+            fixture
+                .events
+                .try_send(Event::WorkspaceChanged {
+                    project: fixture.project,
+                    workspace,
+                })
+                .unwrap();
+        }
+    }
+    cx.run_until_parked();
+    drain(&mut fixture.commands);
+
+    // 2. Uncompressed chunk split mid-UTF-8 flips to auto Hex temporarily, then recovers Pretty/Raw on SendFinished.
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("repeater-send", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let (run2, rev2) = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|cmd| match cmd {
+            Command::Send {
+                tab_id: t,
+                run_id,
+                draft,
+                ..
+            } if t == tab_id => Some((run_id, draft.revision)),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .events
+        .try_send(Event::SendProgress {
+            project: fixture.project,
+            tab_id,
+            run_id: run2,
+            draft_revision: rev2,
+            response: Box::new(HttpResponse {
+                version: HttpVersion::Http11,
+                status: 200,
+                reason_phrase: Some(b"OK".to_vec()),
+                headers: vec![mio_core::Header {
+                    name: "Content-Type".into(),
+                    value: b"application/json;charset=UTF-8".to_vec(),
+                }],
+                body: b"{\"msg\":\"\xe4\xb8".to_vec(),
+                trailers: Vec::new(),
+            }),
+            elapsed_ms: 20,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
+        assert_eq!(resp_ed.view, MessageView::Hex);
+        assert!(resp_ed.auto_hex_fallback);
+    });
+
+    let mut rec2 = record("https://api.example.test/v1/items", "");
+    rec2.summary.id = run2;
+    rec2.summary.source = TrafficSource::Repeater;
+    rec2.summary.status = Some(200);
+    rec2.summary.state = FlowState::Complete;
+    rec2.summary.response_bytes = unpacked_json.body.len() as u64;
+    rec2.response = Some(unpacked_json);
+    fixture
+        .events
+        .try_send(Event::SendFinished {
+            project: fixture.project,
+            tab_id,
+            draft_revision: rev2,
+            record: Box::new(rec2),
+            persisted: true,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
+        assert_eq!(resp_ed.view, MessageView::Raw);
+        assert!(!resp_ed.auto_hex_fallback);
+        assert!(resp_ed.pretty_active);
+    });
+}
+
+#[gpui_kit::test]
 fn proxy_interception_ip_mime_page_title_and_was_annotated_save_with_ack(cx: &mut TestAppContext) {
     use mio_core::ProxyInterceptRelation::{DoesNotMatch, Matches, WasAnnotated};
     use mio_core::ProxyInterceptType::{IpAddress, MimeType, PageTitle, Request};

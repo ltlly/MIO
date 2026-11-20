@@ -848,3 +848,99 @@ fn syntax_highlighter_large_256kib_http_json_under_latency_budget() {
     let np_runs = np_hl.styles_for_mode(&(0..np_doc.len()), false);
     assert_valid_non_overlapping_runs(&np_doc, 0..np_doc.len(), &np_runs);
 }
+
+#[test]
+fn streaming_json_highlighter_highlights_truncated_and_oversized_pretty_json() {
+    let truncated_http = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json;charset=UTF-8\r\n\r\n",
+        "{\n  \"api\": \"demo.endpoint\",\n  \"items\": [\n    {\n      \"id\": 42,\n      \"ok\": true,\n      \"tail\": \"unterminated"
+    );
+    let mut trunc_hl = HttpSyntaxHighlighter::default();
+    trunc_hl.parse_str(truncated_http);
+    let trunc_tokens = tokenize_http(truncated_http);
+    assert!(trunc_tokens.iter().any(|(r, k)| *k == TokenKind::JsonKey && &truncated_http[r.clone()] == "\"api\""));
+    assert!(trunc_tokens.iter().any(|(r, k)| *k == TokenKind::JsonString && &truncated_http[r.clone()] == "\"demo.endpoint\""));
+    assert!(trunc_tokens.iter().any(|(r, k)| *k == TokenKind::JsonNumber && &truncated_http[r.clone()] == "42"));
+    assert!(trunc_tokens.iter().any(|(r, k)| *k == TokenKind::JsonKeyword && &truncated_http[r.clone()] == "true"));
+    let trunc_runs = trunc_hl.styles_for_mode(&(0..truncated_http.len()), false);
+    assert_valid_non_overlapping_runs(truncated_http, 0..truncated_http.len(), &trunc_runs);
+
+    let mut oversized = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json;charset=UTF-8\r\n\r\n{\n  \"items\": [\n",
+    );
+    while oversized.len() < MAX_HIGHLIGHT_BYTES + 4096 {
+        oversized.push_str("    {\"id\": 123, \"name\": \"entry\", \"active\": false},\n");
+    }
+    oversized.push_str("    {\"id\": 999, \"name\": \"last\"}\n  ]\n}");
+    assert!(oversized.len() > MAX_HIGHLIGHT_BYTES);
+    let mut big_hl = HttpSyntaxHighlighter::default();
+    big_hl.parse_str(&oversized);
+    let body_start = oversized.find("\r\n\r\n").unwrap() + 4;
+    let body_runs = big_hl.styles_for_mode(&(body_start..body_start + 512), false);
+    assert!(
+        body_runs.iter().any(|(_, s)| s.color == TokenKind::JsonKey.style(false).color),
+        "oversized pretty JSON exceeding MAX_HIGHLIGHT_BYTES must still highlight JSON keys within capped prefix"
+    );
+    assert!(
+        body_runs.iter().any(|(_, s)| s.color == TokenKind::JsonNumber.style(false).color),
+        "oversized pretty JSON exceeding MAX_HIGHLIGHT_BYTES must still highlight JSON numbers within capped prefix"
+    );
+    assert_valid_non_overlapping_runs(&oversized, 0..MAX_HIGHLIGHT_BYTES.min(oversized.len()), &big_hl.styles_for_mode(&(0..MAX_HIGHLIGHT_BYTES), false));
+}
+
+#[gpui_kit::test]
+fn hex_grid_fills_pane_and_renders_multiple_rows_and_ascii_columns(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::theme::init(cx);
+    });
+    let mut payload = b"HTTP/1.1 200 OK\r\nDate: Fri, 20 Nov 2026 00:00:00 GMT\r\n\r\n".to_vec();
+    payload.resize(169_509, b'A');
+    let (window, probe) = cx.update(|cx| {
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(620.), px(500.)),
+                })),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                cx.new(|cx| {
+                    let mut editor = MessageEditor::new(window, cx);
+                    editor.load(&payload, window, cx);
+                    editor.switch(MessageView::Hex, window, cx).unwrap();
+                    LayoutProbe(editor)
+                })
+            },
+        )
+        .unwrap()
+    });
+    cx.run_until_parked();
+    let hex_id = cx.read(|cx| probe.read(cx).0.hex.entity_id());
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let pane_bounds = window.find("editor-pane").bounds();
+        let grid_bounds = window.find(("hex-grid-view", hex_id)).bounds();
+        assert!(
+            grid_bounds.size.height > px(400.),
+            "HexGridView must fill the editor pane instead of collapsing: pane={pane_bounds:?}, grid={grid_bounds:?}"
+        );
+        for row_ix in 0..=10usize {
+            assert!(
+                window.find(("hex-grid-row", row_ix)).visible(),
+                "expected hex grid row {row_ix} to be laid out visibly"
+            );
+        }
+        assert!(window.find(("hex-row-offset", 0usize)).visible());
+        assert!(window.find(("hex-byte-cell", 0usize)).visible());
+        assert!(window.find(("hex-ascii-cell", 0usize)).visible());
+        let last_ascii = window.find(("hex-ascii-cell", 15usize)).bounds();
+        assert!(
+            last_ascii.right() <= pane_bounds.right(),
+            "ASCII (0..F) column must fit inside the pane: last_ascii={last_ascii:?}, pane={pane_bounds:?}"
+        );
+    })
+    .unwrap();
+}

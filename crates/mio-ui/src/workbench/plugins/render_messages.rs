@@ -45,12 +45,25 @@ impl Workbench {
                         })),
                 );
             }
+            let suite_source = self
+                .extensions
+                .instances
+                .iter()
+                .find(|cand| {
+                    cand.live
+                        && cand.info.tab_id.is_none()
+                        && cand.context_owner.is_none()
+                        && cand.info.manifest.id == instance.info.manifest.id
+                })
+                .map(|cand| cand.info.identity.instance_id);
             sources = sources.child(div().flex_1()).child(
                 button("plugin-rebind", "加载当前草稿")
                     .tooltip("将当前 Repeater 请求草稿同步载入到此插件编辑器")
-                    .disabled(self.plugin_waiting(tab_id))
+                    .disabled(self.plugin_waiting(tab_id) || suite_source.is_none())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.create_plugin_editor(id, Some(id), window, cx)
+                        if let Some(source_id) = suite_source {
+                            this.create_plugin_editor(source_id, Some(id), window, cx);
+                        }
                     })),
             );
             div()
@@ -119,6 +132,7 @@ impl Workbench {
                         cx.notify();
                     })),
             );
+        let mut live_child_plugins = HashSet::new();
         for instance in self
             .extensions
             .instances
@@ -126,6 +140,7 @@ impl Workbench {
             .filter(|instance| instance.info.tab_id == Some(tab_id) && instance.live)
         {
             has_plugin_tabs = true;
+            live_child_plugins.insert(instance.info.manifest.id.as_str());
             let id = instance.info.identity.instance_id;
             let title = instance.panel.read(cx).title().to_owned();
             tabs = tabs.child(
@@ -143,10 +158,27 @@ impl Workbench {
                 })),
             );
         }
+        let creating_sources: HashSet<Uuid> = self
+            .extensions
+            .operations
+            .values()
+            .filter_map(|op| match op {
+                Operation::Create(p) if p.tab_id == tab_id && p.replace.is_none() => Some(p.source),
+                _ => None,
+            })
+            .chain(
+                self.extensions
+                    .create_after_save
+                    .iter()
+                    .filter(|p| p.tab_id == tab_id && p.replace.is_none())
+                    .map(|p| p.source),
+            )
+            .collect();
         for instance in self.extensions.instances.iter().filter(|instance| {
             instance.live
                 && instance.info.tab_id.is_none()
                 && instance.context_owner.is_none()
+                && !live_child_plugins.contains(instance.info.manifest.id.as_str())
                 && instance.info.grants.contains(&Permission::TrafficRead)
                 && instance
                     .info
@@ -157,12 +189,20 @@ impl Workbench {
         }) {
             has_plugin_tabs = true;
             let id = instance.info.identity.instance_id;
+            let suite_title = instance.panel.read(cx).title().trim().to_owned();
+            let add_label = if suite_title.is_empty() {
+                instance.info.manifest.id.clone()
+            } else {
+                suite_title
+            };
+            let creating = creating_sources.contains(&id);
             tabs = tabs.child(
                 button(
                     SharedString::from(format!("plugin-add-editor-{id}")),
-                    format!("＋{}", instance.info.manifest.id),
+                    add_label,
                 )
-                .tooltip("为此标签新建该插件的请求消息编辑器实例")
+                .tooltip("为此标签打开该插件的请求消息编辑器视图")
+                .disabled(creating)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.create_plugin_editor(id, None, window, cx)
                 })),
@@ -220,6 +260,9 @@ impl Workbench {
                         cx.notify();
                     })),
             );
+        let active_plugin_id = active_instance
+            .and_then(|id| self.extensions.instance(id))
+            .map(|inst| inst.info.manifest.id.clone());
         if let Some(instance) = active_instance.and_then(|id| self.extensions.instance(id)) {
             let id = instance.info.identity.instance_id;
             let title = instance.panel.read(cx).title().to_owned();
@@ -235,6 +278,9 @@ impl Workbench {
             tabs = tabs.child("正在打开插件视图…");
         }
         for (source_id, plugin_id) in available {
+            if active_plugin_id.as_deref() == Some(plugin_id.as_str()) {
+                continue;
+            }
             let read_only = !writable_sources.contains(&source_id);
             tabs = tabs.child(
                 button(
@@ -326,6 +372,9 @@ impl Workbench {
                     cx.notify();
                 })),
             );
+        let active_plugin_id = active_instance
+            .and_then(|id| self.extensions.instance(id))
+            .map(|inst| inst.info.manifest.id.clone());
         if let Some(instance) = active_instance.and_then(|id| self.extensions.instance(id)) {
             let id = instance.info.identity.instance_id;
             let title = instance.panel.read(cx).title().to_owned();
@@ -358,6 +407,9 @@ impl Workbench {
             _ => false,
         };
         for (source_id, plugin_id) in available {
+            if active_plugin_id.as_deref() == Some(plugin_id.as_str()) {
+                continue;
+            }
             tabs = tabs.child(
                 button(
                     SharedString::from(format!("{owner}-plugin-add-editor-{source_id}")),

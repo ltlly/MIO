@@ -65,7 +65,12 @@ impl State {
                 .await;
             return Ok(());
         }
-        if self.extensions_disabled && !matches!(action, PluginAction::Disable { .. }) {
+        if self.extensions_disabled
+            && !matches!(
+                action,
+                PluginAction::Disable { .. } | PluginAction::Uninstall { .. }
+            )
+        {
             anyhow::bail!("当前项目已禁用扩展（Disable extensions）；插件未检查、加载或执行");
         }
         ensure!(
@@ -107,15 +112,33 @@ impl State {
                     .context("插件检查结果已失效")?
                     .clone();
                 let trust = NativeTrust::confirmed(&package, grants.iter().copied())?;
-                if let Some(id) = replace_instance {
+                let effective_replace = if let Some(id) = replace_instance {
                     let old = self.plugin_instance(id)?;
                     ensure!(
                         old.info.tab_id.is_none() && old.info.manifest.id == package.manifest.id,
                         "重载目标不是同一 Suite 插件"
                     );
                     self.plugin_idle(id)?;
-                }
-                self.plugin_capacity_for(replace_instance.is_some())?;
+                    Some(id)
+                } else if self.plugins.registry.is_persistent() {
+                    let existing_id = self
+                        .plugins
+                        .instances
+                        .iter()
+                        .find(|(id, inst)| {
+                            inst.info.tab_id.is_none()
+                                && !self.plugins.context_viewers.contains_key(id)
+                                && inst.info.manifest.id == package.manifest.id
+                        })
+                        .map(|(id, _)| *id);
+                    if let Some(id) = existing_id {
+                        self.plugin_idle(id)?;
+                    }
+                    existing_id
+                } else {
+                    None
+                };
+                self.plugin_capacity_for(effective_replace.is_some())?;
                 self.plugins.inspections.remove(&inspection_id);
                 self.start_plugin(
                     operation_id,
@@ -123,7 +146,7 @@ impl State {
                     trust,
                     grants,
                     LaunchTarget::Suite {
-                        replace: replace_instance,
+                        replace: effective_replace,
                         reloaded: false,
                     },
                     cancel,
@@ -170,8 +193,17 @@ impl State {
                 );
             }
             PluginAction::Disable { instance_id } => {
-                let identity = self.plugin_instance(instance_id)?.info.identity;
+                let inst = self.plugin_instance(instance_id)?;
+                let identity = inst.info.identity;
+                let suite_manifest_id = (inst.info.tab_id.is_none()
+                    && !self.plugins.context_viewers.contains_key(&instance_id))
+                .then(|| inst.info.manifest.id.clone());
                 let retired = self.take_plugin_family(instance_id, "插件已禁用");
+                if let Some(plugin_id) = suite_manifest_id
+                    && let Err(err) = self.plugins.registry.set_enabled(&plugin_id, false)
+                {
+                    self.error("plugin_registry", err).await;
+                }
                 self.plugin_job_start(
                     operation_id,
                     Some(instance_id),
@@ -269,6 +301,7 @@ impl State {
                     if pos != target {
                         self.plugins.order.swap(pos, target);
                         self.sync_proxy_plugin_hooks();
+                        self.sync_registry_order();
                     }
                 }
                 let order = self.plugins.order.clone();
@@ -409,12 +442,26 @@ impl State {
                 instance_id,
                 enabled,
             } => {
+                let is_suite = self
+                    .plugins
+                    .instances
+                    .get(&instance_id)
+                    .is_some_and(|inst| {
+                        inst.info.tab_id.is_none()
+                            && !self.plugins.context_viewers.contains_key(&instance_id)
+                    });
                 let inst = self
                     .plugins
                     .instances
                     .get_mut(&instance_id)
                     .context("插件实例不存在")?;
                 inst.auto_reload = enabled;
+                if is_suite {
+                    let plugin_id = inst.info.manifest.id.clone();
+                    if let Err(err) = self.plugins.registry.set_auto_reload(&plugin_id, enabled) {
+                        self.error("plugin_registry", err).await;
+                    }
+                }
                 self.plugin_result(
                     project,
                     operation_id,
@@ -424,6 +471,79 @@ impl State {
                     }),
                 )
                 .await;
+            }
+            PluginAction::EnableInstalled { plugin_id } => {
+                ensure!(
+                    !self.quiesced && !self.plugins.stopping,
+                    "项目正在关闭；扩展未启用"
+                );
+                let already_live = self.plugins.instances.iter().any(|(id, inst)| {
+                    inst.info.tab_id.is_none()
+                        && !self.plugins.context_viewers.contains_key(id)
+                        && inst.info.manifest.id == plugin_id
+                });
+                ensure!(!already_live, "此扩展已在运行中");
+                let entry = self
+                    .plugins
+                    .registry
+                    .get(&plugin_id)?
+                    .context("持久化扩展记录不存在")?;
+                let stored_dir = self.plugins.registry.package_path(&entry)?;
+                self.plugin_capacity()?;
+                self.start_installed_plugin(operation_id, entry, stored_dir, false, cancel);
+            }
+            PluginAction::Uninstall {
+                plugin_id,
+                instance_id,
+            } => {
+                ensure!(!plugin_id.trim().is_empty(), "插件 ID 不能为空");
+                self.plugins.registry.remove(&plugin_id)?;
+                let target_id = instance_id
+                    .filter(|id| {
+                        self.plugins.instances.get(id).is_some_and(|inst| {
+                            inst.info.tab_id.is_none()
+                                && !self.plugins.context_viewers.contains_key(id)
+                                && inst.info.manifest.id == plugin_id
+                        })
+                    })
+                    .or_else(|| {
+                        self.plugins
+                            .instances
+                            .iter()
+                            .find(|(id, inst)| {
+                                inst.info.tab_id.is_none()
+                                    && !self.plugins.context_viewers.contains_key(id)
+                                    && inst.info.manifest.id == plugin_id
+                            })
+                            .map(|(id, _)| *id)
+                    });
+                if let Some(id) = target_id {
+                    let identity = self.plugin_instance(id)?.info.identity;
+                    let retired = self.take_plugin_family(id, "插件已卸载");
+                    self.plugin_job_start(
+                        operation_id,
+                        Some(id),
+                        cancel,
+                        true,
+                        retire_with_uninstall(
+                            retired,
+                            None,
+                            Some(identity),
+                            Some(plugin_id),
+                            "插件已卸载".into(),
+                        ),
+                    );
+                } else {
+                    self.plugin_result(
+                        project,
+                        operation_id,
+                        Ok(PluginOutcome::Uninstalled {
+                            plugin_id,
+                            identity: None,
+                        }),
+                    )
+                    .await;
+                }
             }
             PluginAction::Cancel { .. }
             | PluginAction::ApplyWorkspace { .. }

@@ -2,9 +2,17 @@ use super::*;
 
 impl PluginState {
     pub(crate) fn with_preferences(prefs: PluginPreferencesStore) -> Self {
+        Self::with_stores(prefs, PluginRegistryStore::new(None))
+    }
+
+    pub(crate) fn with_stores(
+        prefs: PluginPreferencesStore,
+        registry: PluginRegistryStore,
+    ) -> Self {
         let (passive_tx, passive_rx) = mpsc::channel(64);
         Self {
             prefs,
+            registry,
             passive_tx,
             passive_rx,
             last_auto_reload_check: None,
@@ -158,6 +166,7 @@ impl State {
                 cleanup_failed: false,
                 background_passive: false,
                 replaces_existing: false,
+                autoload_plugin_id: None,
                 binding: None,
             },
         );

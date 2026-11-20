@@ -420,6 +420,7 @@ pub(crate) struct MessageEditor {
     pub auto_scroll_to_match: bool,
     pub search_error: Rc<RefCell<Option<String>>>,
     pub view: MessageView,
+    pub(crate) auto_hex_fallback: bool,
     selection_seq: Rc<Cell<u64>>,
     view_cell: Rc<Cell<MessageView>>,
     pretty_cell: Rc<Cell<bool>>,

@@ -58,7 +58,7 @@ const GUTTER_DECORATION_GAP: Pixels = px(4.);
 /// Height of the pill an empty gutter decoration paints on a line boundary.
 const GUTTER_BOUNDARY_MARK_HEIGHT: Pixels = px(8.);
 const MIN_OVERVIEW_RULER_MARK_HEIGHT: Pixels = px(6.);
-const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
+const MAX_HIGHLIGHT_LINE_LENGTH: usize = 256 * 1024;
 const MIN_LINE_NUMBER_DIGITS: usize = 3;
 const MAX_LINE_NUMBER_DIGITS: usize = 7;
 const MAX_DISPLAYED_LINE_NUMBER: usize = 9_999_999;

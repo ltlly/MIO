@@ -181,3 +181,160 @@ br#"{"id":"lab.fifo","version":"1","api_version":1,"engine":"native","entry":"wo
         assert!(checked.unwrap().unwrap_err().contains("普通文件"));
     }
 }
+
+fn test_sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn build_test_tar_gz(entries: &[(&str, u8, u32, &[u8])]) -> Vec<u8> {
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+
+    let mut tar = Vec::new();
+    for (name, typeflag, mode, data) in entries {
+        let mut header = [0u8; 512];
+        let name_bytes = name.as_bytes();
+        header[..name_bytes.len()].copy_from_slice(name_bytes);
+        let write_oct = |dst: &mut [u8], val: u64, width: usize| {
+            let s = format!("{val:0width$o}", width = width);
+            dst[..width].copy_from_slice(s.as_bytes());
+        };
+        write_oct(&mut header[100..108], u64::from(*mode), 7);
+        write_oct(&mut header[108..116], 0, 7);
+        write_oct(&mut header[116..124], 0, 7);
+        write_oct(&mut header[124..136], data.len() as u64, 11);
+        write_oct(&mut header[136..148], 0, 11);
+        header[148..156].fill(b' ');
+        header[156] = *typeflag;
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let chk: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let chk_s = format!("{chk:06o}\0 ");
+        header[148..156].copy_from_slice(chk_s.as_bytes());
+        tar.extend_from_slice(&header);
+        tar.extend_from_slice(data);
+        let rem = data.len() % 512;
+        if rem != 0 {
+            tar.resize(tar.len() + (512 - rem), 0);
+        }
+    }
+    tar.resize(tar.len() + 1024, 0);
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar).unwrap();
+    gz.finish().unwrap()
+}
+
+#[test]
+fn single_file_tar_gz_and_mio_plugin_inspect_verify_and_cleanup() {
+    let manifest_bytes = br#"{"id":"lab.archive","version":"0.2.0","api_version":1,"engine":"native","entry":"bin/worker","permissions":["traffic.read"],"contributions":["suite_panel"]}"#;
+    let entry_bytes = [0xcf, 0xfa, 0xed, 0xfe, 0x01, 0x02];
+    let sha_json = serde_json::json!({
+        "id": "lab.archive",
+        "version": "0.2.0",
+        "engine": "native",
+        "entry": "bin/worker",
+        "manifest_sha256": test_sha256_hex(manifest_bytes),
+        "entry_sha256": test_sha256_hex(&entry_bytes),
+        "entry_bytes": entry_bytes.len(),
+    })
+    .to_string();
+    let archive_bytes = build_test_tar_gz(&[
+        ("manifest.json", b'0', 0o644, manifest_bytes),
+        ("bin/worker", b'0', 0o755, &entry_bytes),
+        ("sha256-manifest.json", b'0', 0o644, sha_json.as_bytes()),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    for ext in ["tar.gz", "tgz", "mio-plugin"] {
+        let archive_path = tmp.path().join(format!("plugin.{ext}"));
+        fs::write(&archive_path, &archive_bytes).unwrap();
+        let pkg = VerifiedPackage::read(&archive_path).unwrap();
+        assert_eq!(pkg.manifest.id, "lab.archive");
+        assert_eq!(pkg.directory, archive_path.canonicalize().unwrap());
+        assert_ne!(pkg.work_dir(), pkg.directory.as_path());
+        assert!(pkg.executable.starts_with(pkg.work_dir()));
+        assert!(pkg.executable.is_file());
+        pkg.unchanged().unwrap();
+        assert!(pkg.poll_source_fingerprint().is_some());
+
+        let unpacked_dir = pkg.work_dir().to_path_buf();
+        assert!(unpacked_dir.exists());
+
+        fs::write(&archive_path, b"mutated").unwrap();
+        let err = pkg.unchanged().unwrap_err().to_string();
+        assert!(err.contains("归档"), "unexpected error: {err}");
+
+        drop(pkg);
+        assert!(
+            !unpacked_dir.exists(),
+            "temporary unpacked directory must be cleaned up when VerifiedPackage drops"
+        );
+    }
+}
+
+#[test]
+fn single_file_archive_rejects_tampered_sha256_traversal_symlinks_and_non_gzip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_bytes = br#"{"id":"lab.bad","version":"1","api_version":1,"engine":"native","entry":"worker","permissions":[],"contributions":["suite_panel"]}"#;
+    let entry_bytes = [0xcf, 0xfa, 0xed, 0xfe];
+
+    let bad_sha = serde_json::json!({
+        "id": "lab.bad",
+        "version": "1",
+        "engine": "native",
+        "entry": "worker",
+        "manifest_sha256": test_sha256_hex(manifest_bytes),
+        "entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "entry_bytes": entry_bytes.len(),
+    })
+    .to_string();
+    let bad_sha_path = tmp.path().join("bad-sha.tar.gz");
+    fs::write(
+        &bad_sha_path,
+        build_test_tar_gz(&[
+            ("manifest.json", b'0', 0o644, manifest_bytes),
+            ("worker", b'0', 0o755, &entry_bytes),
+            ("sha256-manifest.json", b'0', 0o644, bad_sha.as_bytes()),
+        ]),
+    )
+    .unwrap();
+    let err = VerifiedPackage::read(&bad_sha_path).unwrap_err().to_string();
+    assert!(err.contains("sha256-manifest.json"), "unexpected: {err}");
+
+    let trav_path = tmp.path().join("traversal.tar.gz");
+    fs::write(
+        &trav_path,
+        build_test_tar_gz(&[
+            ("../escape", b'0', 0o644, b"x"),
+            ("manifest.json", b'0', 0o644, manifest_bytes),
+            ("worker", b'0', 0o755, &entry_bytes),
+        ]),
+    )
+    .unwrap();
+    let err = VerifiedPackage::read(&trav_path).unwrap_err().to_string();
+    assert!(err.contains("穿越"), "unexpected: {err}");
+
+    let sym_path = tmp.path().join("symlink.tar.gz");
+    fs::write(
+        &sym_path,
+        build_test_tar_gz(&[
+            ("worker", b'2', 0o777, b""),
+            ("manifest.json", b'0', 0o644, manifest_bytes),
+        ]),
+    )
+    .unwrap();
+    let err = VerifiedPackage::read(&sym_path).unwrap_err().to_string();
+    assert!(err.contains("软链接"), "unexpected: {err}");
+
+    let non_gz_path = tmp.path().join("raw-bin.mio-plugin");
+    fs::write(&non_gz_path, b"MZ\x90\x00not-gzip").unwrap();
+    let err = VerifiedPackage::read(&non_gz_path).unwrap_err().to_string();
+    assert!(err.contains("gzip"), "unexpected: {err}");
+}

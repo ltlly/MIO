@@ -185,10 +185,13 @@ impl State {
                 tab_id: None,
             };
             let panel = worker.initial_panel.clone();
-            let manifest_modified = package.manifest_modified;
-            let manifest_size = package.manifest_bytes.len() as u64;
-            let entry_modified = package.modified;
-            let entry_size = package.executable_size;
+            let (manifest_modified, manifest_size, entry_modified, entry_size) =
+                package.poll_source_fingerprint().unwrap_or((
+                    package.manifest_modified,
+                    package.manifest_bytes.len() as u64,
+                    package.modified,
+                    package.executable_size,
+                ));
             Ok(Output::Started(Box::new(Candidate {
                 instance: Instance {
                     worker,
@@ -207,6 +210,9 @@ impl State {
                 },
                 replace: Some(instance_id),
                 reloaded: true,
+                autoload: false,
+                enable_installed: false,
+                persist_install: None,
                 open: None,
                 context_open: None,
                 response_open: None,

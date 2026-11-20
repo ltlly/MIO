@@ -360,3 +360,386 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
     assert!(state.plugins.instances.contains_key(&third_id));
     state.stop_plugins().await.unwrap();
 }
+
+fn build_wasm_tar_gz(id: &str, version: &str) -> Vec<u8> {
+    use std::io::Write;
+
+    use flate2::{Compression, write::GzEncoder};
+
+    let wasm = build_demo_wasm_module();
+    let manifest = serde_json::json!({
+        "id": id,
+        "version": version,
+        "api_version": 1,
+        "engine": "wasm",
+        "entry": "plugin.wasm",
+        "permissions": ["traffic.read"],
+        "contributions": ["suite_panel"],
+    })
+    .to_string();
+    let mut tar = Vec::new();
+    for (name, mode, data) in [
+        ("manifest.json", 0o644u32, manifest.as_bytes()),
+        ("plugin.wasm", 0o644u32, wasm.as_slice()),
+    ] {
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        let write_oct = |dst: &mut [u8], val: u64, width: usize| {
+            let s = format!("{val:0width$o}", width = width);
+            dst[..width].copy_from_slice(s.as_bytes());
+        };
+        write_oct(&mut header[100..108], u64::from(mode), 7);
+        write_oct(&mut header[108..116], 0, 7);
+        write_oct(&mut header[116..124], 0, 7);
+        write_oct(&mut header[124..136], data.len() as u64, 11);
+        write_oct(&mut header[136..148], 0, 11);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let chk: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let chk_s = format!("{chk:06o}\0 ");
+        header[148..156].copy_from_slice(chk_s.as_bytes());
+        tar.extend_from_slice(&header);
+        tar.extend_from_slice(data);
+        let rem = data.len() % 512;
+        if rem != 0 {
+            tar.resize(tar.len() + (512 - rem), 0);
+        }
+    }
+    tar.resize(tar.len() + 1024, 0);
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar).unwrap();
+    gz.finish().unwrap()
+}
+
+#[test]
+fn persistent_plugins_survive_runtime_restart_toggle_disable_extensions_and_uninstall() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+    let profile_dir = canonical.join("profile");
+    let user_pref_path = profile_dir.join("preferences.json");
+    let plugins_dir = profile_dir.join("plugins");
+    let archive_path = canonical.join("downloads").join("lab.persist.tar.gz");
+    fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
+    fs::write(&archive_path, build_wasm_tar_gz("lab.persist", "0.1.0")).unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // 1. First runtime: inspect & load from single-file .tar.gz, then delete source archive.
+    let (runtime1, mut client1) = Runtime::start_with_preferences(user_pref_path.clone()).unwrap();
+    rt.block_on(async {
+        let project = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client1.events.recv().await {
+                break project;
+            }
+        };
+        let insp_op = Uuid::new_v4();
+        client1
+            .commands
+            .send(Command::Plugin {
+                project,
+                operation_id: insp_op,
+                action: PluginAction::Inspect {
+                    directory: archive_path.clone(),
+                },
+            })
+            .await
+            .unwrap();
+        let inspection_id = loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Ok(PluginOutcome::Inspected(info)),
+                ..
+            }) = client1.events.recv().await
+                && operation_id == insp_op
+            {
+                break info.id;
+            }
+        };
+        let load_op = Uuid::new_v4();
+        client1
+            .commands
+            .send(Command::Plugin {
+                project,
+                operation_id: load_op,
+                action: PluginAction::Load {
+                    inspection_id,
+                    native_trusted: true,
+                    grants: vec![Permission::TrafficRead],
+                    replace_instance: None,
+                },
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Ok(PluginOutcome::Loaded { info, .. }),
+                ..
+            }) = client1.events.recv().await
+                && operation_id == load_op
+            {
+                assert_eq!(info.manifest.id, "lab.persist");
+                break;
+            }
+        }
+    });
+    drop(client1);
+    runtime1.shutdown().unwrap();
+
+    fs::remove_file(&archive_path).unwrap();
+    assert!(plugins_dir.join("installed.json").is_file());
+    assert!(plugins_dir.join("packages/lab.persist/manifest.json").is_file());
+
+    // 2. Second runtime: StartProject auto-loads persisted plugin even though original .tar.gz is gone.
+    let (runtime2, mut client2) = Runtime::start_with_preferences(user_pref_path.clone()).unwrap();
+    rt.block_on(async {
+        let initial_project = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client2.events.recv().await {
+                break project;
+            }
+        };
+        client2
+            .commands
+            .send(Command::StartProject {
+                path: None,
+                create_new: true,
+                options: ProjectStartOptions::default(),
+            })
+            .await
+            .unwrap();
+        let p2 = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client2.events.recv().await
+                && project.generation > initial_project.generation
+            {
+                break project;
+            }
+        };
+        let mut saw_registry = false;
+        let auto_instance = loop {
+            match client2.events.recv().await.unwrap() {
+                Event::InstalledPlugins {
+                    project,
+                    plugins_dir: dir,
+                    extensions_disabled,
+                    plugins,
+                } if project == p2 => {
+                    assert_eq!(dir, plugins_dir);
+                    assert!(!extensions_disabled);
+                    assert_eq!(plugins.len(), 1);
+                    assert_eq!(plugins[0].id, "lab.persist");
+                    assert!(plugins[0].enabled);
+                    saw_registry = true;
+                }
+                Event::PluginAutoLoaded { project, info, .. } if project == p2 => {
+                    assert_eq!(info.manifest.id, "lab.persist");
+                    break info.identity.instance_id;
+                }
+                _ => {}
+            }
+        };
+        assert!(saw_registry);
+
+        // Uncheck Loaded -> PluginAction::Disable keeps package in installed.json with enabled=false.
+        let disable_op = Uuid::new_v4();
+        client2
+            .commands
+            .send(Command::Plugin {
+                project: p2,
+                operation_id: disable_op,
+                action: PluginAction::Disable {
+                    instance_id: auto_instance,
+                },
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Ok(PluginOutcome::Disabled { .. }),
+                ..
+            }) = client2.events.recv().await
+                && operation_id == disable_op
+            {
+                break;
+            }
+        }
+    });
+    drop(client2);
+    runtime2.shutdown().unwrap();
+
+    // 3. Third runtime: disabled plugin stays idle until explicitly enabled.
+    let (runtime3, mut client3) = Runtime::start_with_preferences(user_pref_path.clone()).unwrap();
+    rt.block_on(async {
+        let initial_project = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client3.events.recv().await {
+                break project;
+            }
+        };
+        client3
+            .commands
+            .send(Command::StartProject {
+                path: None,
+                create_new: true,
+                options: ProjectStartOptions::default(),
+            })
+            .await
+            .unwrap();
+        let p3 = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client3.events.recv().await
+                && project.generation > initial_project.generation
+            {
+                break project;
+            }
+        };
+        loop {
+            match client3.events.recv().await.unwrap() {
+                Event::InstalledPlugins {
+                    project, plugins, ..
+                } if project == p3 => {
+                    assert_eq!(plugins.len(), 1);
+                    assert!(!plugins[0].enabled);
+                    break;
+                }
+                Event::PluginAutoLoaded { .. } => {
+                    panic!("disabled persisted plugin must not auto-load")
+                }
+                _ => {}
+            }
+        }
+        let enable_op = Uuid::new_v4();
+        client3
+            .commands
+            .send(Command::Plugin {
+                project: p3,
+                operation_id: enable_op,
+                action: PluginAction::EnableInstalled {
+                    plugin_id: "lab.persist".into(),
+                },
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Ok(PluginOutcome::InstalledEnabled { info, .. }),
+                ..
+            }) = client3.events.recv().await
+                && operation_id == enable_op
+            {
+                assert_eq!(info.manifest.id, "lab.persist");
+                break;
+            }
+        }
+    });
+    drop(client3);
+    runtime3.shutdown().unwrap();
+
+    // 4. Fourth runtime: disable_extensions suppresses auto-load, while Uninstall still deletes files.
+    let (runtime4, mut client4) = Runtime::start_with_preferences(user_pref_path).unwrap();
+    rt.block_on(async {
+        let initial_project = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client4.events.recv().await {
+                break project;
+            }
+        };
+        client4
+            .commands
+            .send(Command::StartProject {
+                path: None,
+                create_new: true,
+                options: ProjectStartOptions {
+                    disable_extensions: true,
+                    ..ProjectStartOptions::default()
+                },
+            })
+            .await
+            .unwrap();
+        let p4 = loop {
+            if let Some(Event::ProjectOpened { project, .. }) = client4.events.recv().await
+                && project.generation > initial_project.generation
+            {
+                break project;
+            }
+        };
+        loop {
+            match client4.events.recv().await.unwrap() {
+                Event::InstalledPlugins {
+                    project,
+                    extensions_disabled,
+                    plugins,
+                    ..
+                } if project == p4 => {
+                    assert!(extensions_disabled);
+                    assert_eq!(plugins.len(), 1);
+                    assert!(plugins[0].enabled);
+                    break;
+                }
+                Event::PluginAutoLoaded { .. } => {
+                    panic!("disable_extensions must suppress auto-loading")
+                }
+                _ => {}
+            }
+        }
+        let enable_op = Uuid::new_v4();
+        client4
+            .commands
+            .send(Command::Plugin {
+                project: p4,
+                operation_id: enable_op,
+                action: PluginAction::EnableInstalled {
+                    plugin_id: "lab.persist".into(),
+                },
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Err(message),
+                ..
+            }) = client4.events.recv().await
+                && operation_id == enable_op
+            {
+                assert!(message.contains("Disable extensions"), "{message}");
+                break;
+            }
+        }
+        let uninstall_op = Uuid::new_v4();
+        client4
+            .commands
+            .send(Command::Plugin {
+                project: p4,
+                operation_id: uninstall_op,
+                action: PluginAction::Uninstall {
+                    plugin_id: "lab.persist".into(),
+                    instance_id: None,
+                },
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Some(Event::PluginOperation {
+                operation_id,
+                result: Ok(PluginOutcome::Uninstalled { plugin_id, identity }),
+                ..
+            }) = client4.events.recv().await
+                && operation_id == uninstall_op
+            {
+                assert_eq!(plugin_id, "lab.persist");
+                assert!(identity.is_none());
+                break;
+            }
+        }
+    });
+    drop(client4);
+    runtime4.shutdown().unwrap();
+
+    assert!(!plugins_dir.join("packages/lab.persist").exists());
+    let store = crate::plugins::PluginRegistryStore::new(Some(plugins_dir));
+    assert!(store.list().unwrap().is_empty());
+}

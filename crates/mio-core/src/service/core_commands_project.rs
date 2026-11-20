@@ -102,9 +102,8 @@ impl State {
                     )?;
                     store
                 };
-                self.replace_project_with(next, pause_automated_tasks)
+                self.replace_project_with(next, pause_automated_tasks, Some(disable_extensions))
                     .await?;
-                self.extensions_disabled = disable_extensions;
             }
             Command::NewProject { path } => {
                 self.require_saved()?;
@@ -114,8 +113,7 @@ impl State {
                     self.store.check_path_outside_temporary(path)?;
                 }
                 let next = ProjectStore::create(path.as_deref())?;
-                self.replace_project(next).await?;
-                self.extensions_disabled = false;
+                self.replace_project_with(next, false, Some(false)).await?;
             }
             Command::OpenProject { path } => {
                 self.require_saved()?;
@@ -127,7 +125,7 @@ impl State {
                 } else {
                     ProjectStore::open(&path)?
                 };
-                self.replace_project(next).await?;
+                self.replace_project_with(next, false, None).await?;
             }
             Command::SaveProject {
                 project,
@@ -366,14 +364,16 @@ impl State {
             Command::CheckForUpdates { manual } => {
                 let events = self.events.clone();
                 let cancel = self.cancel.child_token();
+                let fallback_route = self.updater_fallback_route();
                 tokio::spawn(async move {
                     if manual {
                         let _ = events.send(Event::UpdateStatus(UpdateStatus::Checking)).await;
                     }
                     let api_url = crate::updater::resolved_api_url();
-                    let status = crate::updater::check_for_updates(
+                    let status = crate::updater::check_for_updates_with_route(
                         &api_url,
                         crate::updater::CURRENT_VERSION,
+                        fallback_route,
                         &cancel,
                     )
                     .await;
@@ -385,10 +385,12 @@ impl State {
             Command::InstallUpdate { info } => {
                 let events = self.events.clone();
                 let cancel = self.cancel.child_token();
+                let fallback_route = self.updater_fallback_route();
                 tokio::spawn(async move {
                     let tx = events.clone();
-                    let terminal = crate::updater::download_and_install_update(
+                    let terminal = crate::updater::download_and_install_update_with_route(
                         &info,
+                        fallback_route,
                         move |progress| {
                             let _ = tx.try_send(Event::UpdateStatus(progress));
                         },
@@ -401,6 +403,20 @@ impl State {
             _ => unreachable!("routed by State::command"),
         }
         Ok(())
+    }
+
+    fn updater_fallback_route(&self) -> mio_proxy::UpstreamRoute {
+        self.store
+            .workspace()
+            .ok()
+            .and_then(|ws| {
+                let tls = self
+                    .preferences
+                    .effective_upstream_tls(&ws.upstream_tls)
+                    .unwrap_or(mio_proxy::UpstreamTls::System);
+                ws.upstream_proxy.to_route_with_tls(tls).ok()
+            })
+            .unwrap_or(mio_proxy::UpstreamRoute::Direct)
     }
 
     pub(super) async fn apply_save_workspace(

@@ -74,7 +74,10 @@ impl Workbench {
             match editing::input_snapshot(&self.extensions.directory, window, cx) {
                 Ok(value) if !value.trim().is_empty() => PathBuf::from(value.as_ref()),
                 Ok(_) => {
-                    self.fail("请选择或输入插件包目录。", cx);
+                    self.fail(
+                        "请选择或输入插件包目录或归档文件（.tar.gz / .tgz / .mio-plugin）。",
+                        cx,
+                    );
                     return;
                 }
                 Err(error) => {
@@ -111,10 +114,10 @@ impl Workbench {
             window,
             cx,
             PathPromptOptions {
-                files: false,
+                files: true,
                 directories: true,
                 multiple: false,
-                prompt: Some("选择本地插件包目录".into()),
+                prompt: Some("选择本地插件包（目录或 .tar.gz / .tgz / .mio-plugin 文件）".into()),
             },
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -138,7 +141,7 @@ impl Workbench {
                     }
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => this.fail(format!("无法选择插件包：{error}"), cx),
-                    Err(_) => this.fail("插件目录选择器已关闭。", cx),
+                    Err(_) => this.fail("插件选择器已关闭。", cx),
                 }
             });
         })
@@ -234,6 +237,40 @@ impl Workbench {
         {
             self.status = "正在热重载插件…".into();
         }
+    }
+
+    pub(in crate::workbench) fn enable_installed_plugin(
+        &mut self,
+        placeholder_id: Uuid,
+        plugin_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition.is_some() || !self.backend_available() {
+            return;
+        }
+        if self.extensions.extensions_disabled {
+            self.fail(
+                "当前项目已禁用扩展（Disable extensions），无法启用扩展。",
+                cx,
+            );
+            return;
+        }
+        if let Some(inst) = self.extensions.instance_mut(placeholder_id)
+            && !inst.live
+        {
+            inst.status = "正在启用持久化扩展…".into();
+        }
+        if self
+            .plugin_action(
+                PluginAction::EnableInstalled { plugin_id },
+                Operation::EnableInstalled { placeholder_id },
+                cx,
+            )
+            .is_some()
+        {
+            self.status = "正在启用持久化扩展…".into();
+        }
+        cx.notify();
     }
 
     pub(in crate::workbench) fn set_plugin_auto_reload(
@@ -396,15 +433,38 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn apply_plugin_order(&mut self, order: Vec<Uuid>) {
-        let mut rank = HashMap::with_capacity(order.len());
-        for (idx, id) in order.into_iter().enumerate() {
-            rank.insert(id, idx);
+        if !self.extensions.persisted_order.is_empty() {
+            let ordered_live_ids: Vec<String> = order
+                .iter()
+                .filter_map(|id| {
+                    self.extensions
+                        .instance(*id)
+                        .filter(|inst| {
+                            inst.persisted
+                                && inst.info.tab_id.is_none()
+                                && inst.context_owner.is_none()
+                        })
+                        .map(|inst| inst.info.manifest.id.clone())
+                })
+                .collect();
+            let live_set: HashSet<&str> = ordered_live_ids.iter().map(String::as_str).collect();
+            let mut live_iter = ordered_live_ids.iter().cloned();
+            let mut updated = Vec::with_capacity(self.extensions.persisted_order.len());
+            for id in &self.extensions.persisted_order {
+                if live_set.contains(id.as_str()) {
+                    if let Some(next_id) = live_iter.next() {
+                        updated.push(next_id);
+                    }
+                } else {
+                    updated.push(id.clone());
+                }
+            }
+            for remaining in live_iter {
+                updated.push(remaining);
+            }
+            self.extensions.persisted_order = updated;
         }
-        self.extensions.instances.sort_by_key(|instance| {
-            rank.get(&instance.info.identity.instance_id)
-                .copied()
-                .map_or((1usize, 0usize), |idx| (0usize, idx))
-        });
+        self.apply_plugin_order_with_persisted(&order);
     }
 
     pub(in crate::workbench) fn apply_plugin_context_replace_request(

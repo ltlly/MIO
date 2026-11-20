@@ -41,6 +41,19 @@ impl State {
                 } else if operation.report {
                     self.plugin_result(operation.project, operation_id, Err(error))
                         .await;
+                } else if let Some(plugin_id) = operation.autoload_plugin_id {
+                    if !operation.cancel.is_cancelled()
+                        && operation.project == self.project
+                        && !self.quiesced
+                        && !self.plugins.stopping
+                    {
+                        self.emit(Event::PluginAutoLoadFailed {
+                            project: operation.project,
+                            plugin_id,
+                            message: error,
+                        })
+                        .await;
+                    }
                 } else if let Some(id) = operation.instance {
                     self.emit(Event::PluginDiagnostic {
                         identity: ChannelIdentity {
@@ -59,6 +72,7 @@ impl State {
             retired,
             candidate,
             disabled,
+            uninstalled_plugin_id,
             reason,
         } = output
         {
@@ -87,13 +101,16 @@ impl State {
                     self.error("plugin_cleanup", &error).await;
                 }
             }
-            if let Some(candidate) = candidate {
+            if let Some(mut candidate) = candidate {
                 if !errors.is_empty()
                     || operation.cancel.is_cancelled()
                     || self.plugins.stopping
                     || self.quiesced
                     || operation.project != self.project
                 {
+                    if let Some(commit) = candidate.persist_install.take() {
+                        commit.staging.rollback();
+                    }
                     let message = if errors.is_empty() {
                         "插件加载已取消；候选实例未激活".into()
                     } else {
@@ -113,6 +130,11 @@ impl State {
             } else if operation.report {
                 let result = if !errors.is_empty() {
                     Err(errors.join("；"))
+                } else if let Some(plugin_id) = uninstalled_plugin_id {
+                    Ok(PluginOutcome::Uninstalled {
+                        plugin_id,
+                        identity: disabled,
+                    })
                 } else if let Some(identity) = disabled {
                     Ok(PluginOutcome::Disabled { identity })
                 } else {
@@ -128,7 +150,7 @@ impl State {
             || self.quiesced
             || self.plugins.stopping;
         match output {
-            Output::Started(candidate) => {
+            Output::Started(mut candidate) => {
                 let source_valid = candidate
                     .instance
                     .source
@@ -137,6 +159,9 @@ impl State {
                     .replace
                     .is_none_or(|id| self.plugins.instances.contains_key(&id));
                 if invalid || !source_valid || !replace_valid {
+                    if let Some(commit) = candidate.persist_install.take() {
+                        commit.staging.rollback();
+                    }
                     self.plugin_job_start(
                         operation_id,
                         None,
@@ -376,18 +401,56 @@ impl State {
             instance,
             replace,
             reloaded,
+            autoload,
+            enable_installed,
+            persist_install,
             open,
             context_open,
             response_open,
-            ..
         } = candidate;
         let id = instance.info.identity.instance_id;
         let info = instance.info.clone();
         let panel = instance.panel.clone();
+        let auto_reload = instance.auto_reload;
         let is_suite = info.tab_id.is_none() && context_open.is_none() && response_open.is_none();
+        if let Some(commit) = persist_install {
+            let entry = InstalledPluginEntry {
+                id: info.manifest.id.clone(),
+                version: info.manifest.version.clone(),
+                engine: info.manifest.engine.clone(),
+                package_dir: commit.staging.package_dir.clone(),
+                original_source: commit.original_source,
+                grants: info.grants.clone(),
+                enabled: true,
+                auto_reload,
+            };
+            match self.plugins.registry.upsert(entry) {
+                Ok(()) => commit.staging.commit(),
+                Err(err) => {
+                    commit.staging.rollback();
+                    self.error("plugin_registry", err).await;
+                }
+            }
+        } else if enable_installed {
+            if let Err(err) = self.plugins.registry.set_enabled(&info.manifest.id, true) {
+                self.error("plugin_registry", err).await;
+            }
+        } else if reloaded
+            && is_suite
+            && let Err(err) = self.plugins.registry.update_loaded_metadata(
+                &info.manifest.id,
+                &info.manifest.version,
+                &info.grants,
+            )
+        {
+            self.error("plugin_registry", err).await;
+        }
         self.plugins.instances.insert(id, instance);
-        if is_suite && !self.plugins.order.contains(&id) {
-            self.plugins.order.push(id);
+        if is_suite {
+            if !self.plugins.order.contains(&id) {
+                self.plugins.order.push(id);
+            }
+            self.sort_plugin_order_by_registry();
             self.sync_proxy_plugin_hooks();
         }
         if let Some((tab_id, revision)) = open {
@@ -444,8 +507,24 @@ impl State {
             if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
                 op.cleanup_failed = true;
             }
+        } else if autoload {
+            self.emit(Event::PluginAutoLoaded {
+                project: operation.project,
+                info,
+                panel,
+                auto_reload,
+                order: self.plugins.order.clone(),
+            })
+            .await;
         } else if operation.report {
-            let outcome = if let (true, Some(old_instance)) = (reloaded, replace) {
+            let outcome = if enable_installed {
+                PluginOutcome::InstalledEnabled {
+                    info,
+                    panel,
+                    auto_reload,
+                    order: self.plugins.order.clone(),
+                }
+            } else if let (true, Some(old_instance)) = (reloaded, replace) {
                 PluginOutcome::Reloaded {
                     old_instance,
                     info,

@@ -1,5 +1,15 @@
 use super::*;
 
+fn response_has_non_identity_content_encoding(resp: &mio_core::HttpResponse) -> bool {
+    resp.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-encoding")
+            && header.value.split(|&b| b == b',').any(|part| {
+                let token = part.trim_ascii();
+                !token.is_empty() && !token.eq_ignore_ascii_case(b"identity")
+            })
+    })
+}
+
 impl Workbench {
     pub(in crate::workbench) fn on_send_and_system_event(
         &mut self,
@@ -53,17 +63,21 @@ impl Workbench {
                             == send.history_cursor.as_ref()
                 }) && let Some(editors) = self.tab_editors.get_mut(&tab_id)
                 {
-                    let was_pretty = editors.response.pretty_active;
-                    let prev_view = editors.response.view;
-                    editors
-                        .response
-                        .load(&response_to_raw(&response), window, cx);
-                    if was_pretty {
-                        let _ = editors.response.switch_pretty(window, cx);
-                    } else if prev_view == MessageView::Hex
-                        && editors.response.view != MessageView::Hex
-                    {
-                        let _ = editors.response.switch(MessageView::Hex, window, cx);
+                    let defer_compressed_preview =
+                        self.workspace.repeater_settings.unpack_compressed_responses
+                            && response_has_non_identity_content_encoding(&response);
+                    if !defer_compressed_preview {
+                        let was_pretty = editors.response.pretty_active;
+                        let preserve_hex = editors.response.view == MessageView::Hex
+                            && !editors.response.auto_hex_fallback;
+                        editors
+                            .response
+                            .load(&response_to_raw(&response), window, cx);
+                        if was_pretty {
+                            let _ = editors.response.switch_pretty(window, cx);
+                        } else if preserve_hex && editors.response.view != MessageView::Hex {
+                            let _ = editors.response.switch(MessageView::Hex, window, cx);
+                        }
                     }
                     editors.response_revision = Some(draft_revision);
                     let result = format!(
@@ -127,7 +141,8 @@ impl Workbench {
                     }
                     if let Some(editors) = self.tab_editors.get_mut(&tab_id) {
                         let was_pretty = editors.response.pretty_active;
-                        let prev_view = editors.response.view;
+                        let preserve_hex = editors.response.view == MessageView::Hex
+                            && !editors.response.auto_hex_fallback;
                         editors.response.load(
                             &record
                                 .response
@@ -139,9 +154,7 @@ impl Workbench {
                         );
                         if was_pretty {
                             let _ = editors.response.switch_pretty(window, cx);
-                        } else if prev_view == MessageView::Hex
-                            && editors.response.view != MessageView::Hex
-                        {
+                        } else if preserve_hex && editors.response.view != MessageView::Hex {
                             let _ = editors.response.switch(MessageView::Hex, window, cx);
                         }
                         editors.response_revision = Some(draft_revision);
@@ -313,6 +326,37 @@ impl Workbench {
             }
             Event::PluginWorkspaceRequest(request) => {
                 self.plugin_workspace_request(request, window, cx);
+            }
+            Event::InstalledPlugins {
+                project,
+                plugins_dir,
+                extensions_disabled,
+                plugins,
+            } => {
+                self.handle_installed_plugins(
+                    project,
+                    plugins_dir,
+                    extensions_disabled,
+                    plugins,
+                    window,
+                    cx,
+                );
+            }
+            Event::PluginAutoLoaded {
+                project,
+                info,
+                panel,
+                auto_reload,
+                order,
+            } => {
+                self.handle_plugin_auto_loaded(project, info, panel, auto_reload, order, window, cx);
+            }
+            Event::PluginAutoLoadFailed {
+                project,
+                plugin_id,
+                message,
+            } => {
+                self.handle_plugin_auto_load_failed(project, plugin_id, message, cx);
             }
             Event::StorageState {
                 project,

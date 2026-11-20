@@ -614,3 +614,363 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
     assert!(api_md.contains("MIO Extensions API"));
     assert!(api_md.contains("traffic.read"));
 }
+
+#[gpui_kit::test]
+fn persistent_plugins_ui_autoload_toggle_and_uninstall(cx: &mut TestAppContext) {
+    let mut fixture = fixture(cx, vec![tab("1")], 64);
+    drain(&mut fixture.commands);
+
+    let plugin_id = "lab.persisted";
+    let dir = PathBuf::from("/tmp/mio-persisted-profile/plugins/packages/lab.persisted");
+    fixture
+        .events
+        .try_send(Event::InstalledPlugins {
+            project: fixture.project,
+            plugins_dir: PathBuf::from("/tmp/mio-persisted-profile/plugins"),
+            extensions_disabled: false,
+            plugins: vec![mio_core::InstalledPluginInfo {
+                id: plugin_id.into(),
+                version: "0.2.0".into(),
+                engine: "native".into(),
+                directory: dir.clone(),
+                entry: PathBuf::from("bin/worker"),
+                grants: vec![Permission::TrafficRead],
+                contributions: vec!["suite_panel".into()],
+                enabled: true,
+                auto_reload: false,
+            }],
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let placeholder_id = cx.read(|cx| {
+        let view = fixture.view.read(cx);
+        assert_eq!(view.extensions.instances.len(), 1);
+        assert!(!view.extensions.instances[0].live);
+        assert!(view.extensions.instances[0].persisted);
+        view.extensions.instances[0].info.identity.instance_id
+    });
+
+    let loaded_info = LoadedPlugin {
+        identity: ChannelIdentity {
+            instance_id: Uuid::new_v4(),
+            project: fixture.project,
+        },
+        directory: dir,
+        manifest: suite_manifest(plugin_id, "native", &["suite_panel"]),
+        grants: vec![Permission::TrafficRead],
+        tab_id: None,
+    };
+    let live_id = loaded_info.identity.instance_id;
+    fixture
+        .events
+        .try_send(Event::PluginAutoLoaded {
+            project: fixture.project,
+            info: loaded_info.clone(),
+            panel: Arc::new(PanelSnapshot {
+                revision: 1,
+                title: "持久化扩展面板".into(),
+                root: Some(Node::new(
+                    1,
+                    "状态",
+                    node::Kind::Text(mio_core::panel::Text {
+                        text: "ready".into(),
+                        tone: 0,
+                    }),
+                )),
+            }),
+            auto_reload: false,
+            order: vec![live_id],
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let top_tab = SharedString::from(format!("tool-plugin-{}", live_id));
+    let loaded_cb = SharedString::from(format!("plugin-loaded-{live_id}"));
+    let live_row = SharedString::from(format!("plugin-instance-{live_id}"));
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("tool-extensions", cx);
+        window.render_frame(cx);
+        assert!(window.find(top_tab.clone()).visible());
+        assert!(window.find(live_row.clone()).visible());
+        assert!(
+            window
+                .try_find(SharedString::from(format!("plugin-instance-{placeholder_id}")))
+                .is_none()
+        );
+        window.click(loaded_cb.clone(), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let disable_op = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action: PluginAction::Disable { instance_id },
+                ..
+            } if instance_id == live_id => Some(operation_id),
+            _ => None,
+        })
+        .expect("unchecking Loaded must dispatch PluginAction::Disable");
+    fixture
+        .events
+        .try_send(Event::PluginStopped {
+            identity: loaded_info.identity,
+            reason: "插件已禁用".into(),
+        })
+        .unwrap();
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: disable_op,
+            result: Ok(PluginOutcome::Disabled {
+                identity: loaded_info.identity,
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let view = fixture.view.read(cx);
+        assert!(
+            view.extensions.error_logs.is_empty(),
+            "expected stop reason '插件已禁用' must not increment error logs: {:?}",
+            view.extensions.error_logs
+        );
+        assert!(
+            view.extensions
+                .logs
+                .iter()
+                .any(|line| line.contains("插件已禁用"))
+        );
+        let inst = view
+            .extensions
+            .instance(live_id)
+            .expect("disabled persisted plugin row remains visible");
+        assert!(!inst.live);
+        assert!(inst.persisted);
+    });
+    // Unexpected stop reasons must still surface in error_logs.
+    fixture.view.update(cx, |view, cx| {
+        view.extensions.instances[0].live = true;
+        view.plugin_diagnostic(loaded_info.identity, "插件进程异常退出".into(), true, cx);
+        assert_eq!(view.extensions.error_logs.len(), 1);
+        view.extensions.error_logs.clear();
+    });
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(loaded_cb, cx);
+    })
+    .unwrap();
+    let enable_op = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action: PluginAction::EnableInstalled { plugin_id: pid },
+                ..
+            } if pid == plugin_id => Some(operation_id),
+            _ => None,
+        })
+        .expect("re-checking Loaded on disabled persisted plugin must dispatch EnableInstalled");
+
+    let mut reenabled_info = loaded_info;
+    reenabled_info.identity.instance_id = Uuid::new_v4();
+    let reenabled_id = reenabled_info.identity.instance_id;
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: enable_op,
+            result: Ok(PluginOutcome::InstalledEnabled {
+                info: reenabled_info.clone(),
+                panel: Arc::new(PanelSnapshot {
+                    revision: 1,
+                    title: "持久化扩展面板".into(),
+                    root: Some(Node::new(
+                        1,
+                        "状态",
+                        node::Kind::Text(mio_core::panel::Text {
+                            text: "enabled".into(),
+                            tone: 0,
+                        }),
+                    )),
+                }),
+                auto_reload: false,
+                order: vec![reenabled_id],
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let reenabled_row = SharedString::from(format!("plugin-instance-{reenabled_id}"));
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(reenabled_row.clone()).visible());
+        window.click("plugin-uninstall", cx);
+    })
+    .unwrap();
+    let uninstall_op = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action:
+                    PluginAction::Uninstall {
+                        plugin_id: pid,
+                        instance_id,
+                    },
+                ..
+            } if pid == plugin_id && instance_id == Some(reenabled_id) => Some(operation_id),
+            _ => None,
+        })
+        .expect("clicking 移除 on persisted plugin must dispatch PluginAction::Uninstall");
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: uninstall_op,
+            result: Ok(PluginOutcome::Uninstalled {
+                plugin_id: plugin_id.into(),
+                identity: Some(reenabled_info.identity),
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(reenabled_row).is_none());
+        assert!(window.try_find(top_tab).is_none());
+    })
+    .unwrap();
+    cx.read(|cx| {
+        assert!(fixture.view.read(cx).extensions.instances.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn repeater_single_editor_per_plugin_and_extensions_hides_children(cx: &mut TestAppContext) {
+    let tab = tab("1");
+    let mut fixture = fixture(cx, vec![tab.clone()], 64);
+    let suite = install_suite_plugin(&fixture, "lab.signer", "native", &["suite_panel", "message_editor"], cx);
+    let suite_id = suite.identity.instance_id;
+    drain(&mut fixture.commands);
+
+    let add_btn = SharedString::from(format!("plugin-add-editor-{suite_id}"));
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("tool-repeater", cx);
+        window.render_frame(cx);
+        assert!(window.find(add_btn.clone()).visible());
+        // Click once, and try clicking again while in-flight.
+        window.click(add_btn.clone(), cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(add_btn.clone()).disabled(), Some(true));
+        window.click(add_btn.clone(), cx);
+    })
+    .unwrap();
+
+    let create_ops: Vec<_> = drain(&mut fixture.commands)
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action:
+                    PluginAction::CreateEditor {
+                        source_instance,
+                        tab_id,
+                        ..
+                    },
+                ..
+            } if source_instance == suite_id && tab_id == tab.id => Some(operation_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        create_ops.len(),
+        1,
+        "at most one in-flight CreateEditor is allowed per (tab, plugin)"
+    );
+
+    let child_id = Uuid::new_v4();
+    let child_info = LoadedPlugin {
+        identity: ChannelIdentity {
+            instance_id: child_id,
+            project: fixture.project,
+        },
+        directory: suite.directory.clone(),
+        manifest: suite.manifest.clone(),
+        grants: suite.grants.clone(),
+        tab_id: Some(tab.id),
+    };
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: create_ops[0],
+            result: Ok(PluginOutcome::Loaded {
+                info: child_info,
+                panel: Arc::new(PanelSnapshot {
+                    revision: 1,
+                    title: "签名编辑页".into(),
+                    root: Some(Node::new(
+                        10,
+                        "请求",
+                        node::Kind::Editor(Editor {
+                            document_id: 401,
+                            revision: 1,
+                            contents: tab.draft.raw.clone(),
+                            format: EditorFormat::Utf8 as i32,
+                            read_only: false,
+                        }),
+                    )),
+                }),
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let child_tab_btn = SharedString::from(format!("plugin-message-{child_id}"));
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(child_tab_btn.clone()).visible());
+        assert!(
+            window.try_find(add_btn.clone()).is_none(),
+            "add-editor button must disappear once plugin editor is open on this tab"
+        );
+        // Programmatic second trigger switches to existing child rather than spawning a second tab.
+        window.click("plugin-message-native", cx);
+        fixture.view.update(cx, |view, cx| {
+            view.create_plugin_editor(suite_id, None, window, cx);
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert!(
+        drain(&mut fixture.commands).is_empty(),
+        "second create_plugin_editor call must switch to existing instance without spawning another"
+    );
+    cx.read(|cx| {
+        assert_eq!(
+            fixture.view.read(cx).extensions.active_messages.get(&tab.id).copied(),
+            Some(child_id)
+        );
+    });
+
+    // Extensions table shows only top-level suite instance, never internal Repeater child editor rows.
+    let suite_row = SharedString::from(format!("plugin-instance-{suite_id}"));
+    let child_row = SharedString::from(format!("plugin-instance-{child_id}"));
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("tool-extensions", cx);
+        window.render_frame(cx);
+        assert!(window.find(suite_row).visible());
+        assert!(
+            window.try_find(child_row).is_none(),
+            "Extensions table must not display internal Repeater child instances"
+        );
+    })
+    .unwrap();
+}

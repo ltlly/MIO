@@ -32,6 +32,13 @@ impl Workbench {
                         .update(cx, |panel, cx| panel.set_enabled(view.live, cx));
                 }
             }
+            Operation::EnableInstalled { placeholder_id } => {
+                if let Some(inst) = self.extensions.instance_mut(placeholder_id)
+                    && !inst.live
+                {
+                    inst.status = format!("启用失败：{error}");
+                }
+            }
             Operation::OpenContext {
                 owner,
                 context_id,
@@ -112,7 +119,9 @@ impl Workbench {
                     .instances
                     .iter()
                     .rev()
-                    .find(|instance| instance.context_owner.is_none())
+                    .find(|instance| {
+                        instance.info.tab_id.is_none() && instance.context_owner.is_none()
+                    })
                     .map(|instance| instance.info.identity.instance_id);
             }
         }
@@ -139,7 +148,9 @@ impl Workbench {
                     .instances
                     .iter()
                     .rev()
-                    .find(|instance| instance.context_owner.is_none())
+                    .find(|instance| {
+                        instance.info.tab_id.is_none() && instance.context_owner.is_none()
+                    })
                     .map(|instance| instance.info.identity.instance_id);
             }
         }
@@ -207,7 +218,8 @@ impl Workbench {
             self.extensions.selected = self
                 .extensions
                 .instances
-                .last()
+                .iter()
+                .rfind(|inst| inst.info.tab_id.is_none() && inst.context_owner.is_none())
                 .map(|instance| instance.info.identity.instance_id);
             cx.notify();
             return;
@@ -234,7 +246,10 @@ impl Workbench {
                         this.extensions.selected = this
                             .extensions
                             .instances
-                            .last()
+                            .iter()
+                            .rfind(|inst| {
+                                inst.info.tab_id.is_none() && inst.context_owner.is_none()
+                            })
                             .map(|instance| instance.info.identity.instance_id);
                         cx.notify();
                     }
@@ -242,6 +257,76 @@ impl Workbench {
             }
         })
         .detach();
+    }
+
+    pub(in crate::workbench) fn uninstall_plugin(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition.is_some() || !self.backend_available() {
+            return;
+        }
+        let Some(instance) = self.extensions.instance(id) else {
+            return;
+        };
+        if instance.info.tab_id.is_some() || instance.context_owner.is_some() {
+            return;
+        }
+        let plugin_id = instance.info.manifest.id.clone();
+        let live = instance.live;
+        if !instance.panel.read(cx).has_unsaved_edits(cx) {
+            self.dispatch_uninstall_plugin(id, plugin_id, live, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "卸载插件并移除尚未回写的编辑内容？",
+            Some("将从用户持久化插件目录中删除该扩展，未保存的插件编辑内容也将一并丢弃。"),
+            &["保留", "卸载并移除"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(1) = answer.await {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.dispatch_uninstall_plugin(id, plugin_id, live, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn dispatch_uninstall_plugin(
+        &mut self,
+        id: Uuid,
+        plugin_id: String,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.extensions.active_top_suite_tab == Some(id) {
+            self.extensions.active_top_suite_tab = None;
+        }
+        if live {
+            self.invalidate_plugin_commits(Some(id), None, cx);
+            self.retain_plugin(id, "正在从持久化插件目录卸载…", cx);
+        } else if let Some(inst) = self.extensions.instance_mut(id) {
+            inst.status = "正在从持久化插件目录卸载…".into();
+        }
+        if self
+            .plugin_action(
+                PluginAction::Uninstall {
+                    plugin_id,
+                    instance_id: live.then_some(id),
+                },
+                Operation::Uninstall { instance_id: id },
+                cx,
+            )
+            .is_some()
+        {
+            self.status = "正在卸载并删除持久化插件…".into();
+        }
+        cx.notify();
     }
 
     pub(in crate::workbench) fn has_unsaved_plugin_edits(&self, cx: &App) -> bool {
@@ -312,12 +397,14 @@ impl Workbench {
             .retain(|instance| instance.context_owner.is_none());
         for instance in &mut self.extensions.instances {
             instance.live = false;
+            instance.persisted = false;
             instance.bound = None;
             instance.status = "原项目已关闭；仅保留编辑内容供复制，插件未自动重启。".into();
             instance
                 .panel
                 .update(cx, |panel, cx| panel.set_enabled(false, cx));
         }
+        self.extensions.extensions_disabled = false;
         self.extensions.operations.clear();
         self.extensions.create_after_save.clear();
         self.extensions.active_messages.clear();
