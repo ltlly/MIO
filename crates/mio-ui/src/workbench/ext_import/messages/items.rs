@@ -265,8 +265,9 @@ fn valid_detail(detail: &ExtItemDetail, summary: &ExtItemSummary, offset: usize)
             == page.rows.len()
 }
 
-mod part_1;
-mod part_2;
+mod controller;
+mod events;
+mod render;
 
 #[cfg(test)]
 mod tests;

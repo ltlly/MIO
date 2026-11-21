@@ -5,7 +5,7 @@ use gpui_kit::base::{Checkbox, CheckboxIndicator};
 use gpui_kit::component::{
     Icon, Selectable, Sizable,
     button::{ButtonRounded, ButtonVariants},
-    input::{Editor, Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode},
 };
@@ -757,18 +757,36 @@ pub(in crate::workbench) fn parse_target_scope_json(raw: &str) -> Result<TargetS
 
 mod discovery;
 mod engagement;
+mod engagement_analysis;
+mod engagement_compare;
+mod engagement_export;
+mod engagement_overlays;
+mod engagement_triage;
+mod issue_defs;
+mod lifecycle;
 mod menus;
+mod menus_items;
+mod menus_tree;
 mod mime;
-mod part_01;
-mod part_02;
-mod part_03;
-mod part_04;
-mod part_05;
-mod part_06;
+mod navigation;
 mod scope_ops;
-mod site_map_ext;
+mod scope_render;
+mod scope_rules;
+mod site_map_bar;
+mod site_map_columns;
+mod site_map_entries;
+mod site_map_issues;
+mod site_map_items;
+mod site_map_tree;
+mod state;
+#[cfg(test)]
+mod tests;
 
 pub(in crate::workbench) use engagement::*;
-pub(in crate::workbench) use menus::*;
-pub(in crate::workbench) use part_01::*;
-pub(in crate::workbench) use part_05::*;
+pub(in crate::workbench) use menus_items::*;
+pub(in crate::workbench) use menus_tree::*;
+pub(in crate::workbench) use mime::target_row_summary_with_metadata;
+#[cfg(test)]
+use mime::{response_mime_label, target_row_summary};
+pub(in crate::workbench) use scope_rules::{split_advanced_scope_url, target_origin_from_url};
+pub(in crate::workbench) use state::*;

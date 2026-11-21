@@ -332,8 +332,8 @@ impl TableDelegate for MessageDelegate {
     }
 }
 
-mod part_1;
-mod part_2;
+mod controller;
+mod render;
 
 #[cfg(test)]
 mod tests;

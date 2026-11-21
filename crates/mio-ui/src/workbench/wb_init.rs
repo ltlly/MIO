@@ -189,6 +189,34 @@ impl Workbench {
         focus.focus(window, cx);
         let command_palette = cx.new(|cx| CommandState::new(window, cx));
         let global_search = wb_render_chrome::GlobalSearchUi::new(window, cx);
+        let wb_weak = cx.weak_entity();
+        let target_pane = boxed_with(|| target::TargetPane::new(window, cx));
+        let target_view =
+            cx.new(|cx| target::TargetView::new(wb_weak.clone(), &target_pane, window, cx));
+        let mut sequencer_pane = boxed_with(|| sequencer::SequencerPane::new(window, cx));
+        let sequencer_view = cx.new(|cx| {
+            sequencer::SequencerView::new(wb_weak.clone(), &sequencer_pane, window, cx)
+        });
+        sequencer_pane.attach_view_inputs(sequencer_view.read(cx).non_editor_inputs());
+        let audit_dashboard = boxed_with(|| audit_dashboard::AuditDashboardPane::new(window, cx));
+        let audit_dashboard_view = cx.new(|cx| {
+            audit_dashboard::AuditDashboardView::new(
+                wb_weak.clone(),
+                &audit_dashboard,
+                window,
+                cx,
+            )
+        });
+        let mut collaborator_pane = boxed_with(|| collaborator::CollaboratorPane::new(window, cx));
+        let collaborator_view = cx.new(|cx| {
+            collaborator::CollaboratorView::new(
+                wb_weak.clone(),
+                &collaborator_pane.raw_editor,
+                window,
+                cx,
+            )
+        });
+        collaborator_pane.attach_view_inputs(collaborator_view.read(cx).non_editor_inputs());
         let mut view = Self {
             owner_window: owner,
             startup_wizard: None,
@@ -282,11 +310,15 @@ impl Workbench {
             editor_ui_caches: wb_editors::EditorUiCaches::default(),
             collaborator_insert_sub: None,
             websocket_repeater: websocket_repeater::WebSocketRepeaterState::default(),
-            target_pane: boxed_with(|| target::TargetPane::new(window, cx)),
-            sequencer_pane: boxed_with(|| sequencer::SequencerPane::new(window, cx)),
-            audit_dashboard: boxed_with(|| audit_dashboard::AuditDashboardPane::new(window, cx)),
+            target_pane,
+            target_view,
+            sequencer_pane,
+            sequencer_view,
+            audit_dashboard,
+            audit_dashboard_view,
             footer_drawer: FooterDrawerState::new(window, cx),
-            collaborator_pane: boxed_with(|| collaborator::CollaboratorPane::new(window, cx)),
+            collaborator_pane,
+            collaborator_view,
             command_palette,
             command_palette_open: false,
             global_search,

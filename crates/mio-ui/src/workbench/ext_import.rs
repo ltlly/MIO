@@ -112,8 +112,9 @@ fn phase_label(phase: ExtImportPhase) -> &'static str {
     }
 }
 
-mod part_1;
-mod part_2;
+mod events;
+mod jobs;
+mod render;
 
 #[cfg(test)]
 mod tests;

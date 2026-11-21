@@ -2,7 +2,6 @@ use gpui_kit::component::{
     Icon, IconName,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
-    resizable::{h_resizable, resizable_panel},
 };
 
 use super::results_view::run_progress;
@@ -13,14 +12,13 @@ use crate::workbench::audit_dashboard::{
 };
 
 impl Workbench {
-    pub(in crate::workbench) fn render_intruder_dashboard(
+    pub(in crate::workbench) fn render_intruder_dashboard_tasks_column(
         &mut self,
+        tasks_header: AnyElement,
+        audit_cards: Vec<AnyElement>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.activate_pro_dashboard(cx);
-        let tasks_header = self.render_dashboard_tasks_header(window, cx);
-        let audit_cards = self.render_audit_task_cards(window, cx);
         let page = &self.intruder.results.runs;
         let pending = page.pending.is_some();
         let disabled = self.backend_disconnected || self.transition.is_some();
@@ -302,7 +300,7 @@ impl Workbench {
                     ),
             );
         }
-        let tasks = div()
+        div()
             .size_full()
             .min_w_0()
             .h_full()
@@ -322,8 +320,24 @@ impl Workbench {
                         .text_color(rgb(if theme::is_dark() { 0xf28b82 } else { 0x9b2727 }))
                         .child("后台服务已断开；已读取的任务摘要仍保留。"),
                 )
-            });
+            })
+            .into_any_element()
+    }
 
+    pub(in crate::workbench) fn render_intruder_dashboard_selection_detail(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let selection = self.intruder.dashboard.selection.as_ref()?;
+        let page = &self.intruder.results.runs;
+        let result = self.intruder.results.views.get(&selection.view_id);
+        let summary = result
+            .and_then(|view| view.summary.as_ref())
+            .or_else(|| page.rows.iter().find(|run| run.id == selection.run_id));
+        let title = summary.map_or_else(
+            || format!("Intruder 攻击 · {}", &selection.run_id.to_string()[..8]),
+            |run| self.dashboard_title(run),
+        );
         let mut detail = div()
             .id("dashboard-detail")
             .test_support()
@@ -332,17 +346,8 @@ impl Workbench {
             .h_full()
             .bg(theme::surface())
             .flex()
-            .flex_col();
-        if let Some(selection) = &self.intruder.dashboard.selection {
-            let result = self.intruder.results.views.get(&selection.view_id);
-            let summary = result
-                .and_then(|view| view.summary.as_ref())
-                .or_else(|| page.rows.iter().find(|run| run.id == selection.run_id));
-            let title = summary.map_or_else(
-                || format!("Intruder 攻击 · {}", &selection.run_id.to_string()[..8]),
-                |run| self.dashboard_title(run),
-            );
-            detail = detail.child(
+            .flex_col()
+            .child(
                 div()
                     .px(px(20.))
                     .pt(px(14.))
@@ -372,59 +377,29 @@ impl Workbench {
                             })),
                     ),
             );
-            if let Some(error) = &selection.error {
-                detail = detail.child(
-                    div()
-                        .p(px(18.))
-                        .text_color(rgb(if theme::is_dark() { 0xf28b82 } else { 0x9b2727 }))
-                        .child(error.clone()),
-                );
-            } else if let Some(results) = &selection.results {
-                detail = detail.child(if result.is_some() {
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .child(results.clone())
-                        .into_any_element()
-                } else {
-                    div()
-                        .p(px(18.))
-                        .child("结果视图已关闭；单击左侧任务可重新打开。")
-                        .into_any_element()
-                });
+        if let Some(error) = &selection.error {
+            detail = detail.child(
+                div()
+                    .p(px(18.))
+                    .text_color(rgb(if theme::is_dark() { 0xf28b82 } else { 0x9b2727 }))
+                    .child(error.clone()),
+            );
+        } else if let Some(results) = &selection.results {
+            detail = detail.child(if result.is_some() {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(results.clone())
+                    .into_any_element()
             } else {
-                detail = detail.child(div().p(px(18.)).child("正在打开结果视图…"));
-            }
+                div()
+                    .p(px(18.))
+                    .child("结果视图已关闭；单击左侧任务可重新打开。")
+                    .into_any_element()
+            });
         } else {
-            detail = detail.child(self.render_audit_task_workspace(window, cx));
+            detail = detail.child(div().p(px(18.)).child("正在打开结果视图…"));
         }
-
-        let new_scan_panel = self.render_new_scan_panel(cx);
-        let main_split = h_resizable("dashboard-main-hsplit")
-            .child(
-                resizable_panel()
-                    .size(px(326.))
-                    .size_range(px(270.)..px(560.))
-                    .child(tasks),
-            )
-            .child(
-                resizable_panel()
-                    .size_range(px(360.)..px(10000.))
-                    .child(detail),
-            )
-            .into_any_element();
-
-        div()
-            .id("intruder-dashboard")
-            .test_support()
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .bg(theme::surface())
-            .text_size(theme::ui_font_size())
-            .when_some(new_scan_panel, |this, panel| this.child(panel))
-            .child(div().flex_1().min_h_0().child(main_split))
-            .into_any_element()
+        Some(detail.into_any_element())
     }
 }

@@ -104,7 +104,9 @@ fn archived_binary_fragments_are_lazy_readonly_and_reject_late_or_mismatched_rea
             .hex
             .clone();
         assert_eq!(editor.read(cx).value().as_ref(), "b8 ad");
-        window.click(("input", editor.entity_id()), cx);
+        window
+            .within(("hex-grid-view", editor.entity_id()))
+            .click(("hex-byte-cell", 0usize), cx);
         window.press(crate::kbd!("a"), cx);
         window.input("00", cx);
         assert_eq!(editor.read(cx).value().as_ref(), "b8 ad");

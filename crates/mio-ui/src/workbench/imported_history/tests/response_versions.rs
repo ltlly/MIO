@@ -342,10 +342,12 @@ fn notes_only_history_refresh_keeps_loaded_hex_views_focus_and_editor_revisions(
         .update(cx, |_, window, cx| {
             window.render_frame(cx);
             let response = f.view.read(cx).history_response.hex.clone();
-            window.click(("input", response.entity_id()), cx);
+            window
+                .within(("hex-grid-view", response.entity_id()))
+                .click(("hex-byte-cell", 0usize), cx);
             window.press(crate::kbd!("a"), cx);
             let view = f.view.read(cx);
-            assert!(response.focus_handle(cx).is_focused(window));
+            assert!(view.history_response.hex_grid_has_focus(window, cx));
             assert_eq!(view.history_request.view(), MessageView::Hex);
             assert_eq!(view.history_response.view(), MessageView::Hex);
             (
@@ -391,12 +393,7 @@ fn notes_only_history_refresh_keeps_loaded_hex_views_focus_and_editor_revisions(
                     view.history_response.hex.read(cx).document_revision(),
                     response_revision
                 );
-                assert!(
-                    view.history_response
-                        .hex
-                        .focus_handle(cx)
-                        .is_focused(window)
-                );
+                assert!(view.history_response.hex_grid_has_focus(window, cx));
                 assert_eq!(
                     view.history_request.bytes(window, cx).unwrap(),
                     request_bytes

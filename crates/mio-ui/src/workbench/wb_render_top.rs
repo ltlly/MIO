@@ -404,13 +404,13 @@ impl Workbench {
             self.render_ext_import(cx)
         } else {
             match self.tool {
-                Tool::Dashboard => self.render_intruder_dashboard(window, cx),
-                Tool::Target => self.render_target(window, cx),
+                Tool::Dashboard => self.audit_dashboard_view.clone().into_any_element(),
+                Tool::Target => self.target_view.clone().into_any_element(),
                 Tool::Proxy => self.render_proxy(window, cx),
                 Tool::Intruder => self.render_intruder(window, cx),
                 Tool::Repeater => self.render_repeater_with_redirect(window, cx),
-                Tool::Collaborator => self.render_collaborator(window, cx),
-                Tool::Sequencer => self.render_sequencer(window, cx),
+                Tool::Collaborator => self.collaborator_view.clone().into_any_element(),
+                Tool::Sequencer => self.sequencer_view.clone().into_any_element(),
                 Tool::Extensions => self.render_extensions(cx),
                 Tool::Decoder => self.render_decoder(window, cx),
                 Tool::Comparer => self.render_comparer(window, cx),

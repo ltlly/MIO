@@ -10,25 +10,17 @@ anyhow.workspace = true
 base64.workspace = true
 encoding_rs.workspace = true
 form_urlencoded.workspace = true
-futures = "0.3.34"
 gpui-kit.workspace = true
-httparse.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 imagesize = "0.14.0"
 markdown = "1.0.0"
-mime.workspace = true
 mio-core = { path = "../mio-core" }
-multer.workspace = true
 regex.workspace = true
-roxmltree.workspace = true
-scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 url.workspace = true
-quick-xml = "0.41.0"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -41,3 +33,4 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
