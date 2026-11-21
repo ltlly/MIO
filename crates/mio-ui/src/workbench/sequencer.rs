@@ -952,14 +952,13 @@ pub(in crate::workbench) fn extract_live_request_host(target: &str, raw: &[u8]) 
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("host") {
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("host") {
                 let host = value.trim();
                 if !host.is_empty() {
                     return host.to_owned();
                 }
             }
-        }
     }
     "(未指定)".to_owned()
 }

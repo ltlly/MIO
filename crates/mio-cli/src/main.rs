@@ -736,7 +736,7 @@ mod tests {
         }
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn parses_all_cli_subcommands_and_global_flags() {
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn headless_server_exports_ca_starts_proxy_and_shuts_down_via_ipc() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().await;
         let dir = TempDirGuard::new("mio-srv");
         let identity_dir = dir.path.join("identity");
         let _id_guard = EnvVarGuard::set("MIO_IDENTITY_DIR", &identity_dir);

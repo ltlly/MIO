@@ -159,7 +159,7 @@ pub fn md4_bytes(data: &[u8]) -> [u8; 16] {
     const R2_S: [u32; 4] = [3, 5, 9, 13];
     const R3_IDX: [usize; 16] = [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
     const R3_S: [u32; 4] = [3, 9, 11, 15];
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut x = [0u32; 16];
         for (i, word) in x.iter_mut().enumerate() {
             *word = u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
@@ -369,11 +369,11 @@ pub fn des_encrypt_block(key7: &[u8; 7], block8: &[u8; 8]) -> [u8; 8] {
     for subkey in subkeys {
         let er = permute(r as u64, 32, &DES_E) ^ subkey;
         let mut s_out = 0u32;
-        for box_idx in 0..8 {
+        for (box_idx, s_box) in DES_S.iter().enumerate() {
             let chunk = ((er >> (42 - box_idx * 6)) & 0x3f) as usize;
             let row = ((chunk & 0x20) >> 4) | (chunk & 0x01);
             let col = (chunk >> 1) & 0x0f;
-            s_out = (s_out << 4) | (DES_S[box_idx][row][col] as u32);
+            s_out = (s_out << 4) | (s_box[row][col] as u32);
         }
         let f = permute(s_out as u64, 32, &DES_P) as u32;
         let next_r = l ^ f;
@@ -411,6 +411,16 @@ pub struct DigestChallenge {
     pub opaque: Option<String>,
     pub algorithm: String,
     pub stale: bool,
+}
+
+pub struct DigestRequest<'a> {
+    pub username: &'a str,
+    pub password: &'a str,
+    pub method: &'a str,
+    pub uri_path: &'a str,
+    pub body: &'a [u8],
+    pub nc: u32,
+    pub cnonce: &'a str,
 }
 
 impl DigestChallenge {
@@ -456,16 +466,16 @@ impl DigestChallenge {
         })
     }
 
-    pub fn build_authorization_value(
-        &self,
-        username: &str,
-        password: &str,
-        method: &str,
-        uri_path: &str,
-        body: &[u8],
-        nc: u32,
-        cnonce: &str,
-    ) -> String {
+    pub fn build_authorization_value(&self, req: &DigestRequest<'_>) -> String {
+        let DigestRequest {
+            username,
+            password,
+            method,
+            uri_path,
+            body,
+            nc,
+            cnonce,
+        } = *req;
         let is_sha256 = self.algorithm.starts_with("SHA-256");
         let is_sess = self.algorithm.ends_with("-SESS");
         let hash_fn = |input: &[u8]| -> String {
@@ -806,7 +816,7 @@ pub fn next_cnonce_and_challenge() -> (String, [u8; 8], u64) {
         .as_secs()
         .saturating_add(11_644_473_600)
         .saturating_mul(10_000_000);
-    let seed = md5_bytes(&format!("{seq}:{now_ns}").as_bytes());
+    let seed = md5_bytes(format!("{seq}:{now_ns}").as_bytes());
     let client_challenge: [u8; 8] = seed[0..8].try_into().unwrap();
     let cnonce = to_hex_lower(&client_challenge);
     (cnonce, client_challenge, windows_ticks)
@@ -875,30 +885,30 @@ mod tests {
         .unwrap();
         assert_eq!(challenge.realm, "testrealm@host.com");
         assert_eq!(challenge.qop.as_deref(), Some("auth"));
-        let header = challenge.build_authorization_value(
-            "Mufasa",
-            "Circle Of Life",
-            "GET",
-            "/dir/index.html",
-            b"",
-            1,
-            "0a4f113b",
-        );
+        let header = challenge.build_authorization_value(&DigestRequest {
+            username: "Mufasa",
+            password: "Circle Of Life",
+            method: "GET",
+            uri_path: "/dir/index.html",
+            body: b"",
+            nc: 1,
+            cnonce: "0a4f113b",
+        });
         assert!(header.contains(r#"response="6629fae49393a05397450978507c4ef1""#));
 
         let sha256_chal = DigestChallenge::parse_from_header(
             r#"Digest realm="api", qop="auth", algorithm=SHA-256, nonce="abc123""#,
         )
         .unwrap();
-        let sha_hdr = sha256_chal.build_authorization_value(
-            "alice",
-            "secret",
-            "POST",
-            "/v1/login",
-            b"{}",
-            1,
-            "cn1",
-        );
+        let sha_hdr = sha256_chal.build_authorization_value(&DigestRequest {
+            username: "alice",
+            password: "secret",
+            method: "POST",
+            uri_path: "/v1/login",
+            body: b"{}",
+            nc: 1,
+            cnonce: "cn1",
+        });
         assert!(sha_hdr.contains("algorithm=SHA-256"));
         assert!(sha_hdr.contains("response=\""));
     }
@@ -907,7 +917,7 @@ mod tests {
     fn ntlm_v1_and_v2_handshake_roundtrip() {
         let type1 = build_ntlm_type1_header_value("CORP", "WORKSTATION1");
         assert!(type1.starts_with("NTLM "));
-        let type1_raw = BASE64.decode(type1[5..].as_bytes()).unwrap();
+        let type1_raw = BASE64.decode(&type1.as_bytes()[5..]).unwrap();
         assert_eq!(&type1_raw[0..8], b"NTLMSSP\0");
         assert_eq!(u32::from_le_bytes(type1_raw[8..12].try_into().unwrap()), 1);
 

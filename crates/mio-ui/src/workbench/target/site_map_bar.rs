@@ -811,6 +811,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_site_map_split_body(
         &mut self,
         view_ctx: &TargetViewContext<'_>,

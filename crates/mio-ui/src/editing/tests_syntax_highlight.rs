@@ -531,10 +531,14 @@ fn message_editor_gutter_and_line_height_match_ext_and_scale_with_settings(
     });
 
     vcx.update(|window, cx| {
-        let mut display = mio_core::UserDisplaySettings::default();
-        display.scale_factor_percent = 125;
-        let mut editor_settings = mio_core::UserMessageEditorSettings::default();
-        editor_settings.font_size_px = 16;
+        let display = mio_core::UserDisplaySettings {
+            scale_factor_percent: 125,
+            ..Default::default()
+        };
+        let editor_settings = mio_core::UserMessageEditorSettings {
+            font_size_px: 16,
+            ..Default::default()
+        };
         crate::theme::apply_user_display(&display, &editor_settings, cx);
         probe.update(cx, |probe, cx| {
             probe.0.load(b"GET / HTTP/1.1\r\n", window, cx);

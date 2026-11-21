@@ -124,8 +124,8 @@ impl Workbench {
         }));
         r.on_action(
             cx.listener(|this, _: &crate::ToggleSettingsWindow, window, cx| {
-                if let Some(settings_win) = this.settings_window {
-                    if settings_win
+                if let Some(settings_win) = this.settings_window
+                    && settings_win
                         .update(cx, |_, win, _| win.remove_window())
                         .is_ok()
                     {
@@ -133,7 +133,6 @@ impl Workbench {
                         cx.notify();
                         return;
                     }
-                }
                 this.open_settings(window, cx);
             }),
         );

@@ -567,7 +567,8 @@ impl SessionData {
         let Some(flow) = self.flows.get(&id) else {
             return Ok(false);
         };
-        let row: Option<(String, u64, i64, String, String, String, Vec<u8>)> = connection
+        type FlowMetaRow = (String, u64, i64, String, String, String, Vec<u8>);
+        let row: Option<FlowMetaRow> = connection
             .query_row(
                 "SELECT id, revision, started, url, method, state, summary
                  FROM main.flows WHERE id=?1",
@@ -920,7 +921,7 @@ impl SessionData {
         self.read_spec_with_settings()?;
         let mut expected = 0u64;
         let mut completed = 0u64;
-        for (&ordinal, _row) in &self.results {
+        for &ordinal in self.results.keys() {
             ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；数据保留");
             let result = self.result_summary(ordinal)?.expect("row exists");
             let terminal = intruder_mod::outcome_terminal(&result.outcome);
@@ -1805,6 +1806,7 @@ impl SessionData {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::store::intruder) fn query_result_view(
         &self,
         query: &IntruderResultViewQuery,

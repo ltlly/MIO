@@ -164,19 +164,17 @@ impl Workbench {
                 let summary =
                     target_row_summary_with_metadata(&row, None, row_metadata.get(&row.id()));
                 let lower = url.to_ascii_lowercase();
-                if summary.mime.eq_ignore_ascii_case("Script")
+                if (summary.mime.eq_ignore_ascii_case("Script")
                     || lower.ends_with(".js")
                     || lower.ends_with(".mjs")
-                    || lower.contains(".js?")
-                {
-                    if seen.insert(format!("ASSET:{url}")) {
+                    || lower.contains(".js?"))
+                    && seen.insert(format!("ASSET:{url}")) {
                         entries.push(TargetEngagementEntry {
                             kind: "脚本资源".into(),
                             location: format!("{} {}", summary.method, summary.status),
                             detail: url,
                         });
                     }
-                }
             }
         }
         let summary = if entries.is_empty() {

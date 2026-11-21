@@ -22,7 +22,7 @@ impl State {
                 result = proxy_completion(&mut self.proxy.primary) => Incoming::ProxyFinished(result),
                 result = extra_proxy_completion(&mut self.proxy.extra) => Incoming::ProxyFinished(result),
                 Some(result) = self.repeater.jobs.join_next(), if !self.repeater.jobs.is_empty() => Incoming::Completed(result),
-                Some(done) = self.ai_ipc.jobs.join_next(), if !self.ai_ipc.jobs.is_empty() => Incoming::IpcRepeaterCompleted(done),
+                Some(done) = self.ai_ipc.jobs.join_next(), if !self.ai_ipc.jobs.is_empty() => Incoming::IpcRepeaterCompleted(Box::new(done)),
                 tab_id = next_repeater_progress(&mut self.repeater.sends, &self.events, can_emit_repeater_progress) => Incoming::RepeaterProgress(tab_id),
                 signal = self.intruder.next_signal(&self.events, false) => Incoming::Intruder(signal),
                 signal = self.ext_archive.next_signal(&self.events, false) => Incoming::Ext(signal),
@@ -83,7 +83,7 @@ impl State {
                     Box::pin(self.accept_ai_ipc_call(call)).await;
                 }
                 Incoming::IpcRepeaterCompleted(done) => {
-                    self.complete_ipc_repeater(done);
+                    self.complete_ipc_repeater(*done);
                 }
                 Incoming::Intruder(signal) => {
                     if let Err(error) = Box::pin(self.intruder_signal(signal)).await {

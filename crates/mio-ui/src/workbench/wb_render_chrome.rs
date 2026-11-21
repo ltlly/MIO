@@ -136,7 +136,7 @@ impl Workbench {
             cancel.cancel();
         }
         let mut workspace = (*self.workspace).clone();
-        if let Ok(_) = self.capture_drafts(window, cx) { workspace = (*self.workspace).clone(); }
+        if self.capture_drafts(window, cx).is_ok() { workspace = (*self.workspace).clone(); }
         self.global_search.revision = self.global_search.revision.saturating_add(1);
         let query = GlobalSearchQuery { project, query_revision: self.global_search.revision, term,
             regex: self.global_search.regex, case_sensitive: self.global_search.case_sensitive,

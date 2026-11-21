@@ -271,6 +271,7 @@ impl Workbench {
         self.apply_issue_search(window, cx);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_issue_page_header(
         &self,
         active: Option<&'static MioIssueDefinition>,

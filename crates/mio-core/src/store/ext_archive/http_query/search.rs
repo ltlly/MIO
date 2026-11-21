@@ -270,10 +270,13 @@ pub(crate) fn global_search_snapshot(
         Ok(collector.result)
 }
 
+type CachedArchiveChunk = ((Uuid, u64), Rc<[u8]>);
+type RawMessagePair = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 #[derive(Default)]
 pub(super) struct ChunkCache {
     states: HashMap<Uuid, SourceState>,
-    chunks: VecDeque<((Uuid, u64), Rc<[u8]>)>,
+    chunks: VecDeque<CachedArchiveChunk>,
 }
 
 impl ChunkCache {
@@ -309,6 +312,7 @@ impl ChunkCache {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn search_page(
     connection: &rusqlite::Transaction<'_>,
     source: Option<Uuid>,
@@ -737,7 +741,7 @@ fn load_live_raw_messages(
     id: Uuid,
     pending: Option<&HttpHistoryPending>,
     cancel: &CancellationToken,
-) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+) -> Result<RawMessagePair> {
     ensure!(!cancel.is_cancelled(), "HTTP 历史查询已取消");
     let mut rows = statement.query(params![
         id.to_string(),

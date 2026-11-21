@@ -314,7 +314,7 @@ pub(in crate::plugin_panel) fn decode_canvas_images(
         }
         let mut rgba = decoded.into_rgba8();
         // GPUI RenderImage expects premultiplied/pixel layout in BGRA byte order.
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         images.push(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])));

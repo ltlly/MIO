@@ -353,8 +353,8 @@ fn extract_meta_refresh_url(body: &[u8]) -> Option<String> {
         let end = lower[start..].find('>')? + start;
         let tag = &text[start..=end];
         let tag_lower = &lower[start..=end];
-        if tag_lower.contains("http-equiv") && tag_lower.contains("refresh") {
-            if let Some(c_pos) = tag_lower.find("content") {
+        if tag_lower.contains("http-equiv") && tag_lower.contains("refresh")
+            && let Some(c_pos) = tag_lower.find("content") {
                 let after = &tag[c_pos + "content".len()..];
                 if let Some(eq) = after.find('=') {
                     let val = after[eq + 1..].trim_start();
@@ -372,7 +372,6 @@ fn extract_meta_refresh_url(body: &[u8]) -> Option<String> {
                     }
                 }
             }
-        }
         cursor = end + 1;
     }
     None
@@ -422,13 +421,12 @@ pub fn redirect_location_url_with_settings(
     response: &HttpResponse,
     http_settings: &crate::NetworkHttpSettings,
 ) -> Option<String> {
-    if http_settings.redirect_3xx && matches!(response.status, 300..=399) {
-        if let Some(loc) = extract_location_header(response)
+    if http_settings.redirect_3xx && matches!(response.status, 300..=399)
+        && let Some(loc) = extract_location_header(response)
             && let Some(resolved) = resolve_raw_redirect_target(current_url, loc)
         {
             return Some(resolved);
         }
-    }
     if http_settings.redirect_any_location
         && let Some(loc) = extract_location_header(response)
         && let Some(resolved) = resolve_raw_redirect_target(current_url, loc)

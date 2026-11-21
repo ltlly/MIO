@@ -335,7 +335,7 @@ impl Workbench {
                     }
                 }
                 self.sync_startup_wizard_preferences(cx);
-                self.status = format!("已{action_label}。").into();
+                self.status = format!("已{action_label}。");
             }
             Ok(_) => {
                 let message = format!("{action_label}回执不匹配；列表尚未确认。");

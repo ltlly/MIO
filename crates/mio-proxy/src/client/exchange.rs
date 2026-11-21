@@ -216,9 +216,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RawH1Io<S> {
     }
 }
 
+type CertObserverFn = Arc<dyn Fn(ObservedCertInfo) + Send + Sync>;
+type CertObserverRef<'a> = (&'a str, u16, &'a CertObserverFn);
+type CertObserverTarget = (String, u16, CertObserverFn);
+
 fn apply_post_tls(
     conn_ext: &Extensions,
-    observer: Option<(&str, u16, &Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    observer: Option<CertObserverRef<'_>>,
     force_http10: bool,
     allow_http2_alpn_override: bool,
 ) {
@@ -244,7 +248,7 @@ struct RawH1Connector<S> {
     cookie_fields: Option<(Arc<[u8]>, usize)>,
     force_http10: bool,
     allow_http2_alpn_override: bool,
-    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    cert_observer: Option<CertObserverTarget>,
     single_packet_barrier: Option<crate::SinglePacketBarrier>,
     cancel: CancellationToken,
 }
@@ -761,7 +765,7 @@ fn finish_direct_client<T>(
     cookie_fields: Option<(Arc<[u8]>, usize)>,
     force_http10: bool,
     allow_http2_alpn_override: bool,
-    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    cert_observer: Option<CertObserverTarget>,
     single_packet_barrier: Option<crate::SinglePacketBarrier>,
     cancel: CancellationToken,
 ) -> PooledClient
@@ -795,7 +799,7 @@ struct PreparedExchange {
     tls: TlsClientConfig,
     destination_tls_key: ClientTlsCacheKey,
     proxy_tls_and_key: Option<(TlsClientConfig, ClientTlsCacheKey)>,
-    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    cert_observer: Option<CertObserverTarget>,
     default_http_version: Version,
     force_http10: bool,
     allow_http2_alpn_override: bool,
@@ -1042,7 +1046,7 @@ fn build_direct_https_proxy_client(
     cookie_fields: Option<(Arc<[u8]>, usize)>,
     force_http10: bool,
     allow_http2_alpn_override: bool,
-    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    cert_observer: Option<CertObserverTarget>,
     single_packet_barrier: Option<crate::SinglePacketBarrier>,
     overrides: &[(String, IpAddr)],
     timing: Arc<Mutex<ResponseTiming>>,
@@ -1085,7 +1089,7 @@ fn build_direct_plain_client(
     cookie_fields: Option<(Arc<[u8]>, usize)>,
     force_http10: bool,
     allow_http2_alpn_override: bool,
-    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    cert_observer: Option<CertObserverTarget>,
     single_packet_barrier: Option<crate::SinglePacketBarrier>,
     overrides: &[(String, IpAddr)],
     timing: Arc<Mutex<ResponseTiming>>,

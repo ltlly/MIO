@@ -586,32 +586,30 @@ impl PendingCommit {
         }
     }
 
-    pub(crate) fn commit_request(
+    pub(crate) async fn commit_request(
         self,
         request: CommitEditor,
         cancel: CancellationToken,
-    ) -> impl Future<Output = Result<HttpRequest>> + use<> {
-        async move {
-            let cancel_clone = cancel.clone();
-            let expected_snapshot = self.expected_snapshot.clone();
-            self.submit_commit(
-                cancel,
-                "插件编辑提交已取消；未发送",
-                "插件编辑提交已取消；插件实例正在回收，未发送",
-                "插件子面板编辑提交已取消；未发送",
-                "插件已停止；未发送旧稿",
-                "插件未完成编辑提交",
-                move |panel_id, op_id, reply| Control::Commit {
-                    panel_id,
-                    op_id,
-                    request,
-                    cancelled: cancel_clone,
-                    expected_snapshot,
-                    reply,
-                },
-            )
-            .await
-        }
+    ) -> Result<HttpRequest> {
+        let cancel_clone = cancel.clone();
+        let expected_snapshot = self.expected_snapshot.clone();
+        self.submit_commit(
+            cancel,
+            "插件编辑提交已取消；未发送",
+            "插件编辑提交已取消；插件实例正在回收，未发送",
+            "插件子面板编辑提交已取消；未发送",
+            "插件已停止；未发送旧稿",
+            "插件未完成编辑提交",
+            move |panel_id, op_id, reply| Control::Commit {
+                panel_id,
+                op_id,
+                request,
+                cancelled: cancel_clone,
+                expected_snapshot,
+                reply,
+            },
+        )
+        .await
     }
 
     pub(crate) async fn commit_response(

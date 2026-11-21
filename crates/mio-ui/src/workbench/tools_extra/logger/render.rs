@@ -1184,6 +1184,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_logger_filter_row_2(
         &self,
         search_term: &str,

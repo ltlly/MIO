@@ -171,8 +171,11 @@ pub(super) fn extract_scripts_from_response(url: &str, raw: &[u8]) -> Vec<Target
         .collect()
 }
 
+pub(super) type MultiItemExtExportRow =
+    (String, String, Option<u16>, String, Vec<u8>, Vec<u8>, String);
+
 pub(super) fn build_multi_item_ext_xml(
-    items: &[(String, String, Option<u16>, String, Vec<u8>, Vec<u8>, String)],
+    items: &[MultiItemExtExportRow],
 ) -> Result<String, String> {
     let now = crate::history::local_time(
         std::time::SystemTime::now()

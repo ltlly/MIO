@@ -543,14 +543,14 @@ impl Workbench {
                 self.flush_project_save(window, cx);
                 self.advance_settings_pool_delete(cx);
             }
-            Event::RepeaterOpened { project, mut tab } if self.project == Some(project) => {
-                if !self
+            Event::RepeaterOpened { project, mut tab } if self.project == Some(project)
+                && !self
                     .workspace
                     .tabs
                     .iter()
                     .chain(&self.workspace.closed)
                     .any(|existing| existing.id == tab.id)
-                {
+                => {
                     if tab.title.parse::<usize>().is_ok() {
                         tab.title = self.next_repeater_tab_title(None, Some(&tab.draft.raw));
                     }
@@ -567,7 +567,6 @@ impl Workbench {
                         self.fail(error, cx);
                     }
                 }
-            }
             _ => {}
         }
         ControlFlow::Continue(())

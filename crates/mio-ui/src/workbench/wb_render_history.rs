@@ -634,8 +634,8 @@ impl Workbench {
                 from_history()
             }
             Tool::Logger => {
-                if let Some(flow_id) = self.extra_tools.logger_selected {
-                    if let Some((record, _)) = self
+                if let Some(flow_id) = self.extra_tools.logger_selected
+                    && let Some((record, _)) = self
                         .extra_tools
                         .logger_loaded_detail
                         .as_deref()
@@ -650,7 +650,6 @@ impl Workbench {
                             return Some((url, Some(flow_id), "Logger"));
                         }
                     }
-                }
                 from_history()
             }
             Tool::Organiser => {

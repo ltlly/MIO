@@ -2159,6 +2159,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_inspector_sections_area(
         &self,
         parsed_http: Option<&InspectorData>,

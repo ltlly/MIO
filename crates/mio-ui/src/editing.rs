@@ -689,7 +689,7 @@ fn new_editor_with_language(
                             st.is_editable()
                                 && !st.has_marked_text()
                                 && st.document_revision() == expected_rev
-                                && st.text().len() >= start + 1
+                                && st.text().len() > start
                                 && st.text().slice(start..start + 1).to_string().as_bytes()
                                     == [byte]
                         };

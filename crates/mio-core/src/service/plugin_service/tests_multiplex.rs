@@ -7,13 +7,15 @@ use tokio::sync::mpsc;
 
 use super::*;
 
-fn setup_multiplex_state() -> (
+type MultiplexStateSetup = (
     State,
     mpsc::Receiver<Event>,
     Uuid,
     Arc<std::sync::Mutex<Vec<(String, u64, Uuid)>>>,
     tempfile::TempDir,
-) {
+);
+
+fn setup_multiplex_state() -> MultiplexStateSetup {
     let dir = tempfile::tempdir().unwrap();
     let worker_path = dir.path().join("mux-worker");
     fs::write(&worker_path, [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
@@ -111,7 +113,7 @@ async fn drain_op(
 fn add_tab(state: &mut State, label: &str, url: &str) -> (TabId, u64) {
     let mut ws = state.store.workspace().unwrap();
     let req = parse_request(
-        format!("GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n").as_bytes(),
+        b"GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n",
         url,
         HttpVersion::Http11,
     )
@@ -671,11 +673,7 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
         .unwrap();
         assert_eq!(session.negotiated_minor(), protocol::PROTOCOL_MINOR);
         let mut revs: HashMap<u64, u64> = HashMap::new();
-        loop {
-            let env = match session.receive() {
-                Ok(env) => env,
-                Err(_) => break,
-            };
+        while let Ok(env) = session.receive() {
             let reply_to = env.request_id;
             let pid = env.panel_id;
             let Some(body) = env.body else { break };
@@ -1186,11 +1184,7 @@ async fn failed_multiplex_init_propagates_close_error_diagnostic_and_keeps_closi
             reg,
         )
         .unwrap();
-        loop {
-            let env = match session.receive() {
-                Ok(env) => env,
-                Err(_) => break,
-            };
+        while let Ok(env) = session.receive() {
             let reply_to = env.request_id;
             let pid = env.panel_id;
             let Some(body) = env.body else { break };
@@ -1685,7 +1679,7 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
             let rev = ctx.next_panel_revision();
             Ok(mio_plugin_sdk::ui::snapshot(
                 rev,
-                &format!("panel-{panel_id}"),
+                format!("panel-{panel_id}"),
                 mio_plugin_api::panel::Node::new(
                     1,
                     "ed",
@@ -2633,9 +2627,8 @@ async fn service_unpolled_commits_cancelled_synchronously_with_bound_resources()
         let _ready = read_mux_duplex_frame(&mut worker_rx).await?;
 
         let mut revs: HashMap<u64, u64> = HashMap::from([(protocol::PANEL_ID, 1)]);
-        loop {
-            match read_mux_duplex_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_mux_duplex_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::OpenRequest(_))
                     | Some(envelope::Body::OpenResponse(_)) => {
@@ -2717,8 +2710,6 @@ async fn service_unpolled_commits_cancelled_synchronously_with_bound_resources()
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         Ok::<_, anyhow::Error>(())

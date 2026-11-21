@@ -331,6 +331,7 @@ impl State {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn begin_send(
         &mut self,
         project: ProjectKey,

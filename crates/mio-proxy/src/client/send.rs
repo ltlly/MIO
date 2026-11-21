@@ -351,15 +351,15 @@ pub(crate) async fn exchange_model_with_auth(
                 drain_auth_challenge_body(response.into_body(), deadline, &cancel, false).await?;
                 let (cnonce, _, _) = crate::auth::next_cnonce_and_challenge();
                 let uri_path = crate::auth::request_uri_path_and_query(&model.url);
-                let val = digest_chal.build_authorization_value(
-                    &creds.username,
-                    &creds.password,
-                    &model.method,
-                    &uri_path,
-                    &model.body,
-                    1,
-                    &cnonce,
-                );
+                let val = digest_chal.build_authorization_value(&crate::auth::DigestRequest {
+                    username: &creds.username,
+                    password: &creds.password,
+                    method: &model.method,
+                    uri_path: &uri_path,
+                    body: &model.body,
+                    nc: 1,
+                    cnonce: &cnonce,
+                });
                 if is_proxy {
                     proxy_auth_header = Some(val);
                 } else {

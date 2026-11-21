@@ -304,6 +304,7 @@ pub(in crate::store::intruder) fn sort_filtered_rows(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn view_row(
     connection: &Connection,
     run: &IntruderRunSummary,
@@ -315,7 +316,7 @@ pub(super) fn view_row(
     payloads: &mut BTreeMap<u64, Vec<result_view::PayloadSummary>>,
     grep_config: &crate::IntruderGrepConfig,
     message_query: &mut rusqlite::Statement<'_>,
-    mut full_message_query: Option<&mut rusqlite::Statement<'_>>,
+    full_message_query: Option<&mut rusqlite::Statement<'_>>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Option<IntruderResultViewRow>> {
     let Some(payloads) = payloads.remove(&ordinal) else {
@@ -360,7 +361,6 @@ pub(super) fn view_row(
                     crate::response_to_raw(response)
                 } else {
                     let full_stmt = full_message_query
-                        .as_deref_mut()
                         .context("Intruder grep 查询缺少完整响应语句")?;
                     super::filters::read_search_response(
                         full_stmt,

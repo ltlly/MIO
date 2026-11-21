@@ -5,6 +5,8 @@ use super::http_head::{
 use super::*;
 use std::ops::Range;
 
+type HeaderPreviewResult = (String, Vec<std::ops::Range<usize>>, Vec<usize>);
+
 impl MessageEditor {
     pub fn new<V: 'static>(window: &mut Window, cx: &mut gpui_kit::Context<V>) -> Self {
         let raw = new_editor(window, cx);
@@ -1262,7 +1264,7 @@ impl MessageEditor {
         bytes: &[u8],
         pretty: bool,
         non_printable: bool,
-    ) -> Result<(String, Vec<std::ops::Range<usize>>, Vec<usize>), String> {
+    ) -> Result<HeaderPreviewResult, String> {
         let formatted;
         let source = if pretty && !non_printable {
             formatted = mio_core::format_pretty_message(bytes)?;

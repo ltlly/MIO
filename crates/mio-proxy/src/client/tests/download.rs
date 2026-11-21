@@ -136,8 +136,10 @@ async fn download_to_sink_enforces_body_limits_redirects_and_non_2xx_snippets() 
             calls: calls.clone(),
             bytes: Vec::new(),
         };
-        let mut cfg = DownloadConfig::default();
-        cfg.max_body_bytes = 8;
+        let cfg = DownloadConfig {
+            max_body_bytes: 8,
+            ..Default::default()
+        };
         let err = download_to_sink(
             &format!("http://{addr}/too-big-cl"),
             cfg.clone(),
@@ -182,8 +184,10 @@ async fn download_to_sink_enforces_body_limits_redirects_and_non_2xx_snippets() 
         assert!(sink_404.bytes.is_empty());
 
         // Max redirects enforced
-        let mut cfg_redir = DownloadConfig::default();
-        cfg_redir.max_redirects = 2;
+        let cfg_redir = DownloadConfig {
+            max_redirects: 2,
+            ..Default::default()
+        };
         let err = download_to_sink(
             &format!("http://{addr}/loop"),
             cfg_redir,

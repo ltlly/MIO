@@ -125,7 +125,7 @@ impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
                 progress,
                 &mut |event| match event {
                     StreamExtEvent::ProxyFlow(item) => {
-                        if batch_proxy_count % 64 == 0 {
+                        if batch_proxy_count.is_multiple_of(64) {
                             check_cancel(cancel)?;
                         }
                         let tx = match active_tx.as_mut() {

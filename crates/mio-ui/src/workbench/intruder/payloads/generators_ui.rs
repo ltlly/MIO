@@ -568,13 +568,12 @@ impl Workbench {
             return;
         };
         let payload_type = self.current_intruder_payload_type(id, editors);
-        if payload_type == IntruderPayloadType::ExtensionGenerated {
-            if let Some((plugin_uuid, _)) = self.live_payload_plugins("payload_generator").first() {
+        if payload_type == IntruderPayloadType::ExtensionGenerated
+            && let Some((plugin_uuid, _)) = self.live_payload_plugins("payload_generator").first() {
                 let uuid = *plugin_uuid;
                 self.generate_plugin_intruder_payloads(id, uuid, window, cx);
                 return;
             }
-        }
         let selected = editors.payload_position;
         let input = editors.payload_input.clone();
         let raw = match editing::input_snapshot(&input, window, cx) {

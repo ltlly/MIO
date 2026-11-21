@@ -176,7 +176,7 @@ fn inspect_collection(
 }
 
 pub(crate) enum StreamExtEvent {
-    ProxyFlow(ImportedProxyFlow),
+    ProxyFlow(Box<ImportedProxyFlow>),
     RepeaterGroups(Vec<TabGroup>),
     RepeaterTab {
         index: usize,
@@ -236,7 +236,7 @@ pub(crate) fn stream_ext_file(
                             proxy_count += 1;
                             col_indexed += 1;
                             col_messages += msg_cnt;
-                            on_event(StreamExtEvent::ProxyFlow(flow))?;
+                            on_event(StreamExtEvent::ProxyFlow(Box::new(flow)))?;
                         }
                     }
                     col_report.indexed_items = col_indexed;
@@ -1558,7 +1558,7 @@ mod tests {
             );
             let mut fields = vec![
                 (2, (parsed_req as i64).to_be_bytes().to_vec()),
-                (11, ((1_700_000_000_000i64 + i as i64 * 10) as i64).to_be_bytes().to_vec()),
+                (11, (1_700_000_000_000i64 + i as i64 * 10).to_be_bytes().to_vec()),
                 (14, 8080i32.to_be_bytes().to_vec()),
                 (15, (orig_req as i64).to_be_bytes().to_vec()),
                 (18, (orig_resp as i64).to_be_bytes().to_vec()),

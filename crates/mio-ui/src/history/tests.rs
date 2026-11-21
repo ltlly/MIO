@@ -449,10 +449,10 @@ fn number_column_fits_four_digit_lead_row_with_highlight_combo_and_supports_five
             };
             let shaped_1402 = window
                 .text_system()
-                .shape_line("1402".into(), font_size, &[run_1402.clone()], None);
+                .shape_line("1402".into(), font_size, std::slice::from_ref(&run_1402), None);
             let shaped_9999 = window
                 .text_system()
-                .shape_line("9999".into(), font_size, &[run_1402.clone()], None);
+                .shape_line("9999".into(), font_size, std::slice::from_ref(&run_1402), None);
             let mut helv_font = window.text_style().font();
             helv_font.family = crate::theme::ui_font_family().into();
             let helv_run_1402 = gpui_kit::TextRun {

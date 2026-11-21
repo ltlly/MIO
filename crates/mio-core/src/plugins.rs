@@ -276,7 +276,7 @@ impl Drop for WindowsJob {
 
 enum WorkerTransport {
     Native {
-        child: Child,
+        child: Box<Child>,
         #[cfg(windows)]
         job: Option<WindowsJob>,
         stdin: tokio::process::ChildStdin,

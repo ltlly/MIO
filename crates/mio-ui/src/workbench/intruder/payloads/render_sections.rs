@@ -441,7 +441,14 @@ impl Workbench {
         editable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let specs: [(&'static str, &'static str, IconName, &'static str, fn() -> PayloadProcessingRule); 26] = [
+        type ProcessingRuleSpec = (
+            &'static str,
+            &'static str,
+            IconName,
+            &'static str,
+            fn() -> PayloadProcessingRule,
+        );
+        let specs: [ProcessingRuleSpec; 26] = [
             ("intruder-proc-prefix", "加前缀", IconName::Plus, "将载荷输入框中的文本作为前缀添加到当前列表每条载荷开头", || PayloadProcessingRule::AddPrefix(String::new())),
             ("intruder-proc-suffix", "加后缀", IconName::Plus, "将载荷输入框中的文本作为后缀追加到当前列表每条载荷末尾", || PayloadProcessingRule::AddSuffix(String::new())),
             ("intruder-proc-substring", "子串截取", IconName::Scissors, "按输入框中的 偏移:长度（留空默认 0:8）截取每条载荷子串", || PayloadProcessingRule::Substring { offset: 0, length: 8 }),

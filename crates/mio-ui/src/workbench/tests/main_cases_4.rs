@@ -105,10 +105,14 @@ fn websocket_intercept_queue_edits_forward_and_drop_without_losing_other_message
     // A Text frame edited into invalid UTF-8 via Hex is rejected atomically and stays queued.
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("intercept-hex", cx);
+        window.render_frame(cx);
         let hex = fixture.view.read(cx).intercepts[0].editor.hex.clone();
-        window.click(("input", hex.entity_id()), cx);
-        window.press(crate::kbd!("a"), cx);
-        window.input("ff", cx);
+        window
+            .within(("hex-grid-view", hex.entity_id()))
+            .click(("hex-byte-cell", 0usize), cx);
+        window.press("f", cx);
+        window.press("f", cx);
+        window.render_frame(cx);
         window.click("intercept-forward", cx);
         let view = fixture.view.read(cx);
         assert!(!view.intercepts[0].deciding);

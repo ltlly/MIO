@@ -732,12 +732,11 @@ impl Workbench {
             return;
         }
         if has_selection && self.tool != Tool::Intruder {
-            if self.inspector.dismissed_selection != current_identity {
-                if !self.inspector.open && self.can_auto_open_over_notes(window, cx) {
+            if self.inspector.dismissed_selection != current_identity
+                && !self.inspector.open && self.can_auto_open_over_notes(window, cx) {
                     self.inspector.open = true;
                     self.inspector.auto_opened_by_selection = true;
                 }
-            }
         } else if !has_selection && self.inspector.auto_opened_by_selection {
             let inspector_busy = self
                 .inspector

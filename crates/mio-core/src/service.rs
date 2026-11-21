@@ -429,7 +429,7 @@ enum Incoming {
     HttpQuery(http_query::Signal),
     AiIpc(ai_ipc::AiIpcCall),
     IpcRepeaterCompleted(
-        std::result::Result<ai_ipc::IpcRepeaterCompletion, tokio::task::JoinError>,
+        Box<std::result::Result<ai_ipc::IpcRepeaterCompletion, tokio::task::JoinError>>,
     ),
     SessionTrace((ProjectKey, SessionTraceEntry)),
     ServerCertObserved((ProjectKey, ObservedServerCert)),

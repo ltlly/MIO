@@ -252,6 +252,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_intruder_group_pill(
         &self,
         id: Uuid,

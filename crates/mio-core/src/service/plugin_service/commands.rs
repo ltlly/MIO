@@ -354,7 +354,7 @@ impl State {
                 ensure!(
                     panel.revision == expected_snapshot.revision
                         || panel::commit_panel_semantically_matches(
-                            Some(&panel),
+                            Some(panel),
                             &expected_snapshot,
                             &editor,
                         ),

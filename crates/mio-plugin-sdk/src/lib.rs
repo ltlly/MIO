@@ -300,6 +300,13 @@ struct Runner<R: Read, W: Write> {
     initial_rev: u64,
 }
 
+struct PanelCallResult<T> {
+    outcome: T,
+    replied: bool,
+    cancelled: bool,
+    post_reply_updates: Vec<PanelUpdate>,
+}
+
 impl<R: Read, W: Write> Runner<R, W> {
     fn with_context<T>(
         &mut self,
@@ -307,9 +314,9 @@ impl<R: Read, W: Write> Runner<R, W> {
         parent_request_id: u64,
         allow_panel_reply: bool,
         f: impl FnOnce(&mut HostContext<'_, R, W>) -> T,
-    ) -> (T, bool, bool, Vec<PanelUpdate>) {
+    ) -> PanelCallResult<T> {
         let mut post_reply_updates = Vec::new();
-        let (out, replied, cancelled) = {
+        let (outcome, replied, cancelled) = {
             let mut ctx = HostContext::new(
                 &mut self.session,
                 &mut self.deferred,
@@ -319,10 +326,15 @@ impl<R: Read, W: Write> Runner<R, W> {
                 &mut self.panel_revisions,
                 &mut post_reply_updates,
             );
-            let out = f(&mut ctx);
-            (out, ctx.replied, ctx.cancelled)
+            let outcome = f(&mut ctx);
+            (outcome, ctx.replied, ctx.cancelled)
         };
-        (out, replied, cancelled, post_reply_updates)
+        PanelCallResult {
+            outcome,
+            replied,
+            cancelled,
+            post_reply_updates,
+        }
     }
 
     fn finish_panel_call(
@@ -330,11 +342,14 @@ impl<R: Read, W: Write> Runner<R, W> {
         panel_id: u64,
         reply_to: u64,
         allow_panel_reply: bool,
-        replied: bool,
-        cancelled: bool,
-        outcome: Result<PanelUpdate, String>,
-        post_reply_updates: Vec<PanelUpdate>,
+        result: PanelCallResult<Result<PanelUpdate, String>>,
     ) -> io::Result<()> {
+        let PanelCallResult {
+            outcome,
+            replied,
+            cancelled,
+            post_reply_updates,
+        } = result;
         if self.deferred.shutdown_requested {
             return Ok(());
         }
@@ -400,17 +415,8 @@ impl<R: Read, W: Write> Runner<R, W> {
         self.panel_revisions
             .entry(panel_id)
             .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-        let (res, replied, cancelled, post_reply_updates) =
-            self.with_context(panel_id, reply_to, true, f);
-        self.finish_panel_call(
-            panel_id,
-            reply_to,
-            true,
-            replied,
-            cancelled,
-            res,
-            post_reply_updates,
-        )
+        let call = self.with_context(panel_id, reply_to, true, f);
+        self.finish_panel_call(panel_id, reply_to, true, call)
     }
 
     fn dispatch_typed<T>(
@@ -425,8 +431,12 @@ impl<R: Read, W: Write> Runner<R, W> {
         self.panel_revisions
             .entry(panel_id)
             .or_insert_with(|| PanelRevisionState::new(default_rev));
-        let (out, _replied, cancelled, post_reply_updates) =
-            self.with_context(panel_id, reply_to, false, f);
+        let PanelCallResult {
+            outcome: out,
+            cancelled,
+            post_reply_updates,
+            ..
+        } = self.with_context(panel_id, reply_to, false, f);
         if self.deferred.shutdown_requested {
             return Ok(());
         }
@@ -488,17 +498,8 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
         initial_rev,
     };
 
-    let (ready_res, ready_replied, ready_cancelled, ready_extra) =
-        runner.with_context(PANEL_ID, 0, false, |ctx| plugin.on_ready(ctx));
-    runner.finish_panel_call(
-        PANEL_ID,
-        0,
-        false,
-        ready_replied,
-        ready_cancelled,
-        ready_res,
-        ready_extra,
-    )?;
+    let ready_call = runner.with_context(PANEL_ID, 0, false, |ctx| plugin.on_ready(ctx));
+    runner.finish_panel_call(PANEL_ID, 0, false, ready_call)?;
     if runner.deferred.shutdown_requested {
         return Ok(());
     }
@@ -649,19 +650,10 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
                 {
                     continue;
                 }
-                let (res, replied, cancelled, post_reply_updates) =
-                    runner.with_context(panel_id, 0, false, |ctx| {
-                        plugin.on_host_result(ctx, panel_id, in_reply_to, result)
-                    });
-                runner.finish_panel_call(
-                    panel_id,
-                    0,
-                    false,
-                    replied,
-                    cancelled,
-                    res,
-                    post_reply_updates,
-                )?;
+                let call = runner.with_context(panel_id, 0, false, |ctx| {
+                    plugin.on_host_result(ctx, panel_id, in_reply_to, result)
+                });
+                runner.finish_panel_call(panel_id, 0, false, call)?;
             }
             envelope::Body::Cancel(cancel) => {
                 if panel_id != PANEL_ID && !runner.panel_revisions.contains_key(&panel_id) {
@@ -677,15 +669,14 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
                     .panel_revisions
                     .entry(panel_id)
                     .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let (res, _replied, _cancelled, _post_reply_updates) = runner
-                    .with_context(panel_id, reply_to, false, |ctx| {
-                        plugin.on_cancel(ctx, panel_id, cancel)
-                    });
+                let cancel_call = runner.with_context(panel_id, reply_to, false, |ctx| {
+                    plugin.on_cancel(ctx, panel_id, cancel)
+                });
                 if runner.deferred.shutdown_requested {
                     break;
                 }
                 let rev = runner.panel_revisions[&panel_id].published;
-                let wire = match res {
+                let wire = match cancel_call.outcome {
                     Ok(_) => envelope::Body::Ack(Empty {}),
                     Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
                 };
@@ -701,25 +692,16 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
                 let prev_published = state.published;
                 state.pending = state.pending.max(state.published).max(snapshot.revision);
                 state.published = snapshot.revision;
-                let (res, replied, cancelled, post_reply_updates) = runner
-                    .with_context(panel_id, reply_to, true, |ctx| {
-                        plugin.on_resync(ctx, panel_id, snapshot)
-                    });
-                if res.is_err()
-                    && !replied
+                let resync_call = runner.with_context(panel_id, reply_to, true, |ctx| {
+                    plugin.on_resync(ctx, panel_id, snapshot)
+                });
+                if resync_call.outcome.is_err()
+                    && !resync_call.replied
                     && let Some(state) = runner.panel_revisions.get_mut(&panel_id)
                 {
                     state.published = prev_published;
                 }
-                runner.finish_panel_call(
-                    panel_id,
-                    reply_to,
-                    true,
-                    replied,
-                    cancelled,
-                    res,
-                    post_reply_updates,
-                )?;
+                runner.finish_panel_call(panel_id, reply_to, true, resync_call)?;
             }
             _ => return Err(io::Error::other("worker 收到方向无效的消息")),
         }

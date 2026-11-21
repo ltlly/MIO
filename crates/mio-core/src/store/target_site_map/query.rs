@@ -209,7 +209,7 @@ impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::Site
             crate::HistoryRow::Live(summary) if !pending_rows.iter().any(|p| p.summary.id == summary.id) => Some(summary.clone()),
             _ => None,
         }).collect();
-        explicit_live.sort_by(|l, r| live_order(l.started_unix_ms, l.id).cmp(&live_order(r.started_unix_ms, r.id)));
+        explicit_live.sort_by_key(|l| live_order(l.started_unix_ms, l.id));
         let mut explicit_index = 0usize;
         pending_rows.sort_by(|left, right| {
             live_order(left.summary.started_unix_ms, left.summary.id)

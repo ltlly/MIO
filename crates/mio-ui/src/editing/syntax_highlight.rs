@@ -470,16 +470,18 @@ pub(crate) fn tokenize_http_with_badges(
     tokenize_http_with_badges_and_meta(text, badges, &payload_markers).0
 }
 
-fn tokenize_http_with_badges_and_meta(
-    text: &str,
-    badges: &[Range<usize>],
-    payload_markers: &[Range<usize>],
-) -> (
+type TokenizeHttpResult = (
     Vec<(Range<usize>, TokenKind)>,
     usize,
     String,
     Option<super::syntax_highlight_body::JsonLexState>,
-) {
+);
+
+fn tokenize_http_with_badges_and_meta(
+    text: &str,
+    badges: &[Range<usize>],
+    payload_markers: &[Range<usize>],
+) -> TokenizeHttpResult {
     if text.is_empty() {
         return (Vec::new(), 0, String::new(), None);
     }

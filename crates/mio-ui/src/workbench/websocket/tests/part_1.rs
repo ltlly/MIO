@@ -167,7 +167,9 @@ fn websocket_row_click_reads_only_latest_binary_payload_and_keeps_it_readonly(
         window.render_frame(cx);
         let editor = fixture.view.read(cx).websocket.payload.hex.clone();
         assert_eq!(editor.read(cx).value().as_ref(), "00 ff 01");
-        window.click(("input", editor.entity_id()), cx);
+        window
+            .within(("hex-grid-view", editor.entity_id()))
+            .click(("hex-byte-cell", 0usize), cx);
         window.press(crate::kbd!("a"), cx);
         window.input("00", cx);
         assert_eq!(editor.read(cx).value().as_ref(), "00 ff 01");

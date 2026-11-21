@@ -218,6 +218,7 @@ impl crate::store::IntruderRepo<&mut ProjectStore> {
     }
 }
 
+#[allow(clippy::needless_lifetimes)]
 impl<'a> crate::store::IntruderRepo<&'a ProjectStore> {
     #[cfg(test)]
     pub(crate) fn test_connection(self, id: Uuid) -> Result<&'a Connection> {

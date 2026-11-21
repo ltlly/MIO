@@ -1,5 +1,14 @@
 use super::*;
 
+type PluginTarget<'a> = (
+    crate::plugins::PluginHandle,
+    ChannelIdentity,
+    u64,
+    Option<TabId>,
+    &'a HashMap<Uuid, u64>,
+    &'a PanelSnapshot,
+);
+
 impl PluginState {
     pub(crate) fn with_preferences(prefs: PluginPreferencesStore) -> Self {
         Self::with_stores(prefs, PluginRegistryStore::new(None))
@@ -128,17 +137,7 @@ impl State {
         Ok(instance)
     }
 
-    pub(super) fn plugin_target(
-        &self,
-        instance_id: Uuid,
-    ) -> Result<(
-        crate::plugins::PluginHandle,
-        ChannelIdentity,
-        u64,
-        Option<TabId>,
-        &HashMap<Uuid, u64>,
-        &PanelSnapshot,
-    )> {
+    pub(super) fn plugin_target(&self, instance_id: Uuid) -> Result<PluginTarget<'_>> {
         ensure!(
             !self.quiesced && !self.plugins.stopping,
             "项目正在关闭；插件操作已拒绝"

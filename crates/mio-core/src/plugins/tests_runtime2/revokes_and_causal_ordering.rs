@@ -417,9 +417,8 @@ async fn real_duplex_supervisor_full_control_queue_revoke_cancels_queued_and_def
         let mut seen_results = 0usize;
         let mut acked_main_events = 0usize;
         let mut close_count = 0usize;
-        loop {
-            match read_async_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_async_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::HostResult(_)) => {
                         seen_results += 1;
@@ -469,8 +468,6 @@ async fn real_duplex_supervisor_full_control_queue_revoke_cancels_queued_and_def
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         ensure!(close_count == 2, "expected both CloseRequests, saw {close_count}");
@@ -1079,9 +1076,8 @@ async fn real_duplex_supervisor_evicted_revoke_seq_floor_still_blocks_old_queued
 
         let mut close_count = 0usize;
         let mut reopen_ok = false;
-        loop {
-            match read_async_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_async_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::CloseRequest(ref c)) => {
                         ensure!(!c.destroy_panel);
@@ -1114,8 +1110,6 @@ async fn real_duplex_supervisor_evicted_revoke_seq_floor_still_blocks_old_queued
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         ensure!(close_count == 1 && reopen_ok);
@@ -1492,9 +1486,8 @@ async fn concurrent_handles_and_late_older_revoke_preserve_newer_explicit_open()
         let _ready = read_async_frame(&mut worker_rx).await?;
 
         let mut p2_rev = 0u64;
-        loop {
-            match read_async_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_async_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::OpenRequest(_)) => {
                         p2_rev += 1;
@@ -1533,8 +1526,6 @@ async fn concurrent_handles_and_late_older_revoke_preserve_newer_explicit_open()
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         Ok::<_, anyhow::Error>(())
@@ -1853,9 +1844,8 @@ async fn real_duplex_supervisor_revoke_cancels_unpermitted_open_waiting_on_full_
 
         let mut close_count = 0usize;
         let mut reopen_ok = false;
-        loop {
-            match read_async_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_async_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::CommitEditor(_)) => {
                         bail!("revoked pre-permit CommitEditor must never reach worker");
@@ -1905,8 +1895,6 @@ async fn real_duplex_supervisor_revoke_cancels_unpermitted_open_waiting_on_full_
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         ensure!(close_count == 1 && reopen_ok);
@@ -2137,9 +2125,8 @@ async fn real_duplex_supervisor_begin_commit_cancelled_before_poll_on_bound_reso
         worker_tx.flush().await?;
         let _ready = read_async_frame(&mut worker_rx).await?;
 
-        loop {
-            match read_async_frame(&mut worker_rx).await {
-                Ok(env) => match env.body {
+        while let Ok(env) = read_async_frame(&mut worker_rx).await {
+            match env.body {
                     Some(envelope::Body::Shutdown(_)) => break,
                     Some(envelope::Body::OpenRequest(_)) => {
                         let snap = send_frame(
@@ -2212,8 +2199,6 @@ async fn real_duplex_supervisor_begin_commit_cancelled_before_poll_on_bound_reso
                         worker_tx.flush().await?;
                     }
                     _ => {}
-                },
-                Err(_) => break,
             }
         }
         Ok::<_, anyhow::Error>(())
@@ -2573,7 +2558,7 @@ async fn real_duplex_supervisor_batch_revoke_cancels_deferred_second_open_before
     );
 
     // Worker must not have seen res_b rev=2 open or res_a/res_b closes yet while res_c is held.
-    assert!(received_closes.lock().unwrap().as_slice() == &[(2, res_c, false)]);
+    assert!(received_closes.lock().unwrap().as_slice() == [(2, res_c, false)]);
     assert!(
         received_opens
             .lock()

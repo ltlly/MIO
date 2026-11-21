@@ -314,7 +314,7 @@ impl RepeaterTargetDialog {
         {
             Ok(target) => target,
             Err(error) => {
-                self.error = Some(error.into());
+                self.error = Some(error);
                 cx.notify();
                 return;
             }
@@ -763,6 +763,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_repeater_toolbar_right(
         &self,
         id: TabId,
@@ -1661,6 +1662,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_repeater_history_nav_pair(
         &self,
         tab_id: TabId,

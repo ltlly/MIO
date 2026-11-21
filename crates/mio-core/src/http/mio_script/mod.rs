@@ -31,6 +31,7 @@ pub(super) use eval::version_from_script;
 pub use highlight::script_keyword_ranges;
 
 /// Compatibility wrapper around [`eval_http_filter_script_input`] with default scope.
+#[allow(clippy::too_many_arguments)]
 pub fn eval_http_filter_script(
     script: &str,
     method: &str,
@@ -63,6 +64,7 @@ pub fn eval_http_filter_script(
 
 /// Compatibility wrapper around [`eval_http_filter_script_input`] with boolean highlight and cancel token.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_http_filter_script_with_scope_and_cancel(
     script: &str,
     method: &str,
@@ -96,6 +98,7 @@ pub(crate) fn eval_http_filter_script_with_scope_and_cancel(
 }
 
 /// Compatibility wrapper around [`eval_http_filter_script_input`] with highlight color code and cancel token.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_http_filter_script_with_highlight_color_and_cancel(
     script: &str,
     method: &str,
@@ -153,6 +156,7 @@ pub fn eval_ws_filter_script(
 }
 
 /// Compatibility wrapper around [`eval_ws_filter_script_input`] with explicit `in_scope`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_ws_filter_script_with_scope(
     script: &str,
     url: &str,

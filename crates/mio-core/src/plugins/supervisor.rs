@@ -11,15 +11,18 @@ pub struct PluginSupervisor {
     terminal_error: Option<String>,
 }
 #[cfg(test)]
+type MultiplexTestHarness = (
+    PluginSupervisor,
+    mpsc::Sender<PluginEvent>,
+    Arc<std::sync::Mutex<Vec<(String, u64, Uuid)>>>,
+);
+
+#[cfg(test)]
 pub(crate) fn spawn_test_multiplex_supervisor(
     identity: ChannelIdentity,
     manifest: PluginManifest,
     panel: Arc<PanelSnapshot>,
-) -> (
-    PluginSupervisor,
-    mpsc::Sender<PluginEvent>,
-    Arc<std::sync::Mutex<Vec<(String, u64, Uuid)>>>,
-) {
+) -> MultiplexTestHarness {
     let (control, mut commands) = mpsc::channel::<SequencedControl>(QUEUE_CAPACITY);
     let (urgent_control, mut urgent_commands) = mpsc::unbounded_channel::<SequencedControl>();
     let control_order = Arc::new(std::sync::Mutex::new(ControlOrderState::default()));
@@ -476,7 +479,7 @@ impl PluginSupervisor {
             match timeout(MAX_OPERATION, handshake).await {
                 Ok(Ok((state, seq, multiplexing))) => (
                     WorkerTransport::Native {
-                        child,
+                        child: Box::new(child),
                         #[cfg(windows)]
                         job,
                         stdin,

@@ -373,6 +373,7 @@ impl Running {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_stream_io<W, R>(
         mut stdin: W,
         mut stdout: R,
@@ -685,7 +686,7 @@ impl Running {
         }
         let (terminated, reaped) = if let Some((mut child, job)) = native_child.take() {
             #[cfg(not(windows))]
-            let _ = job;
+            let _ = &job;
             #[cfg(windows)]
             if let Some(ref j) = job {
                 let _ = j.terminate();

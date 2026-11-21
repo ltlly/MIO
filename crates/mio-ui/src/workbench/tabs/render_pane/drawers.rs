@@ -494,9 +494,9 @@ std::thread_local! {
 fn custom_actions_library_path() -> AnyResult<Option<PathBuf>> {
     #[cfg(test)]
     if let Some(path) = TEST_CUSTOM_ACTIONS_PATH.with(|cell| cell.borrow().clone()) {
-        return Ok(Some(path));
+        Ok(Some(path))
     } else {
-        return Ok(None);
+        Ok(None)
     }
     #[cfg(not(test))]
     Ok(Some(
@@ -680,7 +680,7 @@ fn decode_b64url_json(segment: &str) -> Option<String> {
         .decode(trimmed)
         .or_else(|_| {
             let mut std_b64 = trimmed.replace('-', "+").replace('_', "/");
-            while std_b64.len() % 4 != 0 {
+            while !std_b64.len().is_multiple_of(4) {
                 std_b64.push('=');
             }
             B64_STANDARD.decode(&std_b64)
@@ -778,9 +778,8 @@ fn summarize_request_body(content_type: &str, body: &[u8]) -> (String, bool) {
         return ("空正文 (0 B)".into(), false);
     }
     let ct_lower = content_type.to_ascii_lowercase();
-    if ct_lower.contains("application/json") || body.first().is_some_and(|&b| b == b'{' || b == b'[')
-    {
-        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) {
+    if (ct_lower.contains("application/json") || body.first().is_some_and(|&b| b == b'{' || b == b'['))
+        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) {
             match &val {
                 serde_json::Value::Object(map) => {
                     let keys: Vec<&str> = map.keys().map(String::as_str).collect();
@@ -808,7 +807,6 @@ fn summarize_request_body(content_type: &str, body: &[u8]) -> (String, bool) {
                 _ => return (format!("JSON 标量 · {} B", body.len()), false),
             }
         }
-    }
     if ct_lower.contains("application/x-www-form-urlencoded") {
         let pairs: Vec<(String, String)> =
             form_urlencoded::parse(body).into_owned().collect();
@@ -1510,18 +1508,16 @@ impl Workbench {
                     )
                     .ok()
                 };
-                let history_rows: Vec<mio_core::RepeaterHistoryEntry> = self
+                let history_rows: Vec<mio_core::RepeaterHistoryEntry> = if self
                     .repeater_history
                     .owner
-                    .is_some_and(|(_, id)| id == tab_id)
-                    .then(|| {
+                    .is_some_and(|(_, id)| id == tab_id) { {
                         self.repeater_history
                             .page
                             .as_ref()
                             .map(|p| p.rows.clone())
                             .unwrap_or_default()
-                    })
-                    .unwrap_or_default();
+                    } } else { Default::default() };
 
                 let url_str = parsed_req
                     .as_ref()

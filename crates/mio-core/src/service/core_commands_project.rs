@@ -355,7 +355,7 @@ impl State {
     fn updater_fallback_route(&self) -> Result<mio_proxy::UpstreamRoute> {
         let ws = self.store.metadata().workspace()?;
         let tls = self.preferences.effective_upstream_tls(&ws.upstream_tls)?;
-        Ok(ws.upstream_proxy.to_route_with_tls(tls)?)
+        ws.upstream_proxy.to_route_with_tls(tls)
     }
 
     pub(super) async fn apply_save_workspace(

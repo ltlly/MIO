@@ -467,21 +467,23 @@ async fn ntlm_handshake_reuses_ephemeral_connection_without_polluting_global_poo
                 .unwrap();
         });
 
-        let mut config = SendConfig::default();
-        config.auth = crate::AuthConfig {
-            platform_enabled: true,
-            platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
-                enabled: true,
-                destination_host: "*".into(),
-                credentials: crate::AuthCredentials {
-                    scheme: crate::HttpAuthScheme::NtlmV2,
-                    username: "user".into(),
-                    password: "secret".into(),
-                    domain: "LAB".into(),
-                    workstation: "WS01".into(),
-                },
-            }]),
-            upstream_rules: std::sync::Arc::from([]),
+        let config = SendConfig {
+            auth: crate::AuthConfig {
+                platform_enabled: true,
+                platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
+                    enabled: true,
+                    destination_host: "*".into(),
+                    credentials: crate::AuthCredentials {
+                        scheme: crate::HttpAuthScheme::NtlmV2,
+                        username: "user".into(),
+                        password: "secret".into(),
+                        domain: "LAB".into(),
+                        workstation: "WS01".into(),
+                    },
+                }]),
+                upstream_rules: std::sync::Arc::from([]),
+            },
+            ..Default::default()
         };
 
         let response = send(
@@ -613,20 +615,22 @@ async fn prepared_send_applies_platform_and_upstream_auth_consistently() {
                     .await
                     .unwrap();
             });
-            let mut config = SendConfig::default();
-            config.auth = crate::AuthConfig {
-                platform_enabled: true,
-                platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
-                    enabled: true,
-                    destination_host: "*".into(),
-                    credentials: crate::AuthCredentials {
-                        scheme: crate::HttpAuthScheme::Basic,
-                        username: "alice".into(),
-                        password: "secret".into(),
-                        ..Default::default()
-                    },
-                }]),
-                upstream_rules: std::sync::Arc::from([]),
+            let config = SendConfig {
+                auth: crate::AuthConfig {
+                    platform_enabled: true,
+                    platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
+                        enabled: true,
+                        destination_host: "*".into(),
+                        credentials: crate::AuthCredentials {
+                            scheme: crate::HttpAuthScheme::Basic,
+                            username: "alice".into(),
+                            password: "secret".into(),
+                            ..Default::default()
+                        },
+                    }]),
+                    upstream_rules: std::sync::Arc::from([]),
+                },
+                ..Default::default()
             };
             let req = HttpRequest {
                 method: "GET".into(),
@@ -672,20 +676,22 @@ async fn prepared_send_applies_platform_and_upstream_auth_consistently() {
                     .await
                     .unwrap();
             });
-            let mut config = SendConfig::default();
-            config.auth = crate::AuthConfig {
-                platform_enabled: true,
-                platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
-                    enabled: true,
-                    destination_host: "*".into(),
-                    credentials: crate::AuthCredentials {
-                        scheme: crate::HttpAuthScheme::Digest,
-                        username: "bob".into(),
-                        password: "pw".into(),
-                        ..Default::default()
-                    },
-                }]),
-                upstream_rules: std::sync::Arc::from([]),
+            let config = SendConfig {
+                auth: crate::AuthConfig {
+                    platform_enabled: true,
+                    platform_rules: std::sync::Arc::from([crate::PlatformAuthRuleConfig {
+                        enabled: true,
+                        destination_host: "*".into(),
+                        credentials: crate::AuthCredentials {
+                            scheme: crate::HttpAuthScheme::Digest,
+                            username: "bob".into(),
+                            password: "pw".into(),
+                            ..Default::default()
+                        },
+                    }]),
+                    upstream_rules: std::sync::Arc::from([]),
+                },
+                ..Default::default()
             };
             let req = HttpRequest {
                 method: "GET".into(),

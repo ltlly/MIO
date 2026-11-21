@@ -5,6 +5,8 @@ use super::decode_ext::{
     extract_editor_selection, extract_intruder_textarea_selection, format_selection_stats,
 };
 use super::*;
+
+type SelectionSurfaceProbe = (Vec<(SelectionIdentity, bool, u64)>, bool);
 use crate::{editing::SelectionCandidate, plugin_panel::NativePanel};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{ButtonRounded, ButtonVariants};
@@ -376,7 +378,7 @@ impl Workbench {
         &self,
         window: &Window,
         cx: &App,
-    ) -> Option<(Vec<(SelectionIdentity, bool, u64)>, bool)> {
+    ) -> Option<SelectionSurfaceProbe> {
         if self.shutdown_requested || self.transition == Some(TransitionPhase::Switching) {
             return Some((Vec::new(), false));
         }

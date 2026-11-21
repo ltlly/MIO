@@ -372,6 +372,7 @@ impl Workbench {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::workbench) fn plugin_panel(
         &mut self,
         identity: ChannelIdentity,
@@ -655,6 +656,7 @@ impl Workbench {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::workbench) fn handle_plugin_auto_loaded(
         &mut self,
         project: ProjectKey,

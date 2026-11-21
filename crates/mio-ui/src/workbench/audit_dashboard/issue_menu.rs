@@ -516,6 +516,7 @@ pub(super) fn build_issue_row_menu(
     .item(PopupMenuItem::submenu("高亮 (Highlight)", highlight_submenu))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_issue_header_context_menu(
     view: WeakEntity<Workbench>,
     col_ix: usize,

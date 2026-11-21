@@ -223,7 +223,7 @@ pub fn inspect_passive(
         "Access-Control-Allow-Origin: null",
         true,
     );
-    if let Some((tok, in_req)) = find_alg_none_jwt(req, resp, &body) {
+    if let Some((tok, in_req)) = find_alg_none_jwt(req, resp, body) {
         if in_req {
             b.rqs = spans(&request_to_raw(req), tok.as_bytes());
         }

@@ -58,17 +58,13 @@ impl StreamedResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CapturedFlowMetrics {
     pub remote_ip: Option<std::net::IpAddr>,
     pub response_received_ms: Option<u64>,
     pub reason_phrase: Option<Vec<u8>>,
 }
 
-impl Default for CapturedFlowMetrics {
-    fn default() -> Self {
-        Self { remote_ip: None, response_received_ms: None, reason_phrase: None }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedFlow {

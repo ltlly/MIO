@@ -86,6 +86,7 @@ impl Workbench {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::workbench) fn spawn_save_path_picker(
         &mut self,
         suggested_name: Option<&str>,

@@ -157,6 +157,7 @@ impl Workbench {
         self.load_audit_finding_detail_only(finding_id, switch_to_issues_tab, window, cx);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::workbench) fn handle_audit_issue_row_click(
         &mut self,
         row_members: &[Uuid],

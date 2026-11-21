@@ -1154,7 +1154,7 @@ impl Workbench {
             .timer(std::time::Duration::from_secs(15));
         cx.spawn(async move |_, cx| {
             timer.await;
-            let _ = cx.update(|_| {
+            cx.update(|_| {
                 *sub_timeout.borrow_mut() = None;
             });
         })
@@ -1416,7 +1416,7 @@ impl Workbench {
             .timer(std::time::Duration::from_secs(15));
         cx.spawn(async move |_, cx| {
             timer.await;
-            let _ = cx.update(|_| {
+            cx.update(|_| {
                 *sub_timeout.borrow_mut() = None;
             });
         })

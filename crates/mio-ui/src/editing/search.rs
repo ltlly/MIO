@@ -556,6 +556,7 @@ impl MessageEditor {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_search_nav_button<V: 'static>(
         button_id: String,
         icon: IconName,

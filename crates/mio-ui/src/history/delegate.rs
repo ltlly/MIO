@@ -724,10 +724,11 @@ impl TableDelegate for HistoryDelegate {
                 }
             })
             .unwrap_or_else(|| "HTTP history item".into());
-        let (existing_findings, plugin_items): (
+        type ContextMenuItems = (
             Vec<(mio_core::Uuid, String)>,
             Vec<(mio_core::Uuid, String)>,
-        ) = self
+        );
+        let (existing_findings, plugin_items): ContextMenuItems = self
             .owner
             .as_ref()
             .and_then(WeakEntity::upgrade)
@@ -1135,7 +1136,8 @@ impl TableDelegate for HistoryDelegate {
         } else {
             menu
         };
-        let menu = menu
+
+        menu
             .separator()
             .menu_with_icon(
                 "删除选中记录",
@@ -1229,8 +1231,7 @@ impl TableDelegate for HistoryDelegate {
                             });
                         }
                     }),
-            );
-        menu
+            )
     }
 
     fn render_empty(

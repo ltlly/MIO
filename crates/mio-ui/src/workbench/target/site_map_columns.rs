@@ -375,6 +375,7 @@ impl Workbench {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::workbench) fn build_target_header_context_menu(
     view: WeakEntity<Workbench>,
     col_ix: usize,

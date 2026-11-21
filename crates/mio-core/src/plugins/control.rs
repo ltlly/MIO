@@ -1,5 +1,7 @@
 use super::*;
 
+type CancelledPendingMeta = (u64, u64, bool, Option<u64>);
+
 enum PendingUrgentClose {
     NonDestroy {
         urgent_seq: u64,
@@ -90,7 +92,7 @@ impl Running {
         reason: &str,
         send_cancel: bool,
         expect_late_reply: bool,
-    ) -> (bool, bool, Option<(u64, u64, bool, Option<u64>)>) {
+    ) -> (bool, bool, Option<CancelledPendingMeta>) {
         let Some((
             panel_id,
             panel_revision_at_send,
@@ -400,12 +402,12 @@ impl Running {
         &mut self,
         panel_id: u64,
         command: SequencedControl,
-    ) -> std::result::Result<(), SequencedControl> {
+    ) -> std::result::Result<(), Box<SequencedControl>> {
         let Some(slot) = self.panels.get_mut(&panel_id).filter(|slot| !slot.closing) else {
-            return Err(command);
+            return Err(Box::new(command));
         };
         if slot.deferred_commands.len() >= MAX_DEFERRED_PANEL_COMMANDS {
-            return Err(command);
+            return Err(Box::new(command));
         }
         slot.deferred_commands.push_back(command);
         Ok(())

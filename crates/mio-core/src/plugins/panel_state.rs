@@ -84,7 +84,7 @@ enum OptimisticFieldValue {
 }
 
 impl OptimisticFieldValue {
-    fn into_viewport(&self) -> Option<u64> {
+    fn viewport(&self) -> Option<u64> {
         match self {
             Self::Viewport { revision, .. } => Some(*revision),
             _ => None,
@@ -192,7 +192,7 @@ impl PanelState {
             .get(&OptimisticFieldKey::Viewport(table_id))
         {
             Some(ledger) if completed_request_id == 0 => {
-                ledger.base.into_viewport().unwrap_or(current_vp)
+                ledger.base.viewport().unwrap_or(current_vp)
             }
             Some(ledger) => ledger
                 .pending
@@ -205,7 +205,7 @@ impl PanelState {
                 })
                 .map(|e| &e.value)
                 .unwrap_or(&ledger.base)
-                .into_viewport()
+                .viewport()
                 .unwrap_or(current_vp),
             None => current_vp,
         }
@@ -244,6 +244,7 @@ impl PanelState {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn table_watermark_allowed_for_request(
         &self,
         table_id: u64,
@@ -281,7 +282,7 @@ impl PanelState {
             .is_some_and(|ledger| {
                 ledger.pending.iter().any(|e| {
                     !unclaimed_request_ids.contains(&e.request_id)
-                        && e.value.into_viewport() == Some(candidate_vp)
+                        && e.value.viewport() == Some(candidate_vp)
                 })
             })
         {
@@ -1181,7 +1182,7 @@ impl PanelState {
                 .find(|e| !e.uncertain && !active_request_ids.contains(&e.request_id))
                 .map(|e| &e.value)
                 .unwrap_or(&ledger.base)
-                .into_viewport()
+                .viewport()
                 && let Some(node) = root.find_mut(table_id)
                 && let Some(node::Kind::VirtualTable(table)) = &mut node.kind
             {
@@ -1302,7 +1303,7 @@ impl PanelState {
                     let confirmed_vp = self
                         .optimistic_fields
                         .get(&OptimisticFieldKey::Viewport(table_id))
-                        .and_then(|ledger| ledger.base.into_viewport())
+                        .and_then(|ledger| ledger.base.viewport())
                         .unwrap_or(table.viewport_revision);
                     if confirmed_vp < rev {
                         if offset == 0 || offset < table.total_rows {

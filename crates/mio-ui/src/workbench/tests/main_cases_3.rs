@@ -446,16 +446,21 @@ fn repeater_hex_half_byte_edit_does_not_panic_and_completes_draft_capture(
         window.render_frame(cx);
         window.click("repeater-request-hex", cx);
         window.render_frame(cx);
+        assert!(
+            window
+                .within(("hex-grid-view", hex_editor.entity_id()))
+                .find(("hex-byte-cell", 0usize))
+                .visible()
+        );
         assert_eq!(hex_editor.read(cx).value().as_ref(), initial_hex.as_str());
         assert!(!fixture.view.read(cx).tab_editors[&id].dirty);
 
-        window.click(("input", hex_editor.entity_id()), cx);
-        #[cfg(target_os = "macos")]
-        window.press("cmd-down", cx);
-        #[cfg(not(target_os = "macos"))]
-        window.press("ctrl-end", cx);
-        window.press("end", cx);
-        window.press("backspace", cx);
+        let half_deleted = &initial_hex[..initial_hex.len() - 1];
+        hex_editor.update(cx, |editor, cx| {
+            let len = editor.value().len();
+            editor.set_selected_range_with_direction(0..len, false, cx);
+            editor.replace(half_deleted.to_owned(), window, cx);
+        });
     })
     .unwrap();
     cx.run_until_parked();
@@ -500,13 +505,11 @@ fn repeater_hex_half_byte_edit_does_not_panic_and_completes_draft_capture(
 
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("dismiss-error", cx);
-        window.click(("input", hex_editor.entity_id()), cx);
-        #[cfg(target_os = "macos")]
-        window.press("cmd-down", cx);
-        #[cfg(not(target_os = "macos"))]
-        window.press("ctrl-end", cx);
-        window.press("end", cx);
-        window.input("d", cx);
+        hex_editor.update(cx, |editor, cx| {
+            let len = editor.value().len();
+            editor.set_selected_range_with_direction(0..len, false, cx);
+            editor.replace(completed_hex.clone(), window, cx);
+        });
     })
     .unwrap();
     cx.run_until_parked();

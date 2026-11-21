@@ -618,10 +618,12 @@ fn is_chunked_header_lines(header_lines: &[&str]) -> bool {
     })
 }
 
+type ChunkedBodyLines = (String, SourceLineMap, Vec<(String, String, usize)>);
+
 fn parse_chunked_with_lines(
     raw_text: &str,
     body_start_line: usize,
-) -> Option<(String, SourceLineMap, Vec<(String, String, usize)>)> {
+) -> Option<ChunkedBodyLines> {
     let dummy_headers = [Header {
         name: "Transfer-Encoding".into(),
         value: b"chunked".to_vec(),
@@ -700,7 +702,7 @@ fn parse_chunked_with_lines(
 fn dechunk_pretty_body_with_lines(
     body_str: &str,
     body_start_line: usize,
-) -> Option<(String, SourceLineMap, Vec<(String, String, usize)>)> {
+) -> Option<ChunkedBodyLines> {
     if let Some(parsed) = parse_chunked_with_lines(body_str, body_start_line) {
         return Some(parsed);
     }

@@ -687,6 +687,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn http_download_to_temp_file<F>(
     initial_url: &str,
     accept: &str,
@@ -721,20 +722,22 @@ where
         Ok(file)
     });
 
-    let mut cfg = DownloadConfig::default();
-    cfg.max_body_bytes = max_body_bytes;
-    cfg.timeout = timeout;
-    cfg.max_redirects = MAX_REDIRECTS;
-    cfg.headers = vec![
-        Header {
-            name: "User-Agent".into(),
-            value: format!("MIO/{CURRENT_VERSION}").into_bytes(),
-        },
-        Header {
-            name: "Accept".into(),
-            value: accept.as_bytes().to_vec(),
-        },
-    ];
+    let cfg = DownloadConfig {
+        max_body_bytes,
+        timeout,
+        max_redirects: MAX_REDIRECTS,
+        headers: vec![
+            Header {
+                name: "User-Agent".into(),
+                value: format!("MIO/{CURRENT_VERSION}").into_bytes(),
+            },
+            Header {
+                name: "Accept".into(),
+                value: accept.as_bytes().to_vec(),
+            },
+        ],
+        ..Default::default()
+    };
 
     let mut sink = TempFileDownloadSink {
         hasher: Sha256::new(),

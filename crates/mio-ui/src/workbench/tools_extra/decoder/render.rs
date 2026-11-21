@@ -332,6 +332,7 @@ fn build_decoder_menu(
     menu
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decoder_dropdown_select(
     id: &'static str,
     label: &'static str,

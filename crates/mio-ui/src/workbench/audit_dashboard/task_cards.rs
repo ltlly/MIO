@@ -20,6 +20,7 @@ impl Workbench {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_live_audit_task_card(
         &self,
         live_selected: bool,

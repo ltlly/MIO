@@ -183,6 +183,7 @@ impl SequencerView {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_live_request_drawer(
         &self,
         wb_entity: &Entity<Workbench>,
