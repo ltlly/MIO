@@ -76,6 +76,14 @@ impl ProjectStore {
                     workspace.match_and_replace_rules.clear();
                     workspace_changed = true;
                 }
+                if !workspace.ssl_pass_through_rules.is_empty() {
+                    workspace.ssl_pass_through_rules.clear();
+                    workspace_changed = true;
+                }
+                if !workspace.ws_match_and_replace_rules.is_empty() {
+                    workspace.ws_match_and_replace_rules.clear();
+                    workspace_changed = true;
+                }
                 if !workspace.proxy_interception.is_default() {
                     workspace.proxy_interception = crate::ProxyInterceptionSettings::default();
                     workspace_changed = true;
@@ -199,24 +207,16 @@ impl ProjectStore {
                     workspace_changed = true;
                 }
                 if let Some(ssl_rules) = &config.ssl_pass_through_rules
-                    && crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules)
-                        != *ssl_rules
+                    && &workspace.ssl_pass_through_rules != ssl_rules
                 {
-                    crate::replace_ssl_pass_through_rules(
-                        &mut workspace.match_and_replace_rules,
-                        ssl_rules,
-                    );
+                    workspace.ssl_pass_through_rules = ssl_rules.clone();
                     workspace.validate()?;
                     workspace_changed = true;
                 }
                 if let Some(ws_rules) = &config.ws_match_and_replace_rules
-                    && crate::extract_ws_match_and_replace_rules(&workspace.match_and_replace_rules)
-                        != *ws_rules
+                    && &workspace.ws_match_and_replace_rules != ws_rules
                 {
-                    crate::replace_ws_match_and_replace_rules(
-                        &mut workspace.match_and_replace_rules,
-                        ws_rules,
-                    );
+                    workspace.ws_match_and_replace_rules = ws_rules.clone();
                     workspace.validate()?;
                     workspace_changed = true;
                 }

@@ -436,8 +436,9 @@ fn ext_proxy_ssl_passthrough_ws_match_replace_and_response_mod_startup_import_ro
         )
         .unwrap();
     let ws = store.workspace().unwrap();
-    let ssl_rules = crate::extract_ssl_pass_through_rules(&ws.match_and_replace_rules);
-    let ws_rules = crate::extract_ws_match_and_replace_rules(&ws.match_and_replace_rules);
+    assert!(ws.match_and_replace_rules.is_empty());
+    let ssl_rules = &ws.ssl_pass_through_rules;
+    let ws_rules = &ws.ws_match_and_replace_rules;
     assert_eq!(ssl_rules.len(), 2);
     assert_eq!(ssl_rules[0].host_pattern, "*.pinning.example.com");
     assert_eq!(ssl_rules[0].port, Some(443));
@@ -456,7 +457,10 @@ fn ext_proxy_ssl_passthrough_ws_match_replace_and_response_mod_startup_import_ro
     store
         .apply_startup_options(None, &StartupDefaultConfig::Defaults, None, &cancel)
         .unwrap();
-    assert!(store.workspace().unwrap().proxy_messages.is_default());
+    let reset_ws = store.workspace().unwrap();
+    assert!(reset_ws.proxy_messages.is_default());
+    assert!(reset_ws.ssl_pass_through_rules.is_empty());
+    assert!(reset_ws.ws_match_and_replace_rules.is_empty());
     store.close().unwrap();
 
     for bad in [

@@ -83,6 +83,8 @@ impl Workbench {
             || self.repeater_target_dialog_unsaved(cx)
             || self.workspace.repeater_settings != RepeaterSettings::default()
             || !self.workspace.match_and_replace_rules.is_empty()
+            || !self.workspace.ssl_pass_through_rules.is_empty()
+            || !self.workspace.ws_match_and_replace_rules.is_empty()
             || !self.workspace.proxy_interception.is_default()
             || !self.workspace.proxy_messages.is_default()
             || !self.workspace.proxy_websocket_interception.is_default()

@@ -3,9 +3,7 @@ use gpui_kit::base::CheckboxState;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::select::Select;
 use gpui_kit::component::table::DataTable;
-use mio_core::{
-    MatchAndReplaceRule, MatchReplaceTarget, WsReplaceDirection, extract_ws_match_and_replace_rules,
-};
+use mio_core::{MatchReplaceTarget, WsReplaceDirection};
 
 use super::*;
 
@@ -86,13 +84,7 @@ impl Workbench {
     ) -> AnyElement {
         let http_table_w = mr_table_width(&WB_MR_COLUMNS);
         // Section 1: HTTP match and replace rules
-        let http_rules: Vec<MatchAndReplaceRule> = self
-            .workspace
-            .match_and_replace_rules
-            .iter()
-            .filter(|r| !mio_core::is_advanced_proxy_rule(r))
-            .cloned()
-            .collect();
+        let http_rules = &self.workspace.match_and_replace_rules;
         let http_len = http_rules.len();
         let http_has_disabled = http_rules.iter().any(|r| !r.enabled);
         let http_has_enabled = http_rules.iter().any(|r| r.enabled);
@@ -596,7 +588,7 @@ impl Workbench {
     ) -> AnyElement {
         let ws_table_w = mr_table_width(&WB_WS_MR_COLUMNS);
         // Section 2: WebSocket match and replace rules
-        let ws_rules = extract_ws_match_and_replace_rules(&self.workspace.match_and_replace_rules);
+        let ws_rules = &self.workspace.ws_match_and_replace_rules;
         let ws_len = ws_rules.len();
         let ws_has_disabled = ws_rules.iter().any(|r| !r.enabled);
         let ws_has_enabled = ws_rules.iter().any(|r| r.enabled);

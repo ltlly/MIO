@@ -8,9 +8,8 @@ use gpui_kit::component::{
     table::{Column, TableDelegate},
 };
 use mio_core::{
-    HostnameResolutionRule, HttpAuthScheme, PlatformAuthRule, PlatformAuthType,
-    SocksProxySettings, UpstreamAuthType, UpstreamProxyProtocol, UpstreamProxyRule,
-    UpstreamProxySettings, Uuid,
+    HostnameResolutionRule, PlatformAuthRule, PlatformAuthType, SocksProxySettings,
+    UpstreamAuthType, UpstreamProxyProtocol, UpstreamProxyRule, UpstreamProxySettings, Uuid,
 };
 
 use super::*;
@@ -108,7 +107,8 @@ impl ConnectionsUi {
                             this.connections.selected_platform_auth = this
                                 .state
                                 .upstream_proxy
-                                .platform_auth_rules()
+                                .platform_auth
+                                .rules
                                 .get(*row)
                                 .map(|rule| rule.id);
                         }
@@ -292,8 +292,7 @@ impl ConnectionsTable {
                 })
             }
             ConnectionsTableKind::PlatformAuth => {
-                let rules = settings.state.upstream_proxy.platform_auth_rules();
-                let rule = rules.get(row)?;
+                let rule = settings.state.upstream_proxy.platform_auth.rules.get(row)?;
                 Some(match column {
                     0 => if rule.enabled { "Yes" } else { "No" }.into(),
                     1 => rule.destination_host.clone(),
@@ -306,17 +305,16 @@ impl ConnectionsTable {
             ConnectionsTableKind::Upstream => {
                 let rules = settings.state.upstream_proxy.effective_rules();
                 let rule = rules.get(row)?;
-                let user_desc = rule.user_description();
                 Some(match column {
                     0 => if rule.enabled { "Yes" } else { "No" }.into(),
                     1 => rule.destination_host.clone(),
                     2 => rule.host.clone(),
                     3 => rule.port.to_string(),
-                    4 => rule.auth_scheme().label().into(),
+                    4 => rule.auth_type.label().into(),
                     5 => rule.username.clone(),
                     _ => {
-                        if !user_desc.is_empty() {
-                            user_desc
+                        if !rule.description.is_empty() {
+                            rule.description.clone()
                         } else if rule.protocol == UpstreamProxyProtocol::Https {
                             "HTTPS".into()
                         } else {
@@ -358,7 +356,7 @@ impl TableDelegate for ConnectionsTable {
                     settings.state.upstream_proxy.hostname_resolutions.len()
                 }
                 ConnectionsTableKind::PlatformAuth => {
-                    settings.state.upstream_proxy.platform_auth_rules().len()
+                    settings.state.upstream_proxy.platform_auth.rules.len()
                 }
             }
         })
@@ -422,8 +420,8 @@ impl TableDelegate for ConnectionsTable {
                     (rule.id, rule.enabled, settings.state.enabled)
                 }
                 ConnectionsTableKind::PlatformAuth => {
-                    let rules = settings.state.upstream_proxy.platform_auth_rules();
-                    let Some(rule) = rules.get(row) else {
+                    let Some(rule) = settings.state.upstream_proxy.platform_auth.rules.get(row)
+                    else {
                         return div().into_any_element();
                     };
                     (rule.id, rule.enabled, settings.state.enabled)
@@ -472,11 +470,14 @@ impl TableDelegate for ConnectionsTable {
                         }
                         ConnectionsTableKind::PlatformAuth => {
                             let mut next = this.state.upstream_proxy.clone();
-                            let mut rules = next.platform_auth_rules();
-                            if let Some(entry) = rules.iter_mut().find(|entry| entry.id == id) {
+                            if let Some(entry) = next
+                                .platform_auth
+                                .rules
+                                .iter_mut()
+                                .find(|entry| entry.id == id)
+                            {
                                 entry.enabled = value == CheckboxState::Checked;
                             }
-                            next.set_platform_auth_rules(rules);
                             this.commit_connections(next, cx);
                         }
                         ConnectionsTableKind::Upstream => {
@@ -673,7 +674,7 @@ impl Settings {
         let mut real_rules = next.effective_rules();
         next.socks = next.effective_socks();
         change(&mut real_rules);
-        next.retain_with_platform_auth(real_rules);
+        next.rules = real_rules;
         next.sync_legacy_summary();
         self.commit_connections(next, cx);
     }
@@ -737,7 +738,8 @@ impl Settings {
         let plat_row = self.connections.selected_platform_auth.and_then(|id| {
             self.state
                 .upstream_proxy
-                .platform_auth_rules()
+                .platform_auth
+                .rules
                 .iter()
                 .position(|rule| rule.id == id)
         });
@@ -772,10 +774,6 @@ impl Settings {
             };
             rule
         };
-        let scheme = rule.auth_scheme();
-        let domain = rule.domain();
-        let workstation = rule.workstation();
-        let description = rule.user_description();
         self.connections.editing_rule = (!new).then_some(rule.id);
         self.connections.rule_protocol.update(cx, |select, cx| {
             select.set_selected_index(
@@ -786,12 +784,12 @@ impl Settings {
                 cx,
             )
         });
-        let auth_idx = match scheme {
-            HttpAuthScheme::None => 0,
-            HttpAuthScheme::Basic => 1,
-            HttpAuthScheme::Digest => 2,
-            HttpAuthScheme::NtlmV1 => 3,
-            HttpAuthScheme::NtlmV2 => 4,
+        let auth_idx = match rule.auth_type {
+            UpstreamAuthType::None => 0,
+            UpstreamAuthType::Basic => 1,
+            UpstreamAuthType::Digest => 2,
+            UpstreamAuthType::NtlmV1 => 3,
+            UpstreamAuthType::NtlmV2 => 4,
         };
         self.connections.rule_auth.update(cx, |select, cx| {
             select.set_selected_index(Some(IndexPath::new(auth_idx)), window, cx)
@@ -802,9 +800,9 @@ impl Settings {
             (&self.connections.rule_port, rule.port.to_string()),
             (&self.connections.rule_username, rule.username),
             (&self.connections.rule_password, rule.password),
-            (&self.connections.rule_domain, domain),
-            (&self.connections.rule_workstation, workstation),
-            (&self.connections.rule_description, description),
+            (&self.connections.rule_domain, rule.domain),
+            (&self.connections.rule_workstation, rule.workstation),
+            (&self.connections.rule_description, rule.description),
         ] {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -855,7 +853,7 @@ impl Settings {
             "HTTPS" => UpstreamProxyProtocol::Https,
             _ => unreachable!(),
         };
-        let scheme = match self
+        let auth_type = match self
             .connections
             .rule_auth
             .read(cx)
@@ -863,35 +861,27 @@ impl Settings {
             .copied()
             .expect("认证类型已选择")
         {
-            "None" => HttpAuthScheme::None,
-            "Basic" => HttpAuthScheme::Basic,
-            "Digest" => HttpAuthScheme::Digest,
-            "NTLM v1" => HttpAuthScheme::NtlmV1,
-            "NTLM v2" => HttpAuthScheme::NtlmV2,
+            "None" => UpstreamAuthType::None,
+            "Basic" => UpstreamAuthType::Basic,
+            "Digest" => UpstreamAuthType::Digest,
+            "NTLM v1" => UpstreamAuthType::NtlmV1,
+            "NTLM v2" => UpstreamAuthType::NtlmV2,
             _ => unreachable!(),
         };
-        let mut rule = UpstreamProxyRule {
+        let rule = UpstreamProxyRule {
             id: self.connections.editing_rule.unwrap_or_else(Uuid::new_v4),
             enabled: true,
             destination_host: destination.trim().into(),
             protocol,
             host: host.trim().into(),
             port,
-            auth_type: if scheme == HttpAuthScheme::None {
-                UpstreamAuthType::None
-            } else {
-                UpstreamAuthType::Basic
-            },
+            auth_type,
             username: username.to_string(),
             password: password.to_string(),
+            domain: domain.trim().to_owned(),
+            workstation: workstation.trim().to_owned(),
             description: description.trim().to_owned(),
         };
-        rule.set_extended_auth(
-            scheme,
-            domain.trim(),
-            workstation.trim(),
-            description.trim(),
-        );
         if let Err(error) = rule.validate() {
             self.connections.error = Some(error.to_string());
             cx.notify();
@@ -908,7 +898,7 @@ impl Settings {
         } else {
             real_rules.push(rule);
         }
-        next.retain_with_platform_auth(real_rules);
+        next.rules = real_rules;
         next.sync_legacy_summary();
         self.connections.selected_rule = Some(saved_id);
         if self.commit_connections(next, cx) {
@@ -924,9 +914,11 @@ impl Settings {
             let Some(rule) = self
                 .state
                 .upstream_proxy
-                .platform_auth_rules()
-                .into_iter()
+                .platform_auth
+                .rules
+                .iter()
                 .find(|rule| Some(rule.id) == self.connections.selected_platform_auth)
+                .cloned()
             else {
                 return;
             };
@@ -1010,16 +1002,19 @@ impl Settings {
             return;
         }
         let mut next = self.state.upstream_proxy.clone();
-        let mut rules = next.platform_auth_rules();
         let saved_id = rule.id;
-        if let Some(existing) = rules.iter_mut().find(|entry| entry.id == rule.id) {
+        if let Some(existing) = next
+            .platform_auth
+            .rules
+            .iter_mut()
+            .find(|entry| entry.id == rule.id)
+        {
             let enabled = existing.enabled;
             *existing = rule;
             existing.enabled = enabled;
         } else {
-            rules.push(rule);
+            next.platform_auth.rules.push(rule);
         }
-        next.set_platform_auth_rules(rules);
         self.connections.selected_platform_auth = Some(saved_id);
         if self.commit_connections(next, cx) {
             self.connections.platform_editor_visible = false;
@@ -1046,8 +1041,7 @@ impl Settings {
         };
         let mut next = self.state.upstream_proxy.clone();
         let prev_override = next.effective_socks().override_project_only;
-        let real_rules = next.effective_rules();
-        next.retain_with_platform_auth(real_rules);
+        next.rules = next.effective_rules();
         next.socks = SocksProxySettings {
             use_proxy: self.connections.socks_enabled,
             host: host.trim().into(),
@@ -1064,8 +1058,7 @@ impl Settings {
 
     fn commit_socks_bypass_hosts(&mut self, cx: &mut Context<Self>) {
         let mut next = self.state.upstream_proxy.clone();
-        let real_rules = next.effective_rules();
-        next.retain_with_platform_auth(real_rules);
+        next.rules = next.effective_rules();
         next.socks = next.effective_socks();
         next.socks.bypass_hosts = self.connections.socks_bypass_hosts.clone();
         next.sync_legacy_summary();
@@ -1896,8 +1889,7 @@ impl Settings {
                 enabled,
                 cx.listener(|this, checked: &bool, _, cx| {
                     let mut next = this.state.upstream_proxy.clone();
-                    let real_rules = next.effective_rules();
-                    next.retain_with_platform_auth(real_rules);
+                    next.rules = next.effective_rules();
                     next.socks = next.effective_socks();
                     next.socks.override_project_only = *checked;
                     next.sync_legacy_summary();
@@ -2186,7 +2178,8 @@ impl Settings {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let plat_rules = self.state.upstream_proxy.platform_auth_rules();
+        // Section 5: Platform authentication
+        let plat_rules = &self.state.upstream_proxy.platform_auth.rules;
         let plat_selected = self
             .connections
             .selected_platform_auth
@@ -2229,7 +2222,7 @@ impl Settings {
                         }
                         let selected = this.connections.selected_platform_auth;
                         let mut next = this.state.upstream_proxy.clone();
-                        let mut rules = next.platform_auth_rules();
+                        let rules = &mut next.platform_auth.rules;
                         let Some(index) = rules.iter().position(|r| Some(r.id) == selected) else {
                             return;
                         };
@@ -2241,7 +2234,6 @@ impl Settings {
                             4 if index + 1 < rules.len() => rules.swap(index, index + 1),
                             _ => {}
                         }
-                        next.set_platform_auth_rules(rules);
                         this.commit_connections(next, cx);
                     })),
             );
@@ -2250,9 +2242,10 @@ impl Settings {
         let plat_override = self
             .state
             .upstream_proxy
-            .platform_auth_override_project_only();
-        let plat_enabled = self.state.upstream_proxy.platform_auth_enabled();
-        let plat_prompt = self.state.upstream_proxy.platform_auth_prompt_on_failure();
+            .platform_auth
+            .override_project_only;
+        let plat_enabled = self.state.upstream_proxy.platform_auth.enabled;
+        let plat_prompt = self.state.upstream_proxy.platform_auth.prompt_on_failure;
         let mut section = div()
             .flex()
             .flex_col()
@@ -2270,7 +2263,7 @@ impl Settings {
                 enabled,
                 cx.listener(|this, checked: &bool, _, cx| {
                     let mut next = this.state.upstream_proxy.clone();
-                    next.set_platform_auth_override_project_only(*checked);
+                    next.platform_auth.override_project_only = *checked;
                     this.commit_connections(next, cx);
                 }),
             ))
@@ -2287,7 +2280,7 @@ impl Settings {
                         enabled,
                         cx.listener(|this, checked: &bool, _, cx| {
                             let mut next = this.state.upstream_proxy.clone();
-                            next.set_platform_auth_enabled(*checked);
+                            next.platform_auth.enabled = *checked;
                             this.commit_connections(next, cx);
                         }),
                     ))
@@ -2298,7 +2291,7 @@ impl Settings {
                         enabled,
                         cx.listener(|this, checked: &bool, _, cx| {
                             let mut next = this.state.upstream_proxy.clone();
-                            next.set_platform_auth_prompt_on_failure(*checked);
+                            next.platform_auth.prompt_on_failure = *checked;
                             this.commit_connections(next, cx);
                         }),
                     ))
@@ -2774,5 +2767,138 @@ mod tests {
             "10.0.0.42"
         );
         acknowledge(&fixture, ws6, cx);
+    }
+
+    #[gpui_kit::test]
+    fn network_connections_ntlm_upstream_and_platform_auth_use_first_class_fields(
+        cx: &mut TestAppContext,
+    ) {
+        let mut fixture = fixture(cx, vec![tab("Connections NTLM")], 64);
+        drain(&mut fixture.commands);
+        let settings = open_settings(&fixture, cx);
+
+        cx.update_window(settings, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings-network-connections", cx);
+            window.render_frame(cx);
+            window.click("settings-upstream-add", cx);
+            let entity = settings_entity(window, cx).unwrap();
+            entity.update(cx, |this, cx| {
+                this.connections
+                    .rule_auth
+                    .update(cx, |s, cx| s.set_selected_index(Some(IndexPath::new(4)), window, cx));
+                this.connections
+                    .rule_destination
+                    .update(cx, |s, cx| s.set_value("*.lab.example.invalid", window, cx));
+                this.connections
+                    .rule_host
+                    .update(cx, |s, cx| s.set_value("127.0.0.1", window, cx));
+                this.connections
+                    .rule_port
+                    .update(cx, |s, cx| s.set_value("3128", window, cx));
+                this.connections
+                    .rule_username
+                    .update(cx, |s, cx| s.set_value("alice", window, cx));
+                this.connections
+                    .rule_password
+                    .update(cx, |s, cx| s.set_value("pw", window, cx));
+                this.connections
+                    .rule_domain
+                    .update(cx, |s, cx| s.set_value("LAB", window, cx));
+                this.connections
+                    .rule_workstation
+                    .update(cx, |s, cx| s.set_value("WKSTN1", window, cx));
+                this.connections
+                    .rule_description
+                    .update(cx, |s, cx| s.set_value("ntlm proxy", window, cx));
+                this.save_upstream_rule(window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ws1 = saved(&mut fixture.commands);
+        assert_eq!(ws1.upstream_proxy.rules.len(), 1);
+        let r0 = &ws1.upstream_proxy.rules[0];
+        assert_eq!(r0.auth_type, UpstreamAuthType::NtlmV2);
+        assert_eq!(r0.domain, "LAB");
+        assert_eq!(r0.workstation, "WKSTN1");
+        assert_eq!(r0.description, "ntlm proxy");
+        acknowledge(&fixture, ws1, cx);
+
+        cx.update_window(settings, |_, window, cx| {
+            let entity = settings_entity(window, cx).unwrap();
+            entity.update(cx, |this, cx| {
+                this.open_platform_auth_editor(true, window, cx);
+                this.connections
+                    .platform_auth_type
+                    .update(cx, |s, cx| s.set_selected_index(Some(IndexPath::new(3)), window, cx));
+                this.connections
+                    .platform_destination
+                    .update(cx, |s, cx| s.set_value("app.example.invalid", window, cx));
+                this.connections
+                    .platform_username
+                    .update(cx, |s, cx| s.set_value("bob", window, cx));
+                this.connections
+                    .platform_password
+                    .update(cx, |s, cx| s.set_value("pw2", window, cx));
+                this.connections
+                    .platform_domain
+                    .update(cx, |s, cx| s.set_value("CORP", window, cx));
+                this.connections
+                    .platform_hostname
+                    .update(cx, |s, cx| s.set_value("HOST1", window, cx));
+                this.save_platform_auth_rule(window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ws2 = saved(&mut fixture.commands);
+        assert_eq!(ws2.upstream_proxy.rules.len(), 1);
+        assert_eq!(ws2.upstream_proxy.platform_auth.rules.len(), 1);
+        assert_eq!(
+            ws2.upstream_proxy.platform_auth.rules[0].auth_type,
+            PlatformAuthType::NtlmV2
+        );
+        assert_eq!(ws2.upstream_proxy.platform_auth.rules[0].domain, "CORP");
+        assert_eq!(ws2.upstream_proxy.platform_auth.rules[0].hostname, "HOST1");
+        acknowledge(&fixture, ws2, cx);
+
+        cx.update_window(settings, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "settings-connections-page",
+                ScrollDelta::Pixels(point(px(0.), px(-1200.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click("settings-platform-auth-enabled", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ws3 = saved(&mut fixture.commands);
+        assert!(ws3.upstream_proxy.platform_auth.enabled);
+        assert_eq!(ws3.upstream_proxy.rules.len(), 1);
+        acknowledge(&fixture, ws3, cx);
+
+        cx.update_window(settings, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings-platform-auth-prompt", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ws4 = saved(&mut fixture.commands);
+        assert!(ws4.upstream_proxy.platform_auth.prompt_on_failure);
+        acknowledge(&fixture, ws4, cx);
+
+        cx.update_window(settings, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings-platform-auth-override", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ws5 = saved(&mut fixture.commands);
+        assert!(ws5.upstream_proxy.platform_auth.override_project_only);
+        assert_eq!(ws5.upstream_proxy.rules.len(), 1);
+        acknowledge(&fixture, ws5, cx);
     }
 }

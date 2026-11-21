@@ -70,7 +70,7 @@ pub(crate) fn build_flow_transform_with_scope_and_provenance(
 ) -> Result<Option<mio_proxy::FlowTransform>> {
     let compiled_rules = rules
         .into_iter()
-        .filter(|rule| rule.enabled && !crate::is_advanced_proxy_rule(rule))
+        .filter(|rule| rule.enabled)
         .map(|rule| -> Result<_> {
             if rule.item_type.is_script() {
                 validate_filter_script(&rule.filter_script)

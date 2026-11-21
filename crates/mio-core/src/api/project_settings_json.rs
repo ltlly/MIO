@@ -16,6 +16,8 @@ pub struct ProjectSettingsSubset {
     pub client_certificates: Vec<ClientCertificateRule>,
     pub scope: TargetScope,
     pub match_and_replace_rules: Vec<MatchAndReplaceRule>,
+    pub ssl_pass_through_rules: Vec<SslPassThroughRule>,
+    pub ws_match_and_replace_rules: Vec<WsMatchAndReplaceRule>,
     pub proxy_interception: ProxyInterceptionSettings,
     pub proxy_messages: ProxyMessageSettings,
     pub proxy_websocket_interception: ProxyWebSocketInterceptionSettings,
@@ -35,6 +37,8 @@ impl Default for ProjectSettingsSubset {
             client_certificates: Vec::new(),
             scope: TargetScope::default(),
             match_and_replace_rules: Vec::new(),
+            ssl_pass_through_rules: Vec::new(),
+            ws_match_and_replace_rules: Vec::new(),
             proxy_interception: ProxyInterceptionSettings::default(),
             proxy_messages: ProxyMessageSettings::default(),
             proxy_websocket_interception: ProxyWebSocketInterceptionSettings::default(),
@@ -56,6 +60,8 @@ impl ProjectSettingsSubset {
             client_certificates: ws.client_certificates.clone(),
             scope: ws.scope.clone(),
             match_and_replace_rules: ws.match_and_replace_rules.clone(),
+            ssl_pass_through_rules: ws.ssl_pass_through_rules.clone(),
+            ws_match_and_replace_rules: ws.ws_match_and_replace_rules.clone(),
             proxy_interception: ws.proxy_interception.clone(),
             proxy_messages: ws.proxy_messages,
             proxy_websocket_interception: ws.proxy_websocket_interception,
@@ -80,9 +86,11 @@ impl ProjectSettingsSubset {
                 return Err("Proxy 监听器重定向端口必须在 1 到 65535 之间。".into());
             }
         }
-        let ssl = extract_ssl_pass_through_rules(&self.match_and_replace_rules);
-        let ws_mr = extract_ws_match_and_replace_rules(&self.match_and_replace_rules);
-        crate::validate_ssl_and_ws_rules(&ssl, &ws_mr).map_err(|err| err.to_string())?;
+        crate::validate_ssl_and_ws_rules(
+            &self.ssl_pass_through_rules,
+            &self.ws_match_and_replace_rules,
+        )
+        .map_err(|err| err.to_string())?;
 
         let probe = Workspace {
             repeater_settings: self.repeater_settings.clone(),
@@ -93,6 +101,8 @@ impl ProjectSettingsSubset {
             client_certificates: self.client_certificates.clone(),
             scope: self.scope.clone(),
             match_and_replace_rules: self.match_and_replace_rules.clone(),
+            ssl_pass_through_rules: self.ssl_pass_through_rules.clone(),
+            ws_match_and_replace_rules: self.ws_match_and_replace_rules.clone(),
             proxy_interception: self.proxy_interception.clone(),
             proxy_messages: self.proxy_messages,
             proxy_websocket_interception: self.proxy_websocket_interception,
@@ -189,6 +199,8 @@ struct ProjectSettingsExportDoc<'a> {
     client_certificates: Vec<ClientCertificateJson>,
     scope: &'a TargetScope,
     match_and_replace_rules: &'a [MatchAndReplaceRule],
+    ssl_pass_through_rules: &'a [SslPassThroughRule],
+    ws_match_and_replace_rules: &'a [WsMatchAndReplaceRule],
     proxy_interception: ProxyInterceptionSettingsJson,
     proxy_messages: ProxyMessageSettingsJson,
     proxy_websocket_interception: ProxyWebSocketInterceptionSettingsJson,
@@ -213,6 +225,8 @@ impl<'a> From<&'a ProjectSettingsSubset> for ProjectSettingsExportDoc<'a> {
                 .collect(),
             scope: &s.scope,
             match_and_replace_rules: &s.match_and_replace_rules,
+            ssl_pass_through_rules: &s.ssl_pass_through_rules,
+            ws_match_and_replace_rules: &s.ws_match_and_replace_rules,
             proxy_interception: ProxyInterceptionSettingsJson::from(&s.proxy_interception),
             proxy_messages: ProxyMessageSettingsJson::from(s.proxy_messages),
             proxy_websocket_interception: ProxyWebSocketInterceptionSettingsJson::from(
@@ -247,6 +261,10 @@ struct ProjectSettingsImportDoc {
     #[serde(default, deserialize_with = "deserialize_some")]
     match_and_replace_rules: Option<Vec<MatchAndReplaceRule>>,
     #[serde(default, deserialize_with = "deserialize_some")]
+    ssl_pass_through_rules: Option<Vec<SslPassThroughRule>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    ws_match_and_replace_rules: Option<Vec<WsMatchAndReplaceRule>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
     proxy_interception: Option<ProxyInterceptionSettingsJson>,
     #[serde(default, deserialize_with = "deserialize_some")]
     proxy_messages: Option<ProxyMessageSettingsJson>,
@@ -270,6 +288,8 @@ impl ProjectSettingsImportDoc {
             || self.client_certificates.is_some()
             || self.scope.is_some()
             || self.match_and_replace_rules.is_some()
+            || self.ssl_pass_through_rules.is_some()
+            || self.ws_match_and_replace_rules.is_some()
             || self.proxy_interception.is_some()
             || self.proxy_messages.is_some()
             || self.proxy_websocket_interception.is_some()
@@ -305,6 +325,8 @@ impl ProjectSettingsImportDoc {
             client_certificates,
             scope: self.scope.unwrap_or_default(),
             match_and_replace_rules: self.match_and_replace_rules.unwrap_or_default(),
+            ssl_pass_through_rules: self.ssl_pass_through_rules.unwrap_or_default(),
+            ws_match_and_replace_rules: self.ws_match_and_replace_rules.unwrap_or_default(),
             proxy_interception: self
                 .proxy_interception
                 .map(ProxyInterceptionSettings::from)
@@ -1241,8 +1263,39 @@ mod tests {
             auth_type: UpstreamAuthType::Basic,
             username: "u1".into(),
             password: "p1".into(),
+            domain: String::new(),
+            workstation: String::new(),
             description: "lab proxy".into(),
         });
+        ws.upstream_proxy.rules.push(UpstreamProxyRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            destination_host: "*.ntlm.example.invalid".into(),
+            protocol: UpstreamProxyProtocol::Http,
+            host: "ntlm-proxy.example.invalid".into(),
+            port: 3128,
+            auth_type: UpstreamAuthType::NtlmV2,
+            username: "u2".into(),
+            password: "p2".into(),
+            domain: "LAB".into(),
+            workstation: "WKSTN1".into(),
+            description: "ntlm proxy".into(),
+        });
+        ws.upstream_proxy.platform_auth = PlatformAuthSettings {
+            enabled: true,
+            prompt_on_failure: true,
+            override_project_only: true,
+            rules: vec![PlatformAuthRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                destination_host: "app.example.invalid".into(),
+                auth_type: PlatformAuthType::NtlmV2,
+                username: "alice".into(),
+                password: "secret".into(),
+                domain: "LAB".into(),
+                hostname: "CLIENT1".into(),
+            }],
+        };
         ws.upstream_proxy.socks = SocksProxySettings {
             use_proxy: false,
             host: "127.0.0.1".into(),
@@ -1331,6 +1384,22 @@ mod tests {
             comment: "rewrite header".into(),
             script_name: String::new(),
             filter_script: String::new(),
+        });
+        ws.ssl_pass_through_rules.push(SslPassThroughRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            host_pattern: "*.pin.example.invalid".into(),
+            port: Some(8443),
+            is_regex: false,
+        });
+        ws.ws_match_and_replace_rules.push(WsMatchAndReplaceRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            direction: WsReplaceDirection::ServerToClient,
+            match_pattern: "secret".into(),
+            replace_with: "redacted".into(),
+            is_regex: false,
+            comment: "ws mask".into(),
         });
 
         ws.proxy_interception.request.enabled = false;
@@ -1477,9 +1546,26 @@ mod tests {
         assert!(exported.contains("\"custom_ca_ders_b64\""));
         assert!(exported.contains("\"certificate_b64\""));
         assert!(exported.contains("\"private_key_pem_b64\""));
+        assert!(exported.contains("\"platform_auth\""));
+        assert!(exported.contains("\"ssl_pass_through_rules\""));
+        assert!(exported.contains("\"ws_match_and_replace_rules\""));
+        assert!(exported.contains("\"domain\""));
+        assert!(exported.contains("\"workstation\""));
 
         let parsed = parse_project_settings_json(&exported).expect("parse must succeed");
         assert_eq!(parsed, ProjectSettingsSubset::from_workspace(&ws));
+        assert_eq!(parsed.upstream_proxy.rules.len(), 2);
+        assert_eq!(
+            parsed.upstream_proxy.rules[1].auth_type,
+            UpstreamAuthType::NtlmV2
+        );
+        assert_eq!(parsed.upstream_proxy.rules[1].domain, "LAB");
+        assert_eq!(parsed.upstream_proxy.rules[1].workstation, "WKSTN1");
+        assert_eq!(parsed.upstream_proxy.rules[1].description, "ntlm proxy");
+        assert_eq!(parsed.upstream_proxy.platform_auth.rules.len(), 1);
+        assert_eq!(parsed.match_and_replace_rules.len(), 1);
+        assert_eq!(parsed.ssl_pass_through_rules.len(), 1);
+        assert_eq!(parsed.ws_match_and_replace_rules.len(), 1);
     }
 
     #[test]
@@ -1508,6 +1594,9 @@ mod tests {
         assert!(parsed.proxy_listeners.is_empty());
         assert!(parsed.tasks_auto_start);
         assert!(parsed.scheduled_tasks.is_empty());
+        assert!(parsed.ssl_pass_through_rules.is_empty());
+        assert!(parsed.ws_match_and_replace_rules.is_empty());
+        assert!(parsed.upstream_proxy.platform_auth.is_default());
         assert!(!parsed.scope.include[0].include_subdomains);
         assert!(!parsed.proxy_interception.request.enabled);
         assert!(parsed.proxy_interception.request.rules.is_empty());
@@ -1596,6 +1685,15 @@ mod tests {
             ),
             &format!(
                 r#"{{"sessions": {{"macros": [{{"id": "{macro_id}", "name": "m1", "steps": [{{"id": "{step_id}", "method": "GET", "url": "https://example.invalid/", "extractions": [{{"name": "x", "source_kind": "delimiter", "arg1": "a="}}]}}]}}]}}}}"#
+            ),
+            &format!(
+                r#"{{"ssl_pass_through_rules": [{{"id": "{listener_id}", "enabled": true, "host_pattern": "(", "is_regex": true}}]}}"#
+            ),
+            &format!(
+                r#"{{"ws_match_and_replace_rules": [{{"id": "{listener_id}", "enabled": true, "match_pattern": "(", "replace_with": "x", "is_regex": true}}]}}"#
+            ),
+            &format!(
+                r#"{{"upstream_proxy": {{"platform_auth": {{"enabled": true, "rules": [{{"id": "{listener_id}", "enabled": true, "destination_host": "*", "auth_type": "basic", "username": ""}}]}}}}}}"#
             ),
         ];
 

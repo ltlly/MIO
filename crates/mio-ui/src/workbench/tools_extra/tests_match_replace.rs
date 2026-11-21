@@ -102,7 +102,8 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     .unwrap();
     cx.run_until_parked();
     let ws = saved(&mut f.commands);
-    let ws_rules = extract_ws_match_and_replace_rules(&ws.match_and_replace_rules);
+    assert_eq!(ws.match_and_replace_rules.len(), 1);
+    let ws_rules = &ws.ws_match_and_replace_rules;
     assert_eq!(ws_rules.len(), 1);
     assert!(ws_rules[0].is_regex);
     assert_eq!(ws_rules[0].comment, "mask token");
@@ -122,10 +123,7 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     .unwrap();
     cx.run_until_parked();
     let ws = saved(&mut f.commands);
-    assert_eq!(
-        extract_ws_match_and_replace_rules(&ws.match_and_replace_rules).len(),
-        2
-    );
+    assert_eq!(ws.ws_match_and_replace_rules.len(), 2);
     acknowledge(&f, ws, cx);
 
     cx.update_window(f.window, |_, window, cx| {
@@ -142,8 +140,7 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     .unwrap();
     cx.run_until_parked();
     let ws = saved(&mut f.commands);
-    let ws_rules = extract_ws_match_and_replace_rules(&ws.match_and_replace_rules);
-    assert_eq!(ws_rules[0].match_pattern, "ping");
+    assert_eq!(ws.ws_match_and_replace_rules[0].match_pattern, "ping");
     acknowledge(&f, ws, cx);
 
     cx.update_window(f.window, |_, window, cx| {
@@ -153,7 +150,7 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     .unwrap();
     cx.run_until_parked();
     let ws = saved(&mut f.commands);
-    assert!(!extract_ws_match_and_replace_rules(&ws.match_and_replace_rules)[0].enabled);
+    assert!(!ws.ws_match_and_replace_rules[0].enabled);
     acknowledge(&f, ws, cx);
 
     cx.update_window(f.window, |_, window, cx| {
@@ -169,7 +166,7 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     .unwrap();
     cx.run_until_parked();
     let ws = saved(&mut f.commands);
-    let ws_rules = extract_ws_match_and_replace_rules(&ws.match_and_replace_rules);
+    let ws_rules = &ws.ws_match_and_replace_rules;
     assert_eq!(ws_rules.len(), 1);
     assert_eq!(ws_rules[0].match_pattern, "token=([0-9]+)");
     acknowledge(&f, ws, cx);

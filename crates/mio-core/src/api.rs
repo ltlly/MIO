@@ -119,6 +119,10 @@ pub struct Workspace {
     pub scope: TargetScope,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub match_and_replace_rules: Vec<MatchAndReplaceRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssl_pass_through_rules: Vec<SslPassThroughRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ws_match_and_replace_rules: Vec<WsMatchAndReplaceRule>,
     #[serde(default, skip_serializing_if = "ProxyInterceptionSettings::is_default")]
     pub proxy_interception: ProxyInterceptionSettings,
     #[serde(default, skip_serializing_if = "ProxyMessageSettings::is_default")]
@@ -172,6 +176,8 @@ impl Default for Workspace {
             upstream_tls: UpstreamTlsSettings::default(),
             scope: TargetScope::default(),
             match_and_replace_rules: Vec::new(),
+            ssl_pass_through_rules: Vec::new(),
+            ws_match_and_replace_rules: Vec::new(),
             proxy_interception: ProxyInterceptionSettings::default(),
             proxy_messages: ProxyMessageSettings::default(),
             proxy_websocket_interception: ProxyWebSocketInterceptionSettings::default(),

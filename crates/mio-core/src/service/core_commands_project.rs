@@ -2,6 +2,10 @@ use super::*;
 
 impl State {
     pub(super) async fn command_project_workspace(&mut self, command: Command) -> Result<()> {
+        Box::pin(self.command_project_workspace_inner(command)).await
+    }
+
+    async fn command_project_workspace_inner(&mut self, command: Command) -> Result<()> {
         match command {
             Command::Quiesce { project } => {
                 self.check_project(project)?;
@@ -193,12 +197,10 @@ impl State {
                         self.reload_running_proxy_from_workspace(&workspace).await?;
                     } else {
                     let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-                        &crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules),
+                        &workspace.ssl_pass_through_rules,
                     )?;
                     let ws_transform = crate::http::build_websocket_transform_with_scope(
-                        crate::extract_ws_match_and_replace_rules(
-                            &workspace.match_and_replace_rules,
-                        ),
+                        workspace.ws_match_and_replace_rules.clone(),
                         workspace.proxy_messages.ws_match_replace_in_scope_only,
                         workspace.scope.clone(),
                     )?;
@@ -483,10 +485,10 @@ impl State {
             self.reload_running_proxy_from_workspace(&workspace).await?;
         } else {
         let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-            &crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules),
+            &workspace.ssl_pass_through_rules,
         )?;
         let ws_transform = crate::http::build_websocket_transform_with_scope(
-            crate::extract_ws_match_and_replace_rules(&workspace.match_and_replace_rules),
+            workspace.ws_match_and_replace_rules.clone(),
             workspace.proxy_messages.ws_match_replace_in_scope_only,
             workspace.scope.clone(),
         )?;

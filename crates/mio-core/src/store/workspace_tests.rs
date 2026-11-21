@@ -520,9 +520,45 @@ fn phase2_workspace_fields_persist_across_reopen_and_default_from_legacy_json() 
         protocol: crate::UpstreamProxyProtocol::Http,
         host: "127.0.0.1".into(),
         port: 8888,
+        auth_type: crate::UpstreamAuthType::NtlmV2,
+        username: "u1".into(),
+        password: "p1".into(),
+        domain: "CORP".into(),
+        workstation: "WS01".into(),
         description: "Corp gateway".into(),
-        ..crate::UpstreamProxyRule::default()
     });
+    ws.upstream_proxy.platform_auth = crate::PlatformAuthSettings {
+        enabled: true,
+        prompt_on_failure: true,
+        override_project_only: true,
+        rules: vec![crate::PlatformAuthRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            destination_host: "app.example.invalid".into(),
+            auth_type: crate::PlatformAuthType::Digest,
+            username: "svc".into(),
+            password: "pw".into(),
+            domain: "LAB".into(),
+            hostname: "HOST1".into(),
+        }],
+    };
+    ws.ssl_pass_through_rules.push(crate::SslPassThroughRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        host_pattern: "*.pin.example.invalid".into(),
+        port: Some(8443),
+        is_regex: false,
+    });
+    ws.ws_match_and_replace_rules
+        .push(crate::WsMatchAndReplaceRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            direction: crate::WsReplaceDirection::Both,
+            match_pattern: "ping".into(),
+            replace_with: "pong".into(),
+            is_regex: false,
+            comment: "ws rule".into(),
+        });
     ws.upstream_proxy.socks.bypass_hosts = vec!["localhost".into(), "*.internal".into()];
     ws.upstream_proxy.socks.override_project_only = true;
     ws.upstream_tls.protocol_mode = crate::TlsProtocolMode::Custom;
@@ -575,4 +611,7 @@ fn phase2_workspace_fields_persist_across_reopen_and_default_from_legacy_json() 
     assert_eq!(legacy_ws, Workspace::default());
     assert!(legacy_ws.tasks_auto_start);
     assert!(legacy_ws.live_passive_crawl_enabled);
+    assert!(legacy_ws.ssl_pass_through_rules.is_empty());
+    assert!(legacy_ws.ws_match_and_replace_rules.is_empty());
+    assert!(legacy_ws.upstream_proxy.platform_auth.is_default());
 }

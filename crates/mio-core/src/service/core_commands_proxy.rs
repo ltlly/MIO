@@ -3,6 +3,10 @@ use super::*;
 
 impl State {
     pub(super) async fn command_proxy_intercept(&mut self, command: Command) -> Result<()> {
+        Box::pin(self.command_proxy_intercept_inner(command)).await
+    }
+
+    async fn command_proxy_intercept_inner(&mut self, command: Command) -> Result<()> {
         match command {
             Command::StartProxy { project, listen } => {
                 self.start_proxy_with_override(project, listen, None)
@@ -239,7 +243,7 @@ impl State {
             streaming_timeout,
             strip_100_continue_headers: workspace.network_http.remove_100_continue_headers,
             default_to_http2: workspace.network_http.default_to_http2,
-            platform_auth_enabled: eff_upstream.platform_auth_enabled(),
+            platform_auth_enabled: eff_upstream.platform_auth.enabled,
             platform_auth_rules: eff_upstream.compiled_platform_auth_rules(),
             upstream_auth_rules: eff_upstream.compiled_upstream_auth_rules(),
             ..SendConfig::default()
@@ -317,10 +321,10 @@ impl State {
                 Some(self.provenance.clone()),
             )?;
             config.ssl_pass_through = crate::http::build_ssl_pass_through_matcher(
-                &crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules),
+                &workspace.ssl_pass_through_rules,
             )?;
             config.websocket_transform = crate::http::build_websocket_transform_with_scope(
-                crate::extract_ws_match_and_replace_rules(&workspace.match_and_replace_rules),
+                workspace.ws_match_and_replace_rules.clone(),
                 workspace.proxy_messages.ws_match_replace_in_scope_only,
                 workspace.scope.clone(),
             )?;
@@ -495,10 +499,10 @@ impl State {
         let cert_callback = self.build_server_cert_callback(self.project);
         let tls_fail_callback = self.build_client_tls_failure_callback(self.project);
         let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-            &crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules),
+            &workspace.ssl_pass_through_rules,
         )?;
         let ws_transform = crate::http::build_websocket_transform_with_scope(
-            crate::extract_ws_match_and_replace_rules(&workspace.match_and_replace_rules),
+            workspace.ws_match_and_replace_rules.clone(),
             workspace.proxy_messages.ws_match_replace_in_scope_only,
             workspace.scope.clone(),
         )?;
@@ -810,7 +814,7 @@ fn apply_listener_and_workspace_options(
     config.remove_100_continue_headers = http.remove_100_continue_headers;
 
     let eff_up = workspace.upstream_proxy.effective_for_runtime();
-    config.platform_auth_enabled = eff_up.platform_auth_enabled();
+    config.platform_auth_enabled = eff_up.platform_auth.enabled;
     config.platform_auth_rules = eff_up.compiled_platform_auth_rules();
     config.upstream_auth_rules = eff_up.compiled_upstream_auth_rules();
 }

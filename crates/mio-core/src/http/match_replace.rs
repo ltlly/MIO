@@ -658,10 +658,7 @@ pub fn apply_match_and_replace(
     rules: &[MatchAndReplaceRule],
 ) -> bool {
     let mut changed = false;
-    for rule in rules
-        .iter()
-        .filter(|rule| rule.enabled && !crate::is_advanced_proxy_rule(rule))
-    {
+    for rule in rules.iter().filter(|rule| rule.enabled) {
         if rule.regex && !rule.match_pattern.is_empty() {
             let Some(regex) = compile_rule_regex(&rule.match_pattern) else {
                 continue;

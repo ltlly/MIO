@@ -21,6 +21,8 @@ pub(super) fn apply_project_settings_subset(ws: &mut Workspace, raw: &str) -> Re
     candidate.client_certificates = subset.client_certificates;
     candidate.scope = subset.scope;
     candidate.match_and_replace_rules = subset.match_and_replace_rules;
+    candidate.ssl_pass_through_rules = subset.ssl_pass_through_rules;
+    candidate.ws_match_and_replace_rules = subset.ws_match_and_replace_rules;
     candidate.proxy_interception = subset.proxy_interception;
     candidate.proxy_messages = subset.proxy_messages;
     candidate.proxy_websocket_interception = subset.proxy_websocket_interception;
@@ -172,6 +174,9 @@ impl Settings {
                 && candidate.client_certificates == view.workspace.client_certificates
                 && candidate.scope == view.workspace.scope
                 && candidate.match_and_replace_rules == view.workspace.match_and_replace_rules
+                && candidate.ssl_pass_through_rules == view.workspace.ssl_pass_through_rules
+                && candidate.ws_match_and_replace_rules
+                    == view.workspace.ws_match_and_replace_rules
                 && candidate.proxy_interception == view.workspace.proxy_interception
                 && candidate.proxy_messages == view.workspace.proxy_messages
                 && candidate.proxy_websocket_interception
@@ -220,9 +225,10 @@ impl Settings {
 mod tests {
     use super::*;
     use mio_core::{
-        ProxyListenerCertMode, ProxyListenerConfig, ScheduledTask, ScheduledTaskAction, ScopeRule,
-        SocksProxySettings, TlsProtocolMode, UpstreamAuthType, UpstreamProxyProtocol,
-        UpstreamProxyRule, Uuid,
+        PlatformAuthRule, PlatformAuthSettings, PlatformAuthType, ProxyListenerCertMode,
+        ProxyListenerConfig, ScheduledTask, ScheduledTaskAction, ScopeRule, SocksProxySettings,
+        SslPassThroughRule, TlsProtocolMode, UpstreamAuthType, UpstreamProxyProtocol,
+        UpstreamProxyRule, Uuid, WsMatchAndReplaceRule, WsReplaceDirection,
     };
 
     #[test]
@@ -257,8 +263,25 @@ mod tests {
             auth_type: UpstreamAuthType::Basic,
             username: "u1".into(),
             password: "p1".into(),
+            domain: String::new(),
+            workstation: String::new(),
             description: "corporate proxy".into(),
         });
+        ws.upstream_proxy.platform_auth = PlatformAuthSettings {
+            enabled: true,
+            prompt_on_failure: true,
+            override_project_only: true,
+            rules: vec![PlatformAuthRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                destination_host: "*.corp.local".into(),
+                auth_type: PlatformAuthType::NtlmV2,
+                username: "u2".into(),
+                password: "p2".into(),
+                domain: "CORP".into(),
+                hostname: "WKSTN1".into(),
+            }],
+        };
         ws.upstream_proxy.socks = SocksProxySettings {
             use_proxy: false,
             host: "127.0.0.1".into(),
@@ -307,6 +330,22 @@ mod tests {
         });
 
         ws.sessions.cookie_jar.monitor_mio_ai = true;
+        ws.ssl_pass_through_rules.push(SslPassThroughRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            host_pattern: "*.pin.example.invalid".into(),
+            port: Some(8443),
+            is_regex: false,
+        });
+        ws.ws_match_and_replace_rules.push(WsMatchAndReplaceRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            direction: WsReplaceDirection::Both,
+            match_pattern: "foo".into(),
+            replace_with: "bar".into(),
+            is_regex: false,
+            comment: "ws".into(),
+        });
         ws.tasks_auto_start = false;
         ws.scheduled_tasks.push(ScheduledTask {
             id: Uuid::new_v4(),
@@ -326,6 +365,11 @@ mod tests {
         assert_eq!(restored.upstream_tls, ws.upstream_tls);
         assert_eq!(restored.proxy_listeners, ws.proxy_listeners);
         assert_eq!(restored.scope, ws.scope);
+        assert_eq!(restored.ssl_pass_through_rules, ws.ssl_pass_through_rules);
+        assert_eq!(
+            restored.ws_match_and_replace_rules,
+            ws.ws_match_and_replace_rules
+        );
         assert_eq!(restored.sessions, ws.sessions);
         assert_eq!(restored.tasks_auto_start, ws.tasks_auto_start);
         assert_eq!(restored.scheduled_tasks, ws.scheduled_tasks);
@@ -353,6 +397,9 @@ mod tests {
         assert!(from_legacy.proxy_listeners.is_empty());
         assert!(from_legacy.tasks_auto_start);
         assert!(from_legacy.scheduled_tasks.is_empty());
+        assert!(from_legacy.ssl_pass_through_rules.is_empty());
+        assert!(from_legacy.ws_match_and_replace_rules.is_empty());
+        assert!(from_legacy.upstream_proxy.platform_auth.is_default());
         assert!(!from_legacy.scope.include[0].include_subdomains);
         assert!(!from_legacy.scope.drop_out_of_scope);
     }

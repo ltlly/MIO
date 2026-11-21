@@ -5,9 +5,7 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{Column, TableDelegate};
 use mio_core::{
     MatchAndReplaceRule, MatchReplaceTarget, ProxyResponseModificationSettings, SslPassThroughRule,
-    Uuid, WsMatchAndReplaceRule, WsReplaceDirection, extract_ssl_pass_through_rules,
-    extract_ws_match_and_replace_rules, is_advanced_proxy_rule,
-    replace_ssl_pass_through_rules, replace_ws_match_and_replace_rules, validate_ssl_and_ws_rules,
+    Uuid, WsMatchAndReplaceRule, WsReplaceDirection, validate_ssl_and_ws_rules,
 };
 
 use super::*;
@@ -124,15 +122,11 @@ impl ProxyAdvancedUi {
         cx: &mut Context<Settings>,
     ) -> Self {
         let (http_rules, ssl_rules, ws_rules) = {
-            let rules = &owner.read(cx).workspace.match_and_replace_rules;
+            let ws = &owner.read(cx).workspace;
             (
-                rules
-                    .iter()
-                    .filter(|r| !is_advanced_proxy_rule(r))
-                    .cloned()
-                    .collect(),
-                extract_ssl_pass_through_rules(rules),
-                extract_ws_match_and_replace_rules(rules),
+                ws.match_and_replace_rules.clone(),
+                ws.ssl_pass_through_rules.clone(),
+                ws.ws_match_and_replace_rules.clone(),
             )
         };
         let weak = cx.weak_entity();
@@ -269,16 +263,12 @@ impl ProxyAdvancedUi {
         .detach();
 
         cx.observe_in(owner, window, move |this, owner, _, cx| {
-            let rules = &owner.read(cx).workspace.match_and_replace_rules;
-            this.proxy_advanced.http_rules = rules
-                .iter()
-                .filter(|r| !is_advanced_proxy_rule(r))
-                .cloned()
-                .collect();
+            let ws = &owner.read(cx).workspace;
+            this.proxy_advanced.http_rules = ws.match_and_replace_rules.clone();
             this.proxy_advanced.http_editor_open = false;
             this.proxy_advanced.http_editing = None;
-            this.proxy_advanced.ssl_rules = extract_ssl_pass_through_rules(rules);
-            this.proxy_advanced.ws_rules = extract_ws_match_and_replace_rules(rules);
+            this.proxy_advanced.ssl_rules = ws.ssl_pass_through_rules.clone();
+            this.proxy_advanced.ws_rules = ws.ws_match_and_replace_rules.clone();
 
             let http_sel = this.proxy_advanced.http_selected.and_then(|id| {
                 this.proxy_advanced
@@ -466,22 +456,24 @@ impl Workbench {
         {
             return Err("当前项目尚未就绪或后台不可用；设置未修改。".into());
         }
-        let mut ssl = extract_ssl_pass_through_rules(&self.workspace.match_and_replace_rules);
-        let mut ws = extract_ws_match_and_replace_rules(&self.workspace.match_and_replace_rules);
+        let mut ssl = self.workspace.ssl_pass_through_rules.clone();
+        let mut ws = self.workspace.ws_match_and_replace_rules.clone();
         let mut resp_mod = self.workspace.proxy_messages.response_modification;
         mutate(&mut ssl, &mut ws, &mut resp_mod);
         validate_ssl_and_ws_rules(&ssl, &ws).map_err(|error| error.to_string())?;
         let mut candidate = self.workspace.clone();
-        replace_ssl_pass_through_rules(&mut candidate.match_and_replace_rules, &ssl);
-        replace_ws_match_and_replace_rules(&mut candidate.match_and_replace_rules, &ws);
+        candidate.ssl_pass_through_rules = ssl;
+        candidate.ws_match_and_replace_rules = ws;
         candidate.proxy_messages.response_modification = resp_mod;
         candidate.validate().map_err(|error| error.to_string())?;
-        if candidate.match_and_replace_rules == self.workspace.match_and_replace_rules
+        if candidate.ssl_pass_through_rules == self.workspace.ssl_pass_through_rules
+            && candidate.ws_match_and_replace_rules == self.workspace.ws_match_and_replace_rules
             && candidate.proxy_messages == self.workspace.proxy_messages
         {
             return Ok(());
         }
-        self.workspace.match_and_replace_rules = candidate.match_and_replace_rules;
+        self.workspace.ssl_pass_through_rules = candidate.ssl_pass_through_rules;
+        self.workspace.ws_match_and_replace_rules = candidate.ws_match_and_replace_rules;
         self.workspace.proxy_messages = candidate.proxy_messages;
         self.save_workspace(cx);
         cx.notify();

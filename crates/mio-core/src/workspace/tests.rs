@@ -434,3 +434,118 @@ fn socks_bypass_hosts_routes_matching_hosts_directly() {
             }
     ));
 }
+
+#[test]
+fn upstream_proxy_rule_supports_first_class_auth_domain_and_workstation() {
+    let mut rule = UpstreamProxyRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        destination_host: "*.lab.example.invalid".into(),
+        protocol: UpstreamProxyProtocol::Http,
+        host: "127.0.0.1".into(),
+        port: 3128,
+        auth_type: UpstreamAuthType::NtlmV2,
+        username: "alice".into(),
+        password: "secret".into(),
+        domain: "LAB".into(),
+        workstation: "CLIENT01".into(),
+        description: "ntlm proxy".into(),
+    };
+    rule.validate().unwrap();
+    let route = rule.to_route_with_tls(mio_proxy::UpstreamTls::System).unwrap();
+    match route {
+        mio_proxy::UpstreamRoute::Http(ep) => assert!(ep.credentials.is_none()),
+        other => panic!("unexpected route: {other:?}"),
+    }
+    let auth_cfg = rule.to_upstream_auth_config().unwrap();
+    assert_eq!(auth_cfg.credentials.scheme, crate::HttpAuthScheme::NtlmV2);
+    assert_eq!(auth_cfg.credentials.domain, "LAB");
+    assert_eq!(auth_cfg.credentials.workstation, "CLIENT01");
+
+    rule.auth_type = UpstreamAuthType::Digest;
+    rule.validate().unwrap();
+    match rule.to_route_with_tls(mio_proxy::UpstreamTls::System).unwrap() {
+        mio_proxy::UpstreamRoute::Http(ep) => assert!(ep.credentials.is_none()),
+        other => panic!("unexpected route: {other:?}"),
+    }
+
+    rule.auth_type = UpstreamAuthType::Basic;
+    match rule.to_route_with_tls(mio_proxy::UpstreamTls::System).unwrap() {
+        mio_proxy::UpstreamRoute::Http(ep) => assert!(ep.credentials.is_some()),
+        other => panic!("unexpected route: {other:?}"),
+    }
+
+    rule.username.clear();
+    assert!(rule.validate().is_err());
+    rule.auth_type = UpstreamAuthType::NtlmV1;
+    assert!(rule.validate().is_err());
+    rule.username = "alice".into();
+    rule.domain = "a".repeat(254);
+    assert!(rule.validate().is_err());
+    rule.domain = "LAB".into();
+    rule.workstation = "bad\nws".into();
+    assert!(rule.validate().is_err());
+}
+
+#[test]
+fn platform_auth_settings_and_workspace_ssl_ws_fields_validate_directly() {
+    let mut settings = UpstreamProxySettings::default();
+    assert!(settings.is_default());
+    settings.platform_auth.enabled = true;
+    assert!(!settings.is_default());
+
+    let enabled_rule = crate::PlatformAuthRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        destination_host: "app.example.invalid".into(),
+        auth_type: crate::PlatformAuthType::NtlmV1,
+        username: "u".into(),
+        password: "p".into(),
+        domain: "D".into(),
+        hostname: "H".into(),
+    };
+    let disabled_rule = crate::PlatformAuthRule {
+        id: Uuid::new_v4(),
+        enabled: false,
+        destination_host: "*".into(),
+        auth_type: crate::PlatformAuthType::Basic,
+        username: "u2".into(),
+        password: "p2".into(),
+        domain: String::new(),
+        hostname: String::new(),
+    };
+    settings.platform_auth.rules = vec![enabled_rule.clone(), disabled_rule];
+    settings.validate().unwrap();
+    let compiled = settings.compiled_platform_auth_rules();
+    assert_eq!(compiled.len(), 1);
+    assert_eq!(compiled[0].credentials.scheme, crate::HttpAuthScheme::NtlmV1);
+
+    // Duplicate platform auth IDs are rejected.
+    settings.platform_auth.rules.push(enabled_rule);
+    assert!(settings.validate().is_err());
+
+    let mut ws = Workspace::default();
+    ws.ssl_pass_through_rules.push(crate::SslPassThroughRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        host_pattern: "(".into(),
+        port: Some(443),
+        is_regex: true,
+    });
+    assert!(ws.validate().is_err());
+
+    ws.ssl_pass_through_rules.clear();
+    ws.ws_match_and_replace_rules.push(crate::WsMatchAndReplaceRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        direction: crate::WsReplaceDirection::Both,
+        match_pattern: "(".into(),
+        replace_with: "x".into(),
+        is_regex: true,
+        comment: String::new(),
+    });
+    assert!(ws.validate().is_err());
+
+    ws.ws_match_and_replace_rules[0].is_regex = false;
+    ws.validate().unwrap();
+}

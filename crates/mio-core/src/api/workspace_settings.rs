@@ -35,6 +35,31 @@ pub enum UpstreamAuthType {
     #[default]
     None,
     Basic,
+    Digest,
+    NtlmV1,
+    NtlmV2,
+}
+
+impl UpstreamAuthType {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Basic => "Basic",
+            Self::Digest => "Digest",
+            Self::NtlmV1 => "NTLM v1",
+            Self::NtlmV2 => "NTLM v2",
+        }
+    }
+
+    pub const fn to_scheme(self) -> HttpAuthScheme {
+        match self {
+            Self::None => HttpAuthScheme::None,
+            Self::Basic => HttpAuthScheme::Basic,
+            Self::Digest => HttpAuthScheme::Digest,
+            Self::NtlmV1 => HttpAuthScheme::NtlmV1,
+            Self::NtlmV2 => HttpAuthScheme::NtlmV2,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +77,10 @@ pub struct UpstreamProxyRule {
     pub auth_type: UpstreamAuthType,
     pub username: String,
     pub password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub domain: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workstation: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
 }
@@ -76,6 +105,8 @@ impl Default for UpstreamProxyRule {
             auth_type: UpstreamAuthType::None,
             username: String::new(),
             password: String::new(),
+            domain: String::new(),
+            workstation: String::new(),
             description: String::new(),
         }
     }
@@ -91,6 +122,8 @@ impl std::fmt::Debug for UpstreamProxyRule {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("auth_type", &self.auth_type)
+            .field("domain", &self.domain)
+            .field("workstation", &self.workstation)
             .field(
                 "authenticated",
                 &(!self.username.is_empty() || !self.password.is_empty()),
@@ -100,130 +133,16 @@ impl std::fmt::Debug for UpstreamProxyRule {
     }
 }
 
-pub const UPSTREAM_EXT_AUTH_PREFIX: &str = "mio-up-auth:";
-pub const PLATFORM_AUTH_CFG_PREFIX: &str = "mio-plat-cfg:";
-pub const PLATFORM_AUTH_RULE_PREFIX: &str = "mio-plat-rule:";
-
-fn hex_encode_str(input: &str) -> String {
-    mio_proxy::auth::to_hex_lower(input.as_bytes())
-}
-
-fn hex_decode_str(hex: &str) -> String {
-    let bytes = hex.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if let Ok(s) = std::str::from_utf8(&bytes[i..i + 2])
-            && let Ok(b) = u8::from_str_radix(s, 16)
-        {
-            out.push(b);
-        }
-        i += 2;
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
-
 impl UpstreamProxyRule {
-    pub fn is_internal_platform_auth_carrier(&self) -> bool {
-        self.description.starts_with(PLATFORM_AUTH_CFG_PREFIX)
-            || self.description.starts_with(PLATFORM_AUTH_RULE_PREFIX)
-    }
-
-    pub fn auth_scheme(&self) -> HttpAuthScheme {
-        if let Some(rest) = self.description.strip_prefix(UPSTREAM_EXT_AUTH_PREFIX) {
-            let meta = rest.split('|').next().unwrap_or("");
-            let scheme_code = meta.split(';').next().unwrap_or("");
-            let parsed = HttpAuthScheme::from_code(scheme_code);
-            if parsed != HttpAuthScheme::None {
-                return parsed;
-            }
-        }
-        match self.auth_type {
-            UpstreamAuthType::None => HttpAuthScheme::None,
-            UpstreamAuthType::Basic => HttpAuthScheme::Basic,
-        }
-    }
-
-    pub fn domain(&self) -> String {
-        if let Some(rest) = self.description.strip_prefix(UPSTREAM_EXT_AUTH_PREFIX) {
-            let meta = rest.split('|').next().unwrap_or("");
-            for part in meta.split(';').skip(1) {
-                if let Some(hex) = part.strip_prefix("d=") {
-                    return hex_decode_str(hex);
-                }
-            }
-        }
-        String::new()
-    }
-
-    pub fn workstation(&self) -> String {
-        if let Some(rest) = self.description.strip_prefix(UPSTREAM_EXT_AUTH_PREFIX) {
-            let meta = rest.split('|').next().unwrap_or("");
-            for part in meta.split(';').skip(1) {
-                if let Some(hex) = part.strip_prefix("w=") {
-                    return hex_decode_str(hex);
-                }
-            }
-        }
-        String::new()
-    }
-
-    pub fn user_description(&self) -> String {
-        if let Some(rest) = self.description.strip_prefix(UPSTREAM_EXT_AUTH_PREFIX) {
-            if let Some((_, desc)) = rest.split_once('|') {
-                return desc.to_owned();
-            }
-            return String::new();
-        }
-        self.description.clone()
-    }
-
-    pub fn set_extended_auth(
-        &mut self,
-        scheme: HttpAuthScheme,
-        domain: &str,
-        workstation: &str,
-        user_description: &str,
-    ) {
-        let clean_dom = domain.trim();
-        let clean_ws = workstation.trim();
-        let clean_desc = user_description.trim();
-        self.auth_type = match scheme {
-            HttpAuthScheme::None => UpstreamAuthType::None,
-            _ => UpstreamAuthType::Basic,
-        };
-        if matches!(scheme, HttpAuthScheme::None | HttpAuthScheme::Basic)
-            && clean_dom.is_empty()
-            && clean_ws.is_empty()
-        {
-            self.description = clean_desc.to_owned();
-        } else {
-            self.description = format!(
-                "{UPSTREAM_EXT_AUTH_PREFIX}{};d={};w={}|{}",
-                scheme.code(),
-                hex_encode_str(clean_dom),
-                hex_encode_str(clean_ws),
-                clean_desc
-            );
-        }
-    }
-
-    pub fn with_extended_auth(
-        mut self,
-        scheme: HttpAuthScheme,
-        domain: &str,
-        workstation: &str,
-        user_description: &str,
-    ) -> Self {
-        self.set_extended_auth(scheme, domain, workstation, user_description);
-        self
+    pub const fn auth_scheme(&self) -> HttpAuthScheme {
+        self.auth_type.to_scheme()
     }
 
     pub fn to_upstream_auth_config(&self) -> Option<UpstreamAuthRuleConfig> {
-        if !self.enabled || self.is_internal_platform_auth_carrier() {
+        if !self.enabled {
             return None;
         }
-        let scheme = self.auth_scheme();
+        let scheme = self.auth_type.to_scheme();
         if scheme == HttpAuthScheme::None {
             return None;
         }
@@ -236,8 +155,8 @@ impl UpstreamProxyRule {
                 scheme,
                 username: self.username.clone(),
                 password: self.password.clone(),
-                domain: self.domain(),
-                workstation: self.workstation(),
+                domain: self.domain.trim().to_owned(),
+                workstation: self.workstation.trim().to_owned(),
             },
         })
     }
@@ -327,6 +246,39 @@ impl Default for HostnameResolutionRule {
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct PlatformAuthSettings {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prompt_on_failure: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub override_project_only: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<PlatformAuthRule>,
+}
+
+impl PlatformAuthSettings {
+    pub fn is_default(&self) -> bool {
+        !self.enabled
+            && !self.prompt_on_failure
+            && !self.override_project_only
+            && self.rules.is_empty()
+    }
+}
+
+impl std::fmt::Debug for PlatformAuthSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformAuthSettings")
+            .field("enabled", &self.enabled)
+            .field("prompt_on_failure", &self.prompt_on_failure)
+            .field("override_project_only", &self.override_project_only)
+            .field("rules_len", &self.rules.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UpstreamProxySettings {
     pub protocol: UpstreamProxyProtocol,
     pub host: String,
@@ -341,6 +293,8 @@ pub struct UpstreamProxySettings {
     pub open_ended_response_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hostname_resolutions: Vec<HostnameResolutionRule>,
+    #[serde(default, skip_serializing_if = "PlatformAuthSettings::is_default")]
+    pub platform_auth: PlatformAuthSettings,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub override_project_only: bool,
 }
@@ -360,18 +314,13 @@ impl UpstreamProxySettings {
             && self.socks.is_default()
             && self.open_ended_response_timeout_secs == 0
             && self.hostname_resolutions.is_empty()
+            && self.platform_auth.is_default()
             && !self.override_project_only
     }
 
     pub fn effective_rules(&self) -> Vec<UpstreamProxyRule> {
-        let visible_rules: Vec<UpstreamProxyRule> = self
-            .rules
-            .iter()
-            .filter(|r| !r.is_internal_platform_auth_carrier())
-            .cloned()
-            .collect();
-        if !visible_rules.is_empty() {
-            return visible_rules;
+        if !self.rules.is_empty() {
+            return self.rules.clone();
         }
         if matches!(
             self.protocol,
@@ -394,6 +343,8 @@ impl UpstreamProxySettings {
                 },
                 username: self.username.clone(),
                 password: self.password.clone(),
+                domain: String::new(),
+                workstation: String::new(),
                 description: String::new(),
             }];
         }
@@ -431,14 +382,8 @@ impl UpstreamProxySettings {
         if let Some(rule) = self
             .rules
             .iter()
-            .filter(|rule| !rule.is_internal_platform_auth_carrier())
             .find(|rule| rule.enabled && rule.destination_host.trim() == "*")
-            .or_else(|| {
-                self.rules
-                    .iter()
-                    .filter(|rule| !rule.is_internal_platform_auth_carrier())
-                    .find(|rule| rule.enabled)
-            })
+            .or_else(|| self.rules.iter().find(|rule| rule.enabled))
         {
             self.protocol = rule.protocol;
             self.host = rule.host.clone();
@@ -459,170 +404,10 @@ impl UpstreamProxySettings {
         self.password.clear();
     }
 
-    pub fn retain_with_platform_auth(&mut self, real_rules: Vec<UpstreamProxyRule>) {
-        let carriers: Vec<UpstreamProxyRule> = self
-            .rules
-            .iter()
-            .filter(|r| r.is_internal_platform_auth_carrier())
-            .cloned()
-            .collect();
-        self.rules = real_rules;
-        self.rules.extend(carriers);
-    }
-
-    fn platform_auth_cfg_tuple(&self) -> (bool, bool, bool) {
-        for rule in &self.rules {
-            if let Some(rest) = rule.description.strip_prefix(PLATFORM_AUTH_CFG_PREFIX) {
-                let mut enabled = false;
-                let mut prompt = false;
-                let mut over = false;
-                for part in rest.split(';') {
-                    match part {
-                        "en=1" => enabled = true,
-                        "pr=1" => prompt = true,
-                        "ov=1" => over = true,
-                        _ => {}
-                    }
-                }
-                return (enabled, prompt, over);
-            }
-        }
-        (false, false, false)
-    }
-
-    fn write_platform_auth_cfg_tuple(&mut self, enabled: bool, prompt: bool, over: bool) {
-        self.rules
-            .retain(|r| !r.description.starts_with(PLATFORM_AUTH_CFG_PREFIX));
-        if enabled || prompt || over || !self.platform_auth_rules().is_empty() {
-            self.rules.push(UpstreamProxyRule {
-                id: Uuid::from_u128(0x58e9_f964_060e_4afc_911c_0000_0000_f000),
-                enabled: false,
-                destination_host: "*".into(),
-                protocol: UpstreamProxyProtocol::Http,
-                host: "127.0.0.1".into(),
-                port: 8080,
-                auth_type: UpstreamAuthType::None,
-                username: String::new(),
-                password: String::new(),
-                description: format!(
-                    "{PLATFORM_AUTH_CFG_PREFIX}en={};pr={};ov={}",
-                    u8::from(enabled),
-                    u8::from(prompt),
-                    u8::from(over)
-                ),
-            });
-        }
-    }
-
-    pub fn platform_auth_enabled(&self) -> bool {
-        self.platform_auth_cfg_tuple().0
-    }
-
-    pub fn set_platform_auth_enabled(&mut self, enabled: bool) {
-        let (_, prompt, over) = self.platform_auth_cfg_tuple();
-        self.write_platform_auth_cfg_tuple(enabled, prompt, over);
-    }
-
-    pub fn platform_auth_prompt_on_failure(&self) -> bool {
-        self.platform_auth_cfg_tuple().1
-    }
-
-    pub fn set_platform_auth_prompt_on_failure(&mut self, prompt: bool) {
-        let (enabled, _, over) = self.platform_auth_cfg_tuple();
-        self.write_platform_auth_cfg_tuple(enabled, prompt, over);
-    }
-
-    pub fn platform_auth_override_project_only(&self) -> bool {
-        self.platform_auth_cfg_tuple().2
-    }
-
-    pub fn set_platform_auth_override_project_only(&mut self, over: bool) {
-        let (enabled, prompt, _) = self.platform_auth_cfg_tuple();
-        self.write_platform_auth_cfg_tuple(enabled, prompt, over);
-    }
-
-    pub fn platform_auth_rules(&self) -> Vec<PlatformAuthRule> {
-        let mut out = Vec::new();
-        for rule in &self.rules {
-            let Some(rest) = rule.description.strip_prefix(PLATFORM_AUTH_RULE_PREFIX) else {
-                continue;
-            };
-            let mut enabled = true;
-            let mut auth_type = PlatformAuthType::Basic;
-            let mut domain = String::new();
-            let mut hostname = String::new();
-            let mut username = String::new();
-            let mut password = String::new();
-            for part in rest.split(';') {
-                if let Some(v) = part.strip_prefix("en=") {
-                    enabled = v == "1";
-                } else if let Some(v) = part.strip_prefix("t=") {
-                    auth_type = PlatformAuthType::from_code(v);
-                } else if let Some(v) = part.strip_prefix("u=") {
-                    username = hex_decode_str(v);
-                } else if let Some(v) = part.strip_prefix("p=") {
-                    password = hex_decode_str(v);
-                } else if let Some(v) = part.strip_prefix("d=") {
-                    domain = hex_decode_str(v);
-                } else if let Some(v) = part.strip_prefix("h=") {
-                    hostname = hex_decode_str(v);
-                }
-            }
-            out.push(PlatformAuthRule {
-                id: rule.id,
-                enabled,
-                destination_host: rule.destination_host.clone(),
-                auth_type,
-                username,
-                password,
-                domain,
-                hostname,
-            });
-        }
-        out
-    }
-
-    pub fn set_platform_auth_rules(&mut self, rules: Vec<PlatformAuthRule>) {
-        let (en, pr, ov) = self.platform_auth_cfg_tuple();
-        self.rules
-            .retain(|r| !r.description.starts_with(PLATFORM_AUTH_RULE_PREFIX));
-        for item in rules {
-            let desc = format!(
-                "{PLATFORM_AUTH_RULE_PREFIX}en={};t={};u={};p={};d={};h={}",
-                u8::from(item.enabled),
-                item.auth_type.code(),
-                hex_encode_str(&item.username),
-                hex_encode_str(&item.password),
-                hex_encode_str(&item.domain),
-                hex_encode_str(&item.hostname),
-            );
-            self.rules.push(UpstreamProxyRule {
-                id: if item.id.is_nil() {
-                    Uuid::new_v4()
-                } else {
-                    item.id
-                },
-                enabled: false,
-                destination_host: if item.destination_host.trim().is_empty() {
-                    "*".into()
-                } else {
-                    item.destination_host.trim().to_owned()
-                },
-                protocol: UpstreamProxyProtocol::Http,
-                host: "127.0.0.1".into(),
-                port: 8080,
-                auth_type: UpstreamAuthType::None,
-                username: String::new(),
-                password: String::new(),
-                description: desc,
-            });
-        }
-        self.write_platform_auth_cfg_tuple(en, pr, ov);
-    }
-
     pub fn compiled_platform_auth_rules(&self) -> std::sync::Arc<[PlatformAuthRuleConfig]> {
         let list: Vec<PlatformAuthRuleConfig> = self
-            .platform_auth_rules()
+            .platform_auth
+            .rules
             .iter()
             .filter(|r| r.enabled)
             .map(PlatformAuthRule::to_proxy_config)
@@ -650,10 +435,13 @@ impl UpstreamProxySettings {
         if !self.socks.override_project_only {
             guard.socks = self.effective_socks();
         }
-        if !self.platform_auth_override_project_only() {
-            guard.platform_auth_enabled = self.platform_auth_enabled();
-            guard.platform_auth_prompt = self.platform_auth_prompt_on_failure();
-            guard.platform_auth_rules = self.platform_auth_rules();
+        if !self.platform_auth.override_project_only {
+            guard.platform_auth = PlatformAuthSettings {
+                enabled: self.platform_auth.enabled,
+                prompt_on_failure: self.platform_auth.prompt_on_failure,
+                override_project_only: false,
+                rules: self.platform_auth.rules.clone(),
+            };
         }
     }
 
@@ -663,22 +451,28 @@ impl UpstreamProxySettings {
         let guard = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !out.override_project_only && out.effective_rules().is_empty() && !guard.upstream_rules.is_empty() {
-            out.retain_with_platform_auth(guard.upstream_rules.clone());
+        if !out.override_project_only
+            && out.effective_rules().is_empty()
+            && !guard.upstream_rules.is_empty()
+        {
+            out.rules = guard.upstream_rules.clone();
             out.sync_legacy_summary();
         }
-        if !out.socks.override_project_only && out.effective_socks().is_default() && !guard.socks.is_default() {
+        if !out.socks.override_project_only
+            && out.effective_socks().is_default()
+            && !guard.socks.is_default()
+        {
             out.socks = guard.socks.clone();
             out.sync_legacy_summary();
         }
-        if !out.platform_auth_override_project_only()
-            && !out.platform_auth_enabled()
-            && out.platform_auth_rules().is_empty()
-            && (guard.platform_auth_enabled || !guard.platform_auth_rules.is_empty())
+        if !out.platform_auth.override_project_only
+            && !out.platform_auth.enabled
+            && out.platform_auth.rules.is_empty()
+            && (guard.platform_auth.enabled || !guard.platform_auth.rules.is_empty())
         {
-            out.set_platform_auth_enabled(guard.platform_auth_enabled);
-            out.set_platform_auth_prompt_on_failure(guard.platform_auth_prompt);
-            out.set_platform_auth_rules(guard.platform_auth_rules.clone());
+            out.platform_auth.enabled = guard.platform_auth.enabled;
+            out.platform_auth.prompt_on_failure = guard.platform_auth.prompt_on_failure;
+            out.platform_auth.rules = guard.platform_auth.rules.clone();
         }
         out
     }
@@ -688,9 +482,7 @@ impl UpstreamProxySettings {
 struct UserLevelConnectionsCache {
     upstream_rules: Vec<UpstreamProxyRule>,
     socks: SocksProxySettings,
-    platform_auth_enabled: bool,
-    platform_auth_prompt: bool,
-    platform_auth_rules: Vec<PlatformAuthRule>,
+    platform_auth: PlatformAuthSettings,
 }
 
 fn user_level_connections_cache() -> &'static std::sync::Mutex<UserLevelConnectionsCache> {
@@ -716,6 +508,7 @@ impl std::fmt::Debug for UpstreamProxySettings {
                 &self.open_ended_response_timeout_secs,
             )
             .field("hostname_resolutions_len", &self.hostname_resolutions.len())
+            .field("platform_auth", &self.platform_auth)
             .field("override_project_only", &self.override_project_only)
             .finish()
     }

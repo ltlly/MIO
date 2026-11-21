@@ -95,7 +95,7 @@ impl State {
         let upstream_settings = workspace.upstream_proxy.effective_for_runtime();
         let route_resolver = upstream_settings.build_route_resolver(upstream_tls.clone())?;
         let hostname_overrides = upstream_settings.compiled_hostname_overrides()?;
-        let platform_auth_enabled = upstream_settings.platform_auth_enabled();
+        let platform_auth_enabled = upstream_settings.platform_auth.enabled;
         let platform_auth_rules = upstream_settings.compiled_platform_auth_rules();
         let upstream_auth_rules = upstream_settings.compiled_upstream_auth_rules();
         let streaming_timeout = upstream_settings

@@ -53,12 +53,16 @@ impl UpstreamProxyRule {
             self.host.len() <= 253
                 && self.username.len() <= 4096
                 && self.password.len() <= 4096
+                && self.domain.len() <= 253
+                && self.workstation.len() <= 253
                 && self.description.len() <= 1024
                 && !self
                     .host
                     .bytes()
                     .chain(self.username.bytes())
                     .chain(self.password.bytes())
+                    .chain(self.domain.bytes())
+                    .chain(self.workstation.bytes())
                     .chain(self.description.bytes())
                     .any(|b| matches!(b, b'\r' | b'\n' | 0)),
             "上游代理规则包含控制字符或超过长度上限"
@@ -93,6 +97,14 @@ impl UpstreamProxyRule {
                     username: self.username.clone(),
                     password: self.password.clone(),
                 })
+            }
+            UpstreamAuthType::Digest | UpstreamAuthType::NtlmV1 | UpstreamAuthType::NtlmV2 => {
+                ensure!(
+                    !self.username.is_empty(),
+                    "HTTP/HTTPS 代理 {} 认证必须填写用户名",
+                    self.auth_type.label()
+                );
+                None
             }
         };
         let endpoint = mio_proxy::ProxyEndpoint {
@@ -272,6 +284,15 @@ impl UpstreamProxySettings {
                     "启用的自定义主机名解析存在重复域名：{norm_host}"
                 );
             }
+        }
+        ensure!(
+            self.platform_auth.rules.len() <= 64,
+            "平台认证规则数量超过 64 条上限"
+        );
+        let mut platform_auth_ids = HashSet::new();
+        for rule in &self.platform_auth.rules {
+            ensure!(platform_auth_ids.insert(rule.id), "平台认证规则 ID 重复");
+            rule.validate()?;
         }
         let _ = self.to_route()?;
         Ok(())
@@ -606,6 +627,10 @@ impl Workspace {
                     .map_err(|e| anyhow::anyhow!("Match and replace 正则表达式无效：{e}"))?;
             }
         }
+        crate::http::validate_ssl_and_ws_rules(
+            &self.ssl_pass_through_rules,
+            &self.ws_match_and_replace_rules,
+        )?;
         ensure!(self.tab_count() <= 512, "工作标签超过 512 个限额");
         ensure!(
             self.groups.len() + self.intruder.groups.len() <= 512,

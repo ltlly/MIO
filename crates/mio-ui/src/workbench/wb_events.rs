@@ -397,6 +397,9 @@ impl Workbench {
                 self.saving_project_snapshot = false;
                 self.workspace.revision = stored.revision;
                 self.workspace.match_and_replace_rules = stored.match_and_replace_rules.clone();
+                self.workspace.ssl_pass_through_rules = stored.ssl_pass_through_rules.clone();
+                self.workspace.ws_match_and_replace_rules =
+                    stored.ws_match_and_replace_rules.clone();
                 self.workspace_dirty = true;
                 self.pending_sends.clear();
                 self.plugins_save_failed(cx);

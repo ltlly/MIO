@@ -1,10 +1,6 @@
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{TestAppContext, point};
-use mio_core::{
-    ProxyMessageSettings, SslPassThroughRule, WsMatchAndReplaceRule,
-    extract_ssl_pass_through_rules, extract_ws_match_and_replace_rules,
-    replace_ssl_pass_through_rules, replace_ws_match_and_replace_rules,
-};
+use mio_core::{ProxyMessageSettings, SslPassThroughRule, Workspace, WsMatchAndReplaceRule};
 
 use super::*;
 use crate::workbench::tests::{
@@ -171,7 +167,8 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     input_value(settings, "proxy-ssl-pt-port-input", "8443", cx);
     proxy_rule_click(settings, "proxy-ssl-pt-submit", cx);
     let first = saved(&mut fixture.commands);
-    let ssl_rules = extract_ssl_pass_through_rules(&first.match_and_replace_rules);
+    assert_eq!(first.match_and_replace_rules.len(), 1);
+    let ssl_rules = &first.ssl_pass_through_rules;
     assert_eq!(ssl_rules.len(), 1);
     let ssl_rule = ssl_rules[0].clone();
     assert_eq!(ssl_rule.host_pattern, "*.pin.example");
@@ -187,7 +184,8 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     proxy_rule_click(settings, "proxy-ws-mr-regex", cx);
     proxy_rule_click(settings, "proxy-ws-mr-submit", cx);
     let second = saved(&mut fixture.commands);
-    let ws_rules = extract_ws_match_and_replace_rules(&second.match_and_replace_rules);
+    assert_eq!(second.match_and_replace_rules.len(), 1);
+    let ws_rules = &second.ws_match_and_replace_rules;
     assert_eq!(ws_rules.len(), 1);
     let ws_rule = ws_rules[0].clone();
     assert_eq!(
@@ -203,19 +201,13 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     input_value(settings, "proxy-ws-mr-replace-input", "pong", cx);
     proxy_rule_click(settings, "proxy-ws-mr-submit", cx);
     let second_b = saved(&mut fixture.commands);
-    assert_eq!(
-        extract_ws_match_and_replace_rules(&second_b.match_and_replace_rules).len(),
-        2
-    );
+    assert_eq!(second_b.ws_match_and_replace_rules.len(), 2);
     acknowledge(&fixture, second_b, cx);
 
     proxy_rule_click(settings, ("proxy-ws-mr-row", 1usize), cx);
     proxy_rule_click(settings, "proxy-ws-mr-up", cx);
     let moved_up = saved(&mut fixture.commands);
-    assert_eq!(
-        extract_ws_match_and_replace_rules(&moved_up.match_and_replace_rules)[0].match_pattern,
-        "ping"
-    );
+    assert_eq!(moved_up.ws_match_and_replace_rules[0].match_pattern, "ping");
     acknowledge(&fixture, moved_up, cx);
 
     proxy_rule_click(settings, "proxy-resp-mod-unhide-hidden", cx);
@@ -231,7 +223,7 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
 
     proxy_rule_click(settings, ("proxy-ssl-pt-toggle", 0usize), cx);
     let disabled = saved(&mut fixture.commands);
-    assert!(!extract_ssl_pass_through_rules(&disabled.match_and_replace_rules)[0].enabled);
+    assert!(!disabled.ssl_pass_through_rules[0].enabled);
     acknowledge(&fixture, disabled.clone(), cx);
 
     proxy_rule_click(settings, ("proxy-ssl-pt-row", 0usize), cx);
@@ -239,7 +231,7 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     input_value(settings, "proxy-ssl-pt-host-input", "pinned.local", cx);
     proxy_rule_click(settings, "proxy-ssl-pt-submit", cx);
     let edited = saved(&mut fixture.commands);
-    let edited_ssl = extract_ssl_pass_through_rules(&edited.match_and_replace_rules);
+    let edited_ssl = &edited.ssl_pass_through_rules;
     assert_eq!(edited_ssl.len(), 1);
     assert_eq!(edited_ssl[0].id, ssl_rule.id);
     assert_eq!(edited_ssl[0].host_pattern, "pinned.local");
@@ -252,7 +244,7 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     proxy_rule_click(settings, ("proxy-ws-mr-row", 0usize), cx);
     proxy_rule_click(settings, "proxy-ws-mr-remove", cx);
     let removed = saved(&mut fixture.commands);
-    assert!(extract_ws_match_and_replace_rules(&removed.match_and_replace_rules).is_empty());
+    assert!(removed.ws_match_and_replace_rules.is_empty());
     acknowledge(&fixture, removed.clone(), cx);
 
     cx.simulate_keystrokes(settings, crate::kbd!("w"));
@@ -262,10 +254,7 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     scroll_to_proxy_advanced(reopened, cx);
     let latest = cx.read(|cx| fixture.view.read(cx).workspace.clone());
     assert_eq!(latest.proxy_messages, removed.proxy_messages);
-    assert_eq!(
-        extract_ssl_pass_through_rules(&latest.match_and_replace_rules)[0].host_pattern,
-        "pinned.local"
-    );
+    assert_eq!(latest.ssl_pass_through_rules[0].host_pattern, "pinned.local");
     assert!(
         latest
             .proxy_messages
@@ -298,9 +287,7 @@ fn proxy_advanced_invalid_regex_preserves_inputs_and_sends_no_save(cx: &mut Test
     assert!(drain(&mut fixture.commands).is_empty());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert!(
-            extract_ws_match_and_replace_rules(&view.workspace.match_and_replace_rules).is_empty()
-        );
+        assert!(view.workspace.ws_match_and_replace_rules.is_empty());
     });
 }
 
@@ -313,31 +300,32 @@ fn proxy_advanced_default_fields_preserve_legacy_json_and_security_boundaries() 
     };
     assert!(parsed.response_modification.is_default());
 
-    let mut rules = Vec::new();
-    replace_ssl_pass_through_rules(
-        &mut rules,
-        &[SslPassThroughRule {
-            id: mio_core::Uuid::new_v4(),
-            enabled: true,
-            host_pattern: "127.0.0.1".into(),
-            port: Some(8443),
-            is_regex: false,
-        }],
+    let mut ws = Workspace::default();
+    ws.ssl_pass_through_rules.push(SslPassThroughRule {
+        id: mio_core::Uuid::new_v4(),
+        enabled: true,
+        host_pattern: "127.0.0.1".into(),
+        port: Some(8443),
+        is_regex: false,
+    });
+    ws.ws_match_and_replace_rules.push(WsMatchAndReplaceRule {
+        id: mio_core::Uuid::new_v4(),
+        enabled: true,
+        direction: mio_core::WsReplaceDirection::Both,
+        match_pattern: "a".into(),
+        replace_with: "b".into(),
+        is_regex: false,
+        comment: "note".into(),
+    });
+    ws.validate().unwrap();
+    let encoded = serde_json::to_string(&ws).unwrap();
+    let decoded: Workspace = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.ssl_pass_through_rules, ws.ssl_pass_through_rules);
+    assert_eq!(
+        decoded.ws_match_and_replace_rules,
+        ws.ws_match_and_replace_rules
     );
-    replace_ws_match_and_replace_rules(
-        &mut rules,
-        &[WsMatchAndReplaceRule {
-            id: mio_core::Uuid::new_v4(),
-            enabled: true,
-            direction: mio_core::WsReplaceDirection::Both,
-            match_pattern: "a".into(),
-            replace_with: "b".into(),
-            is_regex: false,
-            comment: "note".into(),
-        }],
-    );
-    assert_eq!(extract_ssl_pass_through_rules(&rules).len(), 1);
-    assert_eq!(extract_ws_match_and_replace_rules(&rules).len(), 1);
+    assert!(decoded.match_and_replace_rules.is_empty());
 }
 
 #[gpui_kit::test]

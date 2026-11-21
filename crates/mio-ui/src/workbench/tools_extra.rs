@@ -11,7 +11,7 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{Column, TableDelegate, TableEvent, TableState};
 use mio_core::{
     FlowSummary, MatchAndReplaceRule, MatchReplaceTarget, TrafficSource, Uuid,
-    WsMatchAndReplaceRule, WsReplaceDirection, extract_ws_match_and_replace_rules,
+    WsMatchAndReplaceRule, WsReplaceDirection,
 };
 
 use super::*;
@@ -654,15 +654,9 @@ pub(super) const WB_MR_COLUMNS: [(&str, f32); 7] = [
 
 impl WorkbenchMatchReplaceTable {
     fn http_rules(&self, cx: &App) -> Vec<MatchAndReplaceRule> {
-        self.owner.upgrade().map_or_else(Vec::new, |wb| {
-            wb.read(cx)
-                .workspace
-                .match_and_replace_rules
-                .iter()
-                .filter(|r| !mio_core::is_advanced_proxy_rule(r))
-                .cloned()
-                .collect()
-        })
+        self.owner
+            .upgrade()
+            .map_or_else(Vec::new, |wb| wb.read(cx).workspace.match_and_replace_rules.clone())
     }
 }
 
@@ -774,7 +768,7 @@ pub(super) const WB_WS_MR_COLUMNS: [(&str, f32); 6] = [
 impl WorkbenchWsMatchReplaceTable {
     fn ws_rules(&self, cx: &App) -> Vec<WsMatchAndReplaceRule> {
         self.owner.upgrade().map_or_else(Vec::new, |wb| {
-            extract_ws_match_and_replace_rules(&wb.read(cx).workspace.match_and_replace_rules)
+            wb.read(cx).workspace.ws_match_and_replace_rules.clone()
         })
     }
 }
@@ -914,8 +908,7 @@ impl MatchReplacePane {
         });
         cx.subscribe_in(&mr_table, window, |this, _, event, window, cx| {
             if let TableEvent::SelectRow(row) | TableEvent::DoubleClickedRow(row) = event {
-                let rule = this.workspace.match_and_replace_rules.iter()
-                    .filter(|rule| !mio_core::is_advanced_proxy_rule(rule)).nth(*row).cloned();
+                let rule = this.workspace.match_and_replace_rules.get(*row).cloned();
                 this.extra_tools.mr_selected = rule.as_ref().map(|rule| rule.id);
                 if matches!(event, TableEvent::DoubleClickedRow(_))
                     && let Some(rule) = rule
@@ -963,11 +956,7 @@ impl MatchReplacePane {
         });
         cx.subscribe_in(&ws_mr_table, window, |this, _, event, window, cx| {
             if let TableEvent::SelectRow(row) | TableEvent::DoubleClickedRow(row) = event {
-                let rule = extract_ws_match_and_replace_rules(
-                    &this.workspace.match_and_replace_rules,
-                )
-                .into_iter()
-                .nth(*row);
+                let rule = this.workspace.ws_match_and_replace_rules.get(*row).cloned();
                 this.extra_tools.ws_mr_selected = rule.as_ref().map(|rule| rule.id);
                 if matches!(event, TableEvent::DoubleClickedRow(_))
                     && let Some(rule) = rule

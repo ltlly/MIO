@@ -98,7 +98,6 @@ impl Workbench {
             self.workspace
                 .match_and_replace_rules
                 .iter()
-                .filter(|r| !mio_core::is_advanced_proxy_rule(r))
                 .position(|r| r.id == id)
         });
         if sel.is_none() {
@@ -162,28 +161,24 @@ impl Workbench {
         if self.project.is_none() || self.transition.is_some() || !self.backend_available() {
             return;
         }
-        let http_indices: Vec<usize> = self
+        let Some(pos) = self
             .workspace
             .match_and_replace_rules
             .iter()
-            .enumerate()
-            .filter_map(|(i, r)| (!mio_core::is_advanced_proxy_rule(r)).then_some(i))
-            .collect();
-        let Some(pos) = http_indices
-            .iter()
-            .position(|&idx| self.workspace.match_and_replace_rules[idx].id == id)
+            .position(|r| r.id == id)
         else {
             return;
         };
         let target_pos = if down {
-            pos.checked_add(1).filter(|&p| p < http_indices.len())
+            pos.checked_add(1)
+                .filter(|&p| p < self.workspace.match_and_replace_rules.len())
         } else {
             pos.checked_sub(1)
         };
         if let Some(target_pos) = target_pos {
             self.workspace
                 .match_and_replace_rules
-                .swap(http_indices[pos], http_indices[target_pos]);
+                .swap(pos, target_pos);
             self.sync_mr_table_selection(cx);
             self.save_workspace(cx);
             cx.notify();
@@ -237,12 +232,7 @@ impl Workbench {
             return;
         }
         let mut changed = false;
-        for rule in self
-            .workspace
-            .match_and_replace_rules
-            .iter_mut()
-            .filter(|r| !mio_core::is_advanced_proxy_rule(r))
-        {
+        for rule in &mut self.workspace.match_and_replace_rules {
             if rule.enabled != enabled {
                 rule.enabled = enabled;
                 changed = true;
@@ -259,11 +249,8 @@ impl Workbench {
         if self.project.is_none() || self.transition.is_some() || !self.backend_available() {
             return;
         }
-        let before = self.workspace.match_and_replace_rules.len();
-        self.workspace
-            .match_and_replace_rules
-            .retain(mio_core::is_advanced_proxy_rule);
-        if self.workspace.match_and_replace_rules.len() != before {
+        if !self.workspace.match_and_replace_rules.is_empty() {
+            self.workspace.match_and_replace_rules.clear();
             if let Some(dlg) = self.extra_tools.mr_dialog.take() {
                 let _ = dlg.update(cx, |_, window, _| window.remove_window());
             }
@@ -302,7 +289,7 @@ impl Workbench {
                 .workspace
                 .match_and_replace_rules
                 .iter_mut()
-                .find(|r| r.id == edit_id && !mio_core::is_advanced_proxy_rule(r))
+                .find(|r| r.id == edit_id)
         {
             existing.item_type = item_type;
             existing.match_pattern = match_pattern;
@@ -350,7 +337,7 @@ impl Workbench {
                 .workspace
                 .match_and_replace_rules
                 .iter_mut()
-                .find(|r| r.id == orig.id && !mio_core::is_advanced_proxy_rule(r))
+                .find(|r| r.id == orig.id)
             else {
                 return Err("待修改的规则已不存在。".into());
             };
@@ -373,11 +360,15 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn sync_ws_mr_table_selection(&mut self, cx: &mut Context<Self>) {
-        let ws_rules = extract_ws_match_and_replace_rules(&self.workspace.match_and_replace_rules);
         let sel = self
             .extra_tools
             .ws_mr_selected
-            .and_then(|id| ws_rules.iter().position(|r| r.id == id));
+            .and_then(|id| {
+                self.workspace
+                    .ws_match_and_replace_rules
+                    .iter()
+                    .position(|r| r.id == id)
+            });
         if sel.is_none() {
             self.extra_tools.ws_mr_selected = None;
         }

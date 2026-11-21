@@ -423,8 +423,7 @@ impl State {
             return;
         }
         let normalized_host = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
-        let existing = crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules);
-        if existing.iter().any(|r| {
+        if workspace.ssl_pass_through_rules.iter().any(|r| {
             r.enabled
                 && !r.is_regex
                 && r.host_pattern.eq_ignore_ascii_case(&normalized_host)
@@ -439,14 +438,12 @@ impl State {
             port: Some(port),
             is_regex: false,
         };
-        workspace
-            .match_and_replace_rules
-            .push(rule.to_match_and_replace_rule());
+        workspace.ssl_pass_through_rules.push(rule);
         workspace.revision = workspace.revision.saturating_add(1);
         if self.store.save_workspace(&workspace).is_ok() {
-            if let Ok(matcher) = crate::http::build_ssl_pass_through_matcher(
-                &crate::extract_ssl_pass_through_rules(&workspace.match_and_replace_rules),
-            ) {
+            if let Ok(matcher) =
+                crate::http::build_ssl_pass_through_matcher(&workspace.ssl_pass_through_rules)
+            {
                 if let Some(proxy) = &self.proxy {
                     proxy.set_ssl_pass_through(matcher.clone());
                 }
