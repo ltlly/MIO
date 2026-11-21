@@ -13,6 +13,80 @@ pub(crate) fn is_cross_platform_absolute(path: &Path) -> bool {
     path.is_absolute() || path.as_os_str().as_encoded_bytes().starts_with(b"/")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDirKind {
+    Data,
+    Config,
+}
+
+/// Resolves the platform application directory for MIO (`Data` or `Config`).
+pub(crate) fn platform_app_dir(kind: AppDirKind) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = kind;
+        let home = std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .context("无法确定用户目录")?;
+        Ok(Path::new(&home).join("Library/Application Support/MIO"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let (xdg_var, fallback_rel) = match kind {
+            AppDirKind::Data => ("XDG_DATA_HOME", ".local/share/mio"),
+            AppDirKind::Config => ("XDG_CONFIG_HOME", ".config/mio"),
+        };
+        if let Some(xdg) = std::env::var_os(xdg_var).filter(|v| !v.is_empty()) {
+            let p = PathBuf::from(xdg);
+            if p.is_absolute() {
+                return Ok(p.join("mio"));
+            }
+        }
+        let home = std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .context("无法确定用户目录")?;
+        Ok(Path::new(&home).join(fallback_rel))
+    }
+    #[cfg(windows)]
+    {
+        let _ = kind;
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(appdata).join("MIO"));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .filter(|v| !v.is_empty())
+        {
+            return Ok(PathBuf::from(profile)
+                .join("AppData")
+                .join("Roaming")
+                .join("MIO"));
+        }
+        anyhow::bail!("无法确定用户目录")
+    }
+}
+
+/// Resolves the platform runtime directory for local MIO sockets if available.
+pub(crate) fn platform_runtime_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        platform_app_dir(AppDirKind::Data)
+            .ok()
+            .map(|dir| dir.join("run"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .map(|dir| PathBuf::from(dir).join("mio"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(|local| PathBuf::from(local).join("MIO").join("run"))
+    }
+}
+
 pub(crate) fn validate_parent_dir(path: &Path, label: &str) -> Result<PathBuf> {
     ensure!(
         is_cross_platform_absolute(path),

@@ -99,10 +99,10 @@ struct ArchiveSummaryEntry {
 }
 
 pub(crate) fn completed_source_id(store: &ProjectStore) -> Result<Option<Uuid>> {
-    if store.read_direct_ext_source()?.is_some() {
+    if store.ext_archive().read_direct_source()?.is_some() {
         return Ok(None);
     }
-    let mut sources = store.ext_sources()?;
+    let mut sources = store.ext_archive().sources()?;
     let Some(source) = sources.pop() else {
         return Ok(None);
     };
@@ -122,7 +122,7 @@ fn load_mapped_ws_item(
     source_id: Uuid,
     id: Uuid,
 ) -> Result<Option<crate::ExtItemDetail>> {
-    let detail = match store.ext_item_detail(source_id, id, 0, 8) {
+    let detail = match store.ext_archive().item_detail(source_id, id, 0, 8) {
         Ok(detail) => detail,
         Err(error)
             if error
@@ -203,7 +203,9 @@ pub(crate) fn read_ext_websocket_notes(
     if !has_edited && !has_raw {
         return Ok(None);
     }
-    let fragment = store.ext_websocket_fragment(source_id, id, !has_raw && has_edited, 0, 0)?;
+    let fragment = store
+        .ext_archive()
+        .websocket_fragment(source_id, id, !has_raw && has_edited, 0, 0)?;
     let text = fragment.row.notes.unwrap_or_default();
     ensure!(
         text.len() <= MAX_NOTES_BYTES,
@@ -256,7 +258,9 @@ pub(crate) fn merge_ext_websocket_history(
     let mut mapped_ordinal = 0u64;
     loop {
         ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
-        let page = store.ext_websocket_page(source_id, page_offset, ARCHIVE_PAGE_LIMIT)?;
+        let page = store
+            .ext_archive()
+            .websocket_page(source_id, page_offset, ARCHIVE_PAGE_LIMIT)?;
         for row in &page.rows {
             ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
             if row.item.state != "mapped" || (row.payload.is_none() && row.edited_payload.is_none())
@@ -420,7 +424,9 @@ fn read_full_payload(
         ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
     }
     if total == 0 {
-        let fragment = store.ext_websocket_fragment(source_id, item_id, edited, 0, 0)?;
+        let fragment = store
+            .ext_archive()
+            .websocket_fragment(source_id, item_id, edited, 0, 0)?;
         ensure!(
             fragment.summary.raw_bytes == 0 && fragment.bytes.is_empty(),
             "外部归档 WebSocket 空消息长度与摘要不一致"
@@ -435,7 +441,9 @@ fn read_full_payload(
         }
         let chunk_len = (total - out.len()).min(EXT_FRAGMENT_BYTES);
         let pos = out.len() as u64;
-        let fragment = store.ext_websocket_fragment(source_id, item_id, edited, pos, chunk_len)?;
+        let fragment = store
+            .ext_archive()
+            .websocket_fragment(source_id, item_id, edited, pos, chunk_len)?;
         ensure!(
             fragment.summary.raw_bytes == expected_bytes && fragment.bytes.len() == chunk_len,
             "外部归档 WebSocket 载荷分片长度与摘要不一致"

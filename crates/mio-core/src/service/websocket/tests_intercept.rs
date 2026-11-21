@@ -36,7 +36,7 @@ async fn websocket_intercept_decide_validates_utf8_persists_original_and_clears_
         })
         .await;
     assert!(bad.unwrap_err().to_string().contains("UTF-8"));
-    assert!(state.pending_websockets.contains_key(&held.id));
+    assert!(state.proxy.pending_websockets.contains_key(&held.id));
 
     // Valid UTF-8 Forward sends decision and resolves intercept.
     state

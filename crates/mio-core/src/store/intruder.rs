@@ -42,6 +42,8 @@ pub(in crate::store::intruder) use recovery_ops::{
 };
 pub(in crate::store::intruder) use result_rows::*;
 pub(super) use retention::{IntruderSessions, ensure_resource_pools_unreferenced};
+#[cfg(test)]
+pub(super) use retention::SessionWriteHook;
 pub(in crate::store::intruder) use run_codec::*;
 pub(in crate::store) use run_codec::{decode_run, run_select};
 pub(super) use schema::create_schema;
@@ -60,7 +62,6 @@ pub(in crate::store) fn reassign_project_pool(
         ensure!(!cancel.is_cancelled(), "Intruder 资源池删除已取消");
         let run = decode_run(row)?;
         ensure_not_discarded(transaction, run.id)?;
-        next_revision(run.resource_pool_revision)?;
         count = count.checked_add(1).context("Intruder 任务计数溢出")?;
     }
     drop(rows);

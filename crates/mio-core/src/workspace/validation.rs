@@ -412,20 +412,6 @@ impl Workspace {
                 "项目名称不能为空、包含控制字符或超过 256 字节"
             );
         }
-        // Temporary validation retained for `store/` tests until `proxy_listener` is dropped.
-        if let Some(listener) = &self.proxy_listener {
-            ensure!(
-                !listener.is_empty() && listener.len() <= 128,
-                "Proxy 监听地址不能为空或超过 128 字节"
-            );
-            let addr: std::net::SocketAddr = listener
-                .parse()
-                .context("Proxy 监听地址格式无效，须为 IP:端口")?;
-            ensure!(
-                addr.ip().is_loopback(),
-                "Proxy 监听地址仅允许 loopback 地址（如 127.0.0.1:8080）"
-            );
-        }
         ensure!(
             self.proxy_listeners.len() <= 32,
             "Proxy 监听器数量超过 32 个上限"

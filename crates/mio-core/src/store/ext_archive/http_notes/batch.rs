@@ -75,16 +75,16 @@ fn read_alias(
     Ok((canonical, canonical_metadata))
 }
 
-impl ProjectStore {
-    pub(crate) fn ext_http_notes_batch(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub(crate) fn http_notes_batch(
         &self,
         project: ProjectKey,
         ids: &[(Uuid, Uuid)],
         cancel: &CancellationToken,
     ) -> Result<ExtHttpNotesBatch> {
         ensure!(!cancel.is_cancelled(), "外部归档 HTTP 批量备注读取已取消");
-        let transaction = self.connection.unchecked_transaction()?;
-        project_guard(&transaction, project, self.id)?;
+        let transaction = self.0.connection.unchecked_transaction()?;
+        project_guard(&transaction, project, self.0.id)?;
         let owners = owners(&transaction, ids, cancel)?;
         let live_map = if ids.iter().any(|(source, _)| source.is_nil()) {
             read_live_http_annotations(&transaction)?
@@ -123,8 +123,10 @@ impl ProjectStore {
             common_text,
         })
     }
+}
 
-    pub(crate) fn set_ext_http_notes_batch(
+impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
+    pub(crate) fn set_http_notes_batch(
         &mut self,
         project: ProjectKey,
         changes: &[(Uuid, Uuid, u64)],
@@ -153,9 +155,10 @@ impl ProjectStore {
                 "外部归档 HTTP 备注 revision 无效"
             );
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            project_guard(&transaction, project, self.id)?;
+            project_guard(&transaction, project, self.0.id)?;
             let owners = owners(&transaction, &ids, cancel)?;
             let mut receipts = Vec::with_capacity(changes.len());
             for &(source, item, revision) in changes {
@@ -178,7 +181,9 @@ impl ProjectStore {
             stored: if cancel.is_cancelled() {
                 Vec::new()
             } else {
-                self.ext_http_notes_batch(project, &ids, cancel)
+                self.0
+                    .ext_archive()
+                    .http_notes_batch(project, &ids, cancel)
                     .map(|batch| batch.states)
                     .unwrap_or_default()
             },

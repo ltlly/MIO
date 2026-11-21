@@ -62,8 +62,8 @@ impl Runtime {
                             match ai_ipc::start_ipc_server(&sock_path, strict_parent, &state.cancel)
                             {
                                 Ok((server, rx)) => {
-                                    state.ai_ipc_server = Some(server);
-                                    state.ai_ipc_rx = Some(rx);
+                                    state.ai_ipc.server = Some(server);
+                                    state.ai_ipc.rx = Some(rx);
                                 }
                                 Err(error) if must_succeed => {
                                     let _ = ready.send(Err(error.to_string()));
@@ -190,23 +190,19 @@ impl State {
     ) -> Result<Self> {
         let store = ProjectStore::create(None)?;
         let intruder =
-            intruder_service::IntruderState::with_resource_pools(store.intruder_resource_pools()?);
+            intruder_service::IntruderState::with_resource_pools(store.resource_pools().list()?);
         store.cancel_queries_with(cancel.clone());
         let project = ProjectKey {
             id: store.id,
             generation: 1,
         };
-        let workspace = store.workspace_arc()?;
+        let workspace = store.metadata().workspace_arc()?;
         let mut ws_repeater = websocket_repeater::WebSocketRepeaterService::new(project);
         ws_repeater.restore_workspace_tabs(project, workspace.websocket_tabs.clone());
         if let Ok(config) = Self::ws_repeater_send_config(&preferences, &workspace, Arc::from([])) {
             ws_repeater.set_connect_config(config);
         }
-        let sessions = crate::sessions::SessionRuntime::from_workspace(project, &workspace);
-        let (session_trace_tx, session_trace_rx) = mpsc::channel(128);
-        sessions.set_trace_sender(Some(session_trace_tx));
-        let (server_cert_tx, server_cert_rx) = mpsc::channel(128);
-        let (tls_failure_tx, tls_failure_rx) = mpsc::channel(64);
+        let sessions = SessionServiceState::from_workspace(project, &workspace);
         if let Ok(upstream_tls) = preferences.effective_upstream_tls(&workspace.upstream_tls)
             && let Ok(upstream_route) = workspace
                 .upstream_proxy
@@ -216,9 +212,8 @@ impl State {
             send_cfg.network.upstream_route = upstream_route;
             send_cfg.tls.trust = upstream_tls;
             send_cfg.tls.options = workspace.upstream_tls.to_proxy_tls_options();
-            sessions.set_proxy_send_config(send_cfg);
+            sessions.runtime.set_proxy_send_config(send_cfg);
         }
-        let (proxy_sender, proxy_events) = mpsc::channel(PROXY_EVENT_CAPACITY);
         let plugin_registry = crate::plugins::PluginRegistryStore::from_env_or_user_preferences(
             preferences_path.as_deref(),
         );
@@ -238,50 +233,19 @@ impl State {
             user_level_connections_cache: UserLevelConnectionsCache::default(),
             project,
             store,
-            project_disk_bytes: 0,
-            last_disk_refresh: None,
+            storage: StorageState::new(),
             events,
             awaiting_event_slot: false,
             cancel,
-            proxy_sender,
-            proxy_events,
-            proxy_notifications: VecDeque::new(),
-            proxy: None,
-            primary_proxy_id: None,
-            ca: None,
-            intercept_requests: false,
-            intercept_responses: false,
-            pending: HashMap::new(),
-            pending_websockets: HashMap::new(),
-            sends: HashMap::new(),
-            jobs: JoinSet::new(),
-            repeater_notifications: VecDeque::new(),
-            history_dirty: false,
-            websocket_history_dirty: false,
-            recovery: VecDeque::new(),
-            websocket_recovery: VecDeque::new(),
-            websocket_query: websocket_query::QueryState::default(),
-            http_query: http_query::QueryState::default(),
-            storage_error: None,
             quiesced: false,
-            extra_proxies: Vec::new(),
-            annotated_flows: Arc::new(RwLock::new(HashSet::new())),
-            compiled_client_certs: Arc::from([]),
-            provenance: ProvenanceTracker::new(),
-            ipc_repeater_revisions: HashSet::new(),
-            ai_ipc_rx: None,
-            ai_ipc_server: None,
-            ipc_job_cancel: CancellationToken::new(),
-            ipc_jobs: JoinSet::new(),
-            sessions,
-            session_trace_rx,
-            server_cert_tx,
-            server_cert_rx,
-            observed_cert_keys: HashSet::new(),
-            tls_failure_tx,
-            tls_failure_rx,
-            last_scheduled_fire: HashMap::new(),
             extensions_disabled: false,
+            proxy: ProxyRuntimeState::new(),
+            repeater: RepeaterState::new(),
+            queries: QueryWorkersState::default(),
+            ai_ipc: AiIpcState::new(),
+            tls: TlsRuntimeState::new(),
+            sessions,
+            last_scheduled_fire: HashMap::new(),
             plugins: plugin_service::PluginState::with_stores(plugin_prefs, plugin_registry),
             ext_archive: ext_service::ExtState::default(),
             intruder,
@@ -299,10 +263,10 @@ impl State {
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => break None,
-                result = proxy_completion(&mut self.proxy) => self.proxy_finished(result),
-                result = extra_proxy_completion(&mut self.extra_proxies) => self.proxy_finished(result),
-                Some(result) = self.jobs.join_next(), if !self.jobs.is_empty() => self.repeater_completed(result).await,
-                Some(done) = self.ipc_jobs.join_next(), if !self.ipc_jobs.is_empty() => self.complete_ipc_repeater(done),
+                result = proxy_completion(&mut self.proxy.primary) => self.proxy_finished(result),
+                result = extra_proxy_completion(&mut self.proxy.extra) => self.proxy_finished(result),
+                Some(result) = self.repeater.jobs.join_next(), if !self.repeater.jobs.is_empty() => self.repeater_completed(result).await,
+                Some(done) = self.ai_ipc.jobs.join_next(), if !self.ai_ipc.jobs.is_empty() => self.complete_ipc_repeater(done),
                 signal = self.intruder.next_signal(&self.events, true) => {
                     if let Err(error) = self.intruder_signal(signal).await {
                         self.queue_intruder_event(Event::Error {
@@ -313,8 +277,8 @@ impl State {
                     }
                 }
                 signal = self.ext_archive.next_signal(&self.events, true) => self.ext_signal(signal).await,
-                signal = self.websocket_query.next_signal(&self.events, true) => self.websocket_query_signal(signal),
-                signal = self.http_query.next_signal(&self.events, true) => self.http_query_signal(signal),
+                signal = self.queries.websocket.next_signal(&self.events, true) => self.websocket_query_signal(signal),
+                signal = self.queries.http.next_signal(&self.events, true) => self.http_query_signal(signal),
                 () = self.ws_repeater.reclaim_signal(), if self.ws_repeater.has_in_flight_jobs() => {}
                 () = self.sequencer.reclaim_signal(), if self.sequencer.has_in_flight_jobs() => {}
                 () = self.audit.reclaim_signal(), if self.audit.has_in_flight_jobs() => {}
@@ -341,22 +305,23 @@ impl State {
     }
 
     pub(super) fn queue_proxy_notification(&mut self, event: Event) {
-        if Self::coalesce_history_notification(&self.proxy_notifications, &event) {
+        if Self::coalesce_history_notification(&self.proxy.notifications, &event) {
             return;
         }
-        while self.proxy_notifications.len() >= MAX_PROXY_NOTIFICATIONS {
-            self.proxy_notifications.pop_front();
+        while self.proxy.notifications.len() >= MAX_PROXY_NOTIFICATIONS {
+            self.proxy.notifications.pop_front();
         }
-        self.proxy_notifications.push_back(event);
+        self.proxy.notifications.push_back(event);
     }
 
     pub(super) async fn flush_proxy_notifications(&mut self) {
-        while !self.proxy_notifications.is_empty() {
+        while !self.proxy.notifications.is_empty() {
             let Some(permit) = self.event_permit().await else {
                 return;
             };
             let event = self
-                .proxy_notifications
+                .proxy
+                .notifications
                 .pop_front()
                 .expect("only the service task consumes Proxy notifications");
             permit.send(event);
@@ -364,7 +329,7 @@ impl State {
     }
 
     pub(super) fn queue_repeater_event(&mut self, event: Event) {
-        let event = if self.repeater_notifications.is_empty() && !self.awaiting_event_slot {
+        let event = if self.repeater.notifications.is_empty() && !self.awaiting_event_slot {
             match self.events.try_send(event) {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -376,14 +341,14 @@ impl State {
         } else {
             event
         };
-        if Self::coalesce_history_notification(&self.repeater_notifications, &event) {
+        if Self::coalesce_history_notification(&self.repeater.notifications, &event) {
             return;
         }
         assert!(
-            self.repeater_notifications.len() < MAX_REPEATER_NOTIFICATIONS,
+            self.repeater.notifications.len() < MAX_REPEATER_NOTIFICATIONS,
             "Repeater notifications exceeded their admitted producer budget"
         );
-        self.repeater_notifications.push_back(event);
+        self.repeater.notifications.push_back(event);
     }
 
     fn coalesce_history_notification(queue: &VecDeque<Event>, candidate: &Event) -> bool {
@@ -399,11 +364,11 @@ impl State {
     }
 
     pub(super) async fn flush_repeater_notifications(&mut self) {
-        while !self.repeater_notifications.is_empty() {
+        while !self.repeater.notifications.is_empty() {
             let Some(permit) = self.event_permit().await else {
                 return;
             };
-            permit.send(self.repeater_notifications.pop_front().unwrap());
+            permit.send(self.repeater.notifications.pop_front().unwrap());
         }
     }
 

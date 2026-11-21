@@ -30,7 +30,7 @@ fn empty_result() -> HttpHistoryResult {
 
 fn parked(state: &mut State, revision: u64) -> oneshot::Sender<()> {
     let (release, wait) = oneshot::channel();
-    state.http_query.active = Some(Active {
+    state.queries.http.active = Some(Active {
         query: query(state.project, revision),
         cancel: state.cancel.child_token(),
         worker: tokio::spawn(async move {
@@ -44,7 +44,7 @@ fn parked(state: &mut State, revision: u64) -> oneshot::Sender<()> {
 async fn complete_next(state: &mut State) {
     let signal = tokio::time::timeout(
         Duration::from_secs(3),
-        state.http_query.next_signal(&state.events, true),
+        state.queries.http.next_signal(&state.events, true),
     )
     .await
     .expect("HTTP query worker must join within the fixture budget");
@@ -57,7 +57,7 @@ async fn latest_http_query_starts_only_after_the_same_cancelled_worker_joins() {
     let (events, _receiver) = mpsc::channel(8);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let release = parked(&mut state, 1);
-    let first_id = state.http_query.active.as_ref().unwrap().worker.id();
+    let first_id = state.queries.http.active.as_ref().unwrap().worker.id();
     for revision in [2, 3] {
         state
             .command(Command::QueryHttpHistory {
@@ -66,21 +66,21 @@ async fn latest_http_query_starts_only_after_the_same_cancelled_worker_joins() {
             .await
             .unwrap();
     }
-    let retained_id = state.http_query.active.as_ref().unwrap().worker.id();
+    let retained_id = state.queries.http.active.as_ref().unwrap().worker.id();
     let cancelled = state
-        .http_query
+        .queries.http
         .active
         .as_ref()
         .unwrap()
         .cancel
         .is_cancelled();
-    let latest = state.http_query.latest.as_ref().unwrap().query_revision;
-    let no_premature_result = state.http_query.result.is_none();
+    let latest = state.queries.http.latest.as_ref().unwrap().query_revision;
+    let no_premature_result = state.queries.http.result.is_none();
     release.send(()).unwrap();
     complete_next(&mut state).await;
-    let started_id = state.http_query.active.as_ref().unwrap().worker.id();
+    let started_id = state.queries.http.active.as_ref().unwrap().worker.id();
     let started_revision = state
-        .http_query
+        .queries.http
         .active
         .as_ref()
         .unwrap()
@@ -92,12 +92,12 @@ async fn latest_http_query_starts_only_after_the_same_cancelled_worker_joins() {
     assert!(cancelled && no_premature_result);
     assert_ne!(started_id, first_id);
     assert_eq!((latest, started_revision), (3, 3));
-    assert!(!state.http_query.has_worker());
-    assert!(state.http_query.latest.is_none());
+    assert!(!state.queries.http.has_worker());
+    assert!(state.queries.http.latest.is_none());
     let Some(Event::HttpHistoryPage {
         query: actual,
         result: Ok(result),
-    }) = &state.http_query.result
+    }) = &state.queries.http.result
     else {
         panic!("the latest query must own the completed result")
     };
@@ -122,7 +122,7 @@ async fn foreign_http_query_cannot_steal_current_delivery_behind_a_full_event_qu
         .await
         .unwrap();
     let active_not_cancelled = !state
-        .http_query
+        .queries.http
         .active
         .as_ref()
         .unwrap()
@@ -133,7 +133,7 @@ async fn foreign_http_query_cannot_steal_current_delivery_behind_a_full_event_qu
     assert!(matches!(receiver.try_recv(), Ok(Event::Stopped)));
     let signal = tokio::time::timeout(
         Duration::from_secs(3),
-        state.http_query.next_signal(&state.events, false),
+        state.queries.http.next_signal(&state.events, false),
     )
     .await
     .unwrap();
@@ -147,7 +147,7 @@ async fn foreign_http_query_cannot_steal_current_delivery_behind_a_full_event_qu
         panic!("the current query must keep the single delivery slot")
     };
     assert!(active_not_cancelled);
-    assert!(!state.http_query.has_worker());
+    assert!(!state.queries.http.has_worker());
     assert_eq!(actual, query(state.project, 1));
     assert_eq!(result, empty_result());
     assert!(receiver.try_recv().is_err());
@@ -158,14 +158,14 @@ async fn http_query_deadline_and_save_as_retain_the_reader_without_publishing_fi
     let (events, _receiver) = mpsc::channel(8);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let release = parked(&mut state, 1);
-    let id = state.http_query.active.as_ref().unwrap().worker.id();
+    let id = state.queries.http.active.as_ref().unwrap().worker.id();
     let source = state.store.test_actual_path();
     let original = state.store.workspace().unwrap();
     let project = state.project;
     let deadline = state
         .stop_http_query_until(tokio::time::Instant::now())
         .await;
-    let retained_after_deadline = state.http_query.active.as_ref().unwrap().worker.id() == id;
+    let retained_after_deadline = state.queries.http.active.as_ref().unwrap().worker.id() == id;
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("not-published.mio");
     let save = state
@@ -178,9 +178,9 @@ async fn http_query_deadline_and_save_as_retain_the_reader_without_publishing_fi
             ext_http_highlights: Vec::new(),
         })
         .await;
-    let retained_after_save = state.http_query.active.as_ref().unwrap().worker.id() == id;
+    let retained_after_save = state.queries.http.active.as_ref().unwrap().worker.id() == id;
     let cancelled = state
-        .http_query
+        .queries.http
         .active
         .as_ref()
         .unwrap()
@@ -201,25 +201,25 @@ async fn http_query_deadline_and_save_as_retain_the_reader_without_publishing_fi
     assert_eq!(state.store.test_actual_path(), source);
     assert_eq!(state.store.workspace().unwrap(), original);
     assert!(source.exists());
-    assert!(!state.http_query.has_worker());
+    assert!(!state.queries.http.has_worker());
 }
 
 #[tokio::test]
 async fn full_event_queue_proxy_stop_cancels_but_does_not_wait_for_http_reader() {
     let (events, mut receiver) = mpsc::channel(1);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
-    state.proxy = Some(
+    state.proxy.primary = Some(
         mio_proxy::start(
             ProxyConfig::new(MitmAuthority::generate().unwrap()),
             state.project,
-            state.proxy_sender.clone(),
+            state.proxy.sender.clone(),
         )
         .await
         .unwrap(),
     );
     let release = parked(&mut state, 1);
-    let id = state.http_query.active.as_ref().unwrap().worker.id();
-    state.http_query.result = Some(Event::HttpHistoryPage {
+    let id = state.queries.http.active.as_ref().unwrap().worker.id();
+    state.queries.http.result = Some(Event::HttpHistoryPage {
         query: query(state.project, 1),
         result: Ok(empty_result()),
     });
@@ -231,15 +231,15 @@ async fn full_event_queue_proxy_stop_cancels_but_does_not_wait_for_http_reader()
         }),
     )
     .await;
-    let proxy_joined = state.proxy.is_none();
+    let proxy_joined = state.proxy.primary.is_none();
     let reader_retained = state
-        .http_query
+        .queries.http
         .active
         .as_ref()
         .is_some_and(|active| active.worker.id() == id && active.cancel.is_cancelled());
     release.send(()).unwrap();
     state.finish_http_query_shutdown().await.unwrap();
-    if state.proxy.is_some() {
+    if state.proxy.primary.is_some() {
         state.finish_proxy_shutdown().await.unwrap();
     }
 
@@ -250,7 +250,7 @@ async fn full_event_queue_proxy_stop_cancels_but_does_not_wait_for_http_reader()
         receiver.try_recv().is_err(),
         "query delivery cannot bypass backpressure"
     );
-    assert!(!state.http_query.has_worker());
+    assert!(!state.queries.http.has_worker());
 }
 
 #[tokio::test]
@@ -286,7 +286,7 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
         let mut foreign = latest.clone();
         foreign.summary.id = Uuid::new_v4();
         foreign.summary.source = TrafficSource::Repeater;
-        state.recovery.extend([
+        state.storage.recovery.extend([
             intermediate.into(),
             latest.clone().into(),
             foreign.clone().into(),
@@ -294,7 +294,7 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
         let source_path = state.store.test_actual_path();
         let original_workspace = state.store.workspace().unwrap();
         let original_recovery = state
-            .recovery
+            .storage.recovery
             .iter()
             .map(|capture| capture.record.clone())
             .collect::<Vec<_>>();
@@ -312,7 +312,7 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
         let Some(Event::HttpHistoryPage {
             query: actual,
             result: Ok(result),
-        }) = &state.http_query.result
+        }) = &state.queries.http.result
         else {
             panic!("valid recovered flow must produce a query result")
         };
@@ -336,7 +336,7 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
             .unwrap();
         complete_next(&mut state).await;
         assert!(
-            matches!(&state.http_query.result, Some(Event::HttpHistoryPage { result: Ok(result), .. })
+            matches!(&state.queries.http.result, Some(Event::HttpHistoryPage { result: Ok(result), .. })
             if result.total == 1 && result.rows.len() == 1
             && result.selected_matches == [(requested.selected_ids[0], true)]
             && result.selected_ranks == [(requested.selected_ids[0], 0)])
@@ -354,7 +354,7 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
             .unwrap();
         complete_next(&mut state).await;
         assert!(
-            matches!(&state.http_query.result, Some(Event::HttpHistoryPage { result: Ok(result), .. })
+            matches!(&state.queries.http.result, Some(Event::HttpHistoryPage { result: Ok(result), .. })
             if result.total == 0 && result.rows.is_empty()
             && result.selected_matches == [(requested.selected_ids[0], false)]
             && result.selected_ranks.is_empty())
@@ -376,12 +376,12 @@ async fn http_query_keeps_original_scalars_and_latest_recovery_state_without_cha
         assert_eq!(state.store.workspace().unwrap(), original_workspace);
         assert_eq!(
             state
-                .recovery
+                .storage.recovery
                 .iter()
                 .map(|capture| capture.record.clone())
                 .collect::<Vec<_>>(),
             original_recovery
         );
-        assert!(!state.http_query.has_worker());
+        assert!(!state.queries.http.has_worker());
     }
 }

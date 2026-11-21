@@ -10,16 +10,16 @@ impl State {
             return Ok(());
         }
         let saved = if self.unsaved_count() == 0 {
-            self.store.put_captured_websocket(&message)
+            self.store.websocket_mut().put_captured(&message)
         } else {
             Err(anyhow::anyhow!("先前流量仍待写盘；已停止接收新消息"))
         };
         if let Err(error) = &saved {
-            self.websocket_recovery.push_back(message);
+            self.storage.websocket_recovery.push_back(message);
             self.storage_failed(error);
         }
-        if !self.websocket_history_dirty {
-            self.websocket_history_dirty = true;
+        if !self.storage.websocket_history_dirty {
+            self.storage.websocket_history_dirty = true;
             self.queue_proxy_notification(Event::WebSocketHistoryChanged {
                 project: self.project,
             });
@@ -28,8 +28,8 @@ impl State {
     }
 
     pub(crate) async fn websocket_history_changed(&mut self) {
-        if !self.websocket_history_dirty {
-            self.websocket_history_dirty = true;
+        if !self.storage.websocket_history_dirty {
+            self.storage.websocket_history_dirty = true;
             self.emit(Event::WebSocketHistoryChanged {
                 project: self.project,
             })
@@ -40,6 +40,7 @@ impl State {
     #[cfg(test)]
     pub(crate) fn read_websocket(&self, id: Uuid) -> Result<WebSocketMessage> {
         if let Some(record) = self
+            .storage
             .websocket_recovery
             .iter()
             .rev()
@@ -47,7 +48,7 @@ impl State {
         {
             return Ok(record.record.as_ref().clone());
         }
-        self.store.read_websocket(id)
+        self.store.websocket().read(id)
     }
 
     pub(crate) fn read_websocket_detail(
@@ -55,6 +56,7 @@ impl State {
         id: Uuid,
     ) -> Result<(WebSocketMessage, Option<Vec<u8>>)> {
         if let Some(capture) = self
+            .storage
             .websocket_recovery
             .iter()
             .rev()
@@ -63,7 +65,7 @@ impl State {
             let original = capture.edited_original().map(|original| original.to_vec());
             return Ok((capture.record.as_ref().clone(), original));
         }
-        self.store.read_websocket_detail(id)
+        self.store.websocket().read_detail(id)
     }
 
     #[cfg(test)]
@@ -92,7 +94,8 @@ impl State {
         let pending = self.websocket_recovery_snapshot()?;
         let rows: Vec<_> = pending.into_iter().map(|(row, _)| row).collect();
         self.store
-            .websocket_page_with_recovery(flow_id, offset, limit, &[], &rows, filter)
+            .websocket()
+            .page_with_recovery(flow_id, offset, limit, &[], &rows, filter)
     }
 
     pub(crate) fn websocket_recovery_snapshot(
@@ -101,7 +104,7 @@ impl State {
         // Faults stop producers; only the bounded queue can append unsaved messages.
         let mut pending = Vec::new();
         let mut positions = HashMap::new();
-        for capture in &self.websocket_recovery {
+        for capture in &self.storage.websocket_recovery {
             if let Some(index) = positions.get(&capture.record.id) {
                 pending[*index] = capture;
             } else {
@@ -112,14 +115,14 @@ impl State {
         if pending.is_empty() {
             return Ok(Vec::new());
         }
-        let (mut next_ordinal, mut next_connection) = self.store.websocket_numbers()?;
+        let (mut next_ordinal, mut next_connection) = self.store.websocket().numbers()?;
         let mut connections = HashMap::new();
         let mut rows = Vec::with_capacity(pending.len());
         // Save As copies sqlite_sequence then writes this queue in the same order.
         // Allocate before filtering so a selected connection never renumbers pending rows.
         for capture in pending {
             let record = &capture.record;
-            let ordinal = if let Some(ordinal) = self.store.websocket_ordinal(record.id)? {
+            let ordinal = if let Some(ordinal) = self.store.websocket().ordinal(record.id)? {
                 ordinal
             } else {
                 let ordinal = next_ordinal;
@@ -131,7 +134,7 @@ impl State {
                     *metadata
                 } else {
                     let metadata =
-                        if let Some(metadata) = self.store.websocket_connection(record.flow_id)? {
+                        if let Some(metadata) = self.store.websocket().connection(record.flow_id)? {
                             metadata
                         } else {
                             let id = next_connection;
@@ -142,12 +145,13 @@ impl State {
                     metadata
                 };
             let url = self
+                .storage
                 .recovery
                 .iter()
                 .rev()
                 .find(|flow| flow.record.summary.id == record.flow_id)
                 .map(|flow| Ok(flow.record.summary.url.clone()))
-                .unwrap_or_else(|| self.store.flow_url(record.flow_id))?;
+                .unwrap_or_else(|| self.store.websocket().flow_url(record.flow_id))?;
             rows.push((
                 WebSocketSummary::from_message(
                     record,

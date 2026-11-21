@@ -1,6 +1,33 @@
 use super::*;
 
 impl State {
+    fn mutate_user_preferences(
+        &mut self,
+        operation_id: Uuid,
+        missing_id_error: &str,
+        mutate: impl FnOnce(&mut crate::preferences::PreferencesStore) -> Result<UserPreferences>,
+    ) -> std::result::Result<UserPreferences, String> {
+        if operation_id.is_nil() {
+            Err(missing_id_error.to_owned())
+        } else {
+            mutate(&mut self.preferences).map_err(|error| format!("{error:#}"))
+        }
+    }
+
+    async fn save_user_preferences_with(
+        &mut self,
+        operation_id: Uuid,
+        missing_id_error: &str,
+        mutate: impl FnOnce(&mut crate::preferences::PreferencesStore) -> Result<UserPreferences>,
+    ) {
+        let result = self.mutate_user_preferences(operation_id, missing_id_error, mutate);
+        self.emit(Event::UserPreferencesSaved {
+            operation_id,
+            result,
+        })
+        .await;
+    }
+
     pub(super) async fn command_prefs_ext_tools(&mut self, command: Command) -> Result<()> {
         match command {
             Command::QueryUserPreferences { operation_id } => {
@@ -17,17 +44,11 @@ impl State {
                 running,
                 finished,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("用户偏好保存缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .set(expected_revision, running, finished)
-                        .map_err(|error| format!("{error:#}"))
-                };
-                self.emit(Event::UserPreferencesSaved {
+                self.save_user_preferences_with(
                     operation_id,
-                    result,
-                })
+                    "用户偏好保存缺少有效 operation ID；未写入。",
+                    |prefs| prefs.set(expected_revision, running, finished),
+                )
                 .await;
             }
             Command::SetUserWorkbenchPreferences {
@@ -37,17 +58,13 @@ impl State {
                 message_editor,
                 misc,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("用户偏好保存缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .set_workbench_settings(expected_revision, display, message_editor, misc)
-                        .map_err(|error| format!("{error:#}"))
-                };
-                self.emit(Event::UserPreferencesSaved {
+                self.save_user_preferences_with(
                     operation_id,
-                    result,
-                })
+                    "用户偏好保存缺少有效 operation ID；未写入。",
+                    |prefs| {
+                        prefs.set_workbench_settings(expected_revision, display, message_editor, misc)
+                    },
+                )
                 .await;
             }
             Command::SetUserStartupPreferences {
@@ -56,17 +73,11 @@ impl State {
                 default_config,
                 disable_extensions,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("用户偏好保存缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .set_startup(expected_revision, default_config, disable_extensions)
-                        .map_err(|error| format!("{error:#}"))
-                };
-                self.emit(Event::UserPreferencesSaved {
+                self.save_user_preferences_with(
                     operation_id,
-                    result,
-                })
+                    "用户偏好保存缺少有效 operation ID；未写入。",
+                    |prefs| prefs.set_startup(expected_revision, default_config, disable_extensions),
+                )
                 .await;
             }
             Command::RemoveRecentProject {
@@ -74,34 +85,22 @@ impl State {
                 expected_revision,
                 path,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("移除最近项目缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .remove_recent(expected_revision, &path)
-                        .map_err(|error| format!("{error:#}"))
-                };
-                self.emit(Event::UserPreferencesSaved {
+                self.save_user_preferences_with(
                     operation_id,
-                    result,
-                })
+                    "移除最近项目缺少有效 operation ID；未写入。",
+                    |prefs| prefs.remove_recent(expected_revision, &path),
+                )
                 .await;
             }
             Command::PruneMissingRecentProjects {
                 operation_id,
                 expected_revision,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("清理失效最近项目缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .prune_missing_recent(expected_revision)
-                        .map_err(|error| format!("{error:#}"))
-                };
-                self.emit(Event::UserPreferencesSaved {
+                self.save_user_preferences_with(
                     operation_id,
-                    result,
-                })
+                    "清理失效最近项目缺少有效 operation ID；未写入。",
+                    |prefs| prefs.prune_missing_recent(expected_revision),
+                )
                 .await;
             }
             Command::SetUserTlsCertificates {
@@ -109,24 +108,22 @@ impl State {
                 expected_revision,
                 certificates,
             } => {
-                let result = if operation_id.is_nil() {
-                    Err("TLS 用户设置保存缺少有效 operation ID；未写入。".into())
-                } else {
-                    self.preferences
-                        .set_tls_certificates(expected_revision, certificates)
-                        .map_err(|error| format!("{error:#}"))
-                };
+                let result = self.mutate_user_preferences(
+                    operation_id,
+                    "TLS 用户设置保存缺少有效 operation ID；未写入。",
+                    |prefs| prefs.set_tls_certificates(expected_revision, certificates),
+                );
                 if result.is_ok()
-                    && let Ok(workspace) = self.store.workspace()
+                    && let Ok(workspace) = self.store.metadata().workspace()
                 {
                     if let Ok(config) = Self::ws_repeater_send_config(
                         &self.preferences,
                         &workspace,
-                        self.compiled_client_certs.clone(),
+                        self.tls.compiled_client_certs.clone(),
                     ) {
                         self.ws_repeater.set_connect_config(config);
                     }
-                    if (self.proxy.is_some() || !self.extra_proxies.is_empty())
+                    if self.proxy.is_running()
                         && let Err(error) = self.reload_running_proxy_from_workspace(&workspace).await
                     {
                         self.emit(Event::Error {
@@ -175,7 +172,7 @@ impl State {
                 let result = self
                     .check_project(project)
                     .and_then(|()| {
-                        let mut sources = self.store.ext_sources()?;
+                        let mut sources = self.store.ext_archive().sources()?;
                         ensure!(
                             sources.len() <= 1,
                             "此项目包含多个 外部来源，当前读取入口不能合并它们"
@@ -202,7 +199,8 @@ impl State {
                     .check_project(project)
                     .and_then(|()| {
                         self.store
-                            .ext_item_page(source_id, collection.as_deref(), offset, limit)
+                            .ext_archive()
+                            .item_page(source_id, collection.as_deref(), offset, limit)
                     })
                     .map_err(|error| error.to_string());
                 self.emit(Event::ExtItems {
@@ -226,7 +224,7 @@ impl State {
                 let result = self
                     .check_project(project)
                     .and_then(|()| {
-                        self.store.ext_item_detail(
+                        self.store.ext_archive().item_detail(
                             source_id,
                             item_id,
                             message_offset,
@@ -289,7 +287,7 @@ impl State {
                 let result = self
                     .check_project(project)
                     .and_then(|()| {
-                        self.store.ext_message_page(
+                        self.store.ext_archive().message_page(
                             source_id,
                             collection.as_deref(),
                             offset,
@@ -316,7 +314,11 @@ impl State {
             } => {
                 let result = self
                     .check_project(project)
-                    .and_then(|()| self.store.ext_message_fragment(message_id, offset, limit))
+                    .and_then(|()| {
+                        self.store
+                            .ext_archive()
+                            .message_fragment(message_id, offset, limit)
+                    })
                     .map_err(|error| error.to_string());
                 self.emit(Event::ExtMessage {
                     project,
@@ -336,7 +338,11 @@ impl State {
             } => {
                 let result = self
                     .check_project(project)
-                    .and_then(|()| self.store.ext_response_fragment(&reference, offset, limit))
+                    .and_then(|()| {
+                        self.store
+                            .ext_archive()
+                            .response_fragment(&reference, offset, limit)
+                    })
                     .map_err(|error| error.to_string());
                 self.emit(Event::ExtResponse {
                     project,
@@ -392,10 +398,11 @@ impl State {
                 let result = self
                     .check_project(project)
                     .and_then(|()| {
-                        let workspace = self.store.workspace()?;
+                        let workspace = self.store.metadata().workspace()?;
                         let pending = self.http_recovery_snapshot()?;
                         self.store
-                            .target_site_map_snapshot(&workspace.scope, &query, &pending)
+                            .site_map()
+                            .snapshot(&workspace.scope, &query, &pending)
                     })
                     .map_err(|error| error.to_string());
                 guard.abort();
@@ -437,7 +444,7 @@ impl State {
                             (format!("live:{flow_id}"), HistoryRow::Live(record.summary), detail, false)
                         }
                         SiteMapEntryInput::History(HistoryTransferEntry::External { source_id, item_id, message_id }) => {
-                            let (row, detail) = self.store.site_map_ext_detail(source_id, item_id, message_id, &cancel)?;
+                            let (row, detail) = self.store.site_map().ext_detail(source_id, item_id, message_id, &cancel)?;
                             (format!("ext_archive:{source_id}:{item_id}"), row, detail, false)
                         }
                         SiteMapEntryInput::History(HistoryTransferEntry::SiteMap { .. }) => anyhow::bail!("所选请求已经属于站点地图"),
@@ -446,7 +453,7 @@ impl State {
                             (format!("draft:{source:?}:{owner_id}"), HistoryRow::Live(detail.record.summary.clone()), detail, true)
                         }
                     };
-                    self.store.add_site_map_entry(workspace_revision, &owner, row, detail, draft, &cancel)
+                    self.store.site_map_mut().add_entry(workspace_revision, &owner, row, detail, draft, &cancel)
                 })().map_err(|error| format!("{error:#}"));
                 self.store.cancel_queries_with(self.cancel.clone());
                 self.emit(Event::SiteMapEntryAdded { project, operation_id, workspace_revision, result }).await;
@@ -455,7 +462,7 @@ impl State {
                 self.store.cancel_queries_with_operation(self.cancel.clone(), cancel.clone());
                 let result = self.check_project(project).and_then(|()| {
                     ensure!(!self.cancel.is_cancelled() && !cancel.is_cancelled(), "站点地图读取已取消");
-                    self.store.read_site_map_entry(entry_id, revision)
+                    self.store.site_map().read_entry(entry_id, revision)
                 }).map_err(|error| format!("{error:#}"));
                 self.store.cancel_queries_with(self.cancel.clone());
                 self.emit(Event::SiteMapEntryRead { project, selection_revision, entry_id, revision, result }).await;

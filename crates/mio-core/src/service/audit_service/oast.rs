@@ -159,7 +159,7 @@ impl State {
         if matched.is_empty() {
             return;
         }
-        let Ok(mut state) = self.store.read_audit_state() else {
+        let Ok(mut state) = self.store.audit().read_state() else {
             return;
         };
         let mut any_added = false;

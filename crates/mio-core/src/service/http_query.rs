@@ -386,22 +386,28 @@ impl State {
             Ok(())
         });
         if let Err(error) = valid {
-            self.http_query
+            self.queries
+                .http
                 .global_search
                 .reject_or_record_error(entry, self.project, error);
             return;
         }
-        if let Some(entry) = self.http_query.global_search.enqueue_or_take_start(entry) {
+        if let Some(entry) = self
+            .queries
+            .http
+            .global_search
+            .enqueue_or_take_start(entry)
+        {
             self.start_global_search(entry);
         }
     }
 
     fn start_global_search(&mut self, entry: GlobalSearchEntry) {
-        debug_assert!(self.http_query.global_search.active.is_none());
+        debug_assert!(self.queries.http.global_search.active.is_none());
         let snapshot = self.check_project(entry.query.project).and_then(|()| {
             let mut ids = HashSet::new();
             let mut pending = Vec::new();
-            for capture in self.recovery.iter().rev() {
+            for capture in self.storage.recovery.iter().rev() {
                 if ids.insert(capture.record.summary.id) {
                     pending.push((
                         capture.record.clone(),
@@ -410,7 +416,7 @@ impl State {
                 }
             }
             Ok((
-                self.store.websocket_query_path(),
+                self.store.query_path(),
                 pending,
                 self.websocket_recovery_snapshot()?,
             ))
@@ -418,7 +424,7 @@ impl State {
         let (path, pending, websocket) = match snapshot {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.http_query.global_search.result = Some(entry.into_event(Err(error)));
+                self.queries.http.global_search.result = Some(entry.into_event(Err(error)));
                 return;
             }
         };
@@ -427,7 +433,7 @@ impl State {
         let operation = entry.operation.clone();
         let worker_query = entry.query.clone();
         let worker = tokio::task::spawn_blocking(move || {
-            ProjectStore::global_search_snapshot(
+            store::global_search_snapshot(
                 &path,
                 &worker_query,
                 &pending,
@@ -436,7 +442,7 @@ impl State {
                 &operation,
             )
         });
-        self.http_query.global_search.active = Some(ActiveQuery {
+        self.queries.http.global_search.active = Some(ActiveQuery {
             query: entry,
             cancel: shutdown,
             worker,
@@ -447,7 +453,7 @@ impl State {
         let mut positions = HashMap::<FlowId, usize>::new();
         let mut rows = Vec::<HttpHistoryPending>::new();
         // Keep the latest state, but the first observed request for history filters.
-        for capture in &self.recovery {
+        for capture in &self.storage.recovery {
             let record = &capture.record;
             if record.summary.source != TrafficSource::Proxy {
                 ensure!(
@@ -530,37 +536,38 @@ impl State {
             query.validate()
         });
         if let Err(error) = valid {
-            self.http_query
+            self.queries
+                .http
                 .history
                 .reject_or_record_error(query, self.project, error);
             return;
         }
-        self.history_dirty = false;
-        if let Some(query) = self.http_query.history.enqueue_or_take_start(query) {
+        self.storage.history_dirty = false;
+        if let Some(query) = self.queries.http.history.enqueue_or_take_start(query) {
             self.start_http_query(query);
         }
     }
 
     fn start_http_query(&mut self, query: HttpHistoryQuery) {
-        debug_assert!(self.http_query.history.active.is_none());
+        debug_assert!(self.queries.http.history.active.is_none());
         let snapshot = self
             .check_project(query.project)
             .and_then(|()| self.http_recovery_snapshot());
         let pending = match snapshot {
             Ok(pending) => pending,
             Err(error) => {
-                self.http_query.history.result = Some(query.result(Err(error)));
+                self.queries.http.history.result = Some(query.result(Err(error)));
                 return;
             }
         };
-        let path = self.store.websocket_query_path();
+        let path = self.store.query_path();
         let cancel = self.cancel.child_token();
         let worker_cancel = cancel.clone();
         let worker_query = query.clone();
         let worker = tokio::task::spawn_blocking(move || {
-            ProjectStore::http_history_snapshot(&path, &worker_query, &pending, &worker_cancel)
+            store::http_history_snapshot(&path, &worker_query, &pending, &worker_cancel)
         });
-        self.http_query.history.active = Some(Active {
+        self.queries.http.history.active = Some(Active {
             query,
             cancel,
             worker,
@@ -569,20 +576,24 @@ impl State {
 
     pub(super) fn http_query_signal(&mut self, signal: Signal) {
         match signal {
-            Signal::Ready(permit) => self.http_query.history.deliver_ready(permit),
+            Signal::Ready(permit) => self.queries.http.history.deliver_ready(permit),
             Signal::Finished(result) => {
                 if let Some(latest) = self
-                    .http_query
+                    .queries
+                    .http
                     .history
                     .finish_and_take_next(result, self.project)
                 {
                     self.start_http_query(latest);
                 }
             }
-            Signal::GlobalSearchReady(permit) => self.http_query.global_search.deliver_ready(permit),
+            Signal::GlobalSearchReady(permit) => {
+                self.queries.http.global_search.deliver_ready(permit)
+            }
             Signal::GlobalSearchFinished(result) => {
                 if let Some(latest) = self
-                    .http_query
+                    .queries
+                    .http
                     .global_search
                     .finish_and_take_next(result, self.project)
                 {
@@ -596,12 +607,14 @@ impl State {
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        self.http_query.cancel();
-        self.http_query
+        self.queries.http.cancel();
+        self.queries
+            .http
             .history
             .stop_until(deadline, self.project)
             .await?;
-        self.http_query
+        self.queries
+            .http
             .global_search
             .stop_until(deadline, self.project)
             .await?;
@@ -609,10 +622,16 @@ impl State {
     }
 
     pub(super) async fn finish_http_query_shutdown(&mut self) -> Result<()> {
-        self.http_query.cancel();
-        let history = self.http_query.history.finish_shutdown(self.project).await;
+        self.queries.http.cancel();
+        let history = self
+            .queries
+            .http
+            .history
+            .finish_shutdown(self.project)
+            .await;
         let global_search = self
-            .http_query
+            .queries
+            .http
             .global_search
             .finish_shutdown(self.project)
             .await;

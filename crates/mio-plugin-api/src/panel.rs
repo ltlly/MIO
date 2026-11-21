@@ -399,13 +399,10 @@ pub struct Transform {
     pub matrix: Vec<f32>,
 }
 
-mod editors;
 mod nodes;
-#[cfg(test)]
-mod tests;
 mod validators;
 
-pub use editors::*;
+pub use nodes::commit_panel_semantically_matches;
 pub use validators::{
     EditorUpdate, KeyEvent, PanelPatch, PatchOperation, PointerEvent, PointerPhase, TableSelection,
     UiEvent, ViewportRequest, patch_operation, ui_event,

@@ -41,7 +41,11 @@ impl State {
             } => {
                 let result = self
                     .check_project(project)
-                    .and_then(|()| self.store.ext_http_notes(project, source_id, item_id))
+                    .and_then(|()| {
+                        self.store
+                            .ext_archive()
+                            .http_notes(project, source_id, item_id)
+                    })
                     .map_err(|error| error.to_string());
                 self.emit(Event::ExtHttpNotes {
                     project,
@@ -65,7 +69,7 @@ impl State {
                     self.require_ext_released()
                 });
                 let result = match ready {
-                    Ok(()) => self.store.set_ext_http_notes(
+                    Ok(()) => self.store.ext_archive_mut().set_http_notes(
                         project,
                         change.source_id,
                         change.item_id,
@@ -77,7 +81,8 @@ impl State {
                         message: error.to_string(),
                         stored: if project == self.project {
                             self.store
-                                .ext_http_notes(project, change.source_id, change.item_id)
+                                .ext_archive()
+                                .http_notes(project, change.source_id, change.item_id)
                                 .ok()
                         } else {
                             None
@@ -111,7 +116,9 @@ impl State {
                     .check_project(project)
                     .and_then(|()| {
                         ensure!(!operation_id.is_nil(), "HTTP 批量备注操作 ID 不能为空");
-                        self.store.ext_http_notes_batch(project, &ids, &cancel)
+                        self.store
+                            .ext_archive()
+                            .http_notes_batch(project, &ids, &cancel)
                     })
                     .map_err(|error| error.to_string());
                 self.store.cancel_queries_with(self.cancel.clone());
@@ -140,7 +147,8 @@ impl State {
                 let result = match ready {
                     Ok(()) => self
                         .store
-                        .set_ext_http_notes_batch(project, &changes, &text, &cancel),
+                        .ext_archive_mut()
+                        .set_http_notes_batch(project, &changes, &text, &cancel),
                     Err(error) => Err(ExtHttpNotesBatchError {
                         message: error.to_string(),
                         stored: if project == self.project
@@ -152,7 +160,8 @@ impl State {
                                 .map(|&(source, item, _)| (source, item))
                                 .collect();
                             self.store
-                                .ext_http_notes_batch(project, &ids, &cancel)
+                                .ext_archive()
+                                .http_notes_batch(project, &ids, &cancel)
                                 .map(|batch| batch.states)
                                 .unwrap_or_default()
                         } else {
@@ -194,12 +203,14 @@ impl State {
                 let result = match ready {
                     Ok(()) => self
                         .store
-                        .set_ext_http_highlights(project, &changes, &cancel),
+                        .ext_archive_mut()
+                        .set_http_highlights(project, &changes, &cancel),
                     Err(error) => Err(ExtHttpHighlightError {
                         message: error.to_string(),
                         stored: if project == self.project && !cancel.is_cancelled() {
                             self.store
-                                .ext_http_highlights(project, &changes)
+                                .ext_archive()
+                                .http_highlights(project, &changes)
                                 .unwrap_or_default()
                         } else {
                             Vec::new()
@@ -280,7 +291,7 @@ impl State {
                 draft_revision,
             } => {
                 self.check_project(project)?;
-                if let Some(active) = self.sends.get_mut(&tab_id)
+                if let Some(active) = self.repeater.sends.get_mut(&tab_id)
                     && active.flow_id == run_id
                     && active.draft_revision == draft_revision
                 {

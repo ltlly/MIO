@@ -62,7 +62,7 @@ async fn held_send(state: &mut State) -> HeldSend {
     let task_cancel = cancel.clone();
     let (release, released) = oneshot::channel();
     let (ready, response_ready) = oneshot::channel();
-    let task = state.jobs.spawn(async move {
+    let task = state.repeater.jobs.spawn(async move {
         let response = mio_proxy::send(
             record.request.clone(),
             SendConfig {
@@ -97,7 +97,7 @@ async fn held_send(state: &mut State) -> HeldSend {
             record,
         }
     });
-    state.sends.insert(
+    state.repeater.sends.insert(
         tab_id,
         ActiveSend {
             cancel,
@@ -280,7 +280,7 @@ async fn repeater_freezes_saved_unpack_setting_and_keeps_rev_two_without_transfo
             state.command(Command::SaveWorkspace { project: state.project, workspace: changed.clone() }).await.unwrap();
             assert!(matches!(events_rx.try_recv().unwrap(), Event::WorkspaceChanged { workspace, .. } if workspace == changed));
             release.send(()).unwrap();
-            let completion = state.jobs.join_next().await.unwrap().unwrap();
+            let completion = state.repeater.jobs.join_next().await.unwrap().unwrap();
             let listener = origin.await.unwrap();
             let decoded = case == 0;
             assert_eq!(completion.received.is_some(), decoded);
@@ -342,7 +342,7 @@ async fn repeater_decode_failure_cancellation_deadline_and_worker_panic_keep_rec
             if case == 0 { assert_eq!(record.summary.state, FlowState::Cancelled); }
             else { assert!(matches!(&record.summary.state, FlowState::Failed(message) if !message.contains("synthetic-codec-canary"))); }
             let tab_id = Uuid::new_v4();
-            state.sends.insert(tab_id, ActiveSend { cancel: active_cancel, task_id, flow_id: record.summary.id, draft_revision: 1, progress_rx: None });
+            state.repeater.sends.insert(tab_id, ActiveSend { cancel: active_cancel, task_id, flow_id: record.summary.id, draft_revision: 1, progress_rx: None });
             state.complete(Completion { project: state.project, tab_id, draft_revision: 1, received, record: record.clone() }).await.unwrap();
             assert!(drain_events(&mut events_rx).iter().any(|event| matches!(event, Event::SendFinished { record: stored, persisted: true, .. } if **stored == record)));
             assert_eq!(state.store.read(record.summary.id).unwrap(), record);
@@ -368,7 +368,7 @@ async fn repeater_stop_retains_codec_handle_and_determined_success_wins_late_can
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let (ready, decoded) = oneshot::channel();
         let deadline = Instant::now() + Duration::from_secs(2);
-        let task = state.jobs.spawn(async move {
+        let task = state.repeater.jobs.spawn(async move {
             let worker = tokio::task::spawn_blocking(move || {
                 let result = http::unpack_response(&response, "POST", 1024, &task_cancel, deadline);
                 let _ = ready.send(());
@@ -378,10 +378,10 @@ async fn repeater_stop_retains_codec_handle_and_determined_success_wins_late_can
             let received = finish_repeater_unpack(&mut record, worker).await;
             Completion { project, tab_id, draft_revision: 1, received, record }
         });
-        state.sends.insert(tab_id, ActiveSend { cancel: cancel.clone(), task_id: task.id(), flow_id: expected.summary.id, draft_revision: 1, progress_rx: None });
+        state.repeater.sends.insert(tab_id, ActiveSend { cancel: cancel.clone(), task_id: task.id(), flow_id: expected.summary.id, draft_revision: 1, progress_rx: None });
         decoded.await.unwrap();
         let first_stop = state.stop_repeater_until(tokio::time::Instant::now()).await;
-        let retained = !task.is_finished() && state.jobs.len() == 1 && state.sends.contains_key(&tab_id);
+        let retained = !task.is_finished() && state.repeater.jobs.len() == 1 && state.repeater.sends.contains_key(&tab_id);
         let before = state.store.read(expected.summary.id).unwrap();
         let early = drain_events(&mut events_rx);
         let released = release.send(());
@@ -393,7 +393,7 @@ async fn repeater_stop_retains_codec_handle_and_determined_success_wins_late_can
         assert!(!early.iter().any(|event| matches!(event, Event::SendFinished { .. })));
         released.unwrap();
         second_stop.unwrap();
-        assert!(state.jobs.is_empty() && state.sends.is_empty() && task.is_finished());
+        assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty() && task.is_finished());
         assert_eq!(terminal.summary.state, FlowState::Complete);
         assert_eq!(terminal.summary.revision, 3);
         assert_eq!(terminal.response.as_ref().unwrap().body, RESPONSE);

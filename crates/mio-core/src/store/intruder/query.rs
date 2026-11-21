@@ -44,9 +44,9 @@ pub(in crate::store::intruder) struct MatchedResult {
     pub grep_payload_hits: Vec<bool>,
 }
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::IntruderRepo<S> {
     #[cfg(test)]
-    pub(crate) fn query_intruder_result_view(
+    pub(crate) fn query_result_view(
         &self,
         query: &IntruderResultViewQuery,
         latest: Option<&IntruderRunSummary>,
@@ -54,7 +54,7 @@ impl ProjectStore {
         cancel: &CancellationToken,
         shutdown: &CancellationToken,
     ) -> Result<IntruderResultViewPage> {
-        self.query_intruder_result_view_with_responses(
+        self.query_result_view_with_responses(
             query,
             latest,
             recovery,
@@ -64,7 +64,7 @@ impl ProjectStore {
         )
     }
 
-    pub(crate) fn query_intruder_result_view_with_responses(
+    pub(crate) fn query_result_view_with_responses(
         &self,
         query: &IntruderResultViewQuery,
         latest: Option<&IntruderRunSummary>,
@@ -86,9 +86,9 @@ impl ProjectStore {
                 && query.offset <= MAX_REQUESTS as usize,
             "Intruder 结果查询身份或分页无效"
         );
-        self.check_intruder_session_owner(query.project, query.run_id)?;
-        if let Some(dataset) = self.session_dataset(query.run_id)? {
-            return self.with_session_intruder_query(query.run_id, |validate| {
+        self.check_session_owner(query.project, query.run_id)?;
+        if let Some(dataset) = self.0.intruder().session_dataset(query.run_id)? {
+            return self.with_session_query(query.run_id, |validate| {
                 dataset.data.query_result_view(
                     query,
                     latest,
@@ -103,7 +103,7 @@ impl ProjectStore {
             });
         }
         let _main_scope = QueryScope::new(
-            &self.connection,
+            &self.0.connection,
             deadline,
             cancel,
             shutdown,
@@ -111,7 +111,7 @@ impl ProjectStore {
         )?;
         let read = |validate_session: ValidateSession<'_>| {
             check()?;
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = self.0.connection.unchecked_transaction()?;
             ensure!(
                 crate::store::metadata::project_id(&transaction)? == query.project.id,
                 "Intruder 项目归属已改变"

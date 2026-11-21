@@ -9,6 +9,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod download;
 mod raw_h1;
 mod send;
 mod streaming;

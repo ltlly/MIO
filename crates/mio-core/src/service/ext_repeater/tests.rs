@@ -135,11 +135,11 @@ async fn open(
 fn unchanged(state: &State, workspace: &Workspace) {
     assert_eq!(state.store.workspace().unwrap(), *workspace);
     assert_eq!(state.store.page(0, 1, "").unwrap().0, 0);
-    assert!(state.sends.is_empty());
-    assert!(state.jobs.is_empty());
-    assert!(state.proxy.is_none());
-    assert!(state.pending.is_empty());
-    assert!(state.ca.is_none());
+    assert!(state.repeater.sends.is_empty());
+    assert!(state.repeater.jobs.is_empty());
+    assert!(state.proxy.primary.is_none());
+    assert!(state.proxy.pending.is_empty());
+    assert!(state.proxy.ca.is_none());
 }
 
 #[tokio::test]
@@ -271,7 +271,12 @@ async fn saved_archive_tab_still_requires_an_explicit_target_before_send_and_nev
             if actual == project && saved == workspace
     ));
     unchanged(&state, &workspace);
-    assert!(receiver.try_recv().is_err());
+    while let Ok(event) = receiver.try_recv() {
+        assert!(
+            matches!(event, Event::ProjectDiskUsage { .. }),
+            "unexpected event after SaveWorkspace: {event:?}"
+        );
+    }
 
     state
         .command(Command::Send {

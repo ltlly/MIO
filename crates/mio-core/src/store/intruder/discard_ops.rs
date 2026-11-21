@@ -59,7 +59,7 @@ pub(in crate::store) fn discard_project_run(
         run.revision == expected_revision,
         "Intruder run revision 已改变；未丢弃"
     );
-    let revision = next_revision(run.revision)?;
+    let revision = next_revision(run.revision);
     let previous = super::super::metadata::workspace(transaction)?;
     ensure!(
         previous.revision.checked_add(1) == Some(workspace.revision),

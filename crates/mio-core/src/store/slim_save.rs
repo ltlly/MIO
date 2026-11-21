@@ -38,14 +38,16 @@ impl ProjectStore {
             "瘦身另存为必须选择新的目标路径，不会原地覆盖当前项目"
         );
         for capture in records {
-            self.reject_session_intruder_flow_write(capture.record.summary.id)?;
+            self.intruder()
+                .reject_session_flow_write(capture.record.summary.id)?;
         }
         for mutation in intruder_mutations {
             if let IntruderMutation::Result {
                 result: Ok(record), ..
             } = mutation
             {
-                self.reject_session_intruder_flow_write(record.summary.id)?;
+                self.intruder()
+                    .reject_session_flow_write(record.summary.id)?;
             }
         }
 
@@ -128,10 +130,7 @@ fn apply_slim_passes(
         for (run_id, rev) in terminal_runs {
             ensure!(!cancel.is_cancelled(), "瘦身保存已取消");
             let mut ws = metadata::workspace(&tx)?;
-            ws.revision = ws
-                .revision
-                .checked_add(1)
-                .context("工作区 revision 已耗尽")?;
+            ws.revision += 1;
             let receipt = intruder::discard_project_run(&tx, staged.id, run_id, rev, ws, cancel)?;
             removed_flows = removed_flows
                 .saturating_add(usize::try_from(receipt.deleted_flows).unwrap_or(usize::MAX));

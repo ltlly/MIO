@@ -58,10 +58,10 @@ async fn abnormal_send_task_always_has_a_terminal_tab_event() {
     record.response = None;
     state.store.put(&record).unwrap();
     let task = state
-        .jobs
+        .repeater.jobs
         .spawn(async { panic!("controlled worker panic") });
     let tab_id = Uuid::new_v4();
-    state.sends.insert(
+    state.repeater.sends.insert(
         tab_id,
         ActiveSend {
             cancel: CancellationToken::new(),
@@ -71,11 +71,11 @@ async fn abnormal_send_task_always_has_a_terminal_tab_event() {
             progress_rx: None,
         },
     );
-    let Some(Err(error)) = state.jobs.join_next().await else {
+    let Some(Err(error)) = state.repeater.jobs.join_next().await else {
         panic!("expected a failed task")
     };
     state.failed_job(error).await;
-    assert!(!state.sends.contains_key(&tab_id));
+    assert!(!state.repeater.sends.contains_key(&tab_id));
     let Event::SendFinished {
         tab_id: actual,
         draft_revision,

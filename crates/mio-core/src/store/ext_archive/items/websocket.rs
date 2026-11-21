@@ -39,15 +39,15 @@ const CANONICAL_WEBSOCKET_SQL: &str = "WITH addresses AS (
     )
 )";
 
-impl ProjectStore {
-    pub fn ext_websocket_page(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub fn websocket_page(
         &self,
         source_id: Uuid,
         offset: usize,
         limit: usize,
     ) -> Result<ExtWebSocketPage> {
         let database_offset = checked_offset(offset, limit)?;
-        if let Some(direct) = self.read_direct_ext_source()?
+        if let Some(direct) = self.read_direct_source()?
             && direct.id == source_id
         {
             return Ok(ExtWebSocketPage {
@@ -56,7 +56,7 @@ impl ProjectStore {
                 next_offset: None,
             });
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"
@@ -101,7 +101,7 @@ impl ProjectStore {
         })
     }
 
-    pub fn ext_websocket_fragment(
+    pub fn websocket_fragment(
         &self,
         source_id: Uuid,
         item_id: Uuid,
@@ -113,7 +113,7 @@ impl ProjectStore {
             length <= EXT_FRAGMENT_BYTES,
             "外部归档 WebSocket 载荷单次读取不得超过 64 KiB"
         );
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"

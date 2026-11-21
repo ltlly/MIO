@@ -74,39 +74,7 @@ pub fn default_identity_dir() -> Result<PathBuf> {
     if let Some(custom) = std::env::var_os("MIO_IDENTITY_DIR").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(custom));
     }
-    #[cfg(target_os = "macos")]
-    {
-        let user_directory = std::env::var_os("HOME").context("无法确定用户目录")?;
-        Ok(Path::new(&user_directory).join("Library/Application Support/MIO/identity"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-            let p = PathBuf::from(xdg);
-            if p.is_absolute() {
-                return Ok(p.join("mio/identity"));
-            }
-        }
-        let user_directory = std::env::var_os("HOME").context("无法确定用户目录")?;
-        Ok(Path::new(&user_directory).join(".local/share/mio/identity"))
-    }
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-            return Ok(PathBuf::from(appdata).join("MIO").join("identity"));
-        }
-        if let Some(profile) = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .filter(|v| !v.is_empty())
-        {
-            return Ok(PathBuf::from(profile)
-                .join("AppData")
-                .join("Roaming")
-                .join("MIO")
-                .join("identity"));
-        }
-        anyhow::bail!("无法确定用户目录")
-    }
+    Ok(crate::fs_atomic::platform_app_dir(crate::fs_atomic::AppDirKind::Data)?.join("identity"))
 }
 
 fn load_at(directory: &Path) -> Result<MitmAuthority> {

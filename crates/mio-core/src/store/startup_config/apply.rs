@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use tokio_util::sync::CancellationToken;
 
 use super::StartupProjectConfig;
@@ -10,7 +10,7 @@ use crate::{
     store::{ProjectStore, intruder, metadata, resource_pools, write_workspace},
 };
 
-impl ProjectStore {
+impl crate::store::MetadataRepo<&mut ProjectStore> {
     pub(crate) fn apply_startup_options(
         &mut self,
         project_name: Option<String>,
@@ -20,10 +20,11 @@ impl ProjectStore {
     ) -> Result<()> {
         ensure!(!cancel.is_cancelled(), "项目启动配置应用已取消");
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
-            metadata::project_id(&transaction)? == self.id,
+            metadata::project_id(&transaction)? == self.0.id,
             "项目 ID 在应用启动配置时已改变"
         );
         let mut workspace = metadata::workspace(&transaction)?;
@@ -37,10 +38,6 @@ impl ProjectStore {
         match config_mode {
             StartupDefaultConfig::Project => {}
             StartupDefaultConfig::Defaults => {
-                if workspace.proxy_listener.is_some() {
-                    workspace.proxy_listener = None;
-                    workspace_changed = true;
-                }
                 if !workspace.proxy_listeners.is_empty() {
                     workspace.proxy_listeners.clear();
                     workspace_changed = true;
@@ -249,7 +246,7 @@ impl ProjectStore {
                     if !removed.is_empty() {
                         intruder::ensure_resource_pools_unreferenced(
                             &transaction,
-                            &self.intruder_sessions,
+                            &self.0.intruder_sessions,
                             &removed,
                             cancel,
                         )?;
@@ -292,10 +289,7 @@ impl ProjectStore {
             }
         }
         if workspace_changed {
-            workspace.revision = workspace
-                .revision
-                .checked_add(1)
-                .context("工作区 revision 已耗尽")?;
+            workspace.revision += 1;
             write_workspace(&transaction, &workspace)?;
         }
         ensure!(!cancel.is_cancelled(), "项目启动配置应用已取消");

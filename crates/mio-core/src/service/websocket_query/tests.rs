@@ -25,7 +25,7 @@ fn empty_result() -> WebSocketHistoryResult {
 
 fn parked(state: &mut State, revision: u64) -> oneshot::Sender<()> {
     let (release, wait) = oneshot::channel();
-    state.websocket_query.active = Some(Active {
+    state.queries.websocket.active = Some(Active {
         query: query(state.project, revision),
         cancel: state.cancel.child_token(),
         worker: tokio::spawn(async move {
@@ -39,7 +39,7 @@ fn parked(state: &mut State, revision: u64) -> oneshot::Sender<()> {
 async fn complete_next(state: &mut State) {
     let signal = tokio::time::timeout(
         Duration::from_secs(3),
-        state.websocket_query.next_signal(&state.events, true),
+        state.queries.websocket.next_signal(&state.events, true),
     )
     .await
     .expect("query worker must join within fixture budget");
@@ -52,19 +52,19 @@ async fn latest_request_waits_for_same_worker_then_starts_only_final_query() {
     let (events, _receiver) = mpsc::channel(8);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let release = parked(&mut state, 1);
-    let first_id = state.websocket_query.active.as_ref().unwrap().worker.id();
+    let first_id = state.queries.websocket.active.as_ref().unwrap().worker.id();
     state.query_websocket_history(query(state.project, 2));
     state.query_websocket_history(query(state.project, 3));
-    let same_worker = state.websocket_query.active.as_ref().unwrap().worker.id() == first_id;
+    let same_worker = state.queries.websocket.active.as_ref().unwrap().worker.id() == first_id;
     let first_cancelled = state
-        .websocket_query
+        .queries.websocket
         .active
         .as_ref()
         .unwrap()
         .cancel
         .is_cancelled();
     let latest = state
-        .websocket_query
+        .queries.websocket
         .latest
         .as_ref()
         .unwrap()
@@ -72,20 +72,20 @@ async fn latest_request_waits_for_same_worker_then_starts_only_final_query() {
     release.send(()).unwrap();
     complete_next(&mut state).await;
     let last = state
-        .websocket_query
+        .queries.websocket
         .active
         .as_ref()
         .unwrap()
         .query
         .query_revision;
-    let replaced = state.websocket_query.active.as_ref().unwrap().worker.id() != first_id;
+    let replaced = state.queries.websocket.active.as_ref().unwrap().worker.id() != first_id;
     complete_next(&mut state).await;
     assert!(same_worker && first_cancelled && replaced);
     assert_eq!((latest, last), (3, 3));
-    assert!(!state.websocket_query.has_worker());
-    assert!(state.websocket_query.latest.is_none());
+    assert!(!state.queries.websocket.has_worker());
+    assert!(state.queries.websocket.latest.is_none());
     assert!(matches!(
-        state.websocket_query.result,
+        state.queries.websocket.result,
         Some(Event::WebSocketHistoryPage {
             query_revision: 3,
             total: 0,
@@ -117,7 +117,7 @@ async fn foreign_project_error_cannot_replace_current_completed_query_delivery()
         .await
         .unwrap();
     let active_not_cancelled = !state
-        .websocket_query
+        .queries.websocket
         .active
         .as_ref()
         .unwrap()
@@ -128,7 +128,7 @@ async fn foreign_project_error_cannot_replace_current_completed_query_delivery()
     assert!(matches!(receiver.try_recv(), Ok(Event::Stopped)));
     let ready = tokio::time::timeout(
         Duration::from_secs(3),
-        state.websocket_query.next_signal(&state.events, false),
+        state.queries.websocket.next_signal(&state.events, false),
     )
     .await
     .unwrap();
@@ -136,7 +136,7 @@ async fn foreign_project_error_cannot_replace_current_completed_query_delivery()
     state.websocket_query_signal(ready);
     let delivered = receiver.try_recv().unwrap();
     assert!(active_not_cancelled);
-    assert!(!state.websocket_query.has_worker());
+    assert!(!state.queries.websocket.has_worker());
     assert!(
         matches!(delivered, Event::WebSocketHistoryPage {
         project, query_revision: 1, total: 0, rows, ..
@@ -151,17 +151,17 @@ async fn repeated_cancel_keeps_latest_query_error_until_worker_really_joins() {
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let release = parked(&mut state, 1);
     state.query_websocket_history(query(state.project, 3));
-    state.websocket_query.cancel();
+    state.queries.websocket.cancel();
     let first_latest = matches!(
-        state.websocket_query.result,
+        state.queries.websocket.result,
         Some(Event::WebSocketHistoryError {
             query_revision: 3,
             ..
         })
     );
-    state.websocket_query.cancel();
+    state.queries.websocket.cancel();
     let second_latest = matches!(
-        state.websocket_query.result,
+        state.queries.websocket.result,
         Some(Event::WebSocketHistoryError {
             query_revision: 3,
             ..
@@ -175,14 +175,14 @@ async fn repeated_cancel_keeps_latest_query_error_until_worker_really_joins() {
         "repeated cancellation must not replace newest error with old worker revision"
     );
     assert!(matches!(
-        state.websocket_query.result,
+        state.queries.websocket.result,
         Some(Event::WebSocketHistoryError {
             query_revision: 3,
             ..
         })
     ));
-    assert!(!state.websocket_query.has_worker());
-    assert!(state.websocket_query.latest.is_none());
+    assert!(!state.queries.websocket.has_worker());
+    assert!(state.queries.websocket.latest.is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -194,12 +194,12 @@ async fn cancelled_current_worker_is_not_hidden_by_foreign_project_result() {
         generation: state.project.generation - 1,
         ..state.project
     };
-    state.websocket_query.result = Some(query(old, 99).result(Err(anyhow::anyhow!("old query"))));
-    state.websocket_query.cancel();
+    state.queries.websocket.result = Some(query(old, 99).result(Err(anyhow::anyhow!("old query"))));
+    state.queries.websocket.cancel();
     release.send(()).unwrap();
     state.finish_websocket_query_shutdown().await.unwrap();
     assert!(
-        matches!(state.websocket_query.result, Some(Event::WebSocketHistoryError {
+        matches!(state.queries.websocket.result, Some(Event::WebSocketHistoryError {
         project, query_revision: 4, ..
     }) if project == state.project)
     );
@@ -210,14 +210,14 @@ async fn deadline_and_save_as_keep_unjoined_reader_and_publish_nothing() {
     let (events, _receiver) = mpsc::channel(8);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let release = parked(&mut state, 1);
-    let id = state.websocket_query.active.as_ref().unwrap().worker.id();
+    let id = state.queries.websocket.active.as_ref().unwrap().worker.id();
     let source = state.store.test_actual_path();
     let original = state.store.workspace().unwrap();
     let project = state.project;
     let deadline = state
         .stop_websocket_query_until(tokio::time::Instant::now())
         .await;
-    let same_after_deadline = state.websocket_query.active.as_ref().unwrap().worker.id() == id;
+    let same_after_deadline = state.queries.websocket.active.as_ref().unwrap().worker.id() == id;
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("not-published.mio");
     let saved = state
@@ -230,7 +230,7 @@ async fn deadline_and_save_as_keep_unjoined_reader_and_publish_nothing() {
             workspace: None,
         })
         .await;
-    let same_after_save = state.websocket_query.active.as_ref().unwrap().worker.id() == id;
+    let same_after_save = state.queries.websocket.active.as_ref().unwrap().worker.id() == id;
     let unpublished =
         !destination.exists() && std::fs::read_dir(directory.path()).unwrap().count() == 0;
     release.send(()).unwrap();
@@ -246,7 +246,7 @@ async fn deadline_and_save_as_keep_unjoined_reader_and_publish_nothing() {
     assert_eq!(state.store.test_actual_path(), source);
     assert_eq!(state.store.workspace().unwrap(), original);
     assert!(source.exists());
-    assert!(!state.websocket_query.has_worker());
+    assert!(!state.queries.websocket.has_worker());
 }
 
 #[tokio::test]
@@ -254,14 +254,14 @@ async fn full_event_queue_does_not_make_proxy_stop_wait_for_search_worker() {
     let (events, mut receiver) = mpsc::channel(1);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-    state.proxy = Some(
-        mio_proxy::start(config, state.project, state.proxy_sender.clone())
+    state.proxy.primary = Some(
+        mio_proxy::start(config, state.project, state.proxy.sender.clone())
             .await
             .unwrap(),
     );
     let release = parked(&mut state, 1);
-    let id = state.websocket_query.active.as_ref().unwrap().worker.id();
-    state.websocket_query.result = Some(query(state.project, 1).result(Ok(empty_result())));
+    let id = state.queries.websocket.active.as_ref().unwrap().worker.id();
+    state.queries.websocket.result = Some(query(state.project, 1).result(Ok(empty_result())));
     state.events.try_send(Event::Stopped).unwrap();
     let stopped = tokio::time::timeout(
         Duration::from_secs(2),
@@ -270,15 +270,15 @@ async fn full_event_queue_does_not_make_proxy_stop_wait_for_search_worker() {
         }),
     )
     .await;
-    let proxy_joined = state.proxy.is_none();
+    let proxy_joined = state.proxy.primary.is_none();
     let retained = state
-        .websocket_query
+        .queries.websocket
         .active
         .as_ref()
         .is_some_and(|active| active.worker.id() == id && active.cancel.is_cancelled());
     release.send(()).unwrap();
     state.finish_websocket_query_shutdown().await.unwrap();
-    if state.proxy.is_some() {
+    if state.proxy.primary.is_some() {
         state.finish_proxy_shutdown().await.unwrap();
     }
     assert!(stopped.is_ok_and(|result| result.is_ok()));
@@ -291,7 +291,7 @@ async fn full_event_queue_does_not_make_proxy_stop_wait_for_search_worker() {
         receiver.try_recv().is_err(),
         "search result must not overtake a full event queue"
     );
-    assert!(!state.websocket_query.has_worker());
+    assert!(!state.queries.websocket.has_worker());
 }
 
 #[tokio::test]
@@ -321,7 +321,7 @@ async fn cancellation_after_precheck_still_joins_one_real_sixteen_mib_regex_matc
         );
         Ok(empty_result())
     });
-    state.websocket_query.active = Some(Active {
+    state.queries.websocket.active = Some(Active {
         query: query(state.project, 1),
         cancel,
         worker,
@@ -330,7 +330,7 @@ async fn cancellation_after_precheck_still_joins_one_real_sixteen_mib_regex_matc
         .await
         .unwrap()
         .unwrap();
-    state.websocket_query.cancel();
+    state.queries.websocket.cancel();
     release.send(()).unwrap();
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -340,9 +340,9 @@ async fn cancellation_after_precheck_still_joins_one_real_sixteen_mib_regex_matc
     .unwrap()
     .unwrap();
     assert_eq!(observed.await.unwrap(), (false, 16 * 1024 * 1024, true));
-    assert!(!state.websocket_query.has_worker());
+    assert!(!state.queries.websocket.has_worker());
     assert!(matches!(
-        state.websocket_query.result,
+        state.queries.websocket.result,
         Some(Event::WebSocketHistoryError {
             query_revision: 1,
             ..

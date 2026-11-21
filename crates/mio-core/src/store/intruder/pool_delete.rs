@@ -124,15 +124,16 @@ fn reassign_session(
 }
 
 #[cfg(test)]
-impl ProjectStore {
+impl store::IntruderRepo<&mut ProjectStore> {
     pub(crate) fn fail_session_pool_delete_commit(&mut self, id: Uuid) {
-        self.intruder_sessions.fail_pool_delete_commit = Some(id);
+        self.0.intruder_sessions.fail_pool_delete_commit = Some(id);
     }
 }
 
-impl ProjectStore {
-    pub(crate) fn session_intruder_summary(&self, id: Uuid) -> Option<&IntruderRunSummary> {
-        self.intruder_sessions
+impl<'a> store::IntruderRepo<&'a ProjectStore> {
+    pub(crate) fn session_summary(self, id: Uuid) -> Option<&'a IntruderRunSummary> {
+        self.0
+            .intruder_sessions
             .runs
             .get(&id)
             .map(|dataset| &dataset.run)

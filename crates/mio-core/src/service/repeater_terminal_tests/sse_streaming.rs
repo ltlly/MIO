@@ -68,7 +68,7 @@ async fn repeater_sse_streaming_progress_and_cancel_preserve_partial_response_ac
 
         chunk_arrived_rx.await.unwrap();
         loop {
-            let progressed_tab = next_repeater_progress(&mut state.sends, &state.events, true).await;
+            let progressed_tab = next_repeater_progress(&mut state.repeater.sends, &state.events, true).await;
             assert_eq!(progressed_tab, tab_id);
             state.emit_repeater_progress(progressed_tab);
             let events_so_far = drain_events(&mut receiver);
@@ -102,13 +102,13 @@ async fn repeater_sse_streaming_progress_and_cancel_preserve_partial_response_ac
             })
             .await
             .unwrap();
-        assert!(state.sends.get(&tab_id).unwrap().progress_rx.is_none());
+        assert!(state.repeater.sends.get(&tab_id).unwrap().progress_rx.is_none());
 
         let stop_res = state
             .stop_repeater_until(tokio::time::Instant::now() + Duration::from_secs(3))
             .await;
         assert!(stop_res.is_err(), "reject_writes forces recovery queue on completion");
-        assert!(state.jobs.is_empty() && state.sends.is_empty());
+        assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
         let _ = hold_tx.send(());
         let _listener = origin.await.unwrap();
 

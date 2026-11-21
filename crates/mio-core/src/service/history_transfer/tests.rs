@@ -159,7 +159,7 @@ async fn mixed_transfer_preserves_order_binary_edits_and_recovery_without_writes
     latest.summary.revision += 1;
     latest.request.url = format!("http://{}/latest", listener.local_addr().unwrap());
     latest.request.body = vec![255, 0, 42];
-    state.recovery.push_back(latest.clone().into());
+    state.storage.recovery.push_back(latest.clone().into());
     let entries = vec![
         archived(&messages[2]),
         HistoryTransferEntry::Live {
@@ -190,7 +190,7 @@ async fn mixed_transfer_preserves_order_binary_edits_and_recovery_without_writes
         && tab.history.is_none()
         && tab.group.is_none()));
     assert_eq!(state.store.workspace().unwrap(), workspace);
-    assert_eq!(state.recovery.len(), 1);
+    assert_eq!(state.storage.recovery.len(), 1);
     assert_eq!(state.store.read(original.summary.id).unwrap(), original);
     assert_eq!(
         state
@@ -199,7 +199,7 @@ async fn mixed_transfer_preserves_order_binary_edits_and_recovery_without_writes
             .unwrap(),
         archive
     );
-    assert!(state.sends.is_empty() && state.jobs.is_empty() && state.proxy.is_none());
+    assert!(state.repeater.sends.is_empty() && state.repeater.jobs.is_empty() && state.proxy.primary.is_none());
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -270,7 +270,7 @@ async fn any_invalid_transfer_entry_rejects_the_whole_proposal_and_restores_canc
                 .is_err()
         );
         assert_eq!(state.store.workspace().unwrap(), workspace);
-        assert!(state.sends.is_empty() && state.jobs.is_empty());
+        assert!(state.repeater.sends.is_empty() && state.repeater.jobs.is_empty());
     }
     let cancel = CancellationToken::new();
     cancel.cancel();

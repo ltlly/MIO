@@ -1,21 +1,21 @@
 use super::*;
 
-impl ProjectStore {
+impl store::IntruderRepo<&mut ProjectStore> {
     /// Reserves the request plus the maximum legal response before any socket is created.
     /// False means outstanding reservations may free enough space; the caller must wait for a completion.
-    pub fn preflight_intruder_result(
+    pub fn preflight_result(
         &mut self,
         id: Uuid,
         ordinal: u64,
         record: &FlowRecord,
     ) -> Result<bool> {
-        let Some(dataset) = self.intruder_sessions.runs.get(&id) else {
+        let Some(dataset) = self.0.intruder_sessions.runs.get(&id) else {
             return Ok(true);
         };
         require_session_mutation(dataset, Some(ordinal))?;
         if dataset.disk_ticket.is_some() {
-            let ticket = self.connection.unchecked_transaction()?;
-            validate_ticket(&ticket, self.id, dataset)?;
+            let ticket = self.0.connection.unchecked_transaction()?;
+            validate_ticket(&ticket, self.0.id, dataset)?;
         }
         validate_record(record)?;
         ensure!(
@@ -34,10 +34,10 @@ impl ProjectStore {
             return Ok(true);
         }
         ensure!(
-            !has_flow(&self.connection, record.summary.id)?,
+            !has_flow(&self.0.connection, record.summary.id)?,
             "Intruder Session flow ID 与磁盘冲突"
         );
-        for other in self.intruder_sessions.runs.values() {
+        for other in self.0.intruder_sessions.runs.values() {
             ensure!(
                 !other.data.has_flow(record.summary.id),
                 "Intruder Session flow ID 已存在"
@@ -52,9 +52,10 @@ impl ProjectStore {
             + record.summary.method.len()
             + 1024) as u64
             + COMPLETION_RESERVE;
-        let used = self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes;
-        if bytes > self.intruder_sessions.quota.saturating_sub(used) {
+        let used = self.0.intruder_sessions.logical_bytes + self.0.intruder_sessions.reserved_bytes;
+        if bytes > self.0.intruder_sessions.quota.saturating_sub(used) {
             let releasable = self
+                .0
                 .intruder_sessions
                 .runs
                 .values()
@@ -65,6 +66,7 @@ impl ProjectStore {
                 releasable > 0
                     && bytes
                         <= self
+                            .0
                             .intruder_sessions
                             .quota
                             .saturating_sub(used - releasable),
@@ -72,8 +74,9 @@ impl ProjectStore {
             );
             return Ok(false);
         }
-        self.intruder_sessions.reserved_bytes += bytes;
-        self.intruder_sessions
+        self.0.intruder_sessions.reserved_bytes += bytes;
+        self.0
+            .intruder_sessions
             .runs
             .get_mut(&id)
             .unwrap()
@@ -88,7 +91,7 @@ impl ProjectStore {
         Ok(true)
     }
 
-    pub(in crate::store) fn write_session_intruder_result_with_reason_phrase(
+    pub(in crate::store) fn write_session_result_with_reason_phrase(
         &mut self,
         id: Uuid,
         ordinal: u64,
@@ -100,13 +103,13 @@ impl ProjectStore {
             .map_or(true, |record| is_flow_terminal(&record.summary.state));
         let flow = result.as_ref().ok().map(|record| record.summary.id);
         #[cfg(test)]
-        let hook = self.intruder_sessions.runs.get(&id).and_then(|d| {
+        let hook = self.0.intruder_sessions.runs.get(&id).and_then(|d| {
             d.write_hook
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         });
-        let (_, run) = self.mutate_session_intruder(
+        let (_, run) = self.mutate_session(
             id,
             Some((ordinal, terminal, flow)),
             |data| {
@@ -123,19 +126,19 @@ impl ProjectStore {
         Ok(run)
     }
 
-    pub(in crate::store) fn write_session_intruder_state(
+    pub(in crate::store) fn write_session_state(
         &mut self,
         id: Uuid,
         state: IntruderRunState,
     ) -> Result<IntruderRunSummary> {
-        let (_, run) = self.mutate_session_intruder(id, None, |data| {
+        let (_, run) = self.mutate_session(id, None, |data| {
             let run = data.write_state(state)?;
             Ok(((), run))
         })?;
         Ok(run)
     }
 
-    pub(in crate::store) fn write_session_intruder_result_notes(
+    pub(in crate::store) fn write_session_result_notes(
         &mut self,
         id: Uuid,
         ordinal: u64,
@@ -151,7 +154,7 @@ impl ProjectStore {
             notes.len() <= MAX_ERROR_BYTES,
             "Intruder 结果备注超过 64 KiB 字节限额"
         );
-        let (saved, _run) = self.mutate_session_intruder(id, None, |data| {
+        let (saved, _run) = self.mutate_session(id, None, |data| {
             let saved = data.write_result_notes(ordinal, expected_notes_revision, notes, cancel)?;
             let run = data.run.clone();
             Ok((saved, run))
@@ -159,7 +162,7 @@ impl ProjectStore {
         Ok(saved)
     }
 
-    pub(in crate::store) fn write_session_intruder_result_highlight(
+    pub(in crate::store) fn write_session_result_highlight(
         &mut self,
         id: Uuid,
         entries: &[(u64, u64)],
@@ -170,7 +173,7 @@ impl ProjectStore {
             !cancel.is_cancelled(),
             "Intruder 结果高亮修改已取消；数据保留"
         );
-        let (saved, _run) = self.mutate_session_intruder(id, None, |data| {
+        let (saved, _run) = self.mutate_session(id, None, |data| {
             let saved = data.write_result_highlights(entries, highlight, cancel)?;
             let run = data.run.clone();
             Ok((saved, run))
@@ -178,21 +181,22 @@ impl ProjectStore {
         Ok(saved)
     }
 
-    fn mutate_session_intruder<T>(
+    fn mutate_session<T>(
         &mut self,
         id: Uuid,
         result: Option<(u64, bool, Option<FlowId>)>,
         change: impl FnOnce(&mut super::super::session_data::SessionData) -> Result<(T, IntruderRunSummary)>,
     ) -> Result<(T, IntruderRunSummary)> {
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get_mut(&id)
             .context("Intruder Session 不存在")?;
         require_session_mutation(dataset, result.map(|(ordinal, _, _)| ordinal))?;
         let ticket = if dataset.disk_ticket.is_some() {
-            let ticket = self.connection.unchecked_transaction()?;
-            validate_ticket(&ticket, self.id, dataset)?;
+            let ticket = self.0.connection.unchecked_transaction()?;
+            validate_ticket(&ticket, self.0.id, dataset)?;
             Some(ticket)
         } else {
             None
@@ -225,8 +229,8 @@ impl ProjectStore {
             );
         }
         let before = dataset.data.mutable_bytes(result.map(|value| value.0))?;
-        let available = self.intruder_sessions.quota.saturating_sub(
-            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        let available = self.0.intruder_sessions.quota.saturating_sub(
+            self.0.intruder_sessions.logical_bytes + self.0.intruder_sessions.reserved_bytes,
         ) + credit
             + if result.is_none() {
                 dataset.state_reserve
@@ -315,11 +319,11 @@ impl ProjectStore {
         if let Some((ordinal, terminal, _)) = result {
             if terminal {
                 if let Some(reservation) = dataset.reservations.remove(&ordinal) {
-                    self.intruder_sessions.reserved_bytes -= reservation.bytes;
+                    self.0.intruder_sessions.reserved_bytes -= reservation.bytes;
                 }
             } else if let Some(reservation) = dataset.reservations.get_mut(&ordinal) {
                 reservation.bytes -= consumed_credit;
-                self.intruder_sessions.reserved_bytes -= consumed_credit;
+                self.0.intruder_sessions.reserved_bytes -= consumed_credit;
             }
         }
         let consumed_state = if result.is_none() {
@@ -328,13 +332,13 @@ impl ProjectStore {
             0
         };
         dataset.state_reserve -= consumed_state;
-        self.intruder_sessions.reserved_bytes -= consumed_state;
+        self.0.intruder_sessions.reserved_bytes -= consumed_state;
         if run.state.is_terminal() {
-            self.intruder_sessions.reserved_bytes -= dataset.state_reserve;
+            self.0.intruder_sessions.reserved_bytes -= dataset.state_reserve;
             dataset.state_reserve = 0;
         }
-        self.intruder_sessions.logical_bytes =
-            self.intruder_sessions.logical_bytes - before + after;
+        self.0.intruder_sessions.logical_bytes =
+            self.0.intruder_sessions.logical_bytes - before + after;
         dataset.logical_bytes = dataset.logical_bytes - before + after;
         run.retention = IntruderRetention::Session;
         dataset.run = run.clone();
@@ -343,7 +347,7 @@ impl ProjectStore {
     }
 
     /// Each batch belongs to one Session dataset and is committed only to its RAM state.
-    pub(crate) fn retry_session_intruder_mutations(
+    pub(crate) fn retry_session_mutations(
         &mut self,
         mutations: &[IntruderMutation],
         cancel: &CancellationToken,
@@ -356,14 +360,15 @@ impl ProjectStore {
         };
         let id = expected.id;
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get_mut(&id)
             .context("RAM 恢复不能写入 Project 攻击")?;
         require_session_mutation(dataset, None)?;
         let ticket = if dataset.disk_ticket.is_some() {
-            let ticket = self.connection.unchecked_transaction()?;
-            validate_ticket(&ticket, self.id, dataset)?;
+            let ticket = self.0.connection.unchecked_transaction()?;
+            validate_ticket(&ticket, self.0.id, dataset)?;
             Some(ticket)
         } else {
             None
@@ -443,8 +448,8 @@ impl ProjectStore {
             hook.as_ref(),
         )?;
         let after = bytes(&staged)?;
-        let available = self.intruder_sessions.quota.saturating_sub(
-            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        let available = self.0.intruder_sessions.quota.saturating_sub(
+            self.0.intruder_sessions.logical_bytes + self.0.intruder_sessions.reserved_bytes,
         ) + credit
             + dataset.state_reserve;
         ensure!(
@@ -466,25 +471,25 @@ impl ProjectStore {
         for (ordinal, terminal) in ordinals {
             if terminal {
                 if let Some(reservation) = dataset.reservations.remove(&ordinal) {
-                    self.intruder_sessions.reserved_bytes -= reservation.bytes;
+                    self.0.intruder_sessions.reserved_bytes -= reservation.bytes;
                     growth = growth.saturating_sub(reservation.bytes);
                 }
             } else if let Some(reservation) = dataset.reservations.get_mut(&ordinal) {
                 let consumed = growth.min(reservation.bytes);
                 reservation.bytes -= consumed;
-                self.intruder_sessions.reserved_bytes -= consumed;
+                self.0.intruder_sessions.reserved_bytes -= consumed;
                 growth -= consumed;
             }
         }
         let consumed_state = growth.min(dataset.state_reserve);
         dataset.state_reserve -= consumed_state;
-        self.intruder_sessions.reserved_bytes -= consumed_state;
+        self.0.intruder_sessions.reserved_bytes -= consumed_state;
         if expected.state.is_terminal() {
-            self.intruder_sessions.reserved_bytes -= dataset.state_reserve;
+            self.0.intruder_sessions.reserved_bytes -= dataset.state_reserve;
             dataset.state_reserve = 0;
         }
-        self.intruder_sessions.logical_bytes =
-            self.intruder_sessions.logical_bytes - before + after;
+        self.0.intruder_sessions.logical_bytes =
+            self.0.intruder_sessions.logical_bytes - before + after;
         dataset.logical_bytes = dataset.logical_bytes - before + after;
         dataset.run = expected.clone();
         drop(ticket);

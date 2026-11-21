@@ -36,7 +36,7 @@ impl Rect {
         )
     }
 
-    pub(super) fn contains(&self, x: f32, y: f32) -> bool {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
     }
 }

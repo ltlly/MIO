@@ -167,7 +167,7 @@ async fn regression_storage_failure_still_completes_send_and_save_recovers_respo
     let task = tokio::spawn(async {});
     let task_id = task.id();
     task.await.unwrap();
-    state.sends.insert(
+    state.repeater.sends.insert(
         tab_id,
         ActiveSend {
             cancel: CancellationToken::new(),
@@ -188,7 +188,7 @@ async fn regression_storage_failure_still_completes_send_and_save_recovers_respo
         })
         .await;
     assert!(result.is_err(), "storage failure must be visible");
-    assert!(!state.sends.contains_key(&tab_id));
+    assert!(!state.repeater.sends.contains_key(&tab_id));
     let mut finished = false;
     while let Ok(event) = receiver.try_recv() {
         if let Event::SendFinished {

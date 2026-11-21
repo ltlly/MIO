@@ -11,7 +11,7 @@ impl State {
     ) -> Result<IntruderBaselineReceipt> {
         self.check_project(project)?;
         self.require_saved()?;
-        self.store.check_intruder_session_owner(project, id)?;
+        self.store.intruder().check_session_owner(project, id)?;
         ensure!(
             !operation_id.is_nil()
                 && !self.quiesced
@@ -76,7 +76,8 @@ impl State {
                 );
                 let page = self
                     .store
-                    .intruder_results(id, request.ordinal.checked_sub(1), 1)?;
+                    .intruder()
+                    .results(id, request.ordinal.checked_sub(1), 1)?;
                 ensure!(
                     page.run == previous
                         && matches!(page.rows.as_slice(),
@@ -105,8 +106,8 @@ impl State {
             true
         };
         let (run, prepared) = if needs_preparation {
-            let (attack_settings, _) = self.store.read_intruder_run_settings_only(id)?;
-            self.store.request_intruder_baseline_with(
+            let (attack_settings, _) = self.store.intruder().read_run_settings_only(id)?;
+            self.store.intruder_mut().request_baseline_with(
                 project,
                 id,
                 expected_revision,
@@ -141,7 +142,7 @@ impl State {
             )?
         } else {
             (
-                self.store.request_intruder_baseline(
+                self.store.intruder_mut().request_baseline(
                     project,
                     id,
                     expected_revision,
@@ -178,7 +179,7 @@ impl State {
         notes: Vec<u8>,
     ) -> Result<(u64, Vec<u8>)> {
         self.check_project(project)?;
-        self.store.set_intruder_result_notes(
+        self.store.intruder_mut().set_result_notes(
             project,
             run_id,
             ordinal,
@@ -197,7 +198,8 @@ impl State {
     ) -> Result<Vec<(u64, u64)>> {
         self.check_project(project)?;
         self.store
-            .set_intruder_result_highlight(project, run_id, &entries, highlight, &self.cancel)
+            .intruder_mut()
+            .set_result_highlight(project, run_id, &entries, highlight, &self.cancel)
     }
 
     pub(in crate::service) fn rename_intruder(
@@ -218,7 +220,7 @@ impl State {
             !self.quiesced && !self.cancel.is_cancelled(),
             "正在停止或切换项目；名称未改变"
         );
-        let run = self.store.rename_intruder_run(
+        let run = self.store.intruder_mut().rename_run(
             project,
             id,
             expected_title_revision,
@@ -270,7 +272,7 @@ impl State {
                     .is_some()),
                 "Intruder 当前资源池不存在；不能恢复"
             );
-            let (spec, attack_settings, _) = self.store.read_intruder_spec_with_settings(id)?;
+            let (spec, attack_settings, _) = self.store.intruder().read_spec_with_settings(id)?;
             let plan = AttackPlan::new(
                 spec.attack_type,
                 spec.draft.raw,
@@ -279,7 +281,8 @@ impl State {
             )?;
             let resumed = self
                 .store
-                .set_intruder_state(id, IntruderRunState::Running)?;
+                .intruder_mut()
+                .set_state(id, IntruderRunState::Running)?;
             self.intruder.runs.insert(
                 id,
                 ActiveRun {
@@ -321,7 +324,7 @@ impl State {
         };
         // Unlike stop/recovery transitions, a failed control must not change phase in memory
         // or queue a future Resume. Saving retries only the stop and result recovery records.
-        let saved = self.store.set_intruder_state(id, state);
+        let saved = self.store.intruder_mut().set_state(id, state);
         let run = self.intruder.runs.get_mut(&id).unwrap();
         match saved {
             Ok(summary) => {

@@ -10,14 +10,14 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
         let mut proxy = mio_proxy::start(
             ProxyConfig::new(MitmAuthority::generate().unwrap()),
             state.project,
-            state.proxy_sender.clone(),
+            state.proxy.sender.clone(),
         )
         .await
         .unwrap();
         proxy.cancellation_token().cancel();
         proxy.join().await.unwrap();
         assert!(proxy.is_joined());
-        state.proxy = Some(proxy);
+        state.proxy.primary = Some(proxy);
         let flow_id = Uuid::new_v4();
         state.queue_proxy_notification(Event::InterceptResolved {
             project: state.project,
@@ -32,18 +32,18 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
             })
             .await;
         }
-        assert!(state.proxy.is_none());
+        assert!(state.proxy.primary.is_none());
         assert_eq!(received.len(), 1);
-        assert_eq!(state.proxy_notifications.len(), 3);
+        assert_eq!(state.proxy.notifications.len(), 3);
         {
-            let mut waiting = Box::pin(proxy_completion(&mut state.proxy));
+            let mut waiting = Box::pin(proxy_completion(&mut state.proxy.primary));
             std::future::poll_fn(|cx| {
                 assert!(waiting.as_mut().poll(cx).is_pending());
                 std::task::Poll::Ready(())
             })
             .await;
         }
-        assert_eq!(state.proxy_notifications.len(), 3);
+        assert_eq!(state.proxy.notifications.len(), 3);
         assert!(matches!(received.try_recv().unwrap(), Event::Stopped));
         let (_, notifications) = tokio::join!(state.flush_proxy_notifications(), async {
             let mut notifications = Vec::new();
@@ -55,7 +55,7 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
         assert!(matches!(notifications[0], Event::InterceptResolved { flow_id: id, .. } if id == flow_id));
         assert!(matches!(notifications[1], Event::HistoryChanged { .. }));
         assert!(matches!(notifications[2], Event::ProxyState { address: None, cancel: None, .. }));
-        assert!(state.proxy_notifications.is_empty());
+        assert!(state.proxy.notifications.is_empty());
     })
     .await
     .expect("completed-runner reclamation and FIFO delivery are bounded");
@@ -69,18 +69,18 @@ async fn joined_proxy_failure_keeps_its_root_cause_when_terminal_storage_also_fa
         let mut proxy = mio_proxy::start(
             ProxyConfig::new(MitmAuthority::generate().unwrap()),
             state.project,
-            state.proxy_sender.clone(),
+            state.proxy.sender.clone(),
         )
         .await
         .unwrap();
         proxy.stop().await.unwrap();
         assert!(proxy.is_joined());
-        state.proxy = Some(proxy);
+        state.proxy.primary = Some(proxy);
         state.events.try_send(Event::Stopped).unwrap();
         state.store.reject_writes(true);
         let mut record = tests::completed_flow();
         record.summary.source = TrafficSource::Proxy;
-        state.proxy_sender.try_send(ProxyEvent::Captured {
+        state.proxy.sender.try_send(ProxyEvent::Captured {
             project: state.project,
             record: record.clone(),
             response_stream: None,
@@ -90,11 +90,11 @@ async fn joined_proxy_failure_keeps_its_root_cause_when_terminal_storage_also_fa
         let error = mio_proxy::ProxyError::Network("runner failure root cause".into());
         let message = error.to_string();
         state.proxy_finished(Err(error));
-        assert!(state.proxy.is_none());
+        assert!(state.proxy.primary.is_none());
         assert_eq!(received.len(), 1);
         assert_eq!(state.read_flow(record.summary.id).unwrap(), record);
-        assert_eq!(state.recovery.len(), 1);
-        let notifications = &state.proxy_notifications;
+        assert_eq!(state.storage.recovery.len(), 1);
+        let notifications = &state.proxy.notifications;
         assert_eq!(notifications.len(), 4);
         assert!(matches!(notifications.front(), Some(Event::Error { operation: "capture", .. })));
         assert!(matches!(notifications[2], Event::ProxyState { address: None, cancel: None, .. }));
@@ -117,7 +117,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
         let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
         config.limits.stop_timeout = Duration::from_millis(2);
         let project = state.project;
-        let sender = state.proxy_sender.clone();
+        let sender = state.proxy.sender.clone();
         let (started, proxy) = oneshot::channel();
         let (pause, pause_requested) = oneshot::channel();
         let (paused, pause_confirmed) = oneshot::channel();
@@ -141,8 +141,8 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
             let _ = runtime.block_on(finished);
         });
         let outcome = tokio::time::timeout_at(deadline - Duration::from_secs(1), async {
-            state.proxy = Some(proxy.await??);
-            let proxy = state.proxy.as_ref().context("missing real Proxy handle")?;
+            state.proxy.primary = Some(proxy.await??);
+            let proxy = state.proxy.primary.as_ref().context("missing real Proxy handle")?;
             let original_handle = std::ptr::from_ref(proxy);
             let address = proxy.address();
             let cancel = proxy.cancellation_token();
@@ -184,7 +184,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                 Some(mio_proxy::ProxyError::StopDeadline)
             ));
             let proxy = state
-                .proxy
+                .proxy.primary
                 .as_ref()
                 .context("deadline discarded the join")?;
             ensure!(std::ptr::eq(proxy, original_handle));
@@ -196,7 +196,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                 "the parked listener is still owned after the deadline"
             );
             let pending = {
-                let mut completion = std::pin::pin!(proxy_completion(&mut state.proxy));
+                let mut completion = std::pin::pin!(proxy_completion(&mut state.proxy.primary));
                 std::future::poll_fn(|cx| Poll::Ready(completion.as_mut().poll(cx).is_pending()))
                     .await
             };
@@ -207,7 +207,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
             ensure!(initial.summary.state == FlowState::Pending);
             ensure!(initial.request.body == BODY && initial.request.url == target);
             ensure!(received.len() == 1);
-            ensure!(state.proxy_notifications.len() == 2);
+            ensure!(state.proxy.notifications.len() == 2);
             ensure!(matches!(received.try_recv()?, Event::Stopped));
             let (_, notices) = tokio::join!(state.error("stop_proxy", &error), async {
                 let mut notices = Vec::new();
@@ -227,10 +227,10 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                 project: Some(project), operation: "stop_proxy", message,
             } if *project == state.project && *message == error.to_string()));
             ensure!(
-                state.proxy.is_some(),
+                state.proxy.primary.is_some(),
                 "no stopped ACK before releasing the runner"
             );
-            ensure!(received.is_empty() && state.proxy_notifications.is_empty());
+            ensure!(received.is_empty() && state.proxy.notifications.is_empty());
 
             state.events.try_send(Event::Stopped)?;
             release.send(())?;
@@ -247,7 +247,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                             "reaping must not require capacity in the full UI queue"
                         )));
                     }
-                    if state.proxy.is_none() {
+                    if state.proxy.primary.is_none() {
                         Poll::Ready(Ok(()))
                     } else {
                         Poll::Pending
@@ -255,7 +255,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                 })
                 .await?;
             }
-            ensure!(state.proxy.is_none());
+            ensure!(state.proxy.primary.is_none());
             ensure!(received.len() == 1, "reaping must leave the UI queue full");
             ensure!(upstream.read(&mut [0; 1]).await? == 0);
             ensure!(downstream.read(&mut [0; 1]).await? == 0);
@@ -272,25 +272,25 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
             ensure!(terminal.summary.revision > initial.summary.revision);
             ensure!(terminal.request == initial.request && terminal.response.is_none());
             ensure!(state.store.page(0, 2, "")?.0 == 1);
-            ensure!(state.unsaved_count() == 0 && state.pending.is_empty());
+            ensure!(state.unsaved_count() == 0 && state.proxy.pending.is_empty());
             let reopened = ProjectStore::open(&state.store.test_actual_path())?;
             ensure!(reopened.read(initial.summary.id)? == terminal);
-            ensure!(state.proxy_events.is_empty());
-            ensure!(state.proxy_notifications.len() == 1);
+            ensure!(state.proxy.events.is_empty());
+            ensure!(state.proxy.notifications.len() == 1);
             ensure!(matches!(received.try_recv()?, Event::Stopped));
             state.flush_proxy_notifications().await;
             ensure!(matches!(received.try_recv()?, Event::ProxyState {
                 project, address: None, cancel: None, ..
             } if project == state.project));
             state.finish_proxy_shutdown().await?;
-            ensure!(state.proxy_notifications.is_empty());
+            ensure!(state.proxy.notifications.is_empty());
             ensure!(received.is_empty());
             Ok::<_, anyhow::Error>(())
         })
         .await;
 
         // Reserve the last second for release and joins even after a failed observation.
-        if let Some(proxy) = &state.proxy {
+        if let Some(proxy) = &state.proxy.primary {
             proxy.request_stop();
         }
         let _ = release.send(());

@@ -72,10 +72,10 @@ impl State {
     }
 
     pub(super) fn emit_repeater_progress(&mut self, tab_id: TabId) {
-        if !self.repeater_notifications.is_empty() || self.events.capacity() <= 4 {
+        if !self.repeater.notifications.is_empty() || self.events.capacity() <= 4 {
             return;
         }
-        let Some(active) = self.sends.get_mut(&tab_id) else {
+        let Some(active) = self.repeater.sends.get_mut(&tab_id) else {
             return;
         };
         let Some(rx) = &mut active.progress_rx else {
@@ -95,14 +95,14 @@ impl State {
 
     pub(super) async fn complete(&mut self, completion: Completion) -> Result<()> {
         if completion.project != self.project
-            || self.sends.get(&completion.tab_id).is_none_or(|active| {
+            || self.repeater.sends.get(&completion.tab_id).is_none_or(|active| {
                 active.flow_id != completion.record.summary.id
                     || active.draft_revision != completion.draft_revision
             })
         {
             return Ok(());
         }
-        self.sends.remove(&completion.tab_id);
+        self.repeater.sends.remove(&completion.tab_id);
         let saved =
             self.persist_repeater_completion(completion.received.as_deref(), &completion.record);
         let audit_event = saved
@@ -119,8 +119,8 @@ impl State {
             record: Box::new(completion.record),
             persisted: saved.is_ok(),
         });
-        if !self.history_dirty {
-            self.history_dirty = true;
+        if !self.storage.history_dirty {
+            self.storage.history_dirty = true;
             self.queue_repeater_event(Event::HistoryChanged {
                 project: self.project,
             });
@@ -128,11 +128,15 @@ impl State {
         if let Some(event) = audit_event {
             self.queue_repeater_event(Event::Audit(event));
         }
+        if saved.is_ok() {
+            self.refresh_project_disk_bytes_throttled();
+        }
         saved
     }
 
     pub(super) async fn failed_job(&mut self, error: tokio::task::JoinError) {
         let Some(tab_id) = self
+            .repeater
             .sends
             .iter()
             .find_map(|(id, active)| (active.task_id == error.id()).then_some(*id))
@@ -144,7 +148,7 @@ impl State {
             });
             return;
         };
-        let active = self.sends.get(&tab_id).unwrap();
+        let active = self.repeater.sends.get(&tab_id).unwrap();
         active.cancel.cancel();
         let (flow_id, draft_revision) = (active.flow_id, active.draft_revision);
         let message = format!("发送任务异常结束，结果未知，未自动重发：{error}");
@@ -168,7 +172,7 @@ impl State {
                 }
             }
             Err(error) => {
-                self.sends.remove(&tab_id);
+                self.repeater.sends.remove(&tab_id);
                 self.queue_repeater_event(Event::SendRejected {
                     project: self.project,
                     tab_id,
@@ -184,13 +188,10 @@ impl State {
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        for send in self.sends.values_mut() {
-            send.cancel.cancel();
-            send.progress_rx = None;
-        }
+        self.repeater.cancel_all();
         let mut send_error = None;
-        while !self.jobs.is_empty() {
-            match tokio::time::timeout_at(deadline, self.jobs.join_next()).await {
+        while !self.repeater.jobs.is_empty() {
+            match tokio::time::timeout_at(deadline, self.repeater.jobs.join_next()).await {
                 Ok(Some(Ok(completion))) => {
                     if let Err(error) = self.complete(completion).await {
                         send_error.get_or_insert(error);
@@ -209,7 +210,7 @@ impl State {
     pub(super) async fn finish_repeater_shutdown(&mut self) -> Result<()> {
         // The final owner must join the same send futures even after Stop's deadline.
         let mut failure = None;
-        while !self.jobs.is_empty() {
+        while !self.repeater.jobs.is_empty() {
             if let Err(error) = self
                 .stop_repeater_until(tokio::time::Instant::now() + Duration::from_secs(3))
                 .await

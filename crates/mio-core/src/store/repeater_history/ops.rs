@@ -1,7 +1,7 @@
 use super::*;
 
-impl ProjectStore {
-    pub(crate) fn begin_repeater_send(
+impl crate::store::RepeaterHistoryRepo<&mut ProjectStore> {
+    pub(crate) fn begin_send(
         &mut self,
         tab_id: TabId,
         draft: &Draft,
@@ -9,8 +9,11 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<()> {
         check_cancel(cancel)?;
-        self.reject_session_intruder_flow_write(pending.summary.id)?;
+        self.0
+            .intruder()
+            .reject_session_flow_write(pending.summary.id)?;
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let workspace = metadata::workspace(&transaction)?;
@@ -125,15 +128,17 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(())
     }
+}
 
-    pub(crate) fn repeater_history_page(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::RepeaterHistoryRepo<S> {
+    pub(crate) fn page(
         &self,
         tab_id: TabId,
         start: u64,
         limit: usize,
     ) -> Result<RepeaterHistoryPage> {
         ensure!((1..=64).contains(&limit), "Repeater 历史页大小必须为 1–64");
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let workspace = metadata::workspace(&transaction)?;
         let tab = workspace
             .tabs
@@ -229,7 +234,7 @@ impl ProjectStore {
         })
     }
 
-    pub(crate) fn load_repeater_history(
+    pub(crate) fn load(
         &self,
         tab_id: TabId,
         entry: RepeaterHistoryEntryId,
@@ -238,7 +243,7 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<WorkTab> {
         check_cancel(cancel)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let workspace = metadata::workspace(&transaction)?;
         ensure!(
             workspace.revision == workspace_revision,
@@ -253,9 +258,7 @@ impl ProjectStore {
             old.draft.revision == draft_revision,
             "草稿 revision 已变化，未覆盖当前编辑"
         );
-        let next = draft_revision
-            .checked_add(1)
-            .context("草稿 revision 已耗尽")?;
+        let next = draft_revision + 1;
         let (mut draft, mut response, last_flow) =
             entry_content(&transaction, old, entry, &workspace, cancel)?;
         draft.revision = next;

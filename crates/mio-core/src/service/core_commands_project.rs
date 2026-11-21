@@ -19,15 +19,14 @@ impl State {
                 if let Err(error) = result {
                     if self.unsaved_count() == 0
                         || error.downcast_ref::<mio_proxy::ProxyError>().is_some()
-                        || !self.jobs.is_empty()
+                        || !self.repeater.jobs.is_empty()
                         || !self.ext_archive.can_quiesce()
                         || self.intruder.has_resources()
                         || self.ws_repeater.has_resources()
                         || self.sequencer.has_resources()
                         || self.audit.has_resources()
                         || self.collaborator.has_resources()
-                        || self.websocket_query.has_worker()
-                        || self.http_query.has_worker()
+                        || self.queries.has_workers()
                     {
                         return Err(error);
                     }
@@ -45,7 +44,7 @@ impl State {
                 options,
             } => {
                 self.require_saved()?;
-                self.store.require_intruder_sessions_resolved()?;
+                self.store.intruder().require_sessions_resolved()?;
                 let project_name =
                     crate::store::startup_config::normalize_project_name(options.name.as_deref())?;
                 let effective_config_mode =
@@ -78,7 +77,7 @@ impl State {
                         crate::store::check_new_project_path(path)?;
                     }
                     let mut store = ProjectStore::create(None)?;
-                    store.apply_startup_options(
+                    store.metadata_mut().apply_startup_options(
                         project_name,
                         &effective_config_mode,
                         loaded_config.as_ref(),
@@ -98,7 +97,7 @@ impl State {
                     } else {
                         ProjectStore::open(&path)?
                     };
-                    store.apply_startup_options(
+                    store.metadata_mut().apply_startup_options(
                         project_name,
                         &effective_config_mode,
                         loaded_config.as_ref(),
@@ -111,7 +110,7 @@ impl State {
             }
             Command::NewProject { path } => {
                 self.require_saved()?;
-                self.store.require_intruder_sessions_resolved()?;
+                self.store.intruder().require_sessions_resolved()?;
                 if let Some(path) = &path {
                     self.require_ext_released()?;
                     self.store.check_path_outside_temporary(path)?;
@@ -121,7 +120,7 @@ impl State {
             }
             Command::OpenProject { path } => {
                 self.require_saved()?;
-                self.store.require_intruder_sessions_resolved()?;
+                self.store.intruder().require_sessions_resolved()?;
                 self.require_ext_released()?;
                 self.store.check_path_outside_temporary(&path)?;
                 let next = if crate::is_external_archive_file(&path) {
@@ -143,14 +142,16 @@ impl State {
                 self.require_ext_released()?;
                 self.retry_session_intruder_recovery()?;
                 let query_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                self.http_query.cancel();
-                self.websocket_query.cancel();
+                self.queries.cancel_all();
                 self.stop_websocket_query_until(query_deadline).await?;
                 self.stop_http_query_until(query_deadline).await?;
                 let destination_changed = path
                     .as_deref()
                     .is_some_and(|target| self.store.path.as_deref() != Some(target));
-                let prev_workspace = workspace.is_some().then(|| self.store.workspace().ok()).flatten();
+                let prev_workspace = workspace
+                    .is_some()
+                    .then(|| self.store.metadata().workspace().ok())
+                    .flatten();
                 let (path, total_bytes, (websocket_notes, ext_http_notes, ext_http_highlights)) =
                     self.store.save_with_notes(
                         path.as_deref(),
@@ -160,105 +161,23 @@ impl State {
                             &ext_http_notes,
                             &ext_http_highlights,
                         ),
-                        self.recovery.make_contiguous(),
-                        self.websocket_recovery.make_contiguous(),
+                        self.storage.recovery.make_contiguous(),
+                        self.storage.websocket_recovery.make_contiguous(),
                         &self.intruder.recovery,
                         &self.cancel,
                     )?;
-                self.recovery.clear();
-                self.websocket_recovery.clear();
+                self.storage.clear_recovery();
                 self.intruder.recovery.clear();
                 self.store.cancel_queries_with(self.cancel.clone());
-                self.storage_error = None;
-                if self.ipc_jobs.is_empty() && self.ipc_job_cancel.is_cancelled() {
-                    self.ipc_job_cancel = self.cancel.child_token();
-                }
+                self.ai_ipc.refresh_cancel_if_idle(&self.cancel);
                 self.flush_all_provenance_to_store();
-                self.refresh_project_disk_bytes();
                 if let Some(workspace) = workspace {
-                    if prev_workspace
-                        .as_ref()
-                        .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)
-                    {
-                        workspace
-                            .upstream_proxy
-                            .sync_user_level_cache(&mut self.user_level_connections_cache);
-                    }
-                    self.sync_compiled_client_certs(&workspace).await;
-                    self.sync_ws_repeater_workspace(&workspace);
-                    self.sync_sessions_workspace(&workspace);
-                    let needs_proxy_rebind = (self.proxy.is_some() || !self.extra_proxies.is_empty())
-                        && prev_workspace.as_ref().is_none_or(|prev| {
-                            prev.upstream_proxy != workspace.upstream_proxy
-                                || prev.upstream_tls != workspace.upstream_tls
-                                || prev.client_certificates != workspace.client_certificates
-                                || prev.proxy_listeners != workspace.proxy_listeners
-                                || prev.proxy_messages.misc != workspace.proxy_messages.misc
-                                || prev.network_http != workspace.network_http
-                                || prev.repeater_settings.request_timeout_secs
-                                    != workspace.repeater_settings.request_timeout_secs
-                                || prev.repeater_settings.streaming_response_timeout_secs
-                                    != workspace.repeater_settings.streaming_response_timeout_secs
-                        });
-                    if needs_proxy_rebind {
-                        self.reload_running_proxy_from_workspace(&workspace).await?;
-                    } else {
-                    let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-                        &workspace.ssl_pass_through_rules,
-                    )?;
-                    let ws_transform = crate::http::build_websocket_transform_with_scope(
-                        workspace.ws_match_and_replace_rules.clone(),
-                        workspace.proxy_messages.ws_match_replace_in_scope_only,
-                        workspace.scope.clone(),
-                    )?;
-                    let drop_scope_fn =
-                        core_commands_proxy::build_drop_out_of_scope_fn(workspace.scope.clone());
-                    if let Some(proxy) = &self.proxy {
-                        proxy.set_processing(
-                            crate::http::build_flow_transform_with_scope_and_provenance(
-                                workspace.match_and_replace_rules.clone(),
-                                workspace.proxy_messages,
-                                workspace.scope.clone(),
-                                Some(self.provenance.clone()),
-                            )?,
-                            Some(crate::http::build_intercept_filter(
-                                workspace.proxy_interception.clone(),
-                                workspace.scope.clone(),
-                            )?),
-                            Some(crate::http::build_websocket_intercept_filter(
-                                workspace.proxy_websocket_interception,
-                                workspace.scope.clone(),
-                            )?),
-                        );
-                        proxy.set_ssl_pass_through(ssl_matcher.clone());
-                        proxy.set_websocket_transform(ws_transform.clone());
-                        proxy.set_drop_out_of_scope(drop_scope_fn.clone());
-                    }
-                    for (_, proxy) in &self.extra_proxies {
-                        proxy.set_processing(
-                            crate::http::build_flow_transform_with_scope_and_provenance(
-                                workspace.match_and_replace_rules.clone(),
-                                workspace.proxy_messages,
-                                workspace.scope.clone(),
-                                Some(self.provenance.clone()),
-                            )?,
-                            Some(crate::http::build_intercept_filter(
-                                workspace.proxy_interception.clone(),
-                                workspace.scope.clone(),
-                            )?),
-                            Some(crate::http::build_websocket_intercept_filter(
-                                workspace.proxy_websocket_interception,
-                                workspace.scope.clone(),
-                            )?),
-                        );
-                        proxy.set_ssl_pass_through(ssl_matcher.clone());
-                        proxy.set_websocket_transform(ws_transform.clone());
-                        proxy.set_drop_out_of_scope(drop_scope_fn.clone());
-                    }
-                    }
-                    self.plugin_workspace_changed(&workspace).await;
-                    self.emit(Event::WorkspaceChanged { project, workspace })
-                        .await;
+                    Box::pin(self.publish_saved_workspace(
+                        project,
+                        prev_workspace.as_ref(),
+                        workspace,
+                    ))
+                    .await?;
                 }
                 self.storage_state().await;
                 self.history_changed().await;
@@ -273,6 +192,7 @@ impl State {
                     ext_http_highlights,
                 })
                 .await;
+                self.refresh_project_disk_bytes();
                 if destination_changed {
                     self.record_recent_project(&saved_path).await;
                 }
@@ -284,7 +204,7 @@ impl State {
                 cancel,
             } => {
                 self.check_project(project)?;
-                let pending_prov = self.provenance.snapshot_all();
+                let pending_prov = self.storage.provenance.snapshot_all();
                 let combined_cancel = self.cancel.child_token();
                 let cancel_watcher = cancel.clone();
                 let child_trigger = combined_cancel.clone();
@@ -297,8 +217,8 @@ impl State {
                     .slim_save_as(
                         &path,
                         &options,
-                        self.recovery.make_contiguous(),
-                        self.websocket_recovery.make_contiguous(),
+                        self.storage.recovery.make_contiguous(),
+                        self.storage.websocket_recovery.make_contiguous(),
                         &self.intruder.recovery,
                         &pending_prov,
                         &combined_cancel,
@@ -321,7 +241,7 @@ impl State {
                         self.emit(Event::WorkspaceRejected {
                             project,
                             revision: attempted_revision,
-                            stored: self.store.workspace()?,
+                            stored: self.store.metadata().workspace()?,
                             message: error.to_string(),
                         })
                         .await
@@ -346,9 +266,9 @@ impl State {
             Command::RegenerateCa => {
                 let ca = tokio::task::spawn_blocking(authority::regenerate).await??;
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
-                self.ca = Some(ca);
-                if self.proxy.is_some() || !self.extra_proxies.is_empty() {
-                    let workspace = self.store.workspace()?;
+                self.proxy.ca = Some(ca);
+                if self.proxy.is_running() {
+                    let workspace = self.store.metadata().workspace()?;
                     self.reload_running_proxy_from_workspace(&workspace).await?;
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
@@ -361,9 +281,9 @@ impl State {
                 })
                 .await??;
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
-                self.ca = Some(ca);
-                if self.proxy.is_some() || !self.extra_proxies.is_empty() {
-                    let workspace = self.store.workspace()?;
+                self.proxy.ca = Some(ca);
+                if self.proxy.is_running() {
+                    let workspace = self.store.metadata().workspace()?;
                     self.reload_running_proxy_from_workspace(&workspace).await?;
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
@@ -433,7 +353,7 @@ impl State {
     }
 
     fn updater_fallback_route(&self) -> Result<mio_proxy::UpstreamRoute> {
-        let ws = self.store.workspace()?;
+        let ws = self.store.metadata().workspace()?;
         let tls = self.preferences.effective_upstream_tls(&ws.upstream_tls)?;
         Ok(ws.upstream_proxy.to_route_with_tls(tls)?)
     }
@@ -443,37 +363,48 @@ impl State {
         project: ProjectKey,
         workspace: Workspace,
     ) -> Result<()> {
-        let prev_workspace = self.store.workspace().ok();
-        let save_outcome = match self.store.save_workspace(&workspace) {
+        let prev_workspace = self.store.metadata().workspace().ok();
+        let save_outcome = match self.store.metadata_mut().save_workspace(&workspace) {
             Ok(()) => Ok(()),
             Err(first_err) => {
                 let matched_ipc_tab = workspace
                     .tabs
                     .iter()
                     .find(|t| {
-                        self.ipc_repeater_revisions
+                        self.ai_ipc
+                            .repeater_revisions
                             .contains(&(t.id, workspace.revision))
                     })
                     .map(|t| t.id);
                 if let Some(tab_id) = matched_ipc_tab
                     && self
                         .store
+                        .metadata()
                         .workspace()
                         .is_ok_and(|stored| stored.revision == workspace.revision)
                 {
-                    self.ipc_repeater_revisions
+                    self.ai_ipc
+                        .repeater_revisions
                         .remove(&(tab_id, workspace.revision));
-                    self.store.reconcile_ipc_workspace(&workspace)
+                    self.store.metadata_mut().reconcile_ipc_workspace(&workspace)
                 } else {
                     Err(first_err)
                 }
             }
         };
         save_outcome?;
-        if prev_workspace
-            .as_ref()
-            .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)
-        {
+        Box::pin(self.publish_saved_workspace(project, prev_workspace.as_ref(), workspace)).await?;
+        self.refresh_project_disk_bytes();
+        Ok(())
+    }
+
+    async fn publish_saved_workspace(
+        &mut self,
+        project: ProjectKey,
+        prev_workspace: Option<&Workspace>,
+        workspace: Workspace,
+    ) -> Result<()> {
+        if prev_workspace.is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy) {
             workspace
                 .upstream_proxy
                 .sync_user_level_cache(&mut self.user_level_connections_cache);
@@ -481,79 +412,63 @@ impl State {
         self.sync_compiled_client_certs(&workspace).await;
         self.sync_ws_repeater_workspace(&workspace);
         self.sync_sessions_workspace(&workspace);
-        self.refresh_project_disk_bytes();
-        let needs_proxy_rebind = (self.proxy.is_some() || !self.extra_proxies.is_empty())
-            && prev_workspace.as_ref().is_none_or(|prev| {
-                prev.upstream_proxy != workspace.upstream_proxy
-                    || prev.upstream_tls != workspace.upstream_tls
-                    || prev.client_certificates != workspace.client_certificates
-                    || prev.proxy_listeners != workspace.proxy_listeners
-                    || prev.proxy_messages.misc != workspace.proxy_messages.misc
-                    || prev.network_http != workspace.network_http
-                    || prev.repeater_settings.request_timeout_secs
-                        != workspace.repeater_settings.request_timeout_secs
-                    || prev.repeater_settings.streaming_response_timeout_secs
-                        != workspace.repeater_settings.streaming_response_timeout_secs
-            });
-        if needs_proxy_rebind {
+        let has_running_proxy = self.proxy.is_running();
+        if has_running_proxy && workspace_requires_proxy_rebind(prev_workspace, &workspace) {
             self.reload_running_proxy_from_workspace(&workspace).await?;
-        } else {
-        let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-            &workspace.ssl_pass_through_rules,
-        )?;
-        let ws_transform = crate::http::build_websocket_transform_with_scope(
-            workspace.ws_match_and_replace_rules.clone(),
-            workspace.proxy_messages.ws_match_replace_in_scope_only,
-            workspace.scope.clone(),
-        )?;
-        let drop_scope_fn =
-            core_commands_proxy::build_drop_out_of_scope_fn(workspace.scope.clone());
-        if let Some(proxy) = &self.proxy {
-            proxy.set_processing(
-                crate::http::build_flow_transform_with_scope_and_provenance(
-                    workspace.match_and_replace_rules.clone(),
-                    workspace.proxy_messages,
-                    workspace.scope.clone(),
-                    Some(self.provenance.clone()),
-                )?,
-                Some(crate::http::build_intercept_filter(
-                    workspace.proxy_interception.clone(),
-                    workspace.scope.clone(),
-                )?),
-                Some(crate::http::build_websocket_intercept_filter(
-                    workspace.proxy_websocket_interception,
-                    workspace.scope.clone(),
-                )?),
-            );
-            proxy.set_ssl_pass_through(ssl_matcher.clone());
-            proxy.set_websocket_transform(ws_transform.clone());
-            proxy.set_drop_out_of_scope(drop_scope_fn.clone());
-        }
-        for (_, proxy) in &self.extra_proxies {
-            proxy.set_processing(
-                crate::http::build_flow_transform_with_scope_and_provenance(
-                    workspace.match_and_replace_rules.clone(),
-                    workspace.proxy_messages,
-                    workspace.scope.clone(),
-                    Some(self.provenance.clone()),
-                )?,
-                Some(crate::http::build_intercept_filter(
-                    workspace.proxy_interception.clone(),
-                    workspace.scope.clone(),
-                )?),
-                Some(crate::http::build_websocket_intercept_filter(
-                    workspace.proxy_websocket_interception,
-                    workspace.scope.clone(),
-                )?),
-            );
-            proxy.set_ssl_pass_through(ssl_matcher.clone());
-            proxy.set_websocket_transform(ws_transform.clone());
-            proxy.set_drop_out_of_scope(drop_scope_fn.clone());
-        }
+        } else if has_running_proxy {
+            self.apply_proxy_processing_from_workspace(&workspace)?;
         }
         self.plugin_workspace_changed(&workspace).await;
         self.emit(Event::WorkspaceChanged { project, workspace })
             .await;
         Ok(())
     }
+
+    fn apply_proxy_processing_from_workspace(&self, workspace: &Workspace) -> Result<()> {
+        let ssl_matcher =
+            crate::http::build_ssl_pass_through_matcher(&workspace.ssl_pass_through_rules)?;
+        let ws_transform = crate::http::build_websocket_transform_with_scope(
+            workspace.ws_match_and_replace_rules.clone(),
+            workspace.proxy_messages.ws_match_replace_in_scope_only,
+            workspace.scope.clone(),
+        )?;
+        let drop_scope_fn = core_commands_proxy::build_drop_out_of_scope_fn(workspace.scope.clone());
+        for proxy in self.proxy.handles() {
+            proxy.set_processing(
+                crate::http::build_flow_transform_with_scope_and_provenance(
+                    workspace.match_and_replace_rules.clone(),
+                    workspace.proxy_messages,
+                    workspace.scope.clone(),
+                    Some(self.storage.provenance.clone()),
+                )?,
+                Some(crate::http::build_intercept_filter(
+                    workspace.proxy_interception.clone(),
+                    workspace.scope.clone(),
+                )?),
+                Some(crate::http::build_websocket_intercept_filter(
+                    workspace.proxy_websocket_interception,
+                    workspace.scope.clone(),
+                )?),
+            );
+            proxy.set_ssl_pass_through(ssl_matcher.clone());
+            proxy.set_websocket_transform(ws_transform.clone());
+            proxy.set_drop_out_of_scope(drop_scope_fn.clone());
+        }
+        Ok(())
+    }
+}
+
+fn workspace_requires_proxy_rebind(prev: Option<&Workspace>, next: &Workspace) -> bool {
+    prev.is_none_or(|prev| {
+        prev.upstream_proxy != next.upstream_proxy
+            || prev.upstream_tls != next.upstream_tls
+            || prev.client_certificates != next.client_certificates
+            || prev.proxy_listeners != next.proxy_listeners
+            || prev.proxy_messages.misc != next.proxy_messages.misc
+            || prev.network_http != next.network_http
+            || prev.repeater_settings.request_timeout_secs
+                != next.repeater_settings.request_timeout_secs
+            || prev.repeater_settings.streaming_response_timeout_secs
+                != next.repeater_settings.streaming_response_timeout_secs
+    })
 }

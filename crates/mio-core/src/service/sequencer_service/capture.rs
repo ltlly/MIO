@@ -213,25 +213,14 @@ async fn decoded_response(
     response: &HttpResponse,
     cancel: &CancellationToken,
 ) -> Option<HttpResponse> {
-    let encoded = response
-        .headers
-        .iter()
-        .any(|header| header.name.eq_ignore_ascii_case("content-encoding"));
-    if !unpack_compressed_responses || !encoded {
-        return None;
-    }
-    let response = response.clone();
-    let method = request.method.clone();
-    let max_body_bytes = config.limits.max_body_bytes;
-    let deadline = Instant::now() + config.limits.timeout;
-    let cancel = cancel.clone();
-    let worker = tokio::task::spawn_blocking(move || {
-        http::unpack_response(&response, &method, max_body_bytes, &cancel, deadline)
-    });
-    match timeout_at(TokioInstant::now() + config.limits.timeout, worker).await {
-        Ok(Ok(Ok(Some(response)))) => Some(response),
-        _ => None,
-    }
+    crate::service::core_repeater_send::unpack_encoded_response_within_timeout(
+        request,
+        config,
+        unpack_compressed_responses,
+        response,
+        cancel,
+    )
+    .await
 }
 
 pub(super) fn fallback_capture_finished(

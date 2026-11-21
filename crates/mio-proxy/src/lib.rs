@@ -19,9 +19,10 @@ pub use auth::{
 };
 pub use capture::{CapturedFlow, CapturedFlowMetrics, StreamedResponse};
 pub use client::{
-    PreparedSend, SendConfig, SendGroupConfig, SendHttpConfig, SendLimits, SendMetrics,
-    SendNetworkConfig, SendStreamOutcome, WebSocketExchange, WebSocketSession,
-    connect_websocket_session, prepare_send, send, send_streaming, send_websocket,
+    DownloadConfig, DownloadOutcome, DownloadRouteResolver, DownloadSink, PreparedSend, SendConfig,
+    SendGroupConfig, SendHttpConfig, SendLimits, SendMetrics, SendNetworkConfig, SendStreamOutcome,
+    WebSocketExchange, WebSocketSession, connect_websocket_session, download_to_sink,
+    download_to_writer, prepare_send, send, send_streaming, send_websocket,
 };
 pub use client_tls::{
     ClientCertificateFormat, ClientCertificateRule, ClientCertificateSummary,

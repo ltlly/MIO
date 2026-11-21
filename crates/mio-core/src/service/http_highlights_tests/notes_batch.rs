@@ -80,7 +80,7 @@ async fn notes_batch_commands_keep_shared_text_atomic_revisions_and_cancel_ident
             text
         );
     }
-    state.history_dirty = false;
+    state.storage.history_dirty = false;
     for cancelled in [false, true] {
         let token = CancellationToken::new();
         if cancelled {
@@ -129,7 +129,7 @@ async fn notes_batch_commands_keep_shared_text_atomic_revisions_and_cancel_ident
                 text
             );
         }
-        assert!(!state.history_dirty);
+        assert!(!state.storage.history_dirty);
     }
     let cancelled = CancellationToken::new();
     cancelled.cancel();

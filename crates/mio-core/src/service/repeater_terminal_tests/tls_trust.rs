@@ -98,7 +98,7 @@ async fn run_tls_trust_test() {
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         let product_ca = MitmAuthority::generate().unwrap();
         let product_ca_der = product_ca.certificate_der();
-        state.ca = Some(product_ca);
+        state.proxy.ca = Some(product_ca);
         let mut request = tests::completed_flow().request;
         request.url = target.clone();
         request.body = PAYLOAD.to_vec();
@@ -160,7 +160,7 @@ async fn run_tls_trust_test() {
                 group_send: None,
                 cancel: CancellationToken::new(),
             }).await.unwrap();
-            let completion = state.jobs.join_next().await.unwrap().unwrap();
+            let completion = state.repeater.jobs.join_next().await.unwrap().unwrap();
             let repeater_record = completion.record.clone();
             assert_eq!(completion.tab_id, tab_id);
             assert_eq!(completion.draft_revision, draft.revision);
@@ -170,7 +170,7 @@ async fn run_tls_trust_test() {
             assert!(drain_events(&mut receiver).iter().any(|event| matches!(event, Event::SendFinished {
                 project, tab_id: actual_tab, draft_revision, persisted: true, record,
             } if *project == state.project && *actual_tab == tab_id && *draft_revision == draft.revision && **record == repeater_record)));
-            assert!(state.jobs.is_empty() && state.sends.is_empty());
+            assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
 
             state.command(Command::SetIntercept { project: state.project, requests: succeeds, responses: succeeds }).await.unwrap();
             assert!(drain_events(&mut receiver).iter().any(|event| matches!(event, Event::ProxyState {
@@ -180,7 +180,7 @@ async fn run_tls_trust_test() {
                 project: state.project,
                 listen: "127.0.0.1:0".parse().unwrap(),
             }).await.unwrap();
-            let product_address = state.proxy.as_ref().unwrap().address();
+            let product_address = state.proxy.primary.as_ref().unwrap().address();
             assert!(drain_events(&mut receiver).iter().any(|event| matches!(event, Event::ProxyState {
                 project, address: Some(actual), ..
             } if *project == state.project && *actual == product_address)));
@@ -217,7 +217,7 @@ async fn run_tls_trust_test() {
             ));
             let mut held_stages = Vec::new();
             let proxy_record = loop {
-                let event = state.proxy_events.recv().await.unwrap();
+                let event = state.proxy.events.recv().await.unwrap();
                 let intercepted = match &event {
                     ProxyEvent::Intercepted { project, record, response_head_only, .. } => {
                         assert_eq!(*project, state.project);
@@ -267,7 +267,7 @@ async fn run_tls_trust_test() {
             }
             state.command(Command::StopProxy { project: state.project }).await.unwrap();
             state.flush_proxy_notifications().await;
-            assert!(state.proxy.is_none() && state.proxy_events.is_empty() && state.pending.is_empty());
+            assert!(state.proxy.primary.is_none() && state.proxy.events.is_empty() && state.proxy.pending.is_empty());
             assert!(drain_events(&mut receiver).iter().any(|event| matches!(event, Event::ProxyState {
                 project, address: None, cancel: None, ..
             } if *project == state.project)));

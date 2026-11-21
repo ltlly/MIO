@@ -50,15 +50,14 @@ fn global_hit(target: crate::GlobalSearchTarget, tool: &str, location: String, m
         websocket_summary: None, site_map_entry: None }
 }
 
-impl ProjectStore {
-    pub(crate) fn global_search_snapshot(
-        path: &std::path::Path,
-        query: &crate::GlobalSearchQuery,
-        pending: &[(crate::FlowRecord, crate::OriginalMessages)],
-        websocket_pending: &[(crate::WebSocketSummary, crate::store::CapturedWebSocket)],
-        shutdown: &CancellationToken,
-        cancel: &CancellationToken,
-    ) -> Result<crate::GlobalSearchResult> {
+pub(crate) fn global_search_snapshot(
+    path: &std::path::Path,
+    query: &crate::GlobalSearchQuery,
+    pending: &[(crate::FlowRecord, crate::OriginalMessages)],
+    websocket_pending: &[(crate::WebSocketSummary, crate::store::CapturedWebSocket)],
+    shutdown: &CancellationToken,
+    cancel: &CancellationToken,
+) -> Result<crate::GlobalSearchResult> {
         let is_cancelled = || shutdown.is_cancelled() || cancel.is_cancelled();
         ensure!(!query.term.trim().is_empty() && query.term.len() <= 4096, "搜索关键词须为 1–4096 字节");
         ensure!((1..=10_000).contains(&query.limit), "全局搜索显示上限须为 1–10000");
@@ -252,7 +251,7 @@ impl ProjectStore {
         let websocket = if shutdown.is_cancelled() {
             bail!("全局搜索已取消");
         } else {
-            ProjectStore::websocket_query_snapshot(path, &websocket_query, websocket_pending, cancel)?
+            crate::store::websocket_query_snapshot(path, &websocket_query, websocket_pending, cancel)?
         };
         for row in websocket.rows {
             if !seen_ws.insert(row.id) { continue; }
@@ -269,7 +268,6 @@ impl ProjectStore {
         }
         ensure!(!is_cancelled(), "全局搜索已取消");
         Ok(collector.result)
-    }
 }
 
 #[derive(Default)]

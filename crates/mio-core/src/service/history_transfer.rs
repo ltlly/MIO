@@ -48,7 +48,7 @@ impl State {
             "历史请求转送需要 1–500 条记录"
         );
         ensure!(
-            self.store.workspace()?.revision == workspace_revision,
+            self.store.metadata().workspace()?.revision == workspace_revision,
             "工作区 revision 已变化；未读取转送请求"
         );
         let mut seen = HashSet::with_capacity(entries.len());
@@ -88,7 +88,7 @@ impl State {
             );
             let tab = match *entry {
                 HistoryTransferEntry::SiteMap { row_id, entry_id, revision } => {
-                    let detail = self.store.read_site_map_entry(entry_id, revision)?;
+                    let detail = self.store.site_map().read_entry(entry_id, revision)?;
                     ensure!(detail.row_id == row_id, "站点地图转送来源身份不一致");
                     let mut tab = WorkTab::from_request(Some(&detail.record.request), "1".into());
                     tab.draft.raw = detail.request_raw;
@@ -118,7 +118,11 @@ impl State {
                     message_id,
                 } => {
                     // Read only the immutable summary before allocating the selected raw request.
-                    let message = self.store.ext_message_fragment(message_id, 0, 0)?.summary;
+                    let message = self
+                        .store
+                        .ext_archive()
+                        .message_fragment(message_id, 0, 0)?
+                        .summary;
                     ensure!(
                         message.source_id == source_id
                             && message.item_id == item_id
@@ -134,7 +138,7 @@ impl State {
                             .is_some_and(|total| total <= MAX_TRANSFER_BYTES),
                         "历史转送请求总量超过 64 MiB；未创建标签"
                     );
-                    self.store.ext_repeater_tab(
+                    self.store.ext_archive().repeater_tab(
                         source_id,
                         item_id,
                         message_id,
@@ -167,7 +171,7 @@ impl State {
             "历史请求转送读取已取消"
         );
         ensure!(
-            self.store.workspace()?.revision == workspace_revision,
+            self.store.metadata().workspace()?.revision == workspace_revision,
             "工作区 revision 已变化；未应用转送请求"
         );
         Ok(proposals)

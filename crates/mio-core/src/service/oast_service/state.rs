@@ -138,7 +138,7 @@ impl State {
         let Some(polling_url) = self.collaborator.config.validate()? else {
             return Ok(None);
         };
-        let workspace = self.store.workspace_arc()?;
+        let workspace = self.store.metadata().workspace_arc()?;
         let upstream_tls = self
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)?;
@@ -157,7 +157,7 @@ impl State {
             },
             tls: mio_proxy::UpstreamTlsConfig {
                 trust: upstream_tls,
-                client_certificates: self.compiled_client_certs.clone(),
+                client_certificates: self.tls.compiled_client_certs.clone(),
                 ..Default::default()
             },
             limits: mio_proxy::SendLimits {

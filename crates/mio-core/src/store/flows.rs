@@ -1,6 +1,6 @@
 use super::*;
 
-impl ProjectStore {
+impl FlowsRepo<&mut ProjectStore> {
     #[cfg(test)]
     pub fn put(&mut self, record: &FlowRecord) -> Result<()> {
         self.put_capture(record, None)
@@ -11,12 +11,14 @@ impl ProjectStore {
         received: &FlowRecord,
         record: &FlowRecord,
     ) -> Result<()> {
-        self.reject_session_intruder_flow_write(record.summary.id)?;
-        let before_tc = query_total_changes(&self.connection)?;
-        let tx = self.connection.transaction()?;
+        self.0
+            .intruder()
+            .reject_session_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.0.connection)?;
+        let tx = self.0.connection.transaction()?;
         write_repeater_completion(&tx, received, record)?;
         tx.commit()?;
-        self.advance_workspace_cache_changes(before_tc)?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
@@ -36,12 +38,14 @@ impl ProjectStore {
         response_stream: Option<&StreamedResponse>,
         listener_port: Option<u16>,
     ) -> Result<()> {
-        self.reject_session_intruder_flow_write(record.summary.id)?;
-        let before_tc = query_total_changes(&self.connection)?;
-        let tx = self.connection.transaction()?;
+        self.0
+            .intruder()
+            .reject_session_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.0.connection)?;
+        let tx = self.0.connection.transaction()?;
         write_capture_with_port(&tx, record, response_stream, listener_port)?;
         tx.commit()?;
-        self.advance_workspace_cache_changes(before_tc)?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
@@ -52,15 +56,32 @@ impl ProjectStore {
         listener_port: Option<u16>,
         metrics: &mio_proxy::CapturedFlowMetrics,
     ) -> Result<()> {
-        self.reject_session_intruder_flow_write(record.summary.id)?;
-        let before_tc = query_total_changes(&self.connection)?;
-        let tx = self.connection.transaction()?;
-        super::messages::write_capture_with_metrics(&tx, record, response_stream, listener_port, metrics)?;
+        self.0
+            .intruder()
+            .reject_session_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.0.connection)?;
+        let tx = self.0.connection.transaction()?;
+        super::messages::write_capture_with_metrics(
+            &tx,
+            record,
+            response_stream,
+            listener_port,
+            metrics,
+        )?;
         tx.commit()?;
-        self.advance_workspace_cache_changes(before_tc)?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
+    pub fn finish_pending(&mut self, crashed: bool, only_proxy: bool) -> Result<usize> {
+        let tx = self.0.connection.transaction()?;
+        let changed = finish_pending_records(&tx, crashed, only_proxy)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+}
+
+impl<S: std::ops::Deref<Target = ProjectStore>> FlowsRepo<S> {
     pub fn page(
         &self,
         offset: usize,
@@ -69,8 +90,8 @@ impl ProjectStore {
     ) -> Result<(usize, Vec<FlowSummary>)> {
         ensure!((1..=500).contains(&limit), "分页大小必须为 1–500");
         ensure!(filter.len() <= 4096, "筛选文本过长");
-        let total: i64 = self.connection.query_row("SELECT count(*) FROM flows WHERE ?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0", [filter], |row| row.get(0))?;
-        let mut statement = self.connection.prepare("SELECT summary FROM flows WHERE ?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0 ORDER BY started DESC,id LIMIT ?2 OFFSET ?3")?;
+        let total: i64 = self.0.connection.query_row("SELECT count(*) FROM flows WHERE ?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0", [filter], |row| row.get(0))?;
+        let mut statement = self.0.connection.prepare("SELECT summary FROM flows WHERE ?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0 ORDER BY started DESC,id LIMIT ?2 OFFSET ?3")?;
         let values = statement.query_map(
             params![filter, limit as i64, i64::try_from(offset)?],
             |row| row.get::<_, Vec<u8>>(0),
@@ -84,13 +105,14 @@ impl ProjectStore {
 
     pub(crate) fn flow_count(&self) -> Result<usize> {
         let total: i64 = self
+            .0
             .connection
             .query_row("SELECT count(*) FROM flows", [], |row| row.get(0))?;
         Ok(usize::try_from(total)?)
     }
 
     pub(crate) fn has_flow(&self, id: FlowId) -> Result<bool> {
-        let exists: bool = self.connection.query_row(
+        let exists: bool = self.0.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM flows WHERE id=?1)",
             [id.to_string()],
             |row| row.get(0),
@@ -138,7 +160,7 @@ impl ProjectStore {
             .filter(|s| matches_summary(s))
             .cloned()
             .collect();
-        let mut stmt = self.connection.prepare(
+        let mut stmt = self.0.connection.prepare(
             "SELECT id, summary FROM flows
              WHERE (?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0)
                AND (?2 IS NULL OR lower(method)=lower(?2))
@@ -173,24 +195,17 @@ impl ProjectStore {
     }
 
     pub fn read_optional(&self, id: FlowId) -> Result<Option<FlowRecord>> {
-        if let Some(record) = self.read_session_intruder_flow(id)? {
+        if let Some(record) = self.0.intruder().read_session_flow(id)? {
             return Ok(Some(record));
         }
-        read_record(&self.connection, id)
+        read_record(&self.0.connection, id)
     }
 
     pub fn original(&self, id: FlowId) -> Result<OriginalMessages> {
-        if let Some(original) = self.original_session_intruder_flow(id)? {
+        if let Some(original) = self.0.intruder().original_session_flow(id)? {
             return Ok(original);
         }
-        read_original(&self.connection, id)
-    }
-
-    pub fn finish_pending(&mut self, crashed: bool, only_proxy: bool) -> Result<usize> {
-        let tx = self.connection.transaction()?;
-        let changed = finish_pending_records(&tx, crashed, only_proxy)?;
-        tx.commit()?;
-        Ok(changed)
+        read_original(&self.0.connection, id)
     }
 }
 

@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
     sync::RwLock,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -125,56 +125,284 @@ struct ActiveSend {
     progress_rx: Option<watch::Receiver<Option<ProgressPayload>>>,
 }
 
-struct State {
-    preferences: crate::preferences::PreferencesStore,
-    user_level_connections_cache: UserLevelConnectionsCache,
-    project: ProjectKey,
-    store: ProjectStore,
-    project_disk_bytes: u64,
-    last_disk_refresh: Option<Instant>,
-    events: mpsc::Sender<Event>,
-    awaiting_event_slot: bool,
-    cancel: CancellationToken,
-    proxy_events: mpsc::Receiver<ProxyEvent>,
-    proxy_sender: mpsc::Sender<ProxyEvent>,
-    proxy_notifications: VecDeque<Event>,
-    proxy: Option<ProxyHandle>,
-    primary_proxy_id: Option<Uuid>,
+struct ProxyRuntimeState {
+    events: mpsc::Receiver<ProxyEvent>,
+    sender: mpsc::Sender<ProxyEvent>,
+    notifications: VecDeque<Event>,
+    primary: Option<ProxyHandle>,
+    primary_id: Option<Uuid>,
+    extra: Vec<(Uuid, ProxyHandle)>,
     ca: Option<MitmAuthority>,
     intercept_requests: bool,
     intercept_responses: bool,
     pending: HashMap<FlowId, Pending>,
     pending_websockets: HashMap<Uuid, PendingWebSocket>,
-    sends: HashMap<TabId, ActiveSend>,
-    jobs: JoinSet<Completion>,
-    repeater_notifications: VecDeque<Event>,
+}
+
+impl ProxyRuntimeState {
+    fn new() -> Self {
+        let (sender, events) = mpsc::channel(PROXY_EVENT_CAPACITY);
+        Self {
+            events,
+            sender,
+            notifications: VecDeque::new(),
+            primary: None,
+            primary_id: None,
+            extra: Vec::new(),
+            ca: None,
+            intercept_requests: false,
+            intercept_responses: false,
+            pending: HashMap::new(),
+            pending_websockets: HashMap::new(),
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.primary.is_some() || !self.extra.is_empty()
+    }
+
+    fn handles(&self) -> impl Iterator<Item = &ProxyHandle> {
+        self.primary
+            .iter()
+            .chain(self.extra.iter().map(|(_, proxy)| proxy))
+    }
+
+    fn request_stop_all(&self) {
+        for proxy in self.handles() {
+            proxy.request_stop();
+        }
+    }
+
+    fn set_intercept(&mut self, requests: bool, responses: bool) {
+        self.intercept_requests = requests;
+        self.intercept_responses = responses;
+        for proxy in self.handles() {
+            proxy.set_intercept(requests, responses);
+        }
+    }
+
+    fn clear_handles(&mut self) {
+        self.primary = None;
+        self.primary_id = None;
+        self.extra.clear();
+    }
+
+    fn primary_address(&self) -> Option<SocketAddr> {
+        self.primary.as_ref().map(ProxyHandle::address)
+    }
+
+    fn primary_cancel(&self) -> Option<CancellationToken> {
+        self.primary.as_ref().map(ProxyHandle::cancellation_token)
+    }
+
+    fn websocket_injectors(&self) -> Option<mio_proxy::WebSocketInjectorRegistry> {
+        self.primary.as_ref().map(ProxyHandle::websocket_injectors)
+    }
+
+    fn active_listeners(&self) -> Vec<(Uuid, SocketAddr)> {
+        let mut listeners = Vec::new();
+        if let Some(proxy) = &self.primary {
+            listeners.push((
+                self.primary_id.unwrap_or(Uuid::from_u128(1)),
+                proxy.address(),
+            ));
+        }
+        for (id, proxy) in &self.extra {
+            listeners.push((*id, proxy.address()));
+        }
+        listeners
+    }
+}
+
+struct StorageState {
+    project_disk_bytes: u64,
+    last_disk_refresh: Option<Instant>,
     history_dirty: bool,
     websocket_history_dirty: bool,
     // The first fault stops producers; only the bounded event queue and active jobs can add records.
     recovery: VecDeque<CapturedFlow>,
     websocket_recovery: VecDeque<CapturedWebSocket>,
-    websocket_query: websocket_query::QueryState,
-    http_query: http_query::QueryState,
-    storage_error: Option<String>,
-    quiesced: bool,
-    extra_proxies: Vec<(Uuid, ProxyHandle)>,
+    error: Option<String>,
     annotated_flows: Arc<RwLock<HashSet<FlowId>>>,
-    compiled_client_certs: Arc<[(ClientCertificateRule, mio_proxy::ParsedClientIdentity)]>,
     provenance: ProvenanceTracker,
-    ipc_repeater_revisions: HashSet<(TabId, u64)>,
-    ai_ipc_rx: Option<mpsc::Receiver<ai_ipc::AiIpcCall>>,
-    ai_ipc_server: Option<ai_ipc::AiIpcServer>,
-    ipc_job_cancel: CancellationToken,
-    ipc_jobs: JoinSet<ai_ipc::IpcRepeaterCompletion>,
-    sessions: crate::sessions::SessionRuntime,
-    session_trace_rx: mpsc::Receiver<(ProjectKey, SessionTraceEntry)>,
+}
+
+impl StorageState {
+    fn new() -> Self {
+        Self {
+            project_disk_bytes: 0,
+            last_disk_refresh: None,
+            history_dirty: false,
+            websocket_history_dirty: false,
+            recovery: VecDeque::new(),
+            websocket_recovery: VecDeque::new(),
+            error: None,
+            annotated_flows: Arc::new(RwLock::new(HashSet::new())),
+            provenance: ProvenanceTracker::new(),
+        }
+    }
+
+    fn clear_recovery(&mut self) {
+        self.recovery.clear();
+        self.websocket_recovery.clear();
+        self.error = None;
+    }
+
+    fn reset_for_project(&mut self, restored_annotated: HashSet<FlowId>) {
+        self.history_dirty = false;
+        self.websocket_history_dirty = false;
+        self.project_disk_bytes = 0;
+        self.last_disk_refresh = None;
+        self.provenance.clear();
+        *self
+            .annotated_flows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restored_annotated;
+    }
+}
+
+struct RepeaterState {
+    sends: HashMap<TabId, ActiveSend>,
+    jobs: JoinSet<Completion>,
+    notifications: VecDeque<Event>,
+}
+
+impl RepeaterState {
+    fn new() -> Self {
+        Self {
+            sends: HashMap::new(),
+            jobs: JoinSet::new(),
+            notifications: VecDeque::new(),
+        }
+    }
+
+    fn cancel_all(&mut self) {
+        for send in self.sends.values_mut() {
+            send.cancel.cancel();
+            send.progress_rx = None;
+        }
+    }
+}
+
+#[derive(Default)]
+struct QueryWorkersState {
+    http: http_query::QueryState,
+    websocket: websocket_query::QueryState,
+}
+
+impl QueryWorkersState {
+    fn cancel_all(&mut self) {
+        self.http.cancel();
+        self.websocket.cancel();
+    }
+
+    fn has_workers(&self) -> bool {
+        self.http.has_worker() || self.websocket.has_worker()
+    }
+}
+
+struct AiIpcState {
+    repeater_revisions: HashSet<(TabId, u64)>,
+    rx: Option<mpsc::Receiver<ai_ipc::AiIpcCall>>,
+    server: Option<ai_ipc::AiIpcServer>,
+    job_cancel: CancellationToken,
+    jobs: JoinSet<ai_ipc::IpcRepeaterCompletion>,
+}
+
+impl AiIpcState {
+    fn new() -> Self {
+        Self {
+            repeater_revisions: HashSet::new(),
+            rx: None,
+            server: None,
+            job_cancel: CancellationToken::new(),
+            jobs: JoinSet::new(),
+        }
+    }
+
+    fn refresh_cancel_if_idle(&mut self, parent: &CancellationToken) {
+        if self.jobs.is_empty() && self.job_cancel.is_cancelled() {
+            self.job_cancel = parent.child_token();
+        }
+    }
+}
+
+struct TlsRuntimeState {
+    compiled_client_certs: Arc<[(ClientCertificateRule, mio_proxy::ParsedClientIdentity)]>,
     server_cert_tx: mpsc::Sender<(ProjectKey, ObservedServerCert)>,
     server_cert_rx: mpsc::Receiver<(ProjectKey, ObservedServerCert)>,
     observed_cert_keys: HashSet<(String, u16, String)>,
     tls_failure_tx: mpsc::Sender<(ProjectKey, String, u16)>,
     tls_failure_rx: mpsc::Receiver<(ProjectKey, String, u16)>,
-    last_scheduled_fire: HashMap<Uuid, i64>,
+}
+
+impl TlsRuntimeState {
+    fn new() -> Self {
+        let (server_cert_tx, server_cert_rx) = mpsc::channel(128);
+        let (tls_failure_tx, tls_failure_rx) = mpsc::channel(64);
+        Self {
+            compiled_client_certs: Arc::from([]),
+            server_cert_tx,
+            server_cert_rx,
+            observed_cert_keys: HashSet::new(),
+            tls_failure_tx,
+            tls_failure_rx,
+        }
+    }
+
+    fn build_server_cert_callback(
+        &self,
+        project: ProjectKey,
+    ) -> mio_proxy::ServerCertObservedCallback {
+        let tx = self.server_cert_tx.clone();
+        Arc::new(move |info: mio_proxy::ObservedCertInfo| {
+            let _ = tx.try_send((project, ObservedServerCert::from(info)));
+        })
+    }
+
+    fn build_client_tls_failure_callback(
+        &self,
+        project: ProjectKey,
+    ) -> mio_proxy::ClientTlsFailureCallback {
+        let tx = self.tls_failure_tx.clone();
+        Arc::new(move |host: String, port: u16| {
+            let _ = tx.try_send((project, host, port));
+        })
+    }
+}
+
+struct SessionServiceState {
+    runtime: crate::sessions::SessionRuntime,
+    trace_rx: mpsc::Receiver<(ProjectKey, SessionTraceEntry)>,
+}
+
+impl SessionServiceState {
+    fn from_workspace(project: ProjectKey, workspace: &Workspace) -> Self {
+        let runtime = crate::sessions::SessionRuntime::from_workspace(project, workspace);
+        let (trace_tx, trace_rx) = mpsc::channel(128);
+        runtime.set_trace_sender(Some(trace_tx));
+        Self { runtime, trace_rx }
+    }
+}
+
+struct State {
+    preferences: crate::preferences::PreferencesStore,
+    user_level_connections_cache: UserLevelConnectionsCache,
+    project: ProjectKey,
+    store: ProjectStore,
+    storage: StorageState,
+    events: mpsc::Sender<Event>,
+    awaiting_event_slot: bool,
+    cancel: CancellationToken,
+    quiesced: bool,
     extensions_disabled: bool,
+    proxy: ProxyRuntimeState,
+    repeater: RepeaterState,
+    queries: QueryWorkersState,
+    ai_ipc: AiIpcState,
+    tls: TlsRuntimeState,
+    sessions: SessionServiceState,
+    last_scheduled_fire: HashMap<Uuid, i64>,
     plugins: plugin_service::PluginState,
     ext_archive: ext_service::ExtState,
     intruder: intruder_service::IntruderState,

@@ -31,9 +31,9 @@ pub(in crate::store) const DIRECT_EXT_REPORT_KEY: &str = "ext_direct_report";
 const PROXY_BATCH_SIZE: usize = 256;
 const REPEATER_BATCH_SIZE: usize = 32;
 
-impl ProjectStore {
-    pub(crate) fn read_direct_ext_source(&self) -> Result<Option<ExtSourceInfo>> {
-        let tx = self.connection.unchecked_transaction()?;
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub(crate) fn read_direct_source(&self) -> Result<Option<ExtSourceInfo>> {
+        let tx = self.0.connection.unchecked_transaction()?;
         let info = {
             let mut stmt = tx.prepare(
                 "SELECT CASE WHEN typeof(value)='blob' AND length(value)<=262144 THEN value END
@@ -51,12 +51,16 @@ impl ProjectStore {
         tx.commit()?;
         Ok(Some(info))
     }
+}
 
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
     pub(crate) fn annotated_live_flow_ids(&self) -> Result<HashSet<Uuid>> {
-        let map = super::plugin_storage::read_live_http_annotations(&self.connection)?;
+        let map = super::plugin_storage::read_live_http_annotations(&self.0.connection)?;
         Ok(map.into_keys().collect())
     }
+}
 
+impl ProjectStore {
     pub(crate) fn open_ext(path: &Path, cancel: &CancellationToken) -> Result<Self> {
         check_cancel(cancel)?;
         let default_name = path
@@ -68,7 +72,7 @@ impl ProjectStore {
         let mut store = Self::create(None)?;
         store.cancel_queries_with(cancel.clone());
         let source_id = Uuid::new_v4();
-        let _ = store.import_ext_file_streaming(
+        let _ = store.ext_archive_mut().import_file_streaming(
             source_id,
             path,
             default_name,
@@ -80,8 +84,10 @@ impl ProjectStore {
         reclaim_macos_malloc_pages();
         Ok(store)
     }
+}
 
-    pub(crate) fn import_ext_file_streaming(
+impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
+    pub(crate) fn import_file_streaming(
         &mut self,
         source_id: Uuid,
         ext_path: &Path,
@@ -90,10 +96,7 @@ impl ProjectStore {
         progress: &mut dyn FnMut(ExtImportPhase, u64, Option<u64>),
     ) -> Result<ExtImportReport> {
         check_cancel(cancel)?;
-        let now_unix_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let now_unix_ms = crate::codec_util::now_unix_ms();
         let (
             mut final_report,
             active_tab_index,
@@ -104,7 +107,7 @@ impl ProjectStore {
             repeater_groups,
             imported_tabs,
         ) = {
-            let conn = &self.connection;
+            let conn = &self.0.connection;
             let mut active_tx: Option<rusqlite::Transaction<'_>> = None;
             let mut batch_proxy_count = 0usize;
             let mut batch_tab_count = 0usize;
@@ -174,37 +177,37 @@ impl ProjectStore {
                             }
                         };
 
+                        let (orig_resp, orig_reason) = match item.original_response {
+                            Some((r, reason)) => (Some(r), reason),
+                            None => (None, None),
+                        };
+                        let first_record = FlowRecord {
+                            summary: FlowSummary {
+                                id: flow_id,
+                                revision: 1,
+                                source: TrafficSource::Proxy,
+                                state: FlowState::Complete,
+                                started_unix_ms: item.started_unix_ms,
+                                method: item.original_request.method.clone(),
+                                url: item.original_request.url.clone(),
+                                request_bytes: item.original_request.body.len() as u64,
+                                status: orig_resp.as_ref().map(|r| r.status),
+                                response_bytes: orig_resp
+                                    .as_ref()
+                                    .map_or(0, |r| r.body.len() as u64),
+                                elapsed_ms: item.elapsed_ms,
+                            },
+                            request: item.original_request,
+                            response: orig_resp,
+                        };
+                        write_imported_capture(
+                            tx,
+                            &first_record,
+                            orig_reason.as_deref(),
+                            item.listener_port,
+                            &head_meta,
+                        )?;
                         if item.edited_request.is_none() && item.edited_response.is_none() {
-                            let (orig_resp, orig_reason) = match item.original_response {
-                                Some((r, reason)) => (Some(r), reason),
-                                None => (None, None),
-                            };
-                            let first_record = FlowRecord {
-                                summary: FlowSummary {
-                                    id: flow_id,
-                                    revision: 1,
-                                    source: TrafficSource::Proxy,
-                                    state: FlowState::Complete,
-                                    started_unix_ms: item.started_unix_ms,
-                                    method: item.original_request.method.clone(),
-                                    url: item.original_request.url.clone(),
-                                    request_bytes: item.original_request.body.len() as u64,
-                                    status: orig_resp.as_ref().map(|r| r.status),
-                                    response_bytes: orig_resp
-                                        .as_ref()
-                                        .map_or(0, |r| r.body.len() as u64),
-                                    elapsed_ms: item.elapsed_ms,
-                                },
-                                request: item.original_request,
-                                response: orig_resp,
-                            };
-                            write_imported_capture(
-                                tx,
-                                &first_record,
-                                orig_reason.as_deref(),
-                                item.listener_port,
-                                &head_meta,
-                            )?;
                             record_passive(
                                 &first_record,
                                 item.started_unix_ms,
@@ -212,47 +215,6 @@ impl ProjectStore {
                                 &mut passive_dedup,
                             );
                         } else {
-                            let (orig_resp, orig_reason) = match item.original_response {
-                                Some((r, reason)) => (Some(r), reason),
-                                None => (None, None),
-                            };
-                            let first_req = if item.edited_request.is_none() {
-                                item.original_request.clone()
-                            } else {
-                                item.original_request
-                            };
-                            let first_resp = if item.edited_response.is_none() {
-                                orig_resp.clone()
-                            } else {
-                                orig_resp
-                            };
-                            let first_record = FlowRecord {
-                                summary: FlowSummary {
-                                    id: flow_id,
-                                    revision: 1,
-                                    source: TrafficSource::Proxy,
-                                    state: FlowState::Complete,
-                                    started_unix_ms: item.started_unix_ms,
-                                    method: first_req.method.clone(),
-                                    url: first_req.url.clone(),
-                                    request_bytes: first_req.body.len() as u64,
-                                    status: first_resp.as_ref().map(|r| r.status),
-                                    response_bytes: first_resp
-                                        .as_ref()
-                                        .map_or(0, |r| r.body.len() as u64),
-                                    elapsed_ms: item.elapsed_ms,
-                                },
-                                request: first_req,
-                                response: first_resp,
-                            };
-                            write_imported_capture(
-                                tx,
-                                &first_record,
-                                orig_reason.as_deref(),
-                                item.listener_port,
-                                &head_meta,
-                            )?;
-
                             let final_req =
                                 item.edited_request.unwrap_or(first_record.request);
                             let (final_resp, final_reason) = match item.edited_response {
@@ -451,7 +413,7 @@ impl ProjectStore {
         };
 
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.connection,
+            &self.0.connection,
             TransactionBehavior::Immediate,
         )?;
 
@@ -522,7 +484,7 @@ impl ProjectStore {
                     .cmp(&a.severity_rank)
                     .then_with(|| b.detected_unix_ms.cmp(&a.detected_unix_ms))
             });
-            let mut audit_state = self.read_audit_state()?;
+            let mut audit_state = self.0.audit().read_state()?;
             let mut existing: HashSet<(String, String, String, Option<String>)> = audit_state
                 .findings
                 .iter()
@@ -550,12 +512,12 @@ impl ProjectStore {
             }
             if added {
                 audit_state.revision = audit_state.revision.saturating_add(1);
-                let _ = self.write_audit_state(&audit_state, cancel);
+                let _ = self.0.audit_mut().write_state(&audit_state, cancel);
             }
         }
         drop(passive_dedup);
-        self.invalidate_workspace_cache();
-        let _ = self.connection.execute_batch("PRAGMA shrink_memory;");
+        self.0.invalidate_workspace_cache();
+        let _ = self.0.connection.execute_batch("PRAGMA shrink_memory;");
         reclaim_macos_malloc_pages();
         Ok(final_report)
     }

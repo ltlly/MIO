@@ -257,8 +257,8 @@ fn frozen_pool_history_neither_counts_as_current_usage_nor_requires_delete_confi
 }
 
 #[test]
-fn delete_preflight_rejects_cas_cancel_revision_and_schema_before_any_session_reassignment() {
-    for mode in 0..5 {
+fn delete_preflight_rejects_cas_cancel_and_schema_before_any_session_reassignment() {
+    for mode in [0, 1, 2, 4] {
         let mut store = ProjectStore::create(None).unwrap();
         let catalog = store
             .ensure_intruder_default_pool(project(&store), &CancellationToken::new())
@@ -286,12 +286,6 @@ fn delete_preflight_rejects_cas_cancel_revision_and_schema_before_any_session_re
                 &CancellationToken::new(),
             )
             .unwrap();
-        if mode == 3 {
-            let mut workspace = store.workspace().unwrap();
-            workspace.revision += 1;
-            workspace.intruder.tabs[0].spec.revision = i64::MAX as u64;
-            store.save_workspace(&workspace).unwrap();
-        }
         if mode == 4 {
             store.connection.execute_batch("CREATE TABLE pool_extension(value BLOB REFERENCES metadata(value) ON UPDATE CASCADE)").unwrap();
         }

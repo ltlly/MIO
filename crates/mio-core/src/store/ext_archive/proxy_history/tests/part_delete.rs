@@ -4,11 +4,16 @@ use super::*;
 fn delete_and_clear_live_proxy_history_preserve_archive_repeater_and_pending_flows() {
     let (mut store, _source, archive_items) = fixture(0, false, false);
     let mut ws = store.workspace().unwrap();
-    assert_eq!(ws.proxy_listener_or_default(), "127.0.0.1:8080");
-    ws.proxy_listener = Some("127.0.0.1:8088".into());
+    let effective = ws.effective_proxy_listeners();
+    assert_eq!(effective.len(), 1);
+    assert_eq!(effective[0].bind_address, "127.0.0.1:8080");
+    ws.proxy_listeners.push(crate::ProxyListenerConfig {
+        bind_address: "127.0.0.1:8088".into(),
+        ..Default::default()
+    });
     ws.validate().unwrap();
-    assert_eq!(ws.proxy_listener_or_default(), "127.0.0.1:8088");
-    ws.proxy_listener = Some("0.0.0.0:8088".into());
+    assert_eq!(ws.effective_proxy_listeners()[0].bind_address, "127.0.0.1:8088");
+    ws.proxy_listeners[0].bind_address = "0.0.0.0:8088".into();
     assert!(ws.validate().is_err());
 
     let mut proxy_a = crate::store::tests::record();

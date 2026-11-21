@@ -14,26 +14,26 @@ impl State {
             self.flush_repeater_notifications().await;
             let intruder_commands_ready = self.intruder.can_accept_commands();
             let commands_ready = self.ext_archive.can_accept_commands() && intruder_commands_ready;
-            let can_emit_repeater_progress = self.repeater_notifications.is_empty();
+            let can_emit_repeater_progress = self.repeater.notifications.is_empty();
             let incoming = tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => Incoming::Stop,
                 _ = self.events.closed() => Incoming::Stop,
-                result = proxy_completion(&mut self.proxy) => Incoming::ProxyFinished(result),
-                result = extra_proxy_completion(&mut self.extra_proxies) => Incoming::ProxyFinished(result),
-                Some(result) = self.jobs.join_next(), if !self.jobs.is_empty() => Incoming::Completed(result),
-                Some(done) = self.ipc_jobs.join_next(), if !self.ipc_jobs.is_empty() => Incoming::IpcRepeaterCompleted(done),
-                tab_id = next_repeater_progress(&mut self.sends, &self.events, can_emit_repeater_progress) => Incoming::RepeaterProgress(tab_id),
+                result = proxy_completion(&mut self.proxy.primary) => Incoming::ProxyFinished(result),
+                result = extra_proxy_completion(&mut self.proxy.extra) => Incoming::ProxyFinished(result),
+                Some(result) = self.repeater.jobs.join_next(), if !self.repeater.jobs.is_empty() => Incoming::Completed(result),
+                Some(done) = self.ai_ipc.jobs.join_next(), if !self.ai_ipc.jobs.is_empty() => Incoming::IpcRepeaterCompleted(done),
+                tab_id = next_repeater_progress(&mut self.repeater.sends, &self.events, can_emit_repeater_progress) => Incoming::RepeaterProgress(tab_id),
                 signal = self.intruder.next_signal(&self.events, false) => Incoming::Intruder(signal),
                 signal = self.ext_archive.next_signal(&self.events, false) => Incoming::Ext(signal),
-                signal = self.websocket_query.next_signal(&self.events, false) => Incoming::WebSocketQuery(signal),
-                signal = self.http_query.next_signal(&self.events, false) => Incoming::HttpQuery(signal),
+                signal = self.queries.websocket.next_signal(&self.events, false) => Incoming::WebSocketQuery(signal),
+                signal = self.queries.http.next_signal(&self.events, false) => Incoming::HttpQuery(signal),
                 command = commands.recv(), if commands_ready => command.map(|command| Incoming::Command(Box::new(command))).unwrap_or(Incoming::Stop),
-                Some(call) = ai_ipc::next_ipc_call(&mut self.ai_ipc_rx), if commands_ready => Incoming::AiIpc(call),
-                event = self.proxy_events.recv(), if intruder_commands_ready => event.map(Incoming::Proxy).unwrap_or(Incoming::Stop),
-                Some(trace) = self.session_trace_rx.recv(), if intruder_commands_ready => Incoming::SessionTrace(trace),
-                Some(cert) = self.server_cert_rx.recv(), if intruder_commands_ready => Incoming::ServerCertObserved(cert),
-                Some(fail) = self.tls_failure_rx.recv(), if intruder_commands_ready => Incoming::ClientTlsFailure(fail),
+                Some(call) = ai_ipc::next_ipc_call(&mut self.ai_ipc.rx), if commands_ready => Incoming::AiIpc(call),
+                event = self.proxy.events.recv(), if intruder_commands_ready => event.map(Incoming::Proxy).unwrap_or(Incoming::Stop),
+                Some(trace) = self.sessions.trace_rx.recv(), if intruder_commands_ready => Incoming::SessionTrace(trace),
+                Some(cert) = self.tls.server_cert_rx.recv(), if intruder_commands_ready => Incoming::ServerCertObserved(cert),
+                Some(fail) = self.tls.tls_failure_rx.recv(), if intruder_commands_ready => Incoming::ClientTlsFailure(fail),
                 signal = self.plugins.next_signal(), if intruder_commands_ready => Incoming::Plugin(signal),
                 Some(event) = self.ws_repeater.next_signal(), if intruder_commands_ready => Incoming::WebSocketRepeater(event),
                 Some(event) = self.sequencer.next_signal(), if intruder_commands_ready => Incoming::Sequencer(event),
@@ -80,13 +80,13 @@ impl State {
                 Incoming::WebSocketQuery(signal) => self.websocket_query_signal(signal),
                 Incoming::HttpQuery(signal) => self.http_query_signal(signal),
                 Incoming::AiIpc(call) => {
-                    self.accept_ai_ipc_call(call).await;
+                    Box::pin(self.accept_ai_ipc_call(call)).await;
                 }
                 Incoming::IpcRepeaterCompleted(done) => {
                     self.complete_ipc_repeater(done);
                 }
                 Incoming::Intruder(signal) => {
-                    if let Err(error) = self.intruder_signal(signal).await {
+                    if let Err(error) = Box::pin(self.intruder_signal(signal)).await {
                         self.queue_intruder_event(Event::Error {
                             project: Some(self.project),
                             operation: "intruder",
@@ -108,7 +108,8 @@ impl State {
                             cert.port,
                             cert.sha256_fingerprint.clone(),
                         );
-                        if self.observed_cert_keys.len() < 512 && self.observed_cert_keys.insert(key)
+                        if self.tls.observed_cert_keys.len() < 512
+                            && self.tls.observed_cert_keys.insert(key)
                             && self.events.capacity() > 4
                         {
                             let _ = self
@@ -119,40 +120,39 @@ impl State {
                 }
                 Incoming::ClientTlsFailure((project, host, port)) => {
                     if project == self.project {
-                        self.handle_client_tls_failure(project, host, port).await;
+                        Box::pin(self.handle_client_tls_failure(project, host, port)).await;
                     }
                 }
                 Incoming::SchedulerTick => {
-                    self.run_scheduled_tasks_tick().await;
+                    Box::pin(self.run_scheduled_tasks_tick()).await;
                 }
             }
             if self.unsaved_count() != 0 && self.intruder.can_accept_commands() {
-                if (self.proxy.is_some()
-                    || !self.extra_proxies.is_empty()
-                    || !self.jobs.is_empty()
-                    || !self.ipc_jobs.is_empty()
+                if (self.proxy.is_running()
+                    || !self.repeater.jobs.is_empty()
+                    || !self.ai_ipc.jobs.is_empty()
                     || self.plugins.has_resources()
                     || self.intruder.has_resources()
                     || self.ws_repeater.has_resources()
                     || self.sequencer.has_resources()
                     || self.audit.has_resources()
                     || self.collaborator.has_resources())
-                    && let Err(error) = self.stop_resources().await
+                    && let Err(error) = Box::pin(self.stop_resources()).await
                 {
-                    self.storage_error.get_or_insert_with(|| error.to_string());
+                    self.storage.error.get_or_insert_with(|| error.to_string());
                 }
                 self.storage_state().await;
             }
         }
         self.cancel.cancel();
-        if let Some(mut ipc_server) = self.ai_ipc_server.take() {
+        if let Some(mut ipc_server) = self.ai_ipc.server.take() {
             ipc_server.shutdown().await;
         }
-        self.ai_ipc_rx = None;
+        self.ai_ipc.rx = None;
         self.stop_ipc_jobs().await;
         // Shutdown must still persist terminal states after query cancellation.
         self.store.cancel_queries_with(CancellationToken::new());
-        let result = self.stop_resources().await;
+        let result = Box::pin(self.stop_resources()).await;
         let proxy_shutdown = self.finish_proxy_shutdown().await;
         let repeater_shutdown = self.finish_repeater_shutdown().await;
         let ws_repeater_shutdown = self.ws_repeater.shutdown().await;
@@ -198,12 +198,12 @@ impl State {
         self.emit(Event::ProjectOpened {
             project: self.project,
             path: self.store.path.clone(),
-            workspace: self.store.workspace()?,
+            workspace: self.store.metadata().workspace()?,
         })
         .await;
         self.proxy_state().await;
         self.refresh_project_disk_bytes();
-        if let Ok(audit_state) = self.store.read_audit_state()
+        if let Ok(audit_state) = self.store.audit().read_state()
             && audit_state != AuditStateSnapshot::default()
         {
             self.emit_audit_if_capacity(Some(AuditEvent::State {
@@ -218,23 +218,14 @@ impl State {
     pub(super) async fn proxy_state(&mut self) {
         self.emit(Event::ProxyState {
             project: self.project,
-            address: self.proxy.as_ref().map(ProxyHandle::address),
-            cancel: self.proxy.as_ref().map(ProxyHandle::cancellation_token),
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            address: self.proxy.primary_address(),
+            cancel: self.proxy.primary_cancel(),
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
         })
         .await;
-        if !self.extra_proxies.is_empty() {
-            let mut listeners = Vec::new();
-            if let Some(proxy) = &self.proxy {
-                listeners.push((
-                    self.primary_proxy_id.unwrap_or(Uuid::from_u128(1)),
-                    proxy.address(),
-                ));
-            }
-            for (id, proxy) in &self.extra_proxies {
-                listeners.push((*id, proxy.address()));
-            }
+        if !self.proxy.extra.is_empty() {
+            let listeners = self.proxy.active_listeners();
             self.emit(Event::ProxyListeners {
                 project: self.project,
                 listeners,
@@ -244,10 +235,10 @@ impl State {
     }
 
     pub(super) async fn authority(&mut self) -> Result<MitmAuthority> {
-        if self.ca.is_none() {
-            self.ca = Some(tokio::task::spawn_blocking(authority::load_or_create).await??);
+        if self.proxy.ca.is_none() {
+            self.proxy.ca = Some(tokio::task::spawn_blocking(authority::load_or_create).await??);
         }
-        Ok(self.ca.as_ref().unwrap().clone())
+        Ok(self.proxy.ca.as_ref().unwrap().clone())
     }
 
     #[cfg(test)]
@@ -262,19 +253,20 @@ impl State {
         extensions_disabled: Option<bool>,
     ) -> Result<()> {
         self.require_saved()?;
-        self.store.require_intruder_sessions_resolved()?;
+        self.store.intruder().require_sessions_resolved()?;
         let intruder =
-            intruder_service::IntruderState::with_resource_pools(next.intruder_resource_pools()?);
+            intruder_service::IntruderState::with_resource_pools(next.resource_pools().list()?);
         self.stop_resources().await?;
         self.require_saved()?;
         self.store.checkpoint()?;
         let effective_pause = pause_automated_tasks
             || !next
+                .metadata()
                 .workspace_arc()
                 .map(|w| w.tasks_auto_start)
                 .unwrap_or(true);
-        next.finish_pending(true, false)?;
-        next.recover_intruder_runs_on_open(effective_pause)?;
+        next.flows_mut().finish_pending(true, false)?;
+        next.intruder_mut().recover_runs_on_open(effective_pause)?;
         next.cancel_queries_with(self.cancel.clone());
         let previous_project = self.project;
         self.project = ProjectKey {
@@ -285,40 +277,33 @@ impl State {
         if let Some(disabled) = extensions_disabled {
             self.extensions_disabled = disabled;
         }
-        self.history_dirty = false;
-        self.websocket_history_dirty = false;
-        self.project_disk_bytes = 0;
-        self.last_disk_refresh = None;
+        let restored_annotated = self.store.flows().annotated_live_flow_ids().unwrap_or_default();
+        self.storage.reset_for_project(restored_annotated);
         self.intruder = intruder;
         self.quiesced = false;
-        self.provenance.clear();
-        self.ipc_repeater_revisions.clear();
-        self.observed_cert_keys.clear();
+        self.ai_ipc.repeater_revisions.clear();
+        self.tls.observed_cert_keys.clear();
         self.last_scheduled_fire.clear();
-        let restored_annotated = self.store.annotated_live_flow_ids().unwrap_or_default();
-        *self
-            .annotated_flows
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = restored_annotated;
         self.ws_repeater.drop_project(previous_project);
         self.sequencer.drop_project(previous_project);
         self.audit.drop_project(previous_project);
         self.collaborator.stop_project(previous_project).await?;
         self.store
-            .recover_audit_tasks_on_open(effective_pause, &self.cancel)?;
+            .audit_mut()
+            .recover_tasks_on_open(effective_pause, &self.cancel)?;
         self.ws_repeater.set_project(self.project);
         self.ws_repeater
-            .set_injectors(self.proxy.as_ref().map(ProxyHandle::websocket_injectors));
-        let workspace = self.store.workspace_arc()?;
+            .set_injectors(self.proxy.websocket_injectors());
+        let workspace = self.store.metadata().workspace_arc()?;
         self.sync_compiled_client_certs(&workspace).await;
-        self.sessions.reset_project(self.project, &workspace);
+        self.sessions.runtime.reset_project(self.project, &workspace);
         self.sync_sessions_workspace(&workspace);
         self.ws_repeater
             .restore_workspace_tabs(self.project, workspace.websocket_tabs.clone());
         if let Ok(config) = Self::ws_repeater_send_config(
             &self.preferences,
             &workspace,
-            self.compiled_client_certs.clone(),
+            self.tls.compiled_client_certs.clone(),
         ) {
             self.ws_repeater.set_connect_config(config);
         }
@@ -331,12 +316,10 @@ impl State {
     }
 
     pub(super) async fn record_recent_project(&mut self, path: &std::path::Path) {
-        let unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-            .unwrap_or(0);
+        let unix_ms = crate::codec_util::now_unix_ms();
         let name = self
             .store
+            .metadata()
             .workspace_arc()
             .ok()
             .and_then(|workspace| workspace.project_name.clone())
@@ -356,20 +339,11 @@ impl State {
     }
 
     pub(super) async fn stop_resources(&mut self) -> Result<()> {
-        self.websocket_query.cancel();
-        self.http_query.cancel();
+        self.queries.cancel_all();
         self.intruder.cancel_all();
-        for send in self.sends.values_mut() {
-            send.cancel.cancel();
-            send.progress_rx = None;
-        }
+        self.repeater.cancel_all();
         self.stop_ipc_jobs().await;
-        if let Some(proxy) = &self.proxy {
-            proxy.request_stop();
-        }
-        for (_, proxy) in &self.extra_proxies {
-            proxy.request_stop();
-        }
+        self.proxy.request_stop_all();
         self.ws_repeater.cancel_all();
         self.sequencer.cancel_all();
         self.audit.cancel_all();
@@ -400,7 +374,7 @@ impl State {
         websocket_result?;
         http_result?;
         if self.unsaved_count() == 0 {
-            self.store.finish_pending(false, false)?;
+            self.store.flows_mut().finish_pending(false, false)?;
         }
         Ok(())
     }
@@ -414,7 +388,7 @@ impl State {
         if self.quiesced || self.unsaved_count() != 0 || host.trim().is_empty() {
             return;
         }
-        let Ok(mut workspace) = self.store.workspace() else {
+        let Ok(mut workspace) = self.store.metadata().workspace() else {
             return;
         };
         if !workspace.proxy_messages.ssl_pass_through_auto_add_on_failure {
@@ -438,14 +412,11 @@ impl State {
         };
         workspace.ssl_pass_through_rules.push(rule);
         workspace.revision = workspace.revision.saturating_add(1);
-        if self.store.save_workspace(&workspace).is_ok() {
+        if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
             if let Ok(matcher) =
                 crate::http::build_ssl_pass_through_matcher(&workspace.ssl_pass_through_rules)
             {
-                if let Some(proxy) = &self.proxy {
-                    proxy.set_ssl_pass_through(matcher.clone());
-                }
-                for (_, proxy) in &self.extra_proxies {
+                for proxy in self.proxy.handles() {
                     proxy.set_ssl_pass_through(matcher.clone());
                 }
             }
@@ -467,16 +438,13 @@ impl State {
         if self.quiesced || self.unsaved_count() != 0 {
             return;
         }
-        let Ok(workspace) = self.store.workspace_arc() else {
+        let Ok(workspace) = self.store.metadata().workspace_arc() else {
             return;
         };
         if workspace.scheduled_tasks.is_empty() {
             return;
         }
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now_secs = crate::codec_util::now_unix_ms() / 1000;
         let now_min = now_secs / 60;
         let due_tasks: Vec<ScheduledTask> = workspace
             .scheduled_tasks
@@ -495,7 +463,7 @@ impl State {
             self.last_scheduled_fire.insert(task.id, now_min);
             match task.action {
                 ScheduledTaskAction::PauseTasks => {
-                    if let Ok(audit_state) = self.store.read_audit_state() {
+                    if let Ok(audit_state) = self.store.audit().read_state() {
                         for t in audit_state
                             .tasks
                             .iter()
@@ -515,7 +483,7 @@ impl State {
                     }
                 }
                 ScheduledTaskAction::ResumeTasks => {
-                    if let Ok(audit_state) = self.store.read_audit_state() {
+                    if let Ok(audit_state) = self.store.audit().read_state() {
                         for t in audit_state
                             .tasks
                             .iter()

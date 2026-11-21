@@ -22,7 +22,11 @@ use crate::{
 pub(crate) mod audit;
 pub(crate) mod ext_archive;
 mod ext_direct;
+pub(crate) use ext_archive::http_query::{
+    http_history_snapshot, search::global_search_snapshot,
+};
 pub use ext_archive::{inspect_mio_ext_archive, read_mio_ext_websocket_fragment};
+pub(crate) use websocket::query::websocket_query_snapshot;
 mod flows;
 mod heads;
 mod intruder;
@@ -258,3 +262,40 @@ pub(crate) struct ProjectStore {
     temporary: Option<TempDir>,
     intruder_sessions: intruder::IntruderSessions,
 }
+
+macro_rules! define_store_repo {
+    ($($name:ident => ($read_fn:ident, $write_fn:ident)),* $(,)?) => {
+        $(
+            #[repr(transparent)]
+            pub(crate) struct $name<S>(pub(in crate::store) S);
+        )*
+
+        impl ProjectStore {
+            $(
+                pub(crate) fn $read_fn(&self) -> $name<&Self> {
+                    $name(self)
+                }
+
+                pub(crate) fn $write_fn(&mut self) -> $name<&mut Self> {
+                    $name(self)
+                }
+            )*
+        }
+    };
+}
+
+define_store_repo!(
+    FlowsRepo => (flows, flows_mut),
+    IntruderRepo => (intruder, intruder_mut),
+    AuditRepo => (audit, audit_mut),
+    ExtArchiveRepo => (ext_archive, ext_archive_mut),
+    WebSocketRepo => (websocket, websocket_mut),
+    SiteMapRepo => (site_map, site_map_mut),
+    RepeaterHistoryRepo => (repeater_history, repeater_history_mut),
+    ResourcePoolsRepo => (resource_pools, resource_pools_mut),
+    PluginStorageRepo => (plugin_storage, plugin_storage_mut),
+    MetadataRepo => (metadata, metadata_mut),
+);
+
+#[cfg(test)]
+mod test_compat;

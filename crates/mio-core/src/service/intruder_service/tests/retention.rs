@@ -224,7 +224,7 @@ async fn terminal_retention_requires_explicit_recovery_repair_and_rejects_late_f
     assert_eq!(page.run.retention, IntruderRetention::Project);
     assert!(!page.persisted);
     let pending = state.intruder.recovery.len();
-    let failure = state.storage_error.clone();
+    let failure = state.storage.error.clone();
     assert!(
         change(
             &mut state,
@@ -237,7 +237,7 @@ async fn terminal_retention_requires_explicit_recovery_repair_and_rejects_late_f
         .contains("尚未写盘")
     );
     assert_eq!(state.intruder.recovery.len(), pending);
-    assert_eq!(state.storage_error, failure);
+    assert_eq!(state.storage.error, failure);
     assert_eq!(state.intruder_result_page(id, None, 1).unwrap(), page);
     let directory = tempfile::tempdir().unwrap();
     save(&mut state, Some(directory.path().join("repaired.mio")))
@@ -265,7 +265,7 @@ async fn terminal_retention_requires_explicit_recovery_repair_and_rejects_late_f
         0,
         "late Session writes must not poison recovery"
     );
-    assert!(state.storage_error.is_none());
+    assert!(state.storage.error.is_none());
     assert_eq!(state.read_flow(summary.id).unwrap(), flow);
     assert_eq!(state.intruder_run(id).unwrap(), session.run);
     assert!(state.store.put_intruder_result(id, 0, Ok(&flow)).is_err());

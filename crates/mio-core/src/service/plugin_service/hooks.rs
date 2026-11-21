@@ -188,9 +188,9 @@ impl State {
             .map(|inst| inst.worker.handle())
             .collect();
 
-        let has_session_hooks = self.sessions.has_proxy_hooks();
-        let sessions = self.sessions.clone();
-        let provenance = self.provenance.clone();
+        let has_session_hooks = self.sessions.runtime.has_proxy_hooks();
+        let sessions = self.sessions.runtime.clone();
+        let provenance = self.storage.provenance.clone();
         let flow_hook =
             (!http_handles.is_empty() || has_session_hooks).then(|| -> mio_proxy::AsyncFlowHook {
                 Arc::new(
@@ -437,16 +437,13 @@ impl State {
 
     pub(crate) fn sync_proxy_plugin_hooks(&self) {
         let (flow_hook, ws_hook) = self.build_proxy_plugin_hooks();
-        if let Some(proxy) = &self.proxy {
-            proxy.set_plugin_hooks(flow_hook.clone(), ws_hook.clone());
-        }
-        for (_, proxy) in &self.extra_proxies {
+        for proxy in self.proxy.handles() {
             proxy.set_plugin_hooks(flow_hook.clone(), ws_hook.clone());
         }
     }
 
     pub(crate) fn sync_sessions_workspace(&self, workspace: &Workspace) {
-        self.sessions.sync_workspace(self.project, workspace);
+        self.sessions.runtime.sync_workspace(self.project, workspace);
         if let Ok(upstream_tls) = self
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)
@@ -455,14 +452,14 @@ impl State {
                 .to_route_with_tls(upstream_tls.clone())
             && let Ok(hostname_overrides) = workspace.upstream_proxy.compiled_hostname_overrides()
         {
-            self.sessions.set_proxy_send_config(SendConfig {
+            self.sessions.runtime.set_proxy_send_config(SendConfig {
                 network: mio_proxy::SendNetworkConfig {
                     upstream_route,
                     hostname_overrides,
                 },
                 tls: mio_proxy::UpstreamTlsConfig {
                     trust: upstream_tls,
-                    client_certificates: self.compiled_client_certs.clone(),
+                    client_certificates: self.tls.compiled_client_certs.clone(),
                     ..Default::default()
                 },
                 limits: mio_proxy::SendLimits {

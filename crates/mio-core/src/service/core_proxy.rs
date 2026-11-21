@@ -20,7 +20,7 @@ impl State {
                 listener_port,
             } => {
                 if project == self.project
-                    && let Some(pending) = self.pending_websockets.remove(&record.id)
+                    && let Some(pending) = self.proxy.pending_websockets.remove(&record.id)
                     && !pending.reply.is_closed()
                     && pending
                         .reply
@@ -53,14 +53,14 @@ impl State {
                 if project != self.project {
                     return Ok(());
                 }
-                let ws_opt = self.store.workspace_arc().ok();
+                let ws_opt = self.store.metadata().workspace_arc().ok();
                 let skip_history = ws_opt.as_ref().is_some_and(|ws| {
                     ws.proxy_messages.misc.disable_history_logging
                         || (ws.proxy_messages.misc.disable_out_of_scope_history_logging
                             && !ws.scope.is_url_in_scope(&record.request.url))
                 });
                 if record.summary.state != FlowState::Intercepted
-                    && self.pending.remove(&record.summary.id).is_some()
+                    && self.proxy.pending.remove(&record.summary.id).is_some()
                 {
                     self.queue_proxy_notification(Event::InterceptResolved {
                         project,
@@ -118,7 +118,7 @@ impl State {
                     } else {
                         InterceptStage::Request
                     };
-                    self.pending.insert(
+                    self.proxy.pending.insert(
                         record.summary.id,
                         Pending {
                             revision: record.summary.revision,
@@ -150,7 +150,7 @@ impl State {
                 if !stopping && !reply.is_closed() {
                     let flow_id = record.flow_id;
                     let kind = record.kind;
-                    self.pending_websockets.insert(
+                    self.proxy.pending_websockets.insert(
                         record.id,
                         PendingWebSocket {
                             flow_id,
@@ -172,7 +172,7 @@ impl State {
                 if project != self.project {
                     return Ok(());
                 }
-                if self.pending_websockets.remove(&message_id).is_some() {
+                if self.proxy.pending_websockets.remove(&message_id).is_some() {
                     self.queue_proxy_notification(Event::WebSocketInterceptResolved {
                         project,
                         message_id,
@@ -180,31 +180,23 @@ impl State {
                 }
             }
         }
-        if !self.history_dirty {
-            self.history_dirty = true;
+        if !self.storage.history_dirty {
+            self.storage.history_dirty = true;
             self.queue_proxy_notification(Event::HistoryChanged {
                 project: self.project,
             });
         }
+        self.refresh_project_disk_bytes_throttled();
         Ok(())
     }
 
     pub(super) fn proxy_finished(&mut self, result: Result<(), mio_proxy::ProxyError>) {
-        if let Some(proxy) = &self.proxy
-            && !proxy.is_joined()
-        {
-            proxy.request_stop();
-        }
-        for (_, proxy) in &self.extra_proxies {
+        for proxy in self.proxy.handles() {
             if !proxy.is_joined() {
                 proxy.request_stop();
             }
         }
-        let all_joined = self.proxy.as_ref().is_none_or(ProxyHandle::is_joined)
-            && self
-                .extra_proxies
-                .iter()
-                .all(|(_, proxy)| proxy.is_joined());
+        let all_joined = self.proxy.handles().all(ProxyHandle::is_joined);
         if let Err(error) = self.finish_proxy_stop(all_joined, result.map_err(anyhow::Error::from))
         {
             self.queue_proxy_notification(Event::Error {
@@ -216,23 +208,18 @@ impl State {
     }
 
     pub(super) async fn stop_proxy(&mut self) -> Result<()> {
-        if let Some(proxy) = self.proxy.as_mut() {
-            proxy.request_stop();
-        }
-        for (_, proxy) in &self.extra_proxies {
-            proxy.request_stop();
-        }
+        self.proxy.request_stop_all();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let mut joined = true;
         let mut result = Ok(());
-        if let Some(proxy) = self.proxy.as_mut() {
+        if let Some(proxy) = self.proxy.primary.as_mut() {
             let stop = tokio::time::timeout_at(deadline, proxy.stop())
                 .await
                 .unwrap_or(Err(mio_proxy::ProxyError::StopDeadline));
             joined &= proxy.is_joined();
             result = stop.map_err(anyhow::Error::from);
         }
-        for (_, proxy) in &mut self.extra_proxies {
+        for (_, proxy) in &mut self.proxy.extra {
             let stop = tokio::time::timeout_at(deadline, proxy.stop())
                 .await
                 .unwrap_or(Err(mio_proxy::ProxyError::StopDeadline));
@@ -245,20 +232,15 @@ impl State {
     }
 
     pub(super) async fn finish_proxy_shutdown(&mut self) -> Result<()> {
-        if self.proxy.is_none() && self.extra_proxies.is_empty() {
+        if !self.proxy.is_running() {
             return Ok(());
         }
-        if let Some(proxy) = &self.proxy {
-            proxy.request_stop();
-        }
-        for (_, proxy) in &self.extra_proxies {
-            proxy.request_stop();
-        }
-        let mut result = match &mut self.proxy {
+        self.proxy.request_stop_all();
+        let mut result = match &mut self.proxy.primary {
             Some(proxy) => proxy.join().await,
             None => Ok(()),
         };
-        for (_, proxy) in &mut self.extra_proxies {
+        for (_, proxy) in &mut self.proxy.extra {
             if let Err(err) = proxy.join().await
                 && result.is_ok()
             {
@@ -269,7 +251,7 @@ impl State {
     }
 
     pub(super) fn finish_proxy_stop(&mut self, joined: bool, mut result: Result<()>) -> Result<()> {
-        while let Ok(event) = self.proxy_events.try_recv() {
+        while let Ok(event) = self.proxy.events.try_recv() {
             if let Err(error) = self.capture_without_waiting_for_ui(event, true) {
                 self.queue_proxy_notification(Event::Error {
                     project: Some(self.project),
@@ -283,10 +265,11 @@ impl State {
         }
         let mut terminal = self
             .proxy
+            .primary
             .as_mut()
             .map(ProxyHandle::drain_terminal_records)
             .unwrap_or_default();
-        for (_, proxy) in &mut self.extra_proxies {
+        for (_, proxy) in &mut self.proxy.extra {
             terminal.extend(proxy.drain_terminal_records());
         }
         for capture in terminal {
@@ -311,41 +294,39 @@ impl State {
             }
         }
         if joined {
-            self.proxy = None;
-            self.primary_proxy_id = None;
-            self.extra_proxies.clear();
+            self.proxy.clear_handles();
             self.ws_repeater.set_injectors(None);
-            for (flow_id, _) in self.pending.drain().collect::<Vec<_>>() {
+            for (flow_id, _) in self.proxy.pending.drain().collect::<Vec<_>>() {
                 self.queue_proxy_notification(Event::InterceptResolved {
                     project: self.project,
                     flow_id,
                 });
             }
-            for (message_id, _) in self.pending_websockets.drain().collect::<Vec<_>>() {
+            for (message_id, _) in self.proxy.pending_websockets.drain().collect::<Vec<_>>() {
                 self.queue_proxy_notification(Event::WebSocketInterceptResolved {
                     project: self.project,
                     message_id,
                 });
             }
             if self.unsaved_count() == 0
-                && let Err(error) = self.store.finish_pending(false, true)
+                && let Err(error) = self.store.flows_mut().finish_pending(false, true)
                 && result.is_ok()
             {
                 result = Err(error);
             }
         }
-        if !self.history_dirty {
-            self.history_dirty = true;
+        if !self.storage.history_dirty {
+            self.storage.history_dirty = true;
             self.queue_proxy_notification(Event::HistoryChanged {
                 project: self.project,
             });
         }
         self.queue_proxy_notification(Event::ProxyState {
             project: self.project,
-            address: self.proxy.as_ref().map(ProxyHandle::address),
-            cancel: self.proxy.as_ref().map(ProxyHandle::cancellation_token),
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            address: self.proxy.primary_address(),
+            cancel: self.proxy.primary_cancel(),
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
         });
         result
     }

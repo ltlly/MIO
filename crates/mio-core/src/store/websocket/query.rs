@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -44,107 +44,103 @@ impl WebSocketHistoryQuery {
     }
 }
 
-impl ProjectStore {
-    pub(crate) fn websocket_query_path(&self) -> PathBuf {
-        self.actual_path()
-    }
-
-    pub(crate) fn websocket_query_snapshot(
-        path: &Path,
-        query: &WebSocketHistoryQuery,
-        pending: &[(WebSocketSummary, CapturedWebSocket)],
-        cancel: &CancellationToken,
-    ) -> Result<WebSocketHistoryResult> {
-        query.validate()?;
-        ensure!(
-            pending.len() <= MAX_EXCLUDED_IDS,
-            "WebSocket 恢复消息超过 512 条限额"
-        );
-        ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(Duration::from_millis(500))?;
-        connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
-        let interruption = cancel.clone();
-        connection.progress_handler(1000, Some(move || interruption.is_cancelled()));
-        let transaction = connection.unchecked_transaction()?;
-        let app_id: i32 =
-            transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(
-            app_id == APPLICATION_ID && schema == SCHEMA,
-            "WebSocket 查询源项目版本已变化；未返回其它项目数据"
-        );
-        schema_guard::validate(&transaction)?;
-        ensure!(
-            metadata::project_id(&transaction)? == query.project.id,
-            "WebSocket 查询源项目 ID 已变化；未返回其它项目数据"
-        );
-        let summaries: Vec<_> = pending.iter().map(|(summary, _)| summary.clone()).collect();
-        let (select, values) = history_sql(query.flow_id, &[], &summaries, &query.filter)?;
-        let mut result = if query.filter.term.is_empty()
-            && query.filter.filter_script.trim().is_empty()
-        {
-            let selected_match = if let Some(id) = query.selected_message_id {
-                let mut selected_values = values.clone();
-                selected_values.push(id.to_string().into());
-                Some((
-                    id,
-                    transaction.query_row(
-                        &format!("SELECT EXISTS(SELECT 1 FROM ({select}) WHERE id=?)"),
-                        params_from_iter(selected_values.iter()),
-                        |row| row.get(0),
-                    )?,
-                ))
-            } else {
-                None
-            };
-            let (total, rows) = metadata_page(
-                &transaction,
-                &select,
-                values,
-                query.offset as i64,
-                query.limit as i64,
-            )?;
-            WebSocketHistoryResult {
-                total,
-                rows,
-                selected_match,
-            }
+pub(crate) fn websocket_query_snapshot(
+    path: &Path,
+    query: &WebSocketHistoryQuery,
+    pending: &[(WebSocketSummary, CapturedWebSocket)],
+    cancel: &CancellationToken,
+) -> Result<WebSocketHistoryResult> {
+    query.validate()?;
+    ensure!(
+        pending.len() <= MAX_EXCLUDED_IDS,
+        "WebSocket 恢复消息超过 512 条限额"
+    );
+    ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(500))?;
+    connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+    let interruption = cancel.clone();
+    connection.progress_handler(1000, Some(move || interruption.is_cancelled()));
+    let transaction = connection.unchecked_transaction()?;
+    let app_id: i32 =
+        transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    ensure!(
+        app_id == APPLICATION_ID && schema == SCHEMA,
+        "WebSocket 查询源项目版本已变化；未返回其它项目数据"
+    );
+    schema_guard::validate(&transaction)?;
+    ensure!(
+        metadata::project_id(&transaction)? == query.project.id,
+        "WebSocket 查询源项目 ID 已变化；未返回其它项目数据"
+    );
+    let summaries: Vec<_> = pending.iter().map(|(summary, _)| summary.clone()).collect();
+    let (select, values) = history_sql(query.flow_id, &[], &summaries, &query.filter)?;
+    let mut result = if query.filter.term.is_empty()
+        && query.filter.filter_script.trim().is_empty()
+    {
+        let selected_match = if let Some(id) = query.selected_message_id {
+            let mut selected_values = values.clone();
+            selected_values.push(id.to_string().into());
+            Some((
+                id,
+                transaction.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM ({select}) WHERE id=?)"),
+                    params_from_iter(selected_values.iter()),
+                    |row| row.get(0),
+                )?,
+            ))
         } else {
-            search_page(&transaction, query, pending, select, values, cancel)?
+            None
         };
-        websocket_notes::fill_previews(&transaction, &mut result.rows)?;
-        let mio_base = crate::service::websocket::ext_archive::snapshot_ext_ordinal_base(
+        let (total, rows) = metadata_page(
             &transaction,
-            &summaries,
+            &select,
+            values,
+            query.offset as i64,
+            query.limit as i64,
         )?;
-        ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
-        transaction.commit()?;
-        if let Some(base) = mio_base {
-            let store = ProjectStore::from_read_only(connection, query.project.id);
-            crate::service::websocket::ext_archive::merge_ext_websocket_query(
-                &store,
-                base,
-                query,
-                &mut result,
-                cancel,
-            )?;
+        WebSocketHistoryResult {
+            total,
+            rows,
+            selected_match,
         }
-        Ok(result)
+    } else {
+        search_page(&transaction, query, pending, select, values, cancel)?
+    };
+    websocket_notes::fill_previews(&transaction, &mut result.rows)?;
+    let mio_base = crate::service::websocket::ext_archive::snapshot_ext_ordinal_base(
+        &transaction,
+        &summaries,
+    )?;
+    ensure!(!cancel.is_cancelled(), "WebSocket 查询已取消");
+    transaction.commit()?;
+    if let Some(base) = mio_base {
+        let store = ProjectStore::from_read_only(connection, query.project.id);
+        crate::service::websocket::ext_archive::merge_ext_websocket_query(
+            &store,
+            base,
+            query,
+            &mut result,
+            cancel,
+        )?;
     }
+    Ok(result)
+}
 
-    #[cfg(test)]
-    pub fn websocket_page(
+#[cfg(test)]
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::WebSocketRepo<S> {
+    pub fn page(
         &self,
         flow: Option<FlowId>,
         offset: usize,
         limit: usize,
         excluded: &[Uuid],
     ) -> Result<(usize, Vec<WebSocketSummary>)> {
-        self.websocket_page_with_recovery(
+        self.page_with_recovery(
             flow,
             offset,
             limit,
@@ -154,8 +150,7 @@ impl ProjectStore {
         )
     }
 
-    #[cfg(test)]
-    pub fn websocket_page_with_recovery(
+    pub fn page_with_recovery(
         &self,
         flow: Option<FlowId>,
         offset: usize,
@@ -181,13 +176,13 @@ impl ProjectStore {
         );
         let (select, values) = history_sql(flow, excluded, pending, history_filter)?;
         // Count and rows share a read snapshot; no payload table is consulted by either query.
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         if !history_filter.filter_script.trim().is_empty()
             || !history_filter.term.is_empty()
         {
             let query = WebSocketHistoryQuery {
                 project: crate::ProjectKey {
-                    id: self.id,
+                    id: self.0.id,
                     generation: 1,
                 },
                 query_revision: 1,
@@ -219,7 +214,7 @@ impl ProjectStore {
         transaction.commit()?;
         if let Some(base) = mio_base {
             return crate::service::websocket::ext_archive::merge_ext_page(
-                self,
+                &self.0,
                 base,
                 flow,
                 excluded,

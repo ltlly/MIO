@@ -4,7 +4,6 @@ use std::{
     collections::HashSet,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, PoisonError, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow, bail, ensure};

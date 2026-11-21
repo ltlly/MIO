@@ -8,8 +8,8 @@ use super::super::{
 };
 use crate::{ExtItem, ExtMessageFragment, ExtMessageSummary, ExtResponseRef, Uuid, Workspace};
 
-impl ProjectStore {
-    pub fn ext_response_fragment(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub fn response_fragment(
         &self,
         reference: &ExtResponseRef,
         offset: u64,
@@ -19,7 +19,7 @@ impl ProjectStore {
             length <= EXT_FRAGMENT_BYTES,
             "外部归档响应读取不得超过 64 KiB"
         );
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let summary = validate_reference(&transaction, reference)?;
         checked_range(offset, length as u64, summary.raw_bytes)?;
         let absolute = summary

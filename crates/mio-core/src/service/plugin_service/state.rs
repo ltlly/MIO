@@ -181,7 +181,7 @@ impl State {
     }
 
     pub(super) fn plugin_tab(&self, tab_id: TabId, revision: u64) -> Result<WorkTab> {
-        let workspace = self.store.workspace()?;
+        let workspace = self.store.metadata().workspace()?;
         let tab = workspace
             .tabs
             .into_iter()

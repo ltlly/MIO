@@ -80,6 +80,7 @@ impl State {
                     Err(anyhow::anyhow!("History 查询超过限额"))
                 } else {
                     self.store
+                        .flows()
                         .page(*offset, *limit, filter)
                         .map(|(total, rows)| ServiceResult::History {
                             offset: *offset,
@@ -131,7 +132,8 @@ impl State {
             ServiceOperation::StorageGet { key } => {
                 let result = self
                     .store
-                    .plugin_storage_get(self.project, &call.plugin_id, key)
+                    .plugin_storage()
+                    .get(self.project, &call.plugin_id, key)
                     .and_then(|val| {
                         self.plugin_check_call(&call)?;
                         Ok(match val {
@@ -152,7 +154,7 @@ impl State {
             ServiceOperation::StorageSet { key, value } => {
                 let result: Result<ServiceResult> = (|| {
                     self.require_saved()?;
-                    self.store.plugin_storage_set(
+                    self.store.plugin_storage_mut().set(
                         self.project,
                         &call.plugin_id,
                         key,
@@ -203,7 +205,7 @@ impl State {
             ServiceOperation::NetworkSend { .. } => self.plugin_send(call).await,
             ServiceOperation::ScopeCheck { url } => {
                 let result: Result<ServiceResult> = (|| {
-                    let workspace = self.store.workspace()?;
+                    let workspace = self.store.metadata().workspace()?;
                     let in_scope = workspace.scope.is_url_in_scope(url);
                     self.plugin_check_call(&call)?;
                     Ok(ServiceResult::ScopeStatus { in_scope })
@@ -219,7 +221,7 @@ impl State {
             } => {
                 let result: Result<ServiceResult> = async {
                     self.require_saved()?;
-                    let mut workspace = self.store.workspace()?;
+                    let mut workspace = self.store.metadata().workspace()?;
                     let prefix = url_prefix.trim().to_owned();
                     let list = if *exclude {
                         &mut workspace.scope.exclude
@@ -235,10 +237,7 @@ impl State {
                             prefix,
                             include_subdomains: *include_subdomains,
                         });
-                        workspace.revision = workspace
-                            .revision
-                            .checked_add(1)
-                            .context("工作区 revision 溢出")?;
+                        workspace.revision += 1;
                         workspace.validate()?;
                         self.apply_save_workspace(self.project, workspace).await?;
                     }
@@ -256,7 +255,7 @@ impl State {
                 limit,
             } => {
                 let result: Result<ServiceResult> = (|| {
-                    let workspace = self.store.workspace()?;
+                    let workspace = self.store.metadata().workspace()?;
                     let selected_node_key =
                         (!prefix.trim().is_empty()).then(|| prefix.trim().to_owned());
                     let query = crate::SiteMapQuery {
@@ -268,7 +267,7 @@ impl State {
                         offset: *offset,
                         limit: *limit,
                     };
-                    let snapshot = self.store.target_site_map_snapshot(
+                    let snapshot = self.store.site_map().snapshot(
                         &workspace.scope,
                         &query,
                         &[],
@@ -280,12 +279,14 @@ impl State {
                                 let in_scope = workspace.scope.is_url_in_scope(&summary.url);
                                 let notes_preview = self
                                     .store
-                                    .ext_http_notes(self.project, Uuid::nil(), summary.id)
+                                    .ext_archive()
+                                    .http_notes(self.project, Uuid::nil(), summary.id)
                                     .map(|n| n.text.chars().take(128).collect())
                                     .unwrap_or_default();
                                 let highlight_color = self
                                     .store
-                                    .ext_http_highlights(
+                                    .ext_archive()
+                                    .http_highlights(
                                         self.project,
                                         &[crate::ExtHttpHighlightChange {
                                             source_id: Uuid::nil(),
@@ -352,8 +353,9 @@ impl State {
                 let result: Result<ServiceResult> = (|| {
                     let notes = self
                         .store
-                        .ext_http_notes(self.project, Uuid::nil(), *flow_id)?;
-                    let hl = self.store.ext_http_highlights(
+                        .ext_archive()
+                        .http_notes(self.project, Uuid::nil(), *flow_id)?;
+                    let hl = self.store.ext_archive().http_highlights(
                         self.project,
                         &[crate::ExtHttpHighlightChange {
                             source_id: Uuid::nil(),
@@ -389,9 +391,11 @@ impl State {
                     if let Some(text) = notes {
                         let cur = self
                             .store
-                            .ext_http_notes(self.project, Uuid::nil(), *flow_id)?;
+                            .ext_archive()
+                            .http_notes(self.project, Uuid::nil(), *flow_id)?;
                         self.store
-                            .set_ext_http_notes(
+                            .ext_archive_mut()
+                            .set_http_notes(
                                 self.project,
                                 Uuid::nil(),
                                 *flow_id,
@@ -402,7 +406,7 @@ impl State {
                             .map_err(|err| anyhow::anyhow!(err.message))?;
                     }
                     if let Some(color) = highlight_color {
-                        let cur = self.store.ext_http_highlights(
+                        let cur = self.store.ext_archive().http_highlights(
                             self.project,
                             &[crate::ExtHttpHighlightChange {
                                 source_id: Uuid::nil(),
@@ -414,7 +418,8 @@ impl State {
                         let expected_highlight_revision =
                             cur.into_iter().next().map_or(0, |(_, _, h)| h.revision);
                         self.store
-                            .set_ext_http_highlights(
+                            .ext_archive_mut()
+                            .set_http_highlights(
                                 self.project,
                                 &[crate::ExtHttpHighlightChange {
                                     source_id: Uuid::nil(),
@@ -428,8 +433,9 @@ impl State {
                     }
                     let final_notes = self
                         .store
-                        .ext_http_notes(self.project, Uuid::nil(), *flow_id)?;
-                    let final_hl = self.store.ext_http_highlights(
+                        .ext_archive()
+                        .http_notes(self.project, Uuid::nil(), *flow_id)?;
+                    let final_hl = self.store.ext_archive().http_highlights(
                         self.project,
                         &[crate::ExtHttpHighlightChange {
                             source_id: Uuid::nil(),
@@ -465,7 +471,7 @@ impl State {
             } => {
                 let result: Result<ServiceResult> = async {
                     self.require_saved()?;
-                    let mut workspace = self.store.workspace()?;
+                    let mut workspace = self.store.metadata().workspace()?;
                     let number = crate::next_organiser_number(&workspace.organiser_items);
                     let mut item = crate::OrganiserItem::from_raw_parts(
                         number,
@@ -483,10 +489,7 @@ impl State {
                     let item_number = item.number;
                     workspace.organiser_items.push(item);
                     crate::validate_organiser_items(&workspace.organiser_items)?;
-                    workspace.revision = workspace
-                        .revision
-                        .checked_add(1)
-                        .context("工作区 revision 溢出")?;
+                    workspace.revision += 1;
                     workspace.validate()?;
                     self.apply_save_workspace(self.project, workspace).await?;
                     Ok(ServiceResult::Resource {
@@ -507,7 +510,7 @@ impl State {
                 let mut emitted_state = None;
                 let result: Result<ServiceResult> = (|| {
                     self.require_saved()?;
-                    let mut state = self.store.read_audit_state()?;
+                    let mut state = self.store.audit().read_state()?;
                     let resp = flow_id
                         .and_then(|id| self.read_flow(id).ok())
                         .and_then(|r| r.response)
@@ -529,13 +532,8 @@ impl State {
                     );
                     let added = crate::store::audit::merge_audit_findings(&mut state.findings, incoming);
                     if !added.is_empty() {
-                        let next_rev = state
-                            .revision
-                            .checked_add(1)
-                            .filter(|rev| *rev <= i64::MAX as u64)
-                            .context("审计状态 revision 溢出")?;
-                        state.revision = next_rev;
-                        self.store.write_audit_state(&state, &call.cancel)?;
+                        state.revision += 1;
+                        self.store.audit_mut().write_state(&state, &call.cancel)?;
                         emitted_state = Some(state);
                     }
                     Ok(ServiceResult::Done)
@@ -632,7 +630,7 @@ impl State {
                 !self.plugins.network.contains_key(&key),
                 "插件网络请求 ID 重复；未再次发送"
             );
-            let workspace = self.store.workspace()?;
+            let workspace = self.store.metadata().workspace()?;
             let upstream_tls = self
                 .preferences
                 .effective_upstream_tls(&workspace.upstream_tls)?;
@@ -663,10 +661,7 @@ impl State {
                     state: FlowState::Pending,
                     request_bytes: outbound.body.len() as u64,
                     response_bytes: 0,
-                    started_unix_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_millis()
-                        .min(i64::MAX as u128) as i64,
+                    started_unix_ms: crate::codec_util::now_unix_ms(),
                     elapsed_ms: 0,
                 },
                 request: outbound,
@@ -692,7 +687,7 @@ impl State {
             },
             tls: mio_proxy::UpstreamTlsConfig {
                 trust: upstream_tls,
-                client_certificates: self.compiled_client_certs.clone(),
+                client_certificates: self.tls.compiled_client_certs.clone(),
                 ..Default::default()
             },
             limits: mio_proxy::SendLimits {
@@ -708,7 +703,7 @@ impl State {
             ..SendConfig::default()
         };
         let flow_id = record.summary.id;
-        let sessions = self.sessions.clone();
+        let sessions = self.sessions.runtime.clone();
         let deadline = Instant::now() + config.limits.timeout;
         let task = tokio::spawn(async move {
             let started = Instant::now();

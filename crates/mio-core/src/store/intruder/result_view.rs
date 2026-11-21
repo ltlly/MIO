@@ -158,12 +158,12 @@ pub(super) fn payload_order(
     })
 }
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::IntruderRepo<S> {
     /// Read only the immutable inputs selected by these stored result ordinals.
     /// Recovery callers may include an admitted ordinal not yet present in the result table.
     /// Returns a complete-row prefix within the page budget; continue after its actual length.
     #[cfg(test)]
-    pub(crate) fn intruder_payload_summaries(
+    pub(crate) fn payload_summaries(
         &self,
         id: Uuid,
         ordinals: &[u64],
@@ -179,13 +179,13 @@ impl ProjectStore {
             unique.len() == ordinals.len(),
             "Intruder payload 查询结果序号重复"
         );
-        if let Some(dataset) = self.session_dataset(id)? {
+        if let Some(dataset) = self.0.intruder().session_dataset(id)? {
             return dataset.data.payload_summaries(&dataset.run, ordinals, &|| {
                 ensure!(!cancel.is_cancelled(), "Intruder payload 读取已取消");
                 Ok(())
             });
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let run = read_run(&transaction, id)?;
         let output = payload_summaries(&transaction, &run, ordinals, &|| {
             ensure!(!cancel.is_cancelled(), "Intruder payload 读取已取消");

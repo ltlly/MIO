@@ -1,7 +1,7 @@
 use super::*;
 
-impl ProjectStore {
-    pub(super) fn move_intruder_to_session(
+impl store::IntruderRepo<&mut ProjectStore> {
+    pub(super) fn move_to_session(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -10,10 +10,11 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<IntruderRetentionReceipt> {
         ensure!(
-            self.intruder_sessions.runs.len() < MAX_SESSION_DATASETS,
+            self.0.intruder_sessions.runs.len() < MAX_SESSION_DATASETS,
             "Intruder Session 达到 {MAX_SESSION_DATASETS} 个数据集限额；未驱逐或写入临时文件"
         );
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -27,9 +28,7 @@ impl ProjectStore {
             run.revision == expected_revision,
             "Intruder run revision 已改变；数据保留"
         );
-        let revision = next_revision(run.revision)?;
-        // Admission must leave a revision available for an explicit promotion or discard.
-        next_revision(revision)?;
+        let revision = next_revision(run.revision);
         let previous = store::metadata::workspace_for_update(&transaction)?;
         ensure!(
             previous.revision.checked_add(1) == Some(workspace.revision),
@@ -37,23 +36,25 @@ impl ProjectStore {
         );
         workspace.validate()?;
         let available = self
+            .0
             .intruder_sessions
             .quota
-            .checked_sub(self.intruder_sessions.logical_bytes)
-            .and_then(|bytes| bytes.checked_sub(self.intruder_sessions.reserved_bytes))
+            .checked_sub(self.0.intruder_sessions.logical_bytes)
+            .and_then(|bytes| bytes.checked_sub(self.0.intruder_sessions.reserved_bytes))
             .context("Intruder Session 逻辑配额计量不一致")?;
         let logical_bytes = dataset_logical_bytes(&transaction, id, available, cancel)?;
         let admitted = self
+            .0
             .intruder_sessions
             .logical_bytes
             .checked_add(logical_bytes)
             .context("Intruder Session 逻辑数据计量溢出")?;
         ensure!(
             admitted
-                .checked_add(self.intruder_sessions.reserved_bytes)
-                .is_some_and(|bytes| bytes <= self.intruder_sessions.quota),
+                .checked_add(self.0.intruder_sessions.reserved_bytes)
+                .is_some_and(|bytes| bytes <= self.0.intruder_sessions.quota),
             "Intruder Session 逻辑 RAM 数据配额不足（需要 {admitted}，限额 {} 字节）；未复制、驱逐或溢写到磁盘",
-            self.intruder_sessions.quota
+            self.0.intruder_sessions.quota
         );
         validate_dataset(&transaction, id, cancel)?;
         let pinned: BTreeSet<_> = previous
@@ -71,10 +72,10 @@ impl ProjectStore {
             if shared_discard_flow(&transaction, id, flow, &pinned)? {
                 disk_flows.insert(flow);
             }
-            for existing in self.intruder_sessions.runs.values() {
+            for existing in self.0.intruder_sessions.runs.values() {
                 if existing.data.has_flow(flow) {
                     disk_flows.insert(flow);
-                    validate_ticket(&transaction, self.id, existing)?;
+                    validate_ticket(&transaction, self.0.id, existing)?;
                     ensure!(
                         existing.data.matches_disk_flow(&transaction, flow, true)?,
                         "Intruder Session 已保留不同的同 ID 消息版本；数据保留"
@@ -105,14 +106,14 @@ impl ProjectStore {
             #[cfg(test)]
             body_reads: std::sync::atomic::AtomicUsize::new(0),
         };
-        validate_workspace_links(&transaction, &self.intruder_sessions, &workspace)?;
+        validate_workspace_links(&transaction, &self.0.intruder_sessions, &workspace)?;
         // Reserve runtime ownership before disk deletion; a failed transaction removes only this stage.
-        self.intruder_sessions.runs.insert(id, dataset);
-        self.intruder_sessions.logical_bytes = admitted;
+        self.0.intruder_sessions.runs.insert(id, dataset);
+        self.0.intruder_sessions.logical_bytes = admitted;
         let transferred = (|| -> Result<IntruderDiscardReceipt> {
             let receipt = discard_project_run(
                 &transaction,
-                self.id,
+                self.0.id,
                 id,
                 expected_revision,
                 workspace,
@@ -128,7 +129,7 @@ impl ProjectStore {
         let receipt = match transferred {
             Ok(receipt) => receipt,
             Err(error) => {
-                self.intruder_sessions.remove(id);
+                self.0.intruder_sessions.remove(id);
                 return Err(error);
             }
         };
@@ -140,7 +141,7 @@ impl ProjectStore {
         })
     }
 
-    pub(super) fn promote_session_intruder(
+    pub(super) fn promote_session(
         &mut self,
         id: Uuid,
         expected_revision: u64,
@@ -148,6 +149,7 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<IntruderRetentionReceipt> {
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get(&id)
@@ -156,11 +158,12 @@ impl ProjectStore {
             dataset.run.revision == expected_revision,
             "Intruder run revision 已改变；数据保留"
         );
-        let revision = next_revision(expected_revision)?;
+        let revision = next_revision(expected_revision);
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        validate_ticket(&transaction, self.id, dataset)?;
+        validate_ticket(&transaction, self.0.id, dataset)?;
         ensure!(
             dataset.data.logical_bytes()? == dataset.logical_bytes,
             "Intruder RAM 数据计量已改变；数据保留"
@@ -205,11 +208,11 @@ impl ProjectStore {
             validate_dataset_snapshot(&transaction, id, cancel, true)? == run,
             "Intruder 项目副本不完整；RAM 保留"
         );
-        validate_workspace_links(&transaction, &self.intruder_sessions, &workspace)?;
+        validate_workspace_links(&transaction, &self.0.intruder_sessions, &workspace)?;
         store::write_workspace(&transaction, &workspace)?;
         ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；RAM 保留");
         transaction.commit()?;
-        self.intruder_sessions.remove(id);
+        self.0.intruder_sessions.remove(id);
         Ok(IntruderRetentionReceipt {
             run,
             retention: IntruderRetention::Project,
@@ -218,7 +221,7 @@ impl ProjectStore {
         })
     }
 
-    pub(in crate::store) fn discard_session_intruder(
+    pub(in crate::store) fn discard_session(
         &mut self,
         id: Uuid,
         expected_revision: u64,
@@ -227,6 +230,7 @@ impl ProjectStore {
     ) -> Result<IntruderDiscardReceipt> {
         ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get(&id)
@@ -235,11 +239,12 @@ impl ProjectStore {
             dataset.run.revision == expected_revision && dataset.run.state.is_terminal(),
             "Intruder 终态或 revision 已改变；数据保留"
         );
-        let revision = next_revision(expected_revision)?;
+        let revision = next_revision(expected_revision);
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        validate_ticket(&transaction, self.id, dataset)?;
+        validate_ticket(&transaction, self.0.id, dataset)?;
         for tab in workspace
             .intruder
             .tabs
@@ -264,6 +269,7 @@ impl ProjectStore {
             );
             let mut shared = on_disk;
             for other in self
+                .0
                 .intruder_sessions
                 .runs
                 .values()
@@ -277,7 +283,7 @@ impl ProjectStore {
                 deleted_flows += 1;
             }
         }
-        validate_workspace_links(&transaction, &self.intruder_sessions, &workspace)?;
+        validate_workspace_links(&transaction, &self.0.intruder_sessions, &workspace)?;
         store::write_workspace(&transaction, &workspace)?;
         let mut retired = dataset.run.clone();
         retired.revision = revision;
@@ -300,7 +306,7 @@ impl ProjectStore {
         ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
         transaction.commit()?;
         // Independently retained disk flows and other Session owners are not owned by this drop.
-        self.intruder_sessions.remove(id);
+        self.0.intruder_sessions.remove(id);
         Ok(IntruderDiscardReceipt {
             revision,
             workspace,

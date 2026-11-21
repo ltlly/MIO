@@ -66,7 +66,7 @@ pub(in crate::store) fn write_result_with_reason_phrase(
                     "Intruder 终态结果不能被覆盖"
                 );
                 ensure!(
-                    terminal && after.summary.revision == next_revision(before.revision)?,
+                    terminal && after.summary.revision == next_revision(before.revision),
                     "Intruder 仅允许在途结果进入下一 revision 的终态"
                 );
                 ensure!(
@@ -202,11 +202,8 @@ pub(in crate::store) fn write_state(
     Ok(run)
 }
 
-pub(in crate::store::intruder) fn next_revision(revision: u64) -> Result<u64> {
-    revision
-        .checked_add(1)
-        .filter(|next| *next <= i64::MAX as u64)
-        .context("Intruder revision 已耗尽")
+pub(in crate::store::intruder) fn next_revision(revision: u64) -> u64 {
+    revision + 1
 }
 
 pub(in crate::store::intruder) fn rename_run(
@@ -225,7 +222,7 @@ pub(in crate::store::intruder) fn rename_run(
         run.title_revision == expected_title_revision,
         "Intruder 任务名称 revision 已改变；名称未覆盖"
     );
-    let revision = next_revision(expected_title_revision)?;
+    let revision = next_revision(expected_title_revision);
     ensure!(!cancel.is_cancelled(), "Intruder 重命名已取消；名称未改变");
     let changed = transaction.execute(
         "UPDATE intruder_runs SET title=?1,title_revision=?2 WHERE id=?3 AND title_revision=?4",
@@ -254,7 +251,7 @@ pub(in crate::store::intruder) fn update_run(
     run: &mut IntruderRunSummary,
 ) -> Result<()> {
     let previous = run.revision;
-    run.revision = next_revision(previous)?;
+    run.revision = next_revision(previous);
     ensure!(
         run.completed <= run.dispatched && run.dispatched <= run.total,
         "Intruder 计数不一致"

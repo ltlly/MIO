@@ -25,12 +25,12 @@ fn percent_encode_component(input: &[u8]) -> String {
         .replace('+', "%20")
 }
 
-fn parsed_content_type(parsed: &ParsedRawRequest<'_>) -> Option<rama::http::mime::Mime> {
+fn parsed_content_type(parsed: &ParsedRawRequest<'_>) -> Option<mime::Mime> {
     parsed.headers.iter().find_map(|h| {
         if h.name.eq_ignore_ascii_case("content-type") {
             std::str::from_utf8(&h.value)
                 .ok()
-                .and_then(|s| s.trim().parse::<rama::http::mime::Mime>().ok())
+                .and_then(|s| s.trim().parse::<mime::Mime>().ok())
         } else {
             None
         }
@@ -102,7 +102,7 @@ fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedRawRequest<'_>) -> Vec<
                 .collect();
         }
         if essence.eq_ignore_ascii_case("multipart/form-data")
-            && let Some(boundary) = ct.get_param(rama::http::mime::BOUNDARY)
+            && let Some(boundary) = ct.get_param(mime::BOUNDARY)
             && let Some(pairs) = extract_multipart_pairs(parsed.body, boundary.as_str())
         {
             return pairs;

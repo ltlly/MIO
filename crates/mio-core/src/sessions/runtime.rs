@@ -505,48 +505,28 @@ impl SessionRuntime {
                     return Err(SessionExecError::Cancelled);
                 }
                 match action {
-                    SessionRuleAction::UseCookieJar { .. } => {
-                        action_labels.push("使用 Cookie Jar".into());
-                        apply_rule_sync_action(action, &working_jar, request, current_unix_ms())
-                            .map_err(|e| {
-                                SessionExecError::Failed(format!(
-                                    "会话规则 '{}' 动作失败：{e}",
-                                    rule.name
-                                ))
-                            })?;
-                    }
-                    SessionRuleAction::SetHeader { name, .. } => {
-                        action_labels.push(format!("设置请求头 {name}"));
-                        apply_rule_sync_action(action, &working_jar, request, current_unix_ms())
-                            .map_err(|e| {
-                                SessionExecError::Failed(format!(
-                                    "会话规则 '{}' 动作失败：{e}",
-                                    rule.name
-                                ))
-                            })?;
-                    }
-                    SessionRuleAction::SetCookie { name, .. } => {
-                        action_labels.push(format!("设置 Cookie {name}"));
-                        apply_rule_sync_action(action, &working_jar, request, current_unix_ms())
-                            .map_err(|e| {
-                                SessionExecError::Failed(format!(
-                                    "会话规则 '{}' 动作失败：{e}",
-                                    rule.name
-                                ))
-                            })?;
-                    }
-                    SessionRuleAction::RewriteUrlParam { name, .. } => {
-                        action_labels.push(format!("改写参数 {name}"));
-                        apply_rule_sync_action(action, &working_jar, request, current_unix_ms())
-                            .map_err(|e| {
-                                SessionExecError::Failed(format!(
-                                    "会话规则 '{}' 动作失败：{e}",
-                                    rule.name
-                                ))
-                            })?;
-                    }
-                    SessionRuleAction::ReplaceRequestText { .. } => {
-                        action_labels.push("替换请求文本".into());
+                    SessionRuleAction::UseCookieJar { .. }
+                    | SessionRuleAction::SetHeader { .. }
+                    | SessionRuleAction::SetCookie { .. }
+                    | SessionRuleAction::RewriteUrlParam { .. }
+                    | SessionRuleAction::ReplaceRequestText { .. } => {
+                        let label = match action {
+                            SessionRuleAction::UseCookieJar { .. } => "使用 Cookie Jar".into(),
+                            SessionRuleAction::SetHeader { name, .. } => {
+                                format!("设置请求头 {name}")
+                            }
+                            SessionRuleAction::SetCookie { name, .. } => {
+                                format!("设置 Cookie {name}")
+                            }
+                            SessionRuleAction::RewriteUrlParam { name, .. } => {
+                                format!("改写参数 {name}")
+                            }
+                            SessionRuleAction::ReplaceRequestText { .. } => {
+                                "替换请求文本".into()
+                            }
+                            SessionRuleAction::RunMacro { .. } => unreachable!(),
+                        };
+                        action_labels.push(label);
                         apply_rule_sync_action(action, &working_jar, request, current_unix_ms())
                             .map_err(|e| {
                                 SessionExecError::Failed(format!(
@@ -667,12 +647,7 @@ impl SessionRuntime {
             }
             Err(SessionExecError::Cancelled) => {
                 record.summary.state = FlowState::Cancelled;
-                record.summary.revision = record
-                    .summary
-                    .revision
-                    .checked_add(1)
-                    .filter(|next| *next <= i64::MAX as u64)
-                    .unwrap_or(record.summary.revision);
+                record.summary.revision += 1;
                 record.summary.elapsed_ms =
                     started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 None
@@ -680,12 +655,7 @@ impl SessionRuntime {
             Err(SessionExecError::Failed(msg)) => {
                 record.summary.state =
                     FlowState::Failed(format!("会话规则执行失败，未发送请求：{msg}"));
-                record.summary.revision = record
-                    .summary
-                    .revision
-                    .checked_add(1)
-                    .filter(|next| *next <= i64::MAX as u64)
-                    .unwrap_or(record.summary.revision);
+                record.summary.revision += 1;
                 record.summary.elapsed_ms =
                     started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 None

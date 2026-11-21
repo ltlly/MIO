@@ -68,11 +68,7 @@ pub(in crate::service) fn convert_plugin_findings_for_phase(
         .and_then(|u| u.host_str().map(String::from))
         .unwrap_or_default();
     let raw_response = response_to_raw(response);
-    let now_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64;
+    let now_unix_ms = crate::codec_util::now_unix_ms();
     dtos.into_iter()
         .map(|dto| {
             let sev = map_plugin_severity(dto.severity);
@@ -137,7 +133,7 @@ impl State {
         {
             return;
         }
-        let persisted = self.store.read_optional(record.summary.id).ok().flatten();
+        let persisted = self.store.flows().read_optional(record.summary.id).ok().flatten();
         if persisted
             .as_ref()
             .is_none_or(|stored| stored.summary.revision < record.summary.revision)
@@ -156,7 +152,8 @@ impl State {
         }
         if !self
             .store
-            .read_audit_state()
+            .audit()
+            .read_state()
             .is_ok_and(|s| s.live_passive_enabled)
         {
             return;
@@ -219,7 +216,7 @@ impl State {
         {
             return;
         }
-        let Ok(mut state) = self.store.read_audit_state() else {
+        let Ok(mut state) = self.store.audit().read_state() else {
             return;
         };
         if !state.live_passive_enabled {
@@ -230,17 +227,11 @@ impl State {
         if added.is_empty() {
             return;
         }
-        let Some(next_rev) = state
-            .revision
-            .checked_add(1)
-            .filter(|rev| *rev <= i64::MAX as u64)
-        else {
-            return;
-        };
-        state.revision = next_rev;
+        state.revision += 1;
         if let Err(error) = self
             .store
-            .write_audit_state(&state, &CancellationToken::new())
+            .audit_mut()
+            .write_state(&state, &CancellationToken::new())
         {
             self.error("audit", error).await;
             return;

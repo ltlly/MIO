@@ -12,39 +12,7 @@ pub fn default_user_preferences_path() -> Result<PathBuf> {
         validate_recorded_path(&path, "用户偏好")?;
         return Ok(path);
     }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME").context("无法确定 macOS 用户目录")?;
-        Ok(Path::new(&home).join("Library/Application Support/MIO/preferences.json"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-            let p = PathBuf::from(xdg);
-            if p.is_absolute() {
-                return Ok(p.join("mio/preferences.json"));
-            }
-        }
-        let home = std::env::var_os("HOME").context("无法确定用户目录")?;
-        Ok(Path::new(&home).join(".config/mio/preferences.json"))
-    }
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-            return Ok(PathBuf::from(appdata).join("MIO").join("preferences.json"));
-        }
-        if let Some(profile) = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .filter(|v| !v.is_empty())
-        {
-            return Ok(PathBuf::from(profile)
-                .join("AppData")
-                .join("Roaming")
-                .join("MIO")
-                .join("preferences.json"));
-        }
-        anyhow::bail!("无法确定用户目录")
-    }
+    Ok(fs_atomic::platform_app_dir(fs_atomic::AppDirKind::Config)?.join("preferences.json"))
 }
 
 fn validate_recorded_path(path: &Path, label: &str) -> Result<()> {

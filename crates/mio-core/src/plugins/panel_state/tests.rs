@@ -125,38 +125,6 @@ fn full_snapshot_cannot_replace_a_newer_table_viewport() {
 }
 
 #[test]
-fn duplicate_nodes_and_unbounded_canvas_are_rejected() {
-    let root = editor(false).root.unwrap();
-    let duplicate = PanelSnapshot {
-        revision: 1,
-        title: "test".into(),
-        root: Some(Node::new(
-            2,
-            "root",
-            node::Kind::Column(Container {
-                children: vec![root.clone(), root],
-            }),
-        )),
-    };
-    assert!(duplicate.validate().is_err());
-    let c = Canvas {
-        width: f32::NAN,
-        height: 10.0,
-        ..Default::default()
-    };
-    assert!(c.validate().is_err());
-    let c = Canvas {
-        width: 100.0,
-        height: 100.0,
-        commands: vec![DrawCommand {
-            op: Some(draw_command::Op::PopClip(Empty {})),
-        }],
-        ..Default::default()
-    };
-    assert!(c.validate().is_err());
-}
-
-#[test]
 fn scroll_column_checkbox_select_badge_and_progress_validate_and_observe_events() {
     let snap = PanelSnapshot {
         revision: 1,

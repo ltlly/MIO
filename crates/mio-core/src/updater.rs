@@ -8,24 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crate::{Header, HttpRequest, HttpResponse, HttpVersion};
-use mio_proxy::{ProxyCredentials, ProxyEndpoint, SendConfig, UpstreamRoute, UpstreamTls};
-use rama::{
-    Service,
-    extensions::ExtensionsRef as _,
-    graceful::Shutdown,
-    http::{
-        Body, Request,
-        body::util::BodyExt,
-        client::{EasyHttpWebClient, proxy::layer::SetProxyAuthHttpHeaderLayer},
-    },
-    net::{
-        Protocol,
-        address::{Host, HostWithPort, ProxyAddress},
-        client::ProxyRoute,
-        user::{Basic, ProxyCredential},
-    },
-    rt::Executor,
-    tls::client::TlsClientConfig,
+use mio_proxy::{
+    DownloadConfig, DownloadRouteResolver, DownloadSink, ProxyCredentials, ProxyEndpoint,
+    ProxyError, SendConfig, UpstreamRoute, UpstreamTls,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -669,84 +654,37 @@ struct DownloadedAsset {
     sha256_hex: String,
 }
 
-fn upstream_to_rama_proxy_route(route: &UpstreamRoute, target_url: &str) -> Result<ProxyRoute> {
-    let target_host = url::Url::parse(target_url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned));
-    let effective = target_host
-        .as_deref()
-        .map_or_else(|| route.clone(), |h| route.resolve_for_host(h));
-    let (endpoint, protocol, socks) = match effective {
-        UpstreamRoute::Direct => return Ok(ProxyRoute::Direct),
-        UpstreamRoute::Http(ep) => (ep, Protocol::HTTP, false),
-        UpstreamRoute::Https { endpoint, .. } => (endpoint, Protocol::HTTPS, false),
-        UpstreamRoute::Socks5(ep) => (ep, Protocol::SOCKS5H, true),
-        UpstreamRoute::Socks5LocalDns(ep) => (ep, Protocol::SOCKS5, true),
-        UpstreamRoute::Socks5WithBypass {
-            endpoint,
-            local_dns,
-            ..
-        } => (
-            endpoint,
-            if local_dns {
-                Protocol::SOCKS5
-            } else {
-                Protocol::SOCKS5H
-            },
-            true,
-        ),
-    };
-    ensure!(
-        endpoint.port > 0 && endpoint.host.len() <= 253,
-        "上游代理主机或端口无效"
-    );
-    let host: Host = endpoint
-        .host
-        .parse()
-        .map_err(|_| anyhow!("上游代理需要纯主机名或 IP"))?;
-    let credential = endpoint
-        .credentials
-        .as_ref()
-        .map(|creds| {
-            let max = if socks { 255 } else { 4096 };
-            ensure!(
-                !creds.username.is_empty()
-                    && creds.username.len() <= max
-                    && creds.password.len() <= max
-                    && (!socks || !creds.password.is_empty())
-                    && (socks || !creds.username.contains(':'))
-                    && !creds
-                        .username
-                        .bytes()
-                        .chain(creds.password.bytes())
-                        .any(|b| matches!(b, b'\r' | b'\n' | 0)),
-                "上游代理凭据无效"
-            );
-            let username = creds
-                .username
-                .clone()
-                .try_into()
-                .map_err(|_| anyhow!("上游代理用户名无效"))?;
-            let basic = if creds.password.is_empty() {
-                Basic::new_insecure(username)
-            } else {
-                Basic::new(
-                    username,
-                    creds
-                        .password
-                        .clone()
-                        .try_into()
-                        .map_err(|_| anyhow!("上游代理密码无效"))?,
-                )
-            };
-            Ok::<_, anyhow::Error>(ProxyCredential::Basic(basic))
-        })
-        .transpose()?;
-    Ok(ProxyRoute::Proxy(ProxyAddress {
-        protocol: Some(protocol),
-        address: HostWithPort::new(host, endpoint.port),
-        credential,
-    }))
+impl DownloadRouteResolver for UpdateRouteContext {
+    async fn resolve_route(&mut self, target_url: &str) -> UpstreamRoute {
+        self.resolve(target_url).await
+    }
+}
+
+struct TempFileDownloadSink<F> {
+    hasher: Sha256,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    hint_total_bytes: Option<u64>,
+    on_progress: F,
+}
+
+impl<F> DownloadSink for TempFileDownloadSink<F>
+where
+    F: FnMut(u64, Option<u64>) + Send,
+{
+    async fn write_chunk(
+        &mut self,
+        chunk: &[u8],
+        total_received: u64,
+        content_length: Option<u64>,
+    ) -> std::result::Result<(), ProxyError> {
+        self.hasher.update(chunk);
+        self.tx
+            .send(chunk.to_vec())
+            .await
+            .map_err(|_| ProxyError::Network("更新包磁盘写入任务意外退出".into()))?;
+        (self.on_progress)(total_received, content_length.or(self.hint_total_bytes));
+        Ok(())
+    }
 }
 
 async fn http_download_to_temp_file<F>(
@@ -756,200 +694,89 @@ async fn http_download_to_temp_file<F>(
     max_body_bytes: usize,
     hint_total_bytes: Option<u64>,
     route_ctx: &mut UpdateRouteContext,
-    mut on_progress: F,
+    on_progress: F,
     cancel: &CancellationToken,
 ) -> Result<DownloadedAsset>
 where
     F: FnMut(u64, Option<u64>) + Send,
 {
-    let mut current_url = initial_url.to_owned();
-    let deadline = tokio::time::Instant::now() + timeout;
-    for _hop in 0..=MAX_REDIRECTS {
-        if cancel.is_cancelled() {
-            bail!("更新操作已取消");
-        }
-        let upstream_route = route_ctx.resolve(&current_url).await;
-        let proxy_route = upstream_to_rama_proxy_route(&upstream_route, &current_url)?;
-        let req_cancel = cancel.child_token();
-        let shutdown = Shutdown::new(req_cancel.clone().cancelled_owned());
-        let _cancel_on_drop = req_cancel.clone().drop_guard();
-        let exec = Executor::graceful(shutdown.guard());
-
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .with_default_dns_connector()
-            .with_tls_proxy_support_using_rustls()
-            .with_proxy_support()
-            .with_tls_support_using_rustls(TlsClientConfig::default_http())
-            .with_default_http_connector::<Body>(exec)
-            .without_connection_pool()
-            .build_client()
-            .with_jit_layer(SetProxyAuthHttpHeaderLayer::new());
-
-        let request = Request::builder()
-            .method("GET")
-            .uri(current_url.as_str())
-            .header("User-Agent", format!("MIO/{CURRENT_VERSION}"))
-            .header("Accept", accept)
-            .body(Body::empty())
-            .context("构造更新下载请求失败")?;
-        request.extensions().insert(proxy_route);
-
-        let response = {
-            let mut serve = Box::pin(client.serve(request));
-            tokio::select! {
-                biased;
-                _ = req_cancel.cancelled() => Err(anyhow!("更新操作已取消")),
-                _ = tokio::time::sleep_until(deadline) => {
-                    req_cancel.cancel();
-                    Err(anyhow!("请求更新服务器超时"))
-                }
-                res = serve.as_mut() => res.map_err(|err| {
-                    req_cancel.cancel();
-                    anyhow!("请求更新服务器失败：{err}")
-                }),
-            }
-        };
-        drop(client);
-        let response = match response {
-            Ok(resp) => resp,
-            Err(err) => {
-                shutdown.shutdown().await;
-                return Err(err);
-            }
-        };
-
-        let status = response.status().as_u16();
-        if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            let loc = response
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_owned())
-                .context("更新服务器返回重定向响应，但缺少 Location 响应头")?;
-            drop(response);
-            req_cancel.cancel();
-            shutdown.shutdown().await;
-            let next = url::Url::parse(&current_url)
-                .with_context(|| format!("无效的请求 URL：{current_url}"))?
-                .join(&loc)
-                .with_context(|| format!("无效的重定向地址：{loc}"))?;
-            current_url = next.to_string();
-            continue;
-        }
-
-        if !(200..300).contains(&status) {
-            let mut body = response.into_body();
-            let mut snippet = Vec::with_capacity(200);
-            while snippet.len() < 200 {
-                let Some(Ok(frame)) = body.frame().await else {
-                    break;
-                };
-                if let Ok(data) = frame.into_data() {
-                    let take = (200 - snippet.len()).min(data.len());
-                    snippet.extend_from_slice(&data[..take]);
-                }
-            }
-            drop(body);
-            req_cancel.cancel();
-            shutdown.shutdown().await;
-            let text = String::from_utf8_lossy(&snippet);
-            bail!("更新服务器返回 HTTP {status}：{}", text.trim());
-        }
-
-        let content_length = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok());
-        if let Some(len) = content_length
-            && len > max_body_bytes as u64
-        {
-            drop(response);
-            req_cancel.cancel();
-            shutdown.shutdown().await;
-            bail!("安装包超过 {max_body_bytes} 字节上限");
-        }
-        let total_bytes = content_length.or(hint_total_bytes);
-
-        let temp_file = NamedTempFile::new().context("无法创建更新包临时文件")?;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<rama::bytes::Bytes>(8);
-        let writer_handle = tokio::task::spawn_blocking(move || -> Result<NamedTempFile> {
-            let mut writer = BufWriter::with_capacity(64 * 1024, temp_file);
-            while let Some(chunk) = rx.blocking_recv() {
-                writer.write_all(&chunk).context("写入更新包临时文件失败")?;
-            }
-            writer.flush().context("刷新更新包临时文件缓冲失败")?;
-            let file = writer
-                .into_inner()
-                .map_err(|err| anyhow!("完成更新包写入失败：{}", err.error()))?;
-            file.as_file()
-                .sync_all()
-                .context("同步更新包临时文件到磁盘失败")?;
-            Ok(file)
-        });
-
-        let mut hasher = Sha256::new();
-        let mut received = 0u64;
-        let mut body = response.into_body();
-        let stream_result: Result<()> = loop {
-            tokio::select! {
-                biased;
-                _ = req_cancel.cancelled() => break Err(anyhow!("更新操作已取消")),
-                _ = tokio::time::sleep_until(deadline) => break Err(anyhow!("下载更新包超时")),
-                frame = body.frame() => match frame {
-                    None => break Ok(()),
-                    Some(Err(err)) => {
-                        break Err(if req_cancel.is_cancelled() {
-                            anyhow!("更新操作已取消")
-                        } else {
-                            anyhow!("读取更新包响应流失败：{err}")
-                        });
-                    }
-                    Some(Ok(frame)) => {
-                        if let Ok(data) = frame.into_data() && !data.is_empty() {
-                            let next = received
-                                .checked_add(data.len() as u64)
-                                .context("更新包大小溢出")?;
-                            if next > max_body_bytes as u64 {
-                                break Err(anyhow!("安装包超过 {max_body_bytes} 字节上限"));
-                            }
-                            hasher.update(&data);
-                            received = next;
-                            if tx.send(data).await.is_err() {
-                                break Err(anyhow!("更新包磁盘写入任务意外退出"));
-                            }
-                            on_progress(received, total_bytes);
-                        }
-                    }
-                }
-            }
-        };
-
-        drop(tx);
-        drop(body);
-        req_cancel.cancel();
-        let writer_res = writer_handle
-            .await
-            .map_err(|e| anyhow!("更新包写入线程异常退出：{e}"))
-            .and_then(|r| r);
-        shutdown.shutdown().await;
-        stream_result?;
-        let file = writer_res?;
-
-        let digest = hasher.finalize();
-        let mut sha256_hex = String::with_capacity(64);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(sha256_hex, "{byte:02x}");
-        }
-        return Ok(DownloadedAsset {
-            file,
-            received_bytes: received,
-            sha256_hex,
-        });
+    if cancel.is_cancelled() {
+        bail!("更新操作已取消");
     }
-    bail!("更新请求重定向次数过多（超过 {MAX_REDIRECTS} 次）")
+
+    let temp_file = NamedTempFile::new().context("无法创建更新包临时文件")?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let writer_handle = tokio::task::spawn_blocking(move || -> Result<NamedTempFile> {
+        let mut writer = BufWriter::with_capacity(64 * 1024, temp_file);
+        while let Some(chunk) = rx.blocking_recv() {
+            writer.write_all(&chunk).context("写入更新包临时文件失败")?;
+        }
+        writer.flush().context("刷新更新包临时文件缓冲失败")?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| anyhow!("完成更新包写入失败：{}", err.error()))?;
+        file.as_file()
+            .sync_all()
+            .context("同步更新包临时文件到磁盘失败")?;
+        Ok(file)
+    });
+
+    let mut cfg = DownloadConfig::default();
+    cfg.max_body_bytes = max_body_bytes;
+    cfg.timeout = timeout;
+    cfg.max_redirects = MAX_REDIRECTS;
+    cfg.headers = vec![
+        Header {
+            name: "User-Agent".into(),
+            value: format!("MIO/{CURRENT_VERSION}").into_bytes(),
+        },
+        Header {
+            name: "Accept".into(),
+            value: accept.as_bytes().to_vec(),
+        },
+    ];
+
+    let mut sink = TempFileDownloadSink {
+        hasher: Sha256::new(),
+        tx,
+        hint_total_bytes,
+        on_progress,
+    };
+
+    let download_result =
+        mio_proxy::download_to_sink(initial_url, cfg, route_ctx, &mut sink, cancel.clone()).await;
+    let TempFileDownloadSink { hasher, tx, .. } = sink;
+    drop(tx);
+
+    let writer_res = writer_handle
+        .await
+        .map_err(|e| anyhow!("更新包写入线程异常退出：{e}"))
+        .and_then(|r| r);
+
+    let outcome = download_result.map_err(|err| match err {
+        ProxyError::Cancelled => anyhow!("更新操作已取消"),
+        ProxyError::Timeout => anyhow!("下载更新包超时"),
+        ProxyError::BodyLimit { limit } => anyhow!("安装包超过 {limit} 字节上限"),
+        other => anyhow!("请求更新服务器失败：{other}"),
+    })?;
+
+    if !(200..300).contains(&outcome.status) {
+        let text = String::from_utf8_lossy(&outcome.error_snippet);
+        bail!("更新服务器返回 HTTP {}：{}", outcome.status, text.trim());
+    }
+
+    let file = writer_res?;
+    let digest = hasher.finalize();
+    let mut sha256_hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(sha256_hex, "{byte:02x}");
+    }
+    Ok(DownloadedAsset {
+        file,
+        received_bytes: outcome.bytes_written,
+        sha256_hex,
+    })
 }
 
 /// Parses a GitHub Releases JSON payload into either `UpToDate` or `Available(UpdateInfo)`.

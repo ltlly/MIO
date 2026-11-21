@@ -13,6 +13,7 @@ use std::io::IoSlice;
 
 use crate::{AuthConfig, ProxyError, SinglePacketBarrier, UpstreamRoute, UpstreamTlsConfig};
 
+mod download;
 mod exchange;
 #[cfg(test)]
 use exchange::RawH1Io;
@@ -22,6 +23,10 @@ mod tests;
 mod websocket;
 mod websocket_session;
 
+pub use download::{
+    DownloadConfig, DownloadOutcome, DownloadRouteResolver, DownloadSink, download_to_sink,
+    download_to_writer,
+};
 pub(crate) use exchange::{exchange, exchange_with_metrics};
 #[cfg(test)]
 use send::{collect_response, send_owned};

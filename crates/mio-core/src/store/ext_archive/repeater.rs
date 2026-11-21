@@ -14,8 +14,8 @@ pub(super) mod response;
 #[cfg(test)]
 pub(super) mod restore;
 
-impl ProjectStore {
-    pub(crate) fn ext_repeater_tab(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub(crate) fn repeater_tab(
         &self,
         source_id: Uuid,
         item_id: Uuid,
@@ -24,7 +24,7 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<WorkTab> {
         check_cancel(cancel).context("归档请求载入已取消，未创建 Repeater 草稿")?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let tab = load_tab(
             &transaction,
             source_id,

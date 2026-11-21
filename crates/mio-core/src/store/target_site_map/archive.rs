@@ -341,15 +341,15 @@ pub(in crate::store) fn read_ext_message_bytes(
     Ok(raw)
 }
 
-impl crate::store::ProjectStore {
-    pub(crate) fn site_map_ext_detail(
+impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::SiteMapRepo<S> {
+    pub(crate) fn ext_detail(
         &self,
         source_id: crate::Uuid,
         item_id: crate::Uuid,
         message_id: crate::Uuid,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(crate::HistoryRow, super::SiteMapEntryDetail)> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let row = build_ext_history_row(&transaction, source_id, item_id, true, true)?;
         let crate::HistoryRow::ExtProxy(archive) = &row else { unreachable!() };
         let selected = archive.request.as_ref().filter(|message| message.id == message_id)

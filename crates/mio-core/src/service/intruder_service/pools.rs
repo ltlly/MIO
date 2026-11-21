@@ -14,7 +14,7 @@ impl State {
         project: ProjectKey,
     ) -> Result<IntruderPoolUsage> {
         self.check_project(project)?;
-        let mut usage = self.store.intruder_pool_usage(&self.cancel)?;
+        let mut usage = self.store.resource_pools().usage(&self.cancel)?;
         let ids: BTreeSet<_> = self
             .intruder
             .runs
@@ -28,7 +28,7 @@ impl State {
             )
             .collect();
         for id in ids {
-            let stored = self.store.read_intruder_run(id)?;
+            let stored = self.store.intruder().read_run(id)?;
             let current = self.intruder_run(id)?;
             if stored.resource_pool != current.resource_pool {
                 if let Some(pool) = stored.resource_pool {
@@ -56,7 +56,7 @@ impl State {
             .iter()
             .filter_map(|(id, count)| (*count > 0).then_some(*id))
             .collect();
-        let workspace = self.store.workspace()?;
+        let workspace = self.store.metadata().workspace()?;
         for tab in workspace
             .intruder
             .tabs
@@ -106,7 +106,7 @@ impl State {
                 default_pool_created: false,
                 catalog: (project == self.project).then(|| self.intruder.resource_pools.clone()),
                 workspace: (project == self.project)
-                    .then(|| self.store.workspace().ok())
+                    .then(|| self.store.metadata().workspace().ok())
                     .flatten()
                     .map(Box::new),
             });
@@ -116,7 +116,7 @@ impl State {
             .requests
             .values()
             .any(|request| request.resource_pool == Some(pool_id));
-        let result = self.store.delete_intruder_resource_pool(
+        let result = self.store.resource_pools_mut().delete(
             project,
             pool_id,
             expected_revisions,
@@ -139,7 +139,7 @@ impl State {
         }
         // A partial Session commit must survive subsequent result/lifecycle persistence.
         for (id, active) in &mut self.intruder.runs {
-            if let Some(stored) = self.store.session_intruder_summary(*id) {
+            if let Some(stored) = self.store.intruder().session_summary(*id) {
                 active.summary.resource_pool = stored.resource_pool;
                 active.summary.resource_pool_revision = stored.resource_pool_revision;
             } else if let Ok(receipt) = &result
@@ -170,7 +170,7 @@ impl State {
                 && !cancel.is_cancelled(),
             "Intruder 默认资源池请求已取消或不可用；未创建"
         );
-        let catalog = self.store.ensure_intruder_default_pool(project, cancel)?;
+        let catalog = self.store.resource_pools_mut().ensure_default(project, cancel)?;
         for pool in &catalog.pools {
             self.intruder.pool_timings.entry(pool.id).or_default();
         }
@@ -213,9 +213,10 @@ impl State {
             "Intruder 资源池仍被活动任务引用；未删除或修改目录"
         );
         let timings = self.intruder.prepared_pool_timings(&pools)?;
-        let catalog =
-            self.store
-                .set_intruder_resource_pools(project, expected_revision, pools, cancel)?;
+        let catalog = self
+            .store
+            .resource_pools_mut()
+            .set(project, expected_revision, pools, cancel)?;
         self.intruder.resource_pools = catalog.clone();
         self.intruder.pool_timings = timings;
         self.intruder.dirty = true;
@@ -245,7 +246,7 @@ impl State {
             self.intruder.resource_pools.find(resource_pool).is_some(),
             "Intruder 资源池不存在；未改变任务"
         );
-        let run = self.store.set_intruder_resource_pool(
+        let run = self.store.intruder_mut().set_resource_pool(
             project,
             id,
             expected_pool_revision,

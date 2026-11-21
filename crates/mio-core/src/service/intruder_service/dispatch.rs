@@ -89,7 +89,7 @@ impl State {
                 Ok(request)
             });
         let config: Result<SendConfig> = (|| {
-            let workspace = self.store.workspace_arc()?;
+            let workspace = self.store.metadata().workspace_arc()?;
             let upstream_tls = self
                 .preferences
                 .effective_upstream_tls(&workspace.upstream_tls)?;
@@ -101,7 +101,7 @@ impl State {
                 .route_for_url_with_tls(&run.target, upstream_tls.clone())?;
             send_cfg.network.hostname_overrides = hostname_overrides;
             send_cfg.tls.trust = upstream_tls;
-            send_cfg.tls.client_certificates = self.compiled_client_certs.clone();
+            send_cfg.tls.client_certificates = self.tls.compiled_client_certs.clone();
             send_cfg.limits.timeout = run.timeout;
             send_cfg.limits.streaming_timeout = streaming_timeout;
             send_cfg.http.version = Some(run.version);
@@ -144,16 +144,13 @@ impl State {
                 state: FlowState::Pending,
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
-                started_unix_ms: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_millis()
-                    .min(i64::MAX as u128) as i64,
+                started_unix_ms: crate::codec_util::now_unix_ms(),
                 elapsed_ms: 0,
             },
             request,
             response: None,
         };
-        if self.sessions.has_enabled_rules(SessionTool::Intruder)
+        if self.sessions.runtime.has_enabled_rules(SessionTool::Intruder)
             || !self.session_action_hooks().is_empty()
         {
             self.spawn_intruder_pre_send(id, ordinal, record, config, response_codes);
@@ -171,7 +168,11 @@ impl State {
         response_codes: Vec<u16>,
     ) -> Result<()> {
         let prepared = mio_proxy::prepare_send(&record.request, config.clone());
-        match self.store.preflight_intruder_result(id, ordinal, &record) {
+        match self
+            .store
+            .intruder_mut()
+            .preflight_result(id, ordinal, &record)
+        {
             Ok(true) => {}
             Ok(false) => {
                 self.intruder
@@ -234,8 +235,8 @@ impl State {
         if let Some((pool, timing)) = timing {
             self.intruder.pool_timings.insert(pool, timing);
         }
-        let workspace_snapshot = self.store.workspace_arc()?;
-        let sessions = self.sessions.clone();
+        let workspace_snapshot = self.store.metadata().workspace_arc()?;
+        let sessions = self.sessions.runtime.clone();
         let run = self.intruder.runs.get_mut(&id).unwrap();
         let attack_settings = run.attack_settings.clone();
         let update_host_header = run.update_host_header;

@@ -1,6 +1,17 @@
 use std::path::{Path, PathBuf};
 use super::*;
 
+struct ProxyRuntimeNetConfig {
+    upstream_tls: mio_proxy::UpstreamTls,
+    upstream_tls_options: mio_proxy::UpstreamTlsOptions,
+    eff_upstream: UpstreamProxySettings,
+    upstream_route: mio_proxy::UpstreamRoute,
+    upstream_route_resolver: mio_proxy::UpstreamRouteResolver,
+    hostname_overrides: Arc<[(String, std::net::IpAddr)]>,
+    request_timeout: Duration,
+    streaming_timeout: Option<Duration>,
+}
+
 impl State {
     pub(super) async fn command_proxy_intercept(&mut self, command: Command) -> Result<()> {
         Box::pin(self.command_proxy_intercept_inner(command)).await
@@ -14,8 +25,7 @@ impl State {
             }
             Command::StopProxy { project } => {
                 self.check_project(project)?;
-                self.websocket_query.cancel();
-                self.http_query.cancel();
+                self.queries.cancel_all();
                 self.stop_proxy().await?;
             }
             Command::StopProxyListener {
@@ -31,14 +41,7 @@ impl State {
                 responses,
             } => {
                 self.check_project(project)?;
-                self.intercept_requests = requests;
-                self.intercept_responses = responses;
-                if let Some(proxy) = &self.proxy {
-                    proxy.set_intercept(requests, responses);
-                }
-                for (_, proxy) in &self.extra_proxies {
-                    proxy.set_intercept(requests, responses);
-                }
+                self.proxy.set_intercept(requests, responses);
                 self.proxy_state().await;
             }
             Command::OpenConfiguredBrowser {
@@ -55,7 +58,7 @@ impl State {
                 decision,
             } => {
                 self.check_project(project)?;
-                let pending = self.pending.get(&flow_id).context("拦截已结束")?;
+                let pending = self.proxy.pending.get(&flow_id).context("拦截已结束")?;
                 ensure!(
                     pending.revision == revision && !pending.reply.is_closed(),
                     "拦截决定已过期；未发送旧修改"
@@ -81,12 +84,12 @@ impl State {
                         "SSE 最终响应不能改为临时响应、协议升级或无效状态码；拦截仍等待决定"
                     );
                 }
-                let pending = self.pending.remove(&flow_id).unwrap();
+                let pending = self.proxy.pending.remove(&flow_id).unwrap();
                 let decision = match decision {
                     Decision::Drop => InterceptDecision::Drop,
                     Decision::ForwardRequest(request) => {
                         if request != pending.intercepted_request {
-                            self.provenance.record_request(
+                            self.storage.provenance.record_request(
                                 flow_id,
                                 &pending.intercepted_request,
                                 ProvenanceActor::ManualInterceptEdit,
@@ -99,7 +102,7 @@ impl State {
                         if let Some(intercepted_resp) = &pending.intercepted_response
                             && intercepted_resp != &response
                         {
-                            self.provenance.record_response(
+                            self.storage.provenance.record_response(
                                 flow_id,
                                 intercepted_resp,
                                 ProvenanceActor::ManualInterceptEdit,
@@ -123,6 +126,7 @@ impl State {
             } => {
                 self.check_project(project)?;
                 let pending = self
+                    .proxy
                     .pending_websockets
                     .get(&message_id)
                     .context("WebSocket 拦截已结束")?;
@@ -142,7 +146,7 @@ impl State {
                         );
                     }
                 }
-                let pending = self.pending_websockets.remove(&message_id).unwrap();
+                let pending = self.proxy.pending_websockets.remove(&message_id).unwrap();
                 let decision = match decision {
                     WebSocketDecision::Forward(payload) => {
                         mio_proxy::WebSocketInterceptDecision::Forward(payload)
@@ -167,6 +171,7 @@ impl State {
                 self.check_project(project)?;
                 {
                     let mut annotated_flows = self
+                        .storage
                         .annotated_flows
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -188,41 +193,23 @@ impl State {
         Ok(())
     }
 
-    pub(super) async fn start_proxy_with_override(
+    fn build_proxy_runtime_net_config(
         &mut self,
-        project: ProjectKey,
-        listen: SocketAddr,
-        explicit_listen_override: Option<SocketAddr>,
-    ) -> Result<()> {
-        self.check_project(project)?;
-        self.require_saved()?;
-        ensure!(!self.quiesced, "正在保存并切换项目；监听未启动");
-        ensure!(
-            self.proxy.is_none() && self.extra_proxies.is_empty(),
-            "Proxy 已在监听"
-        );
-        let allow_non_loopback =
-            std::env::var_os("MIO_ALLOW_NON_LOOPBACK_PROXY").is_some_and(|v| v == "1");
-        ensure!(
-            listen.ip().is_loopback() || allow_non_loopback,
-            "当前监听只允许 loopback 地址"
-        );
-        let workspace = self.store.workspace()?;
-        let client_certificates = self
-            .compile_client_certificates(&workspace.client_certificates)
-            .await?;
-        self.compiled_client_certs = client_certificates.clone();
+        workspace: &Workspace,
+        sync_cache: bool,
+    ) -> Result<ProxyRuntimeNetConfig> {
         let upstream_tls = self
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)?;
+        let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
         let eff_upstream = workspace
             .upstream_proxy
             .effective_for_runtime(&self.user_level_connections_cache);
-        eff_upstream.sync_user_level_cache(&mut self.user_level_connections_cache);
-        let upstream_route = eff_upstream
-            .to_route_with_tls(upstream_tls.clone())?;
-        let upstream_route_resolver = eff_upstream
-            .build_route_resolver(upstream_tls.clone())?;
+        if sync_cache {
+            eff_upstream.sync_user_level_cache(&mut self.user_level_connections_cache);
+        }
+        let upstream_route = eff_upstream.to_route_with_tls(upstream_tls.clone())?;
+        let upstream_route_resolver = eff_upstream.build_route_resolver(upstream_tls.clone())?;
         let hostname_overrides = eff_upstream.compiled_hostname_overrides()?;
         let request_timeout = Duration::from_secs(
             workspace
@@ -233,23 +220,160 @@ impl State {
         let streaming_timeout = eff_upstream
             .effective_streaming_timeout()
             .or_else(|| workspace.repeater_settings.effective_streaming_timeout());
-        let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
-        self.sessions.sync_workspace(self.project, &workspace);
+        Ok(ProxyRuntimeNetConfig {
+            upstream_tls,
+            upstream_tls_options,
+            eff_upstream,
+            upstream_route,
+            upstream_route_resolver,
+            hostname_overrides,
+            request_timeout,
+            streaming_timeout,
+        })
+    }
+
+    async fn start_proxy_listeners(
+        &mut self,
+        project: ProjectKey,
+        workspace: &Workspace,
+        net: &ProxyRuntimeNetConfig,
+        desired_listeners: &[(ProxyListenerConfig, SocketAddr)],
+        emit_state_on_failure: bool,
+    ) -> Result<()> {
+        let authority = self.authority().await?;
+        let (plugin_flow_hook, plugin_ws_hook) = self.build_proxy_plugin_hooks();
+        let shared_connections = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
+        let shared_requests = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
+        let shared_injectors = mio_proxy::WebSocketInjectorRegistry::new();
+        let annotation_tracker =
+            annotated_flows_tracker(self.storage.annotated_flows.clone(), self.cancel.clone());
+        let drop_scope_fn = build_drop_out_of_scope_fn(workspace.scope.clone());
+        let cert_callback = self.build_server_cert_callback(project);
+        let tls_fail_callback = self.build_client_tls_failure_callback(project);
+        let ssl_matcher =
+            crate::http::build_ssl_pass_through_matcher(&workspace.ssl_pass_through_rules)?;
+        let ws_transform = crate::http::build_websocket_transform_with_scope(
+            workspace.ws_match_and_replace_rules.clone(),
+            workspace.proxy_messages.ws_match_replace_in_scope_only,
+            workspace.scope.clone(),
+        )?;
+        let mut handles: Vec<(Uuid, ProxyHandle)> = Vec::new();
+        for (listener_cfg, bind) in desired_listeners {
+            let mut config = ProxyConfig::new(authority.clone());
+            config.network.listen = *bind;
+            config.limits.max_connections = PROXY_MAX_CONNECTIONS;
+            config.hooks.intercept_requests = self.proxy.intercept_requests;
+            config.hooks.intercept_responses = self.proxy.intercept_responses;
+            config.network.upstream_route = net.upstream_route.clone();
+            config.network.upstream_route_resolver = Some(net.upstream_route_resolver.clone());
+            config.tls.upstream.trust = net.upstream_tls.clone();
+            config.tls.upstream.options = net.upstream_tls_options;
+            config.network.hostname_overrides = net.hostname_overrides.clone();
+            config.limits.request_timeout = net.request_timeout;
+            config.limits.streaming_timeout = net.streaming_timeout;
+            apply_listener_and_workspace_options(
+                &mut config,
+                listener_cfg,
+                workspace,
+                &net.eff_upstream,
+            );
+            config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
+            config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
+            config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
+            config.hooks.intercept_filter = Some(crate::http::build_intercept_filter(
+                workspace.proxy_interception.clone(),
+                workspace.scope.clone(),
+            )?);
+            config.hooks.websocket_intercept_filter =
+                Some(crate::http::build_websocket_intercept_filter(
+                    workspace.proxy_websocket_interception,
+                    workspace.scope.clone(),
+                )?);
+            config.hooks.flow_transform =
+                crate::http::build_flow_transform_with_scope_and_provenance(
+                    workspace.match_and_replace_rules.clone(),
+                    workspace.proxy_messages,
+                    workspace.scope.clone(),
+                    Some(self.storage.provenance.clone()),
+                )?;
+            config.hooks.ssl_pass_through = ssl_matcher.clone();
+            config.hooks.websocket_transform = ws_transform.clone();
+            config.tls.upstream.client_certificates = self.tls.compiled_client_certs.clone();
+            config.shared.connections = Some(shared_connections.clone());
+            config.shared.requests = Some(shared_requests.clone());
+            config.shared.injectors = Some(shared_injectors.clone());
+            config.hooks.annotation_checker = Some(annotation_tracker.clone());
+            config.hooks.async_flow_hook = plugin_flow_hook.clone();
+            config.hooks.async_websocket_hook = plugin_ws_hook.clone();
+            match mio_proxy::start(config, project, self.proxy.sender.clone()).await {
+                Ok(proxy) => handles.push((listener_cfg.id, proxy)),
+                Err(error) => {
+                    for (_, started) in &handles {
+                        started.request_stop();
+                    }
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    for (_, started) in &mut handles {
+                        let _ = tokio::time::timeout_at(deadline, started.stop()).await;
+                    }
+                    self.proxy.clear_handles();
+                    if emit_state_on_failure {
+                        self.ws_repeater.set_injectors(None);
+                        self.proxy_state().await;
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        if !handles.is_empty() {
+            let (first_id, first) = handles.remove(0);
+            self.proxy.primary = Some(first);
+            self.proxy.primary_id = Some(first_id);
+        }
+        self.proxy.extra.extend(handles);
+        self.ws_repeater
+            .set_injectors(self.proxy.websocket_injectors());
+        self.proxy_state().await;
+        Ok(())
+    }
+
+    pub(super) async fn start_proxy_with_override(
+        &mut self,
+        project: ProjectKey,
+        listen: SocketAddr,
+        explicit_listen_override: Option<SocketAddr>,
+    ) -> Result<()> {
+        self.check_project(project)?;
+        self.require_saved()?;
+        ensure!(!self.quiesced, "正在保存并切换项目；监听未启动");
+        ensure!(!self.proxy.is_running(), "Proxy 已在监听");
+        let allow_non_loopback =
+            std::env::var_os("MIO_ALLOW_NON_LOOPBACK_PROXY").is_some_and(|v| v == "1");
+        ensure!(
+            listen.ip().is_loopback() || allow_non_loopback,
+            "当前监听只允许 loopback 地址"
+        );
+        let workspace = self.store.metadata().workspace()?;
+        let client_certificates = self
+            .compile_client_certificates(&workspace.client_certificates)
+            .await?;
+        self.tls.compiled_client_certs = client_certificates.clone();
+        let net = self.build_proxy_runtime_net_config(&workspace, true)?;
+        self.sessions.runtime.sync_workspace(self.project, &workspace);
         let mut session_send_cfg = SendConfig::default();
-        session_send_cfg.network.upstream_route = upstream_route.clone();
-        session_send_cfg.network.hostname_overrides = hostname_overrides.clone();
-        session_send_cfg.tls.trust = upstream_tls.clone();
-        session_send_cfg.tls.options = upstream_tls_options;
-        session_send_cfg.tls.client_certificates = client_certificates.clone();
-        session_send_cfg.limits.timeout = request_timeout;
-        session_send_cfg.limits.streaming_timeout = streaming_timeout;
+        session_send_cfg.network.upstream_route = net.upstream_route.clone();
+        session_send_cfg.network.hostname_overrides = net.hostname_overrides.clone();
+        session_send_cfg.tls.trust = net.upstream_tls.clone();
+        session_send_cfg.tls.options = net.upstream_tls_options;
+        session_send_cfg.tls.client_certificates = client_certificates;
+        session_send_cfg.limits.timeout = net.request_timeout;
+        session_send_cfg.limits.streaming_timeout = net.streaming_timeout;
         session_send_cfg.http.strip_100_continue_headers =
             workspace.network_http.remove_100_continue_headers;
         session_send_cfg.http.default_to_http2 = workspace.network_http.default_to_http2;
-        session_send_cfg.auth.platform_enabled = eff_upstream.platform_auth.enabled;
-        session_send_cfg.auth.platform_rules = eff_upstream.compiled_platform_auth_rules();
-        session_send_cfg.auth.upstream_rules = eff_upstream.compiled_upstream_auth_rules();
-        self.sessions.set_proxy_send_config(session_send_cfg);
+        session_send_cfg.auth.platform_enabled = net.eff_upstream.platform_auth.enabled;
+        session_send_cfg.auth.platform_rules = net.eff_upstream.compiled_platform_auth_rules();
+        session_send_cfg.auth.upstream_rules = net.eff_upstream.compiled_upstream_auth_rules();
+        self.sessions.runtime.set_proxy_send_config(session_send_cfg);
         let listeners = workspace.effective_proxy_listeners();
         let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
         let enabled_listeners: Vec<ProxyListenerConfig> = if let Some(explicit) =
@@ -273,148 +397,61 @@ impl State {
             base.bind_address = listen.to_string();
             vec![base]
         };
-        let authority = self.authority().await?;
-        let (plugin_flow_hook, plugin_ws_hook) = self.build_proxy_plugin_hooks();
-        let shared_connections = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
-        let shared_requests = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
-        let shared_injectors = mio_proxy::WebSocketInjectorRegistry::new();
-        let annotation_tracker =
-            annotated_flows_tracker(self.annotated_flows.clone(), self.cancel.clone());
-        let drop_scope_fn = build_drop_out_of_scope_fn(workspace.scope.clone());
-        let cert_callback = self.build_server_cert_callback(project);
-        let tls_fail_callback = self.build_client_tls_failure_callback(project);
-        let mut handles: Vec<(Uuid, ProxyHandle)> = Vec::new();
-        for listener_cfg in &enabled_listeners {
-            let bind: SocketAddr = listener_cfg.bind_address.trim().parse()?;
-            ensure!(
-                bind.ip().is_loopback() || allow_non_loopback,
-                "当前监听只允许 loopback 地址"
-            );
-            let mut config = ProxyConfig::new(authority.clone());
-            config.network.listen = bind;
-            config.limits.max_connections = PROXY_MAX_CONNECTIONS;
-            config.hooks.intercept_requests = self.intercept_requests;
-            config.hooks.intercept_responses = self.intercept_responses;
-            config.network.upstream_route = upstream_route.clone();
-            config.network.upstream_route_resolver = Some(upstream_route_resolver.clone());
-            config.tls.upstream.trust = upstream_tls.clone();
-            config.tls.upstream.options = upstream_tls_options;
-            config.network.hostname_overrides = hostname_overrides.clone();
-            config.limits.request_timeout = request_timeout;
-            config.limits.streaming_timeout = streaming_timeout;
-            apply_listener_and_workspace_options(
-                &mut config,
-                listener_cfg,
-                &workspace,
-                &eff_upstream,
-            );
-            config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
-            config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
-            config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
-            config.hooks.intercept_filter = Some(crate::http::build_intercept_filter(
-                workspace.proxy_interception.clone(),
-                workspace.scope.clone(),
-            )?);
-            config.hooks.websocket_intercept_filter =
-                Some(crate::http::build_websocket_intercept_filter(
-                    workspace.proxy_websocket_interception,
-                    workspace.scope.clone(),
-                )?);
-            config.hooks.flow_transform = crate::http::build_flow_transform_with_scope_and_provenance(
-                workspace.match_and_replace_rules.clone(),
-                workspace.proxy_messages,
-                workspace.scope.clone(),
-                Some(self.provenance.clone()),
-            )?;
-            config.hooks.ssl_pass_through = crate::http::build_ssl_pass_through_matcher(
-                &workspace.ssl_pass_through_rules,
-            )?;
-            config.hooks.websocket_transform = crate::http::build_websocket_transform_with_scope(
-                workspace.ws_match_and_replace_rules.clone(),
-                workspace.proxy_messages.ws_match_replace_in_scope_only,
-                workspace.scope.clone(),
-            )?;
-            config.tls.upstream.client_certificates = client_certificates.clone();
-            config.shared.connections = Some(shared_connections.clone());
-            config.shared.requests = Some(shared_requests.clone());
-            config.shared.injectors = Some(shared_injectors.clone());
-            config.hooks.annotation_checker = Some(annotation_tracker.clone());
-            config.hooks.async_flow_hook = plugin_flow_hook.clone();
-            config.hooks.async_websocket_hook = plugin_ws_hook.clone();
-            let proxy = mio_proxy::start(config, project, self.proxy_sender.clone()).await;
-            match proxy {
-                Ok(proxy) => {
-                    handles.push((listener_cfg.id, proxy));
-                }
-                Err(error) => {
-                    for (_, started) in &handles {
-                        started.request_stop();
-                    }
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                    for (_, started) in &mut handles {
-                        let _ = tokio::time::timeout_at(deadline, started.stop()).await;
-                    }
-                    self.proxy = None;
-                    self.primary_proxy_id = None;
-                    self.extra_proxies.clear();
-                    return Err(error.into());
-                }
-            }
-        }
-        if !handles.is_empty() {
-            let (first_id, first) = handles.remove(0);
-            self.proxy = Some(first);
-            self.primary_proxy_id = Some(first_id);
-        }
-        self.extra_proxies.extend(handles);
-        self.ws_repeater
-            .set_injectors(self.proxy.as_ref().map(ProxyHandle::websocket_injectors));
-        self.proxy_state().await;
-        Ok(())
+        let desired_listeners: Vec<(ProxyListenerConfig, SocketAddr)> = enabled_listeners
+            .into_iter()
+            .map(|listener_cfg| {
+                let bind: SocketAddr = listener_cfg.bind_address.trim().parse()?;
+                ensure!(
+                    bind.ip().is_loopback() || allow_non_loopback,
+                    "当前监听只允许 loopback 地址"
+                );
+                Ok((listener_cfg, bind))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Box::pin(self.start_proxy_listeners(
+            project,
+            &workspace,
+            &net,
+            &desired_listeners,
+            false,
+        ))
+        .await
     }
 
     pub(super) async fn stop_single_proxy_listener(&mut self, listener_id: Uuid) -> Result<()> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let mut stopped_any = false;
-        if self.proxy.is_some()
-            && self.primary_proxy_id.unwrap_or(Uuid::from_u128(1)) == listener_id
+        if self.proxy.primary.is_some()
+            && self.proxy.primary_id.unwrap_or(Uuid::from_u128(1)) == listener_id
         {
-            if let Some(mut primary) = self.proxy.take() {
+            if let Some(mut primary) = self.proxy.primary.take() {
                 primary.request_stop();
                 let _ = tokio::time::timeout_at(deadline, primary.stop()).await;
                 stopped_any = true;
             }
-            if !self.extra_proxies.is_empty() {
-                let (next_id, next_handle) = self.extra_proxies.remove(0);
-                self.proxy = Some(next_handle);
-                self.primary_proxy_id = Some(next_id);
+            if !self.proxy.extra.is_empty() {
+                let (next_id, next_handle) = self.proxy.extra.remove(0);
+                self.proxy.primary = Some(next_handle);
+                self.proxy.primary_id = Some(next_id);
             } else {
-                self.primary_proxy_id = None;
+                self.proxy.primary_id = None;
             }
         } else if let Some(pos) = self
-            .extra_proxies
+            .proxy
+            .extra
             .iter()
             .position(|(id, _)| *id == listener_id)
         {
-            let (_, mut handle) = self.extra_proxies.remove(pos);
+            let (_, mut handle) = self.proxy.extra.remove(pos);
             handle.request_stop();
             let _ = tokio::time::timeout_at(deadline, handle.stop()).await;
             stopped_any = true;
         }
         ensure!(stopped_any, "未找到正在运行的指定 Proxy 监听器");
         self.ws_repeater
-            .set_injectors(self.proxy.as_ref().map(ProxyHandle::websocket_injectors));
+            .set_injectors(self.proxy.websocket_injectors());
         self.proxy_state().await;
-        let mut listeners = Vec::new();
-        if let Some(proxy) = &self.proxy {
-            listeners.push((
-                self.primary_proxy_id.unwrap_or(Uuid::from_u128(1)),
-                proxy.address(),
-            ));
-        }
-        for (id, proxy) in &self.extra_proxies {
-            listeners.push((*id, proxy.address()));
-        }
+        let listeners = self.proxy.active_listeners();
         self.emit(Event::ProxyListeners {
             project: self.project,
             listeners,
@@ -427,40 +464,15 @@ impl State {
         &mut self,
         workspace: &Workspace,
     ) -> Result<()> {
-        if self.proxy.is_none() && self.extra_proxies.is_empty() {
+        if !self.proxy.is_running() {
             return Ok(());
         }
         let allow_non_loopback =
             std::env::var_os("MIO_ALLOW_NON_LOOPBACK_PROXY").is_some_and(|v| v == "1");
-        let upstream_tls = self
-            .preferences
-            .effective_upstream_tls(&workspace.upstream_tls)?;
-        let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
-        let eff_upstream = workspace
-            .upstream_proxy
-            .effective_for_runtime(&self.user_level_connections_cache);
-        let upstream_route = eff_upstream
-            .to_route_with_tls(upstream_tls.clone())?;
-        let upstream_route_resolver = eff_upstream
-            .build_route_resolver(upstream_tls.clone())?;
-        let hostname_overrides = eff_upstream.compiled_hostname_overrides()?;
-        let request_timeout = Duration::from_secs(
-            workspace
-                .repeater_settings
-                .request_timeout_secs
-                .clamp(1, 3600),
-        );
-        let streaming_timeout = eff_upstream
-            .effective_streaming_timeout()
-            .or_else(|| workspace.repeater_settings.effective_streaming_timeout());
+        let net = self.build_proxy_runtime_net_config(workspace, false)?;
 
-        let mut current_addrs = Vec::new();
-        if let Some(proxy) = &self.proxy {
-            current_addrs.push(proxy.address());
-        }
-        for (_, proxy) in &self.extra_proxies {
-            current_addrs.push(proxy.address());
-        }
+        let current_addrs: Vec<SocketAddr> =
+            self.proxy.handles().map(ProxyHandle::address).collect();
 
         let listeners = workspace.effective_proxy_listeners();
         let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
@@ -486,128 +498,36 @@ impl State {
                     .collect::<Result<Vec<_>>>()?
             } else if let Some(&first_cur) = current_addrs.first() {
                 let mut base = listeners.first().cloned().unwrap_or_default();
-                base.id = self.primary_proxy_id.unwrap_or(base.id);
+                base.id = self.proxy.primary_id.unwrap_or(base.id);
                 vec![(base, first_cur)]
             } else {
                 return Ok(());
             };
 
         self.stop_proxy().await?;
-
-        let authority = self.authority().await?;
-        let (plugin_flow_hook, plugin_ws_hook) = self.build_proxy_plugin_hooks();
-        let shared_connections = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
-        let shared_requests = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
-        let shared_injectors = mio_proxy::WebSocketInjectorRegistry::new();
-        let annotation_tracker =
-            annotated_flows_tracker(self.annotated_flows.clone(), self.cancel.clone());
-        let drop_scope_fn = build_drop_out_of_scope_fn(workspace.scope.clone());
-        let cert_callback = self.build_server_cert_callback(self.project);
-        let tls_fail_callback = self.build_client_tls_failure_callback(self.project);
-        let ssl_matcher = crate::http::build_ssl_pass_through_matcher(
-            &workspace.ssl_pass_through_rules,
-        )?;
-        let ws_transform = crate::http::build_websocket_transform_with_scope(
-            workspace.ws_match_and_replace_rules.clone(),
-            workspace.proxy_messages.ws_match_replace_in_scope_only,
-            workspace.scope.clone(),
-        )?;
-        let mut handles: Vec<(Uuid, ProxyHandle)> = Vec::new();
-        for (listener_cfg, bind) in &desired_listeners {
-            let mut config = ProxyConfig::new(authority.clone());
-            config.network.listen = *bind;
-            config.limits.max_connections = PROXY_MAX_CONNECTIONS;
-            config.hooks.intercept_requests = self.intercept_requests;
-            config.hooks.intercept_responses = self.intercept_responses;
-            config.network.upstream_route = upstream_route.clone();
-            config.network.upstream_route_resolver = Some(upstream_route_resolver.clone());
-            config.tls.upstream.trust = upstream_tls.clone();
-            config.tls.upstream.options = upstream_tls_options;
-            config.network.hostname_overrides = hostname_overrides.clone();
-            config.limits.request_timeout = request_timeout;
-            config.limits.streaming_timeout = streaming_timeout;
-            apply_listener_and_workspace_options(
-                &mut config,
-                listener_cfg,
-                workspace,
-                &eff_upstream,
-            );
-            config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
-            config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
-            config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
-            config.hooks.intercept_filter = Some(crate::http::build_intercept_filter(
-                workspace.proxy_interception.clone(),
-                workspace.scope.clone(),
-            )?);
-            config.hooks.websocket_intercept_filter =
-                Some(crate::http::build_websocket_intercept_filter(
-                    workspace.proxy_websocket_interception,
-                    workspace.scope.clone(),
-                )?);
-            config.hooks.flow_transform = crate::http::build_flow_transform_with_scope_and_provenance(
-                workspace.match_and_replace_rules.clone(),
-                workspace.proxy_messages,
-                workspace.scope.clone(),
-                Some(self.provenance.clone()),
-            )?;
-            config.hooks.ssl_pass_through = ssl_matcher.clone();
-            config.hooks.websocket_transform = ws_transform.clone();
-            config.tls.upstream.client_certificates = self.compiled_client_certs.clone();
-            config.shared.connections = Some(shared_connections.clone());
-            config.shared.requests = Some(shared_requests.clone());
-            config.shared.injectors = Some(shared_injectors.clone());
-            config.hooks.annotation_checker = Some(annotation_tracker.clone());
-            config.hooks.async_flow_hook = plugin_flow_hook.clone();
-            config.hooks.async_websocket_hook = plugin_ws_hook.clone();
-            match mio_proxy::start(config, self.project, self.proxy_sender.clone()).await {
-                Ok(proxy) => handles.push((listener_cfg.id, proxy)),
-                Err(error) => {
-                    for (_, started) in &handles {
-                        started.request_stop();
-                    }
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                    for (_, started) in &mut handles {
-                        let _ = tokio::time::timeout_at(deadline, started.stop()).await;
-                    }
-                    self.proxy = None;
-                    self.primary_proxy_id = None;
-                    self.extra_proxies.clear();
-                    self.ws_repeater.set_injectors(None);
-                    self.proxy_state().await;
-                    return Err(error.into());
-                }
-            }
-        }
-        if !handles.is_empty() {
-            let (first_id, first) = handles.remove(0);
-            self.proxy = Some(first);
-            self.primary_proxy_id = Some(first_id);
-        }
-        self.extra_proxies.extend(handles);
-        self.ws_repeater
-            .set_injectors(self.proxy.as_ref().map(ProxyHandle::websocket_injectors));
-        self.proxy_state().await;
-        Ok(())
+        let project = self.project;
+        Box::pin(self.start_proxy_listeners(
+            project,
+            workspace,
+            &net,
+            &desired_listeners,
+            true,
+        ))
+        .await
     }
 
     pub(super) fn build_server_cert_callback(
         &self,
         project: ProjectKey,
     ) -> mio_proxy::ServerCertObservedCallback {
-        let tx = self.server_cert_tx.clone();
-        Arc::new(move |info: mio_proxy::ObservedCertInfo| {
-            let _ = tx.try_send((project, ObservedServerCert::from(info)));
-        })
+        self.tls.build_server_cert_callback(project)
     }
 
     pub(super) fn build_client_tls_failure_callback(
         &self,
         project: ProjectKey,
     ) -> mio_proxy::ClientTlsFailureCallback {
-        let tx = self.tls_failure_tx.clone();
-        Arc::new(move |host: String, port: u16| {
-            let _ = tx.try_send((project, host, port));
-        })
+        self.tls.build_client_tls_failure_callback(project)
     }
 
     pub(super) async fn open_configured_browser(
@@ -645,24 +565,23 @@ impl State {
             .filter(|u| !u.is_empty())
             .unwrap_or_else(|| "about:blank".into());
         self.sessions
+            .runtime
             .stage_browser_navigation_session(&target_url, &session)?;
         let mut intercept_disabled = false;
-        if self.intercept_requests || self.intercept_responses {
-            self.intercept_requests = false;
-            self.intercept_responses = false;
-            if let Some(proxy) = &self.proxy {
-                proxy.set_intercept(false, false);
-            }
-            for (_, proxy) in &self.extra_proxies {
-                proxy.set_intercept(false, false);
-            }
+        if self.proxy.intercept_requests || self.proxy.intercept_responses {
+            self.proxy.set_intercept(false, false);
             intercept_disabled = true;
         }
-        if self.proxy.is_none() {
-            let workspace = self.store.workspace()?;
-            let listen: SocketAddr = workspace
-                .proxy_listener_or_default()
-                .trim()
+        if self.proxy.primary.is_none() {
+            let workspace = self.store.metadata().workspace()?;
+            let listeners = workspace.effective_proxy_listeners();
+            let primary_addr = listeners
+                .iter()
+                .find(|l| l.enabled)
+                .or_else(|| listeners.first())
+                .map(|l| l.bind_address.trim())
+                .unwrap_or(DEFAULT_PROXY_LISTENER);
+            let listen: SocketAddr = primary_addr
                 .parse()
                 .context("Proxy 监听地址不是合法的 IP:Port")?;
             self.start_proxy_with_override(project, listen, None)
@@ -675,8 +594,7 @@ impl State {
         }
         let address = self
             .proxy
-            .as_ref()
-            .map(ProxyHandle::address)
+            .primary_address()
             .context("Proxy 监听器尚未绑定地址")?;
         let authority = self.authority().await?;
         let spki_base64 = authority.spki_sha256_base64()?;
@@ -964,8 +882,8 @@ mod tests {
             ..ProxyListenerConfig::default()
         }];
         state.store.save_workspace(&ws).unwrap();
-        state.intercept_requests = true;
-        state.intercept_responses = true;
+        state.proxy.intercept_requests = true;
+        state.proxy.intercept_responses = true;
 
         let temp = tempfile::tempdir().unwrap();
         let identity_dir = temp.path().join("identity");
@@ -984,8 +902,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!state.intercept_requests && !state.intercept_responses);
-        assert!(state.proxy.is_some());
+        assert!(!state.proxy.intercept_requests && !state.proxy.intercept_responses);
+        assert!(state.proxy.primary.is_some());
         let profile_dir = temp.path().join("browser-profile-original-session");
         assert!(profile_dir.join("mio-ca.cer").is_file());
         assert!(profile_dir.join("mio-ca.pem").is_file());
@@ -1002,6 +920,7 @@ mod tests {
         };
         let (changed, _) = state
             .sessions
+            .runtime
             .apply_before_send_with_steps(
                 SessionTool::Proxy,
                 &mut probe_req,

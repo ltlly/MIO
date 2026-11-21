@@ -194,7 +194,7 @@ impl State {
         if let Ok(config) = Self::ws_repeater_send_config(
             &self.preferences,
             workspace,
-            self.compiled_client_certs.clone(),
+            self.tls.compiled_client_certs.clone(),
         ) {
             self.ws_repeater.set_connect_config(config);
         }
@@ -203,11 +203,11 @@ impl State {
     pub(crate) async fn sync_compiled_client_certs(&mut self, workspace: &Workspace) {
         let rules = workspace.client_certificates.clone();
         if rules.is_empty() {
-            self.compiled_client_certs = Arc::from([]);
+            self.tls.compiled_client_certs = Arc::from([]);
             return;
         }
         if let Ok(certs) = self.compile_client_certificates(&rules).await {
-            self.compiled_client_certs = certs;
+            self.tls.compiled_client_certs = certs;
         }
     }
 
@@ -247,18 +247,15 @@ impl State {
     }
 
     fn refresh_ws_repeater_runtime_config(&mut self) -> Result<()> {
-        let workspace = self.store.workspace()?;
+        let workspace = self.store.metadata().workspace()?;
         let config = Self::ws_repeater_send_config(
             &self.preferences,
             &workspace,
-            self.compiled_client_certs.clone(),
+            self.tls.compiled_client_certs.clone(),
         )?;
         self.ws_repeater.set_connect_config(config);
-        self.ws_repeater.set_injectors(
-            self.proxy
-                .as_ref()
-                .map(mio_proxy::ProxyHandle::websocket_injectors),
-        );
+        self.ws_repeater
+            .set_injectors(self.proxy.websocket_injectors());
         Ok(())
     }
 
@@ -339,11 +336,8 @@ impl State {
                     return;
                 }
                 if matches!(other, WebSocketRepeaterCommand::Send { .. }) {
-                    self.ws_repeater.set_injectors(
-                        self.proxy
-                            .as_ref()
-                            .map(mio_proxy::ProxyHandle::websocket_injectors),
-                    );
+                    self.ws_repeater
+                        .set_injectors(self.proxy.websocket_injectors());
                 }
                 other
             }

@@ -286,7 +286,7 @@ pub(in crate::store::intruder) fn write_result_notes(
         current_revision == expected_notes_revision,
         "Intruder 结果备注 revision 已改变；未覆盖（当前 {current_revision}）"
     );
-    let revision = next_revision(expected_notes_revision)?;
+    let revision = next_revision(expected_notes_revision);
     let changed = transaction.execute(
         "UPDATE intruder_results SET notes=?1,notes_revision=?2
          WHERE run=?3 AND ordinal=?4 AND notes_revision=?5",
@@ -358,7 +358,7 @@ pub(in crate::store::intruder) fn write_result_highlights(
         let _ = current_notes_revision;
         let _ = current;
         ensure!(current.is_some(), "Intruder 基准请求尚未派发；不能设置高亮");
-        let revision = next_revision(expected_highlight_revision)?;
+        let revision = next_revision(expected_highlight_revision);
         let changed = transaction.execute(
             "UPDATE intruder_results SET highlight=?1,highlight_revision=?2
              WHERE run=?3 AND ordinal=?4 AND highlight_revision=?5",

@@ -11,7 +11,7 @@ const MAX_LOGGER_PAGE_LIMIT: usize = 200;
 const MAX_LOGGER_PAGE_SUMMARY_BYTES: usize = 1024 * 1024;
 const LOGGER_QUERY_BUDGET: Duration = Duration::from_secs(5);
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
     pub fn logger_history_page(
         &self,
         offset: usize,
@@ -35,12 +35,12 @@ impl ProjectStore {
         check_logger_cancel(cancel, Instant::now() + LOGGER_QUERY_BUDGET)?;
         let deadline = Instant::now() + LOGGER_QUERY_BUDGET;
         let interrupt = cancel.clone();
-        self.connection.progress_handler(
+        self.0.connection.progress_handler(
             1000,
             Some(move || interrupt.is_cancelled() || Instant::now() >= deadline),
         );
         let result = (|| -> Result<(usize, Vec<FlowSummary>)> {
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = self.0.connection.unchecked_transaction()?;
             let invalid: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM flows WHERE typeof(summary)!='blob' OR length(summary)>?1
                     OR NOT json_valid(CAST(summary AS TEXT)) OR json_type(CAST(summary AS TEXT))!='object'
@@ -116,7 +116,7 @@ impl ProjectStore {
             transaction.commit()?;
             Ok((total, page))
         })();
-        self.connection.progress_handler(0, None::<fn() -> bool>);
+        self.0.connection.progress_handler(0, None::<fn() -> bool>);
         match result {
             Err(error)
                 if cancel.is_cancelled()
@@ -133,7 +133,9 @@ impl ProjectStore {
             other => other,
         }
     }
+}
 
+impl crate::store::FlowsRepo<&mut ProjectStore> {
     pub fn delete_live_proxy_flows(&mut self, flow_ids: &[FlowId]) -> Result<Vec<FlowId>> {
         ensure!(
             !flow_ids.is_empty() && flow_ids.len() <= 500,
@@ -143,12 +145,13 @@ impl ProjectStore {
         let mut seen = std::collections::HashSet::with_capacity(flow_ids.len());
         for &flow_id in flow_ids {
             ensure!(!flow_id.is_nil(), "HTTP 历史记录 ID 不能为空");
-            self.reject_session_intruder_flow_write(flow_id)?;
+            self.0.intruder().reject_session_flow_write(flow_id)?;
             if seen.insert(flow_id) {
                 unique_ids.push(flow_id);
             }
         }
         let tx = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         crate::store::schema_guard::validate(&tx)?;
@@ -229,7 +232,7 @@ impl ProjectStore {
 
     pub fn clear_live_proxy_history(&mut self) -> Result<Vec<FlowId>> {
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.connection,
+            &self.0.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
         crate::store::schema_guard::validate(&tx)?;
@@ -275,7 +278,7 @@ impl ProjectStore {
                     "HTTP 历史记录 {flow_id} 摘要状态或归属不一致"
                 );
                 if !pinned_flows.contains(&flow_id) {
-                    self.reject_session_intruder_flow_write(flow_id)?;
+                    self.0.intruder().reject_session_flow_write(flow_id)?;
                     deleted_ids.push(flow_id);
                 }
             }

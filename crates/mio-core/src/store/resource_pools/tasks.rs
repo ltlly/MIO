@@ -75,21 +75,12 @@ fn reassigned_workspace(
         {
             let to = to.context("Intruder 默认资源池缺失；未改变配置")?;
             tab.spec.resource_pool = Some(IntruderPoolSelection::Existing(to));
-            tab.spec.revision = tab
-                .spec
-                .revision
-                .checked_add(1)
-                .filter(|n| *n <= i64::MAX as u64)
-                .context("Intruder 配置 revision 已耗尽")?;
+            tab.spec.revision += 1;
             count += 1;
         }
     }
     if count != 0 {
-        workspace.revision = workspace
-            .revision
-            .checked_add(1)
-            .filter(|n| *n <= i64::MAX as u64)
-            .context("工作区 revision 已耗尽")?;
+        workspace.revision += 1;
     }
     workspace.validate()?;
     Ok((workspace, count))
@@ -126,20 +117,22 @@ fn apply_delete(
     })
 }
 
-impl ProjectStore {
-    pub(crate) fn intruder_pool_usage(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ResourcePoolsRepo<S> {
+    pub(crate) fn usage(
         &self,
         cancel: &CancellationToken,
     ) -> Result<IntruderPoolUsage> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
-            metadata::project_id(&transaction)? == self.id,
+            metadata::project_id(&transaction)? == self.0.id,
             "Intruder 项目归属已改变"
         );
-        usage(&transaction, &self.intruder_sessions, cancel)
+        usage(&transaction, &self.0.intruder_sessions, cancel)
     }
+}
 
-    pub(crate) fn delete_intruder_resource_pool(
+impl crate::store::ResourcePoolsRepo<&mut ProjectStore> {
+    pub(crate) fn delete(
         &mut self,
         project: ProjectKey,
         pool_id: Uuid,
@@ -155,12 +148,13 @@ impl ProjectStore {
         let mut confirmed_workspace = None;
         let result = (|| -> Result<IntruderPoolDeleteReceipt> {
             ensure!(
-                project.id == self.id && !pool_id.is_nil(),
+                project.id == self.0.id && !pool_id.is_nil(),
                 "Intruder 资源池项目或身份无效"
             );
             ensure!(!cancel.is_cancelled(), "Intruder 资源池删除已取消");
-            self.intruder_sessions.check_pool_delete_owner(project)?;
+            self.0.intruder_sessions.check_pool_delete_owner(project)?;
             let preview = self
+                .0
                 .connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             ensure!(
@@ -184,7 +178,7 @@ impl ProjectStore {
                 workspace.revision == expected_workspace_revision,
                 "工作区 revision 已改变；未删除资源池"
             );
-            let used = usage(&preview, &self.intruder_sessions, cancel)?
+            let used = usage(&preview, &self.0.intruder_sessions, cancel)?
                 .requires_confirmation
                 .contains(&pool_id)
                 || has_in_flight;
@@ -206,12 +200,14 @@ impl ProjectStore {
             // Exercise every main-database constraint before the first separate Session commit.
             apply_delete(&preview, &catalog, pool_id, &workspace, cancel)?;
             if let Some(default) = catalog.default_pool_id {
-                self.intruder_sessions
+                self.0
+                    .intruder_sessions
                     .preflight_pool_delete(&preview, pool_id, default, cancel)?;
             }
             preview.rollback()?;
             if initialize {
                 let transaction = self
+                    .0
                     .connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 ensure!(
@@ -236,6 +232,7 @@ impl ProjectStore {
                 confirmed_catalog = Some(catalog.clone());
             }
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             ensure!(
@@ -248,7 +245,7 @@ impl ProjectStore {
             );
             let mut receipt = apply_delete(&transaction, &catalog, pool_id, &workspace, cancel)?;
             if let Some(default) = catalog.default_pool_id {
-                self.intruder_sessions.reassign_deleted_pool(
+                self.0.intruder_sessions.reassign_deleted_pool(
                     &transaction,
                     pool_id,
                     default,
@@ -270,8 +267,14 @@ impl ProjectStore {
             reassigned_sessions: changed_sessions,
             default_pool_created: default_created,
             // Global shutdown can interrupt fresh SQL reads after a committed Session/default.
-            catalog: self.intruder_resource_pools().ok().or(confirmed_catalog),
-            workspace: self.workspace().ok().or(confirmed_workspace).map(Box::new),
+            catalog: self.0.resource_pools().list().ok().or(confirmed_catalog),
+            workspace: self
+                .0
+                .metadata()
+                .workspace()
+                .ok()
+                .or(confirmed_workspace)
+                .map(Box::new),
         })
     }
 }

@@ -18,7 +18,7 @@ async fn full_ui_queue_cannot_interrupt_durable_proxy_stop_drain() {
     for record in [&first, &second] {
         let (reply, decision) = oneshot::channel();
         decisions.push(decision);
-        state.pending.insert(
+        state.proxy.pending.insert(
             record.summary.id,
             Pending {
                 revision: 1,
@@ -30,7 +30,7 @@ async fn full_ui_queue_cannot_interrupt_durable_proxy_stop_drain() {
             },
         );
         state
-            .proxy_sender
+            .proxy.sender
             .try_send(ProxyEvent::Captured {
                 project: state.project,
                 record: record.clone(),
@@ -56,7 +56,7 @@ async fn full_ui_queue_cannot_interrupt_durable_proxy_stop_drain() {
         "Stop must drain final captures without waiting for UI event capacity"
     );
     assert_eq!(final_record, Some(second.clone()));
-    assert!(state.pending.is_empty());
+    assert!(state.proxy.pending.is_empty());
     for mut decision in decisions {
         assert!(matches!(
             decision.try_recv(),
@@ -87,7 +87,7 @@ async fn full_ui_queue_cannot_interrupt_durable_proxy_stop_drain() {
     assert!(
         matches!(notifications[3], Event::ProxyState { project, address: None, .. } if project == state.project)
     );
-    assert!(state.proxy_notifications.is_empty());
+    assert!(state.proxy.notifications.is_empty());
     assert!(received.try_recv().is_err());
 }
 
@@ -106,7 +106,7 @@ async fn proxy_stop_outbox_preserves_each_storage_error_and_blocks_new_command_a
         second.summary.id = Uuid::new_v4();
         for record in [&first, &second] {
             state
-                .proxy_sender
+                .proxy.sender
                 .try_send(ProxyEvent::Captured {
                     project,
                     record: record.clone(),
@@ -225,7 +225,7 @@ async fn proxy_stop_outbox_preserves_each_storage_error_and_blocks_new_command_a
     state.store.reject_writes(true);
     for _ in 0..2 {
         state
-            .proxy_sender
+            .proxy.sender
             .try_send(ProxyEvent::Captured {
                 project: state.project,
                 record: tests::completed_flow(),
@@ -241,7 +241,7 @@ async fn proxy_stop_outbox_preserves_each_storage_error_and_blocks_new_command_a
             .unwrap()
             .is_err()
     );
-    assert_eq!(state.recovery.len(), 2);
+    assert_eq!(state.storage.recovery.len(), 2);
     assert!(matches!(received.try_recv().unwrap(), Event::Stopped));
     let notifications = tokio::time::timeout(Duration::from_secs(1), async {
         let (_, notifications) = tokio::join!(state.flush_proxy_notifications(), async {
@@ -261,7 +261,7 @@ async fn proxy_stop_outbox_preserves_each_storage_error_and_blocks_new_command_a
         notifications[3],
         Event::ProxyState { address: None, .. }
     ));
-    assert!(state.proxy_notifications.is_empty());
+    assert!(state.proxy.notifications.is_empty());
 }
 
 #[tokio::test]
@@ -271,7 +271,7 @@ async fn sse_head_only_rejections_keep_pending_and_allow_one_valid_forward() {
     let id = Uuid::new_v4();
     let (reply, mut decision) = oneshot::channel();
     let sample = tests::completed_flow();
-    state.pending.insert(
+    state.proxy.pending.insert(
         id,
         Pending {
             revision: 7,
@@ -316,7 +316,7 @@ async fn sse_head_only_rejections_keep_pending_and_allow_one_valid_forward() {
             result.is_err(),
             "unsupported SSE replacement {kind} must be rejected"
         );
-        assert!(state.pending.contains_key(&id));
+        assert!(state.proxy.pending.contains_key(&id));
         assert!(matches!(
             decision.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -335,7 +335,7 @@ async fn sse_head_only_rejections_keep_pending_and_allow_one_valid_forward() {
         })
         .await
         .unwrap();
-    assert!(!state.pending.contains_key(&id));
+    assert!(!state.proxy.pending.contains_key(&id));
     assert!(
         matches!(decision.await.unwrap(), InterceptDecision::ForwardResponse(actual) if actual == head)
     );
@@ -368,15 +368,15 @@ async fn full_proxy_queue_and_storage_failure_still_preserve_the_terminal_record
         let (events, _receiver) = mpsc::channel(32);
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         let (sender, proxy_events) = mpsc::channel(1);
-        state.proxy_events = proxy_events;
-        state.proxy_sender = sender.clone();
+        state.proxy.events = proxy_events;
+        state.proxy.sender = sender.clone();
         let config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-        state.proxy = Some(
+        state.proxy.primary = Some(
             mio_proxy::start(config, state.project, sender)
                 .await
                 .unwrap(),
         );
-        let mut client = TcpStream::connect(state.proxy.as_ref().unwrap().address())
+        let mut client = TcpStream::connect(state.proxy.primary.as_ref().unwrap().address())
             .await
             .unwrap();
         client
@@ -388,14 +388,14 @@ async fn full_proxy_queue_and_storage_failure_still_preserve_the_terminal_record
             .unwrap();
         client.write_all(&[0, 0xff, b'T']).await.unwrap();
         assert_eq!(received.await.unwrap(), [0, 0xff, b'T']);
-        assert_eq!(state.proxy_events.len(), 1);
+        assert_eq!(state.proxy.events.len(), 1);
         state.store.reject_writes(true);
         let stopped = state.stop_proxy().await;
         assert!(matches!(client.read(&mut [0; 1]).await, Ok(0) | Err(_)));
         source.await.unwrap();
         assert!(stopped.is_err(), "storage failure must be visible");
         let record = &state
-            .recovery
+            .storage.recovery
             .back()
             .expect("unsaved traffic remains recoverable")
             .record;
@@ -406,7 +406,7 @@ async fn full_proxy_queue_and_storage_failure_still_preserve_the_terminal_record
         );
         assert_eq!(record.request.body, [0, 0xff, b'T']);
         assert_eq!(state.read_flow(record.summary.id).unwrap(), *record);
-        assert!(state.proxy.is_none());
+        assert!(state.proxy.primary.is_none());
     })
     .await
     .expect("bounded real socket Stop and fixture cleanup");

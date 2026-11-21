@@ -29,20 +29,22 @@ pub(in crate::store) fn workspace_arc_in_tx(
     Ok(workspace)
 }
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> MetadataRepo<S> {
     pub fn workspace(&self) -> Result<Workspace> {
         self.workspace_arc().map(|ws| (*ws).clone())
     }
 
     pub(crate) fn workspace_arc(&self) -> Result<Arc<Workspace>> {
         let data_version: i64 =
-            self.connection
+            self.0
+                .connection
                 .pragma_query_value(None, "data_version", |row| row.get(0))?;
         let schema_version: i64 =
-            self.connection
+            self.0
+                .connection
                 .pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        let total_changes = query_total_changes(&self.connection)?;
-        if let Ok(guard) = self.cache.lock()
+        let total_changes = query_total_changes(&self.0.connection)?;
+        if let Ok(guard) = self.0.cache.lock()
             && let Some(cached) = guard.workspace.as_ref()
             && cached.data_version == data_version
             && cached.schema_version == schema_version
@@ -50,7 +52,7 @@ impl ProjectStore {
         {
             return Ok(Arc::clone(&cached.workspace));
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let tx_dv: i64 =
             transaction.pragma_query_value(None, "data_version", |row| row.get(0))?;
         let tx_sv: i64 =
@@ -58,7 +60,7 @@ impl ProjectStore {
         let tx_tc = query_total_changes(&transaction)?;
         let workspace = Arc::new(metadata::workspace(&transaction)?);
         transaction.commit()?;
-        if let Ok(mut guard) = self.cache.lock() {
+        if let Ok(mut guard) = self.0.cache.lock() {
             guard.workspace = Some(WorkspaceCacheEntry {
                 data_version: tx_dv,
                 schema_version: tx_sv,
@@ -68,7 +70,35 @@ impl ProjectStore {
         }
         Ok(workspace)
     }
+}
 
+impl MetadataRepo<&mut ProjectStore> {
+    pub fn save_workspace(&mut self, workspace: &Workspace) -> Result<()> {
+        self.0.intruder().validate_session_workspace(workspace)?;
+        let transaction = self
+            .0
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        write_workspace(&transaction, workspace)?;
+        transaction.commit()?;
+        self.0.update_workspace_cache(workspace);
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_ipc_workspace(&mut self, workspace: &Workspace) -> Result<()> {
+        self.0.intruder().validate_session_workspace(workspace)?;
+        let transaction = self
+            .0
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        write_workspace_with_mode(&transaction, workspace, true)?;
+        transaction.commit()?;
+        self.0.update_workspace_cache(workspace);
+        Ok(())
+    }
+}
+
+impl ProjectStore {
     pub(in crate::store) fn invalidate_workspace_cache(&self) {
         if let Ok(mut guard) = self.cache.lock() {
             guard.workspace = None;
@@ -97,28 +127,6 @@ impl ProjectStore {
                 Err(_) => None,
             };
         }
-    }
-
-    pub fn save_workspace(&mut self, workspace: &Workspace) -> Result<()> {
-        self.validate_session_workspace(workspace)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        write_workspace(&transaction, workspace)?;
-        transaction.commit()?;
-        self.update_workspace_cache(workspace);
-        Ok(())
-    }
-
-    pub(crate) fn reconcile_ipc_workspace(&mut self, workspace: &Workspace) -> Result<()> {
-        self.validate_session_workspace(workspace)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        write_workspace_with_mode(&transaction, workspace, true)?;
-        transaction.commit()?;
-        self.update_workspace_cache(workspace);
-        Ok(())
     }
 
     pub fn save(&mut self, destination: Option<&Path>) -> Result<(PathBuf, u64)> {
@@ -167,18 +175,20 @@ impl ProjectStore {
         ext_archive::http_notes::validate_changes(http_notes)?;
         ext_archive::http_highlights::validate_changes(highlights)?;
         for capture in records {
-            self.reject_session_intruder_flow_write(capture.record.summary.id)?;
+            self.intruder()
+                .reject_session_flow_write(capture.record.summary.id)?;
         }
         for mutation in intruder_mutations {
             if let IntruderMutation::Result {
                 result: Ok(record), ..
             } = mutation
             {
-                self.reject_session_intruder_flow_write(record.summary.id)?;
+                self.intruder()
+                    .reject_session_flow_write(record.summary.id)?;
             }
         }
         if let Some(workspace) = workspace {
-            self.validate_session_workspace(workspace)?;
+            self.intruder().validate_session_workspace(workspace)?;
         }
         let receipts = if let Some(destination) =
             destination.filter(|p| self.path.as_deref() != Some(p))
@@ -297,7 +307,7 @@ impl ProjectStore {
             reopened.id == self.id,
             "另存为的项目 ID 已改变；原项目与 Session 数据保留"
         );
-        self.validate_session_snapshot(&reopened)?;
+        self.intruder().validate_session_snapshot(&reopened)?;
         reopened.intruder_sessions = std::mem::take(&mut self.intruder_sessions);
         *self = reopened;
         Ok(())

@@ -75,17 +75,19 @@ fn read(connection: &Connection) -> Result<AuditStateSnapshot> {
     Ok(state)
 }
 
-impl ProjectStore {
-    pub(crate) fn read_audit_state(&self) -> Result<AuditStateSnapshot> {
-        let tx = self.connection.unchecked_transaction()?;
+impl<S: std::ops::Deref<Target = ProjectStore>> super::AuditRepo<S> {
+    pub(crate) fn read_state(&self) -> Result<AuditStateSnapshot> {
+        let tx = self.0.connection.unchecked_transaction()?;
         ensure!(
-            metadata::project_id(&tx)? == self.id,
+            metadata::project_id(&tx)? == self.0.id,
             "审计状态项目归属已改变"
         );
         read(&tx)
     }
+}
 
-    pub(crate) fn write_audit_state(
+impl super::AuditRepo<&mut ProjectStore> {
+    pub(crate) fn write_state(
         &mut self,
         next: &AuditStateSnapshot,
         cancel: &CancellationToken,
@@ -105,13 +107,14 @@ impl ProjectStore {
             "审计状态超过编码限额"
         );
         let tx = self
+            .0
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let schema: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == super::SCHEMA, "项目版本已改变；未写入审计状态");
-        super::ensure_schema_validated_in_tx(&self.cache, &tx)?;
+        super::ensure_schema_validated_in_tx(&self.0.cache, &tx)?;
         ensure!(
-            metadata::project_id(&tx)? == self.id,
+            metadata::project_id(&tx)? == self.0.id,
             "审计状态项目归属已改变"
         );
         let before_tc = super::query_total_changes(&tx)?;
@@ -122,16 +125,16 @@ impl ProjectStore {
         )?;
         ensure!(!cancel.is_cancelled(), "审计状态更新已取消");
         tx.commit()?;
-        self.advance_workspace_cache_changes(before_tc)?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
-    pub(crate) fn recover_audit_tasks_on_open(
+    pub(crate) fn recover_tasks_on_open(
         &mut self,
         pause_automated_tasks: bool,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let mut state = self.read_audit_state()?;
+        let mut state = self.0.audit().read_state()?;
         let mut changed = false;
         for task in &mut state.tasks {
             if matches!(task.state, AuditTaskState::Running | AuditTaskState::Paused) {
@@ -147,11 +150,8 @@ impl ProjectStore {
             changed = true;
         }
         if changed {
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .context("审计状态 revision 已耗尽")?;
-            self.write_audit_state(&state, cancel)?;
+            state.revision += 1;
+            self.write_state(&state, cancel)?;
         }
         Ok(())
     }

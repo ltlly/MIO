@@ -150,7 +150,7 @@ async fn terminal_discard_failure_keeps_recovery_until_explicit_save_and_retry()
     assert!(!state.intruder.has_resources());
     let unsaved = state.intruder_result_page(id, None, 1).unwrap();
     let pending = state.intruder.recovery.len();
-    let failure = state.storage_error.clone();
+    let failure = state.storage.error.clone();
     let proposal = discard_workspace(&state);
     let operation_id = Uuid::new_v4();
     state
@@ -170,7 +170,7 @@ async fn terminal_discard_failure_keeps_recovery_until_explicit_save_and_retry()
     );
     assert_eq!(state.intruder.recovery.len(), pending);
     assert!(pending > 0);
-    assert_eq!(state.storage_error, failure);
+    assert_eq!(state.storage.error, failure);
     assert_eq!(state.intruder_result_page(id, None, 1).unwrap(), unsaved);
     let directory = tempfile::tempdir().unwrap();
     save(&mut state, Some(directory.path().join("recovery.mio")))

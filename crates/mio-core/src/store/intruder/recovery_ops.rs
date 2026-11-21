@@ -141,7 +141,7 @@ pub(in crate::store::intruder) fn request_baseline<T>(
         .checked_add(1)
         .filter(|total| *total <= MAX_REQUESTS)
         .context("Intruder 基准请求超过总请求限额；未追加")?;
-    let revision = next_revision(run.revision)?;
+    let revision = next_revision(run.revision);
     let metadata: Vec<u8> = transaction
         .query_row(
             "SELECT CASE WHEN typeof(spec_meta)='blob' AND length(spec_meta)<=?2 THEN spec_meta END
@@ -220,7 +220,7 @@ pub(in crate::store::intruder) fn bind_resource_pool(
         run.resource_pool != Some(pool_id),
         "Intruder 已绑定此资源池；未重复修改"
     );
-    let revision = next_revision(expected)?;
+    let revision = next_revision(expected);
     let changed = transaction.execute(
         "UPDATE intruder_runs SET pool_id=?1,pool_revision=?2 WHERE id=?3 AND pool_revision=?4",
         params![pool_id.to_string(), revision, id.to_string(), expected],

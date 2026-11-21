@@ -317,6 +317,6 @@ async fn item_query_commands_keep_empty_slots_metadata_and_current_draft_separat
     let fragment = result.unwrap();
     assert_eq!(fragment.summary, message);
     assert_eq!(fragment.bytes, raw);
-    assert!(state.sends.is_empty());
-    assert!(state.proxy.is_none());
+    assert!(state.repeater.sends.is_empty());
+    assert!(state.proxy.primary.is_none());
 }

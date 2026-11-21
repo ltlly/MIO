@@ -16,39 +16,42 @@ pub(super) struct Reservation {
     flow: FlowId,
 }
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> store::IntruderRepo<S> {
     #[cfg(test)]
-    pub(crate) fn reject_session_intruder_writes(&self, id: Uuid, reject: bool) {
-        self.intruder_sessions.runs[&id]
+    pub(crate) fn reject_session_writes(&self, id: Uuid, reject: bool) {
+        self.0.intruder_sessions.runs[&id]
             .reject_writes
             .store(reject, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]
-    pub(crate) fn set_session_intruder_write_hook(
+    pub(crate) fn set_session_write_hook(
         &self,
         id: Uuid,
         hook: Option<super::session_data::SessionWriteHook>,
     ) {
-        *self.intruder_sessions.runs[&id]
+        *self.0.intruder_sessions.runs[&id]
             .write_hook
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
     }
 
-    pub fn is_session_intruder_run(&self, id: Uuid) -> bool {
-        self.intruder_sessions.contains(id)
+    pub fn is_session_run(&self, id: Uuid) -> bool {
+        self.0.intruder_sessions.contains(id)
     }
 
-    pub(in crate::store) fn session_intruder_cursor(&self, id: Uuid) -> Option<(i64, Uuid)> {
-        self.intruder_sessions
+    pub(in crate::store) fn session_cursor(&self, id: Uuid) -> Option<(i64, Uuid)> {
+        self.0
+            .intruder_sessions
             .runs
             .get(&id)
             .map(|dataset| (dataset.run.started_unix_ms, id))
     }
+}
 
+impl store::IntruderRepo<&mut ProjectStore> {
     #[cfg(test)]
-    pub fn create_intruder_run_with_retention(
+    pub fn create_run_with_retention(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -56,7 +59,7 @@ impl ProjectStore {
         spec: &IntruderSpec,
         started: i64,
     ) -> Result<IntruderRunSummary> {
-        self.create_intruder_run_with_pool_catalog(
+        self.create_run_with_pool_catalog(
             project,
             id,
             tab_id,
@@ -67,7 +70,7 @@ impl ProjectStore {
         .map(|(run, _)| run)
     }
 
-    pub(crate) fn create_intruder_run_with_pool_catalog(
+    pub(crate) fn create_run_with_pool_catalog(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -76,25 +79,25 @@ impl ProjectStore {
         started: i64,
         cancel: &CancellationToken,
     ) -> Result<(IntruderRunSummary, crate::IntruderResourcePools)> {
-        self.check_intruder_session_owner(project, id)?;
+        self.0.intruder().check_session_owner(project, id)?;
         ensure!(
             !cancel.is_cancelled(),
             "Intruder Start 已取消；未创建资源池或运行"
         );
         if spec.save_to_project {
-            return self
-                .create_project_intruder_run_with_pool_catalog(id, tab_id, spec, started, cancel);
+            return self.create_project_run_with_pool_catalog(id, tab_id, spec, started, cancel);
         }
         ensure!(
-            !self.intruder_sessions.contains(id),
+            !self.0.intruder_sessions.contains(id),
             "Intruder Session run ID 已存在；未开始"
         );
         ensure!(
-            self.intruder_sessions.runs.len() < MAX_SESSION_DATASETS,
+            self.0.intruder_sessions.runs.len() < MAX_SESSION_DATASETS,
             "Intruder Session 数据集达到限额；未驱逐"
         );
         let total = spec.validate()?;
         let source = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -151,10 +154,11 @@ impl ProjectStore {
             payload_configs,
         )?;
         let available = self
+            .0
             .intruder_sessions
             .quota
-            .checked_sub(self.intruder_sessions.logical_bytes)
-            .and_then(|bytes| bytes.checked_sub(self.intruder_sessions.reserved_bytes))
+            .checked_sub(self.0.intruder_sessions.logical_bytes)
+            .and_then(|bytes| bytes.checked_sub(self.0.intruder_sessions.reserved_bytes))
             .and_then(|bytes| bytes.checked_sub(STATE_RESERVE))
             .context("Intruder Session 容量不足；未开始")?;
         let logical_bytes = data.logical_bytes()?;
@@ -168,9 +172,9 @@ impl ProjectStore {
         );
         source.commit()?;
         let run = data.run.clone();
-        self.intruder_sessions.logical_bytes += logical_bytes;
-        self.intruder_sessions.reserved_bytes += STATE_RESERVE;
-        self.intruder_sessions.runs.insert(
+        self.0.intruder_sessions.logical_bytes += logical_bytes;
+        self.0.intruder_sessions.reserved_bytes += STATE_RESERVE;
+        self.0.intruder_sessions.runs.insert(
             id,
             SessionDataset {
                 data,
@@ -193,7 +197,7 @@ impl ProjectStore {
         Ok((run, catalog))
     }
 
-    pub(in crate::store) fn set_session_intruder_resource_pool(
+    pub(in crate::store) fn set_session_resource_pool(
         &mut self,
         id: Uuid,
         expected: u64,
@@ -201,12 +205,13 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<IntruderRunSummary> {
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get_mut(&id)
             .context("Intruder Session 不存在")?;
-        let ticket = self.connection.unchecked_transaction()?;
-        validate_ticket(&ticket, self.id, dataset)?;
+        let ticket = self.0.connection.unchecked_transaction()?;
+        validate_ticket(&ticket, self.0.id, dataset)?;
         let catalog = store::resource_pools::read(&ticket)?;
         ensure!(
             catalog.find(pool_id).is_some(),
@@ -230,9 +235,9 @@ impl ProjectStore {
         let growth = after.saturating_sub(before);
         ensure!(
             growth
-                <= self.intruder_sessions.quota.saturating_sub(
-                    self.intruder_sessions.logical_bytes
-                        + self.intruder_sessions.reserved_bytes
+                <= self.0.intruder_sessions.quota.saturating_sub(
+                    self.0.intruder_sessions.logical_bytes
+                        + self.0.intruder_sessions.reserved_bytes
                 ),
             "Intruder Session 配额不足；资源池绑定未改变"
         );
@@ -241,12 +246,12 @@ impl ProjectStore {
         dataset.data = staged;
         dataset.run = run.clone();
         dataset.logical_bytes += growth;
-        self.intruder_sessions.logical_bytes += growth;
+        self.0.intruder_sessions.logical_bytes += growth;
         drop(ticket);
         Ok(run)
     }
 
-    pub(in crate::store) fn request_session_intruder_baseline<T>(
+    pub(in crate::store) fn request_session_baseline<T>(
         &mut self,
         id: Uuid,
         expected_revision: u64,
@@ -254,12 +259,13 @@ impl ProjectStore {
         prepare: impl FnOnce(IntruderSpec) -> Result<T>,
     ) -> Result<(IntruderRunSummary, T)> {
         let dataset = self
+            .0
             .intruder_sessions
             .runs
             .get_mut(&id)
             .context("Intruder Session 不存在")?;
-        let ticket = self.connection.unchecked_transaction()?;
-        validate_ticket(&ticket, self.id, dataset)?;
+        let ticket = self.0.connection.unchecked_transaction()?;
+        validate_ticket(&ticket, self.0.id, dataset)?;
         validate_pool_binding(&ticket, &dataset.run)?;
         ensure!(
             dataset.data.run == dataset.run,
@@ -284,8 +290,8 @@ impl ProjectStore {
         let growth = after
             .checked_sub(before)
             .context("Intruder 基准请求字节计量回退")?;
-        let available = self.intruder_sessions.quota.saturating_sub(
-            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        let available = self.0.intruder_sessions.quota.saturating_sub(
+            self.0.intruder_sessions.logical_bytes + self.0.intruder_sessions.reserved_bytes,
         );
         ensure!(
             growth
@@ -302,8 +308,8 @@ impl ProjectStore {
         dataset.run = run.clone();
         dataset.logical_bytes += growth;
         dataset.state_reserve += state_reserve;
-        self.intruder_sessions.logical_bytes += growth;
-        self.intruder_sessions.reserved_bytes += state_reserve;
+        self.0.intruder_sessions.logical_bytes += growth;
+        self.0.intruder_sessions.reserved_bytes += state_reserve;
         drop(ticket);
         Ok((run, prepared))
     }

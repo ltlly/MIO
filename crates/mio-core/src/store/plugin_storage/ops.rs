@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AuditStateSnapshot, FlowId, MAX_AUDIT_FINDINGS, MAX_AUDIT_STATE_BYTES, MAX_AUDIT_TASKS,
     ProjectKey,
-    store::{ProjectStore, SCHEMA, audit, ensure_schema_validated_in_tx, metadata},
+    store::{
+        PluginStorageRepo, ProjectStore, SCHEMA, audit, ensure_schema_validated_in_tx, metadata,
+    },
 };
 
 use super::{
@@ -60,19 +62,19 @@ pub(in crate::store) fn audit_pinned_flows(transaction: &Transaction<'_>) -> Res
         .collect())
 }
 
-impl ProjectStore {
-    pub fn plugin_storage_get(
+impl<S: std::ops::Deref<Target = ProjectStore>> PluginStorageRepo<S> {
+    pub fn get(
         &self,
         project: ProjectKey,
         plugin_id: &str,
         key: &str,
     ) -> Result<Option<Vec<u8>>> {
-        ensure!(project.id == self.id, "插件存储项目归属不匹配");
+        ensure!(project.id == self.0.id, "插件存储项目归属不匹配");
         validate_plugin_id(plugin_id)?;
         validate_key(key)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
-            metadata::project_id(&transaction)? == project.id && self.id == project.id,
+            metadata::project_id(&transaction)? == project.id && self.0.id == project.id,
             "插件存储项目归属已改变"
         );
         let Some(map) = read_map(&transaction, plugin_id)? else {
@@ -81,8 +83,10 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(map.entries.get(key).cloned())
     }
+}
 
-    pub fn plugin_storage_set(
+impl PluginStorageRepo<&mut ProjectStore> {
+    pub fn set(
         &mut self,
         project: ProjectKey,
         plugin_id: &str,
@@ -90,21 +94,22 @@ impl ProjectStore {
         value: &[u8],
         cancel: &CancellationToken,
     ) -> Result<()> {
-        ensure!(project.id == self.id, "插件存储项目归属不匹配");
+        ensure!(project.id == self.0.id, "插件存储项目归属不匹配");
         validate_plugin_id(plugin_id)?;
         validate_key(key)?;
         validate_value(value)?;
         ensure!(!cancel.is_cancelled(), "插件存储写入已取消");
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == SCHEMA, "项目版本已改变；未写入插件存储");
         ensure!(
-            metadata::project_id(&transaction)? == project.id && self.id == project.id,
+            metadata::project_id(&transaction)? == project.id && self.0.id == project.id,
             "插件存储项目归属已改变"
         );
-        ensure_schema_validated_in_tx(&self.cache, &transaction)?;
+        ensure_schema_validated_in_tx(&self.0.cache, &transaction)?;
         ensure!(!cancel.is_cancelled(), "插件存储写入已取消");
         let mut map = read_map(&transaction, plugin_id)?.unwrap_or_default();
         if !map.entries.contains_key(key) {

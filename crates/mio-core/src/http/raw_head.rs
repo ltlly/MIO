@@ -229,7 +229,7 @@ pub fn extract_http_header_charset(bytes: &[u8]) -> Option<String> {
 }
 
 pub fn extract_content_type_essence_and_charset(content_type: &str) -> (String, Option<String>) {
-    let parsed_mime = content_type.parse::<rama::http::mime::Mime>().ok();
+    let parsed_mime = content_type.parse::<mime::Mime>().ok();
     let essence = parsed_mime
         .as_ref()
         .map(|m| m.essence_str().to_owned())
@@ -237,7 +237,7 @@ pub fn extract_content_type_essence_and_charset(content_type: &str) -> (String, 
     let charset = parsed_mime
         .as_ref()
         .and_then(|m| {
-            m.get_param(rama::http::mime::CHARSET)
+            m.get_param(mime::CHARSET)
                 .map(|v| v.as_str().to_owned())
         })
         .or_else(|| charset_from_content_type_str(content_type));

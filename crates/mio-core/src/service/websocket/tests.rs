@@ -4,7 +4,7 @@ pub(super) async fn deliver_query(state: &mut State) {
     loop {
         let signal = tokio::time::timeout(
             Duration::from_secs(3),
-            state.websocket_query.next_signal(&state.events, false),
+            state.queries.websocket.next_signal(&state.events, false),
         )
         .await
         .unwrap();

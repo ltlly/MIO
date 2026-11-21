@@ -90,7 +90,7 @@ impl State {
             }
         }
         let recovery: Vec<_> = recovery.into_values().collect();
-        let mut page = self.store.query_intruder_result_view_with_responses(
+        let mut page = self.store.intruder().query_result_view_with_responses(
             query,
             run.as_ref(),
             &recovery,

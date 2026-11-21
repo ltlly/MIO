@@ -134,7 +134,7 @@ pub(crate) fn convert(
             .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
             .map(str::to_owned);
         let source_id = Uuid::new_v4();
-        let report = store.import_ext_file_streaming(
+        let report = store.ext_archive_mut().import_file_streaming(
             source_id,
             &inspection.source_path,
             default_name,

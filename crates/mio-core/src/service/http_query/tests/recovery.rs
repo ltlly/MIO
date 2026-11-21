@@ -76,7 +76,7 @@ async fn http_query_parameterized_recovery_uses_original_requests_through_delive
             assert!(state.persist(&pending).is_err());
             latest.push(pending);
         }
-        let recovery_before = state.recovery.clone();
+        let recovery_before = state.storage.recovery.clone();
         let workspace_before = state.store.workspace().unwrap();
         let source_path = state.store.test_actual_path();
         let original_project = state.project;
@@ -100,7 +100,7 @@ async fn http_query_parameterized_recovery_uses_original_requests_through_delive
             complete_next(&mut state).await;
             let signal = tokio::time::timeout(
                 Duration::from_secs(3),
-                state.http_query.next_signal(&state.events, false),
+                state.queries.http.next_signal(&state.events, false),
             )
             .await
             .expect("completed HTTP history query must obtain its delivery slot");
@@ -125,8 +125,8 @@ async fn http_query_parameterized_recovery_uses_original_requests_through_delive
             );
             assert_eq!(result.selected_ranks, [(requested.selected_ids[0], 0)]);
             assert!(result.selected_rows.is_empty());
-            assert!(!state.http_query.has_worker());
-            assert!(state.http_query.result.is_none());
+            assert!(!state.queries.http.has_worker());
+            assert!(state.queries.http.result.is_none());
             assert!(receiver.try_recv().is_err());
             for record in &latest {
                 assert_eq!(state.read_flow(record.summary.id).unwrap(), *record);
@@ -135,7 +135,7 @@ async fn http_query_parameterized_recovery_uses_original_requests_through_delive
 
             if phase == 0 {
                 assert_eq!(state.project, original_project);
-                assert_eq!(state.recovery, recovery_before);
+                assert_eq!(state.storage.recovery, recovery_before);
                 assert_eq!(state.store.test_actual_path(), source_path);
                 for (original, changed) in originals.iter().zip(&edited) {
                     assert_eq!(
@@ -166,7 +166,7 @@ async fn http_query_parameterized_recovery_uses_original_requests_through_delive
                         saved = true;
                     }
                 }
-                assert!(saved && state.recovery.is_empty());
+                assert!(saved && state.storage.recovery.is_empty());
                 state
                     .command(Command::OpenProject {
                         path: saved_path.clone(),
@@ -211,7 +211,7 @@ fn http_query_parameterized_recovery_rejects_inconsistent_original_identity_only
     first.request.url = "http://127.0.0.1:9001/fixture/original".into();
     first.summary.url = first.request.url.clone();
     first.request.body = b"a=1".to_vec();
-    state.recovery.push_back(first.clone().into());
+    state.storage.recovery.push_back(first.clone().into());
     let recovery = state.http_recovery_snapshot().unwrap();
     let mut requested = query(state.project, 1);
     let path = state.store.test_actual_path();
@@ -274,7 +274,7 @@ fn http_recovery_snapshot_preserves_stream_original_status_and_waits_for_first_r
     request.summary.status = None;
     request.summary.response_bytes = 0;
     request.response = None;
-    state.recovery.push_back(request.clone().into());
+    state.storage.recovery.push_back(request.clone().into());
     let mut received = crate::service::tests::completed_flow();
     received.summary.id = request.summary.id;
     received.summary.source = TrafficSource::Proxy;
@@ -285,7 +285,7 @@ fn http_recovery_snapshot_preserves_stream_original_status_and_waits_for_first_r
     received.request.url = "http://127.0.0.1:9001/changed".into();
     received.summary.method = received.request.method.clone();
     received.summary.url = received.request.url.clone();
-    state.recovery.push_back(CapturedFlow {
+    state.storage.recovery.push_back(CapturedFlow {
         record: received.clone(),
         response_stream: Some(StreamedResponse {
             original_status: 201,
@@ -313,7 +313,7 @@ fn http_recovery_snapshot_preserves_stream_original_status_and_waits_for_first_r
     assert_eq!(rows[0].request.as_ref(), Some(&received.request));
     assert_eq!(rows[0].response.as_ref(), received.response.as_ref());
     state
-        .recovery
+        .storage.recovery
         .back_mut()
         .unwrap()
         .response_stream
@@ -321,7 +321,7 @@ fn http_recovery_snapshot_preserves_stream_original_status_and_waits_for_first_r
         .unwrap()
         .original_status = 0;
     assert!(state.http_recovery_snapshot().is_err());
-    assert_eq!(state.recovery.back().unwrap().record, received);
+    assert_eq!(state.storage.recovery.back().unwrap().record, received);
 }
 
 #[test]
@@ -332,11 +332,11 @@ fn oversized_http_recovery_is_rejected_instead_of_truncating_unsaved_rows() {
     template.summary.source = TrafficSource::Proxy;
     for _ in 0..512 {
         template.summary.id = Uuid::new_v4();
-        state.recovery.push_back(template.clone().into());
+        state.storage.recovery.push_back(template.clone().into());
     }
     assert_eq!(state.http_recovery_snapshot().unwrap().len(), 512);
     template.summary.id = Uuid::new_v4();
-    state.recovery.push_back(template.into());
+    state.storage.recovery.push_back(template.into());
     assert!(state.http_recovery_snapshot().is_err());
-    assert_eq!(state.recovery.len(), 513);
+    assert_eq!(state.storage.recovery.len(), 513);
 }

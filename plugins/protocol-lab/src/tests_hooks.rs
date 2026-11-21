@@ -1,3 +1,5 @@
+use mio_core::plugins::PanelState;
+
 use super::{tests_state::*, *};
 
 #[test]

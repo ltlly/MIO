@@ -76,7 +76,7 @@ pub(super) const CANONICAL: &str = "WITH addresses AS (
     )
 )";
 
-impl ProjectStore {
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
     pub fn history_page(
         &self,
         offset: usize,
@@ -89,7 +89,7 @@ impl ProjectStore {
         database_offset
             .checked_add(limit as i64)
             .context("History 分页范围溢出")?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         // Gate corrupted live_http_annotations metadata before returning any history page.
         let _ = crate::store::plugin_storage::read_live_http_annotations(&transaction)?;
         let source = proxy_source(&transaction)?;

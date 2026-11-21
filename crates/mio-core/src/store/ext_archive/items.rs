@@ -40,8 +40,8 @@ const ITEM_MESSAGE_SELECT: &str = "SELECT
     FROM ext_messages m JOIN ext_items i ON i.id=m.item JOIN ext_sources s ON s.id=i.source
     WHERE i.source=?1 AND m.item=?2 ORDER BY m.field_id LIMIT ?3 OFFSET ?4";
 
-impl ProjectStore {
-    pub fn ext_item_page(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub fn item_page(
         &self,
         source_id: Uuid,
         collection: Option<&str>,
@@ -52,7 +52,7 @@ impl ProjectStore {
         if let Some(collection) = collection {
             validate_collection(collection)?;
         }
-        if let Some(direct) = self.read_direct_ext_source()?
+        if let Some(direct) = self.read_direct_source()?
             && direct.id == source_id
         {
             return Ok(ExtItemPage {
@@ -61,7 +61,7 @@ impl ProjectStore {
                 next_offset: None,
             });
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"
@@ -121,7 +121,7 @@ impl ProjectStore {
         })
     }
 
-    pub fn ext_item_detail(
+    pub fn item_detail(
         &self,
         source_id: Uuid,
         item_id: Uuid,
@@ -129,12 +129,12 @@ impl ProjectStore {
         message_limit: usize,
     ) -> Result<ExtItemDetail> {
         let database_offset = checked_offset(message_offset, message_limit)?;
-        if let Some(direct) = self.read_direct_ext_source()?
+        if let Some(direct) = self.read_direct_source()?
             && direct.id == source_id
         {
             bail!("外部归档条目不存在或不属于当前来源");
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"
@@ -266,7 +266,7 @@ pub fn inspect_mio_ext_archive(
     ws_limit: usize,
 ) -> Result<Option<(crate::ExtCoverageReport, crate::ExtWebSocketPage)>> {
     let store = ProjectStore::open(path)?;
-    if let Some(direct) = store.read_direct_ext_source()? {
+    if let Some(direct) = store.ext_archive().read_direct_source()? {
         let coverage = direct.report.coverage_report();
         let ws_page = crate::ExtWebSocketPage {
             total: 0,
@@ -275,12 +275,12 @@ pub fn inspect_mio_ext_archive(
         };
         return Ok(Some((coverage, ws_page)));
     }
-    let mut sources = store.ext_sources()?;
+    let mut sources = store.ext_archive().sources()?;
     let Some(source) = sources.pop() else {
         return Ok(None);
     };
-    let coverage = store.ext_coverage_report(source.id)?;
-    let ws_page = store.ext_websocket_page(source.id, ws_offset, ws_limit)?;
+    let coverage = store.ext_archive().coverage_report(source.id)?;
+    let ws_page = store.ext_archive().websocket_page(source.id, ws_offset, ws_limit)?;
     Ok(Some((coverage, ws_page)))
 }
 
@@ -293,5 +293,5 @@ pub fn read_mio_ext_websocket_fragment(
     length: usize,
 ) -> Result<crate::ExtWebSocketFragment> {
     let store = ProjectStore::open(path)?;
-    store.ext_websocket_fragment(source_id, item_id, edited, offset, length)
+    store.ext_archive().websocket_fragment(source_id, item_id, edited, offset, length)
 }

@@ -11,8 +11,6 @@ httparse.workspace = true
 mime.workspace = true
 mio-plugin-api = { path = "../mio-plugin-api" }
 mio-proxy = { path = "../mio-proxy" }
-# Kept strictly for updater.rs::http_download_to_temp_file until mio-proxy exposes a chunk-streaming sink.
-rama.workspace = true
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true

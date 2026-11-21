@@ -55,10 +55,7 @@ pub(in crate::store::ext_archive) fn build_workspace(
         result.restored_groups = workspace.groups.len();
         result.gaps.append(&mut groups.gaps);
         if result.restored_groups > 0 {
-            workspace.revision = workspace
-                .revision
-                .checked_add(1)
-                .context("恢复分组时工作区 revision 已耗尽")?;
+            workspace.revision += 1;
         }
         Some(groups)
     } else {
@@ -189,10 +186,7 @@ pub(in crate::store::ext_archive) fn build_workspace(
     }
     if !workspace.tabs.is_empty() {
         if result.restored_groups == 0 {
-            workspace.revision = workspace
-                .revision
-                .checked_add(1)
-                .context("恢复工作区 revision 已耗尽")?;
+            workspace.revision += 1;
         }
         if workspace.active.is_none() {
             workspace.active = Some(workspace.tabs[0].id);

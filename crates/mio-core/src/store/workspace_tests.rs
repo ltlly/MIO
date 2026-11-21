@@ -561,8 +561,7 @@ fn phase2_workspace_fields_persist_across_reopen_and_default_from_legacy_json() 
         });
     ws.upstream_proxy.socks.bypass_hosts = vec!["localhost".into(), "*.internal".into()];
     ws.upstream_proxy.socks.override_project_only = true;
-    ws.upstream_tls.protocol_mode = crate::TlsProtocolMode::Custom;
-    ws.upstream_tls.allow_unsafe_renegotiation = true;
+    ws.upstream_tls.protocol_mode = crate::TlsProtocolMode::Default;
     ws.upstream_tls.disable_session_resume = true;
     ws.upstream_tls.client_certs_override_project_only = true;
     ws.proxy_listeners.push(crate::ProxyListenerConfig {
@@ -573,7 +572,6 @@ fn phase2_workspace_fields_persist_across_reopen_and_default_from_legacy_json() 
         custom_key_pem: Some("-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----".into()),
         ..crate::ProxyListenerConfig::default()
     });
-    ws.sessions.cookie_jar.monitor_mio_ai = true;
     ws.scheduled_tasks.push(crate::ScheduledTask {
         id: Uuid::new_v4(),
         enabled: true,

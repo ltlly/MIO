@@ -97,8 +97,8 @@ fn live_order(started_unix_ms: i64, flow_id: crate::FlowId) -> (Reverse<i64>, cr
     (Reverse(started_unix_ms), flow_id)
 }
 
-impl crate::store::ProjectStore {
-    pub fn target_site_map_snapshot(
+impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::SiteMapRepo<S> {
+    pub fn snapshot(
         &self,
         scope: &crate::TargetScope,
         query: &SiteMapQuery,
@@ -106,12 +106,12 @@ impl crate::store::ProjectStore {
     ) -> Result<SiteMapSnapshot> {
         query.validate()?;
         validate_pending(pending)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == crate::store::SCHEMA, "Site Map 项目版本已变化");
         crate::store::schema_guard::validate(&transaction)?;
         ensure!(
-            crate::store::metadata::project_id(&transaction)? == self.id,
+            crate::store::metadata::project_id(&transaction)? == self.0.id,
             "Site Map 项目 ID 已变化"
         );
         let source_id = active_ext_source(&transaction)?;

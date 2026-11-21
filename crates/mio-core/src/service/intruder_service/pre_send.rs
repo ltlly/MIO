@@ -11,7 +11,7 @@ impl State {
     ) {
         let session_hooks = self.strict_session_action_hooks();
         let http_hooks = self.tool_http_hooks();
-        let sessions = self.sessions.clone();
+        let sessions = self.sessions.runtime.clone();
         let project = self.project;
         let run = self.intruder.runs.get_mut(&id).unwrap();
         run.preparing = true;

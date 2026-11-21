@@ -75,36 +75,37 @@ impl State {
             .check_project(query.project)
             .and_then(|()| query.validate());
         if let Err(error) = valid {
-            self.websocket_query
+            self.queries
+                .websocket
                 .reject_or_record_error(query, self.project, error);
             return;
         }
-        self.websocket_history_dirty = false;
-        if let Some(query) = self.websocket_query.enqueue_or_take_start(query) {
+        self.storage.websocket_history_dirty = false;
+        if let Some(query) = self.queries.websocket.enqueue_or_take_start(query) {
             self.start_websocket_query(query);
         }
     }
 
     fn start_websocket_query(&mut self, query: WebSocketHistoryQuery) {
-        debug_assert!(self.websocket_query.active.is_none());
+        debug_assert!(self.queries.websocket.active.is_none());
         let snapshot = self
             .check_project(query.project)
             .and_then(|()| self.websocket_recovery_snapshot());
         let pending = match snapshot {
             Ok(pending) => pending,
             Err(error) => {
-                self.websocket_query.result = Some(query.result(Err(error)));
+                self.queries.websocket.result = Some(query.result(Err(error)));
                 return;
             }
         };
-        let path = self.store.websocket_query_path();
+        let path = self.store.query_path();
         let cancel = self.cancel.child_token();
         let worker_cancel = cancel.clone();
         let worker_query = query.clone();
         let worker = tokio::task::spawn_blocking(move || {
-            ProjectStore::websocket_query_snapshot(&path, &worker_query, &pending, &worker_cancel)
+            store::websocket_query_snapshot(&path, &worker_query, &pending, &worker_cancel)
         });
-        self.websocket_query.active = Some(Active {
+        self.queries.websocket.active = Some(Active {
             query,
             cancel,
             worker,
@@ -113,10 +114,11 @@ impl State {
 
     pub(super) fn websocket_query_signal(&mut self, signal: Signal) {
         match signal {
-            Signal::Ready(permit) => self.websocket_query.deliver_ready(permit),
+            Signal::Ready(permit) => self.queries.websocket.deliver_ready(permit),
             Signal::Finished(result) => {
                 if let Some(latest) = self
-                    .websocket_query
+                    .queries
+                    .websocket
                     .finish_and_take_next(result, self.project)
                 {
                     self.start_websocket_query(latest);
@@ -129,11 +131,14 @@ impl State {
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        self.websocket_query.stop_until(deadline, self.project).await
+        self.queries
+            .websocket
+            .stop_until(deadline, self.project)
+            .await
     }
 
     pub(super) async fn finish_websocket_query_shutdown(&mut self) -> Result<()> {
-        self.websocket_query.finish_shutdown(self.project).await
+        self.queries.websocket.finish_shutdown(self.project).await
     }
 }
 

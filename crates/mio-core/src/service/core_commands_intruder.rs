@@ -368,7 +368,7 @@ impl State {
             } => {
                 let result = self
                     .check_project(project)
-                    .and_then(|()| self.store.read_intruder_spec(run_id))
+                    .and_then(|()| self.store.intruder().read_spec(run_id))
                     .map(Box::new)
                     .map_err(|error| error.to_string());
                 self.queue_intruder_event(Event::IntruderSpec {

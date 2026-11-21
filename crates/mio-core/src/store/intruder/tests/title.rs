@@ -122,16 +122,6 @@ fn task_title_cas_rejects_stale_invalid_cancelled_and_failed_writes_without_retr
         ),
         ("", 2, first.revision)
     );
-    store
-        .connection
-        .execute(
-            "UPDATE intruder_runs SET title_revision=?1 WHERE id=?2",
-            params![i64::MAX, first.id.to_string()],
-        )
-        .unwrap();
-    let exhausted = store.read_intruder_run(first.id).unwrap();
-    assert!(rename(&mut store, &exhausted, "overflow").is_err());
-    assert_eq!(store.read_intruder_run(first.id).unwrap(), exhausted);
 }
 
 #[test]

@@ -1,6 +1,52 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    ops::ControlFlow,
+};
 
-use super::{validators::*, *};
+use mio_plugin_api::panel::*;
+
+fn check(condition: bool, message: &str) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn coordinate(value: f32) -> bool {
+    value.is_finite() && value.abs() <= 16_384.0
+}
+
+fn label(value: &str, maximum: usize) -> Result<(), String> {
+    check(
+        !value.is_empty() && value.len() <= maximum,
+        "标签为空或超过限额",
+    )
+}
+
+fn preserve_table_revisions_with(
+    prev_root: &Node,
+    next_root: &Node,
+    allow_vp: &mut impl FnMut(u64, &VirtualTable, &VirtualTable) -> bool,
+) -> Result<(), String> {
+    match prev_root.try_visit(&mut |node| {
+        if let Some(node::Kind::VirtualTable(previous)) = &node.kind
+            && let Some(node::Kind::VirtualTable(next)) =
+                next_root.find(node.id).and_then(|n| n.kind.as_ref())
+            && let Err(err) = check(
+                allow_vp(node.id, previous, next),
+                "表格 viewport revision 已过期；需要重新同步",
+            )
+        {
+            return ControlFlow::Break(err);
+        }
+        ControlFlow::Continue(())
+    }) {
+        ControlFlow::Break(err) => Err(err),
+        ControlFlow::Continue(()) => Ok(()),
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum OptimisticFieldKey {
@@ -282,7 +328,8 @@ impl PanelState {
             }
         }
         if let (Some(previous), Some(next)) = (&self.snapshot.root, &next.root) {
-            previous.preserve_table_revisions_with(
+            preserve_table_revisions_with(
+                previous,
                 next,
                 &mut |table_id, previous, next| {
                     let floor = self.table_watermark_for_request(
@@ -1860,87 +1907,6 @@ fn apply_optimistic_value(
     }
 }
 
-pub fn commit_panel_semantically_matches(
-    current: Option<&PanelSnapshot>,
-    expected: &PanelSnapshot,
-    document: &EditorSnapshot,
-) -> bool {
-    let Some(cur) = current else {
-        return false;
-    };
-    cur.title == expected.title
-        && nodes_match_for_commit(cur.root.as_ref(), expected.root.as_ref(), document)
-}
 
-fn nodes_match_for_commit(
-    current: Option<&Node>,
-    expected: Option<&Node>,
-    document: &EditorSnapshot,
-) -> bool {
-    match (current, expected) {
-        (None, None) => true,
-        (Some(cur), Some(exp)) => {
-            if cur.id != exp.id
-                || cur.accessibility_label != exp.accessibility_label
-                || cur.layout != exp.layout
-            {
-                return false;
-            }
-            match (&cur.kind, &exp.kind) {
-                (Some(node::Kind::Editor(cur_ed)), Some(node::Kind::Editor(exp_ed)))
-                    if cur_ed.document_id == document.document_id
-                        && exp_ed.document_id == document.document_id =>
-                {
-                    cur_ed.format == exp_ed.format
-                        && cur_ed.read_only == exp_ed.read_only
-                        && !cur_ed.read_only
-                        && cur_ed.revision >= exp_ed.revision
-                        && cur_ed.revision <= document.revision
-                        && (cur_ed.revision != exp_ed.revision
-                            || cur_ed.contents == exp_ed.contents)
-                        && (cur_ed.revision != document.revision
-                            || cur_ed.contents == document.contents)
-                }
-                (Some(node::Kind::Row(cur_c)), Some(node::Kind::Row(exp_c)))
-                | (Some(node::Kind::Column(cur_c)), Some(node::Kind::Column(exp_c)))
-                | (Some(node::Kind::ScrollColumn(cur_c)), Some(node::Kind::ScrollColumn(exp_c))) => {
-                    cur_c.children.len() == exp_c.children.len()
-                        && cur_c
-                            .children
-                            .iter()
-                            .zip(&exp_c.children)
-                            .all(|(c, e)| nodes_match_for_commit(Some(c), Some(e), document))
-                }
-                (Some(node::Kind::Split(cur_s)), Some(node::Kind::Split(exp_s))) => {
-                    cur_s.axis == exp_s.axis
-                        && cur_s.fraction.to_bits() == exp_s.fraction.to_bits()
-                        && nodes_match_for_commit(
-                            cur_s.first.as_deref(),
-                            exp_s.first.as_deref(),
-                            document,
-                        )
-                        && nodes_match_for_commit(
-                            cur_s.second.as_deref(),
-                            exp_s.second.as_deref(),
-                            document,
-                        )
-                }
-                (Some(node::Kind::Tabs(cur_t)), Some(node::Kind::Tabs(exp_t))) => {
-                    cur_t.axis == exp_t.axis
-                        && cur_t.active == exp_t.active
-                        && cur_t.tabs.len() == exp_t.tabs.len()
-                        && cur_t.tabs.iter().zip(&exp_t.tabs).all(|(ct, et)| {
-                            ct.title == et.title
-                                && nodes_match_for_commit(
-                                    ct.content.as_deref(),
-                                    et.content.as_deref(),
-                                    document,
-                                )
-                        })
-                }
-                (a, b) => a == b,
-            }
-        }
-        _ => false,
-    }
-}
+#[cfg(test)]
+mod tests;

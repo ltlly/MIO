@@ -15,67 +15,6 @@ pub const MAX_STORAGE_KEY_BYTES: usize = 256;
 pub const MAX_STORAGE_VALUE_BYTES: usize = 64 * 1024;
 pub const PANEL_ID: u64 = 1;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MatchReplaceTarget {
-    #[default]
-    RequestHeader,
-    RequestBody,
-    ResponseHeader,
-    ResponseBody,
-    RequestParamName,
-    RequestParamValue,
-    RequestFirstLine,
-    RequestScript,
-    ResponseScript,
-}
-
-impl MatchReplaceTarget {
-    pub fn is_script(self) -> bool {
-        matches!(self, Self::RequestScript | Self::ResponseScript)
-    }
-
-    pub fn is_response(self) -> bool {
-        matches!(
-            self,
-            Self::ResponseHeader | Self::ResponseBody | Self::ResponseScript
-        )
-    }
-
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::RequestHeader => "Request header",
-            Self::RequestBody => "Request body",
-            Self::ResponseHeader => "Response header",
-            Self::ResponseBody => "Response body",
-            Self::RequestParamName => "Request param name",
-            Self::RequestParamValue => "Request param value",
-            Self::RequestFirstLine => "Request first line",
-            Self::RequestScript => "Request script",
-            Self::ResponseScript => "Response script",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatchAndReplaceRule {
-    pub id: Uuid,
-    pub enabled: bool,
-    pub item_type: MatchReplaceTarget,
-    #[serde(default)]
-    pub match_pattern: String,
-    #[serde(default)]
-    pub replace_with: String,
-    #[serde(default)]
-    pub regex: bool,
-    #[serde(default)]
-    pub comment: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub script_name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub filter_script: String,
-}
-
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Enumeration, Serialize, Deserialize,
 )]

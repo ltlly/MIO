@@ -113,25 +113,11 @@ fn a_million_planned_requests_do_not_create_a_million_result_rows() {
 }
 
 #[test]
-fn exhausted_revision_and_inconsistent_terminal_metadata_cannot_commit_a_result() {
+fn inconsistent_terminal_metadata_cannot_commit_a_result() {
     let mut store = store();
     let run = run(&mut store, 1);
     let request = pending();
     store.put_intruder_result(run.id, 0, Ok(&request)).unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE intruder_runs SET revision=?1 WHERE id=?2",
-            params![i64::MAX, run.id.to_string()],
-        )
-        .unwrap();
-    assert!(
-        store
-            .put_intruder_result(run.id, 0, Ok(&complete(&request)))
-            .is_err()
-    );
-    assert_eq!(store.read(request.summary.id).unwrap(), request);
-    assert_eq!(store.read_intruder_run(run.id).unwrap().completed, 0);
     store
         .connection
         .execute(

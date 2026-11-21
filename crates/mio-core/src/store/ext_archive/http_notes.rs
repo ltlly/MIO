@@ -196,15 +196,15 @@ pub(super) fn preview(
     }
 }
 
-impl ProjectStore {
-    pub(crate) fn ext_http_notes(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub(crate) fn http_notes(
         &self,
         project: ProjectKey,
         source: Uuid,
         item: Uuid,
     ) -> Result<ExtHttpNotes> {
-        let transaction = self.connection.unchecked_transaction()?;
-        project_guard(&transaction, project, self.id)?;
+        let transaction = self.0.connection.unchecked_transaction()?;
+        project_guard(&transaction, project, self.0.id)?;
         if source.is_nil() {
             validate_live_proxy_flow(&transaction, item)?;
             let map = read_live_http_annotations(&transaction)?;
@@ -222,8 +222,10 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(notes)
     }
+}
 
-    pub(crate) fn set_ext_http_notes(
+impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
+    pub(crate) fn set_http_notes(
         &mut self,
         project: ProjectKey,
         source: Uuid,
@@ -235,9 +237,10 @@ impl ProjectStore {
         let result = (|| {
             ensure!(!cancel.is_cancelled(), "外部归档 HTTP 备注修改已取消");
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            project_guard(&transaction, project, self.id)?;
+            project_guard(&transaction, project, self.0.id)?;
             let change = ExtHttpNotesChange {
                 source_id: source,
                 item_id: item,
@@ -266,7 +269,7 @@ impl ProjectStore {
         })();
         result.map_err(|error: anyhow::Error| ExtHttpNotesError {
             message: error.to_string(),
-            stored: self.ext_http_notes(project, source, item).ok(),
+            stored: self.0.ext_archive().http_notes(project, source, item).ok(),
         })
     }
 }
@@ -372,11 +375,7 @@ fn write_live(
             text: current.notes,
         });
     }
-    let revision = current
-        .notes_revision
-        .checked_add(1)
-        .filter(|value| *value <= i64::MAX as u64)
-        .context("外部归档 HTTP 备注 revision 已耗尽")?;
+    let revision = current.notes_revision + 1;
     let entry = map.entry(flow_id).or_default();
     entry.notes_revision = revision;
     entry.notes = text.into();
@@ -405,11 +404,7 @@ fn write(
     if stored.text == text {
         return Ok(stored);
     }
-    let revision = stored
-        .revision
-        .checked_add(1)
-        .filter(|value| *value <= i64::MAX as u64)
-        .context("外部归档 HTTP 备注 revision 已耗尽")?;
+    let revision = stored.revision + 1;
     if stored.revision == 0 {
         transaction.execute(
             "INSERT INTO main.ext_http_notes(item,revision,text) VALUES(?1,?2,?3)",

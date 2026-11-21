@@ -56,18 +56,18 @@ pub(in crate::store) fn create_connections(connection: &Connection) -> Result<()
     Ok(())
 }
 
-impl ProjectStore {
-    pub(crate) fn list_websocket_messages(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::WebSocketRepo<S> {
+    pub(crate) fn list_messages(
         &self,
         limit: usize,
     ) -> Result<(usize, Vec<WebSocketMessage>)> {
         let clamped = limit.clamp(1, 500);
-        let total: usize = self.connection.query_row(
+        let total: usize = self.0.connection.query_row(
             "SELECT count(*) FROM main.websocket_messages",
             [],
             |row| row.get::<_, usize>(0),
         )?;
-        let mut stmt = self.connection.prepare(&format!(
+        let mut stmt = self.0.connection.prepare(&format!(
             "SELECT {SUMMARY_COLUMNS}, p.body
              FROM main.websocket_messages w
              LEFT JOIN main.flows f ON f.id=w.flow
@@ -97,48 +97,37 @@ impl ProjectStore {
     }
 
     #[cfg(test)]
-    pub fn put_websocket(&mut self, record: &WebSocketMessage) -> Result<()> {
-        self.put_captured_websocket(&record.clone().into())
-    }
-
-    pub fn put_captured_websocket(&mut self, record: &CapturedWebSocket) -> Result<()> {
-        let transaction = self.connection.transaction()?;
-        write_record(&transaction, record)?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn read_websocket(&self, id: Uuid) -> Result<WebSocketMessage> {
-        let live_exists: bool = self.connection.query_row(
+    pub fn read(&self, id: Uuid) -> Result<WebSocketMessage> {
+        let live_exists: bool = self.0.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM websocket_messages WHERE id=?1)",
             [id.to_string()],
             |row| row.get(0),
         )?;
         if live_exists {
-            return read_record(&self.connection, id);
+            return read_record(&self.0.connection, id);
         }
-        crate::service::websocket::ext_archive::read_ext_websocket_detail(self, id)
+        crate::service::websocket::ext_archive::read_ext_websocket_detail(&self.0, id)
             .map(|(record, _)| record)
     }
 
-    pub fn read_websocket_detail(&self, id: Uuid) -> Result<(WebSocketMessage, Option<Vec<u8>>)> {
-        let live_exists: bool = self.connection.query_row(
+    pub fn read_detail(&self, id: Uuid) -> Result<(WebSocketMessage, Option<Vec<u8>>)> {
+        let live_exists: bool = self.0.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM websocket_messages WHERE id=?1)",
             [id.to_string()],
             |row| row.get(0),
         )?;
         if live_exists {
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = self.0.connection.unchecked_transaction()?;
             let detail = read_record_with_original(&transaction, id)?;
             transaction.commit()?;
             return Ok(detail);
         }
-        crate::service::websocket::ext_archive::read_ext_websocket_detail(self, id)
+        crate::service::websocket::ext_archive::read_ext_websocket_detail(&self.0, id)
     }
 
     pub fn flow_url(&self, id: FlowId) -> Result<String> {
-        self.connection
+        self.0
+            .connection
             .query_row(
                 "SELECT url FROM flows WHERE id=?1",
                 [id.to_string()],
@@ -148,9 +137,10 @@ impl ProjectStore {
             .context("WebSocket 对应的 HTTP 流量不存在")
     }
 
-    pub fn websocket_numbers(&self) -> Result<(u64, u64)> {
+    pub fn numbers(&self) -> Result<(u64, u64)> {
         let next = |table: &str| -> Result<u64> {
             let last: Option<u64> = self
+                .0
                 .connection
                 .query_row(
                     "SELECT seq FROM sqlite_sequence WHERE name=?1",
@@ -158,15 +148,14 @@ impl ProjectStore {
                     |row| row.get(0),
                 )
                 .optional()?;
-            last.unwrap_or_default()
-                .checked_add(1)
-                .context("WebSocket 编号已耗尽")
+            Ok(last.unwrap_or_default() + 1)
         };
         Ok((next("websocket_messages")?, next("websocket_connections")?))
     }
 
-    pub fn websocket_connection(&self, flow: FlowId) -> Result<Option<(u64, Option<u16>)>> {
-        self.connection
+    pub fn connection(&self, flow: FlowId) -> Result<Option<(u64, Option<u16>)>> {
+        self.0
+            .connection
             .query_row(
                 "SELECT c.id,c.listener_port FROM flows f
                  JOIN websocket_connections c ON f.id=c.flow WHERE f.id=?1",
@@ -177,8 +166,9 @@ impl ProjectStore {
             .map_err(Into::into)
     }
 
-    pub fn websocket_ordinal(&self, id: Uuid) -> Result<Option<u64>> {
-        self.connection
+    pub fn ordinal(&self, id: Uuid) -> Result<Option<u64>> {
+        self.0
+            .connection
             .query_row(
                 "SELECT ordinal FROM websocket_messages WHERE id=?1",
                 [id.to_string()],
@@ -187,7 +177,23 @@ impl ProjectStore {
             .optional()
             .map_err(Into::into)
     }
+}
 
+impl crate::store::WebSocketRepo<&mut ProjectStore> {
+    #[cfg(test)]
+    pub fn put(&mut self, record: &WebSocketMessage) -> Result<()> {
+        self.put_captured(&record.clone().into())
+    }
+
+    pub fn put_captured(&mut self, record: &CapturedWebSocket) -> Result<()> {
+        let transaction = self.0.connection.transaction()?;
+        write_record(&transaction, record)?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+impl ProjectStore {
     pub(super) fn from_read_only(connection: Connection, id: Uuid) -> Self {
         Self {
             connection,

@@ -178,6 +178,10 @@ impl ProjectStore {
             .unwrap_or_else(|| self.temporary.as_ref().unwrap().path().join("project.mio"))
     }
 
+    pub(crate) fn query_path(&self) -> PathBuf {
+        self.actual_path()
+    }
+
     pub fn checkpoint(&mut self) -> Result<()> {
         let (busy, _, _): (i32, i32, i32) =
             self.connection

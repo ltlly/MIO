@@ -78,7 +78,9 @@ fn changes(
 fn drain(receiver: &mut mpsc::Receiver<Event>) -> Vec<Event> {
     let mut events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
-        events.push(event);
+        if !matches!(event, Event::ProjectDiskUsage { .. }) {
+            events.push(event);
+        }
     }
     events
 }
@@ -198,7 +200,7 @@ async fn highlight_commands_correlate_batches_and_reject_stale_cancelled_or_inva
             }
         )]
     );
-    state.history_dirty = false;
+    state.storage.history_dirty = false;
     for scenario in 0..5 {
         let cancel = CancellationToken::new();
         if scenario == 1 {
@@ -259,7 +261,7 @@ async fn highlight_commands_correlate_batches_and_reject_stale_cancelled_or_inva
                 .unwrap(),
             *saved
         );
-        assert!(!state.history_dirty);
+        assert!(!state.storage.history_dirty);
     }
     let operation = Uuid::new_v4();
     state
@@ -305,8 +307,8 @@ async fn project_save_failure_retains_recovery_then_save_as_returns_all_annotati
         payload: vec![0, 255, 42],
         observed_unix_ms: 5,
     };
-    state.recovery.push_back(recovery.clone().into());
-    state.websocket_recovery.push_back(message.clone().into());
+    state.storage.recovery.push_back(recovery.clone().into());
+    state.storage.websocket_recovery.push_back(message.clone().into());
     let before = state.store.workspace().unwrap();
     let mut workspace = before.clone();
     workspace.open_request(None).unwrap();
@@ -329,7 +331,7 @@ async fn project_save_failure_retains_recovery_then_save_as_returns_all_annotati
     };
     assert!(state.command(save(0, None)).await.is_err());
     assert_eq!(
-        (state.recovery.len(), state.websocket_recovery.len()),
+        (state.storage.recovery.len(), state.storage.websocket_recovery.len()),
         (1, 1)
     );
     assert!(

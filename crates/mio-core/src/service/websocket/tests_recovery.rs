@@ -86,7 +86,7 @@ async fn recovery_connection_and_message_numbers_survive_filtering_duplicates_an
         .find(|(row, _)| row.id == second.id)
         .unwrap();
     let latest_second = state
-        .websocket_recovery
+        .storage.websocket_recovery
         .iter()
         .rev()
         .find(|capture| capture.record.id == second.id)
@@ -94,7 +94,7 @@ async fn recovery_connection_and_message_numbers_survive_filtering_duplicates_an
     assert!(
         !std::sync::Arc::ptr_eq(
             &latest_second.record,
-            &state.websocket_recovery.front().unwrap().record
+            &state.storage.websocket_recovery.front().unwrap().record
         ),
         "duplicate fixture records must own distinct Arc allocations"
     );

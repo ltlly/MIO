@@ -105,8 +105,8 @@ fn validate_detail(detail: &SiteMapEntryDetail) -> Result<()> {
     Ok(())
 }
 
-impl crate::store::ProjectStore {
-    pub(crate) fn add_site_map_entry(
+impl crate::store::SiteMapRepo<&mut crate::store::ProjectStore> {
+    pub(crate) fn add_entry(
         &mut self,
         workspace_revision: u64,
         owner: &str,
@@ -118,10 +118,10 @@ impl crate::store::ProjectStore {
         ensure!(!cancel.is_cancelled(), "站点地图添加已取消");
         ensure!(!owner.is_empty() && owner.len() <= 4096, "站点地图来源身份无效");
         validate_detail(&detail)?;
-        let transaction = self.connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        crate::store::ensure_schema_validated_in_tx(&self.cache, &transaction)?;
-        ensure!(crate::store::metadata::project_id(&transaction)? == self.id
-            && crate::store::save::workspace_arc_in_tx(&self.cache, &transaction)?.revision == workspace_revision,
+        let transaction = self.0.connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::store::ensure_schema_validated_in_tx(&self.0.cache, &transaction)?;
+        ensure!(crate::store::metadata::project_id(&transaction)? == self.0.id
+            && crate::store::save::workspace_arc_in_tx(&self.0.cache, &transaction)?.revision == workspace_revision,
             "站点地图项目或工作区 revision 已变化");
         let before_tc = crate::store::query_total_changes(&transaction)?;
         let previous: Option<(String, u64, Vec<u8>)> = transaction.query_row(
@@ -140,7 +140,7 @@ impl crate::store::ProjectStore {
         let unchanged = previous.as_ref().is_some_and(|(_, _, bytes)| bytes == &encoded);
         let revision = match &previous {
             Some((_, revision, _)) if unchanged => *revision,
-            Some((_, revision, _)) => revision.checked_add(1).filter(|value| *value <= i64::MAX as u64).context("站点地图 revision 已耗尽")?,
+            Some((_, revision, _)) => *revision + 1,
             None => 1,
         };
         let row_encoded = serde_json::to_vec(&row)?;
@@ -159,15 +159,17 @@ impl crate::store::ProjectStore {
         ensure!(!cancel.is_cancelled(), "站点地图添加已取消");
         transaction.commit()?;
         if !unchanged {
-            self.advance_workspace_cache_changes(before_tc)?;
+            self.0.advance_workspace_cache_changes(before_tc)?;
         }
         let node_key = tree::parse_site_map_url(&detail.record.request.url).context("站点地图 URL 无效")?.full_key;
         Ok(SiteMapEntryReceipt { entry_id, revision, node_key, row })
     }
+}
 
-    pub fn read_site_map_entry(&self, entry_id: crate::Uuid, revision: u64) -> Result<SiteMapEntryDetail> {
+impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::SiteMapRepo<S> {
+    pub fn read_entry(&self, entry_id: crate::Uuid, revision: u64) -> Result<SiteMapEntryDetail> {
         ensure!(!entry_id.is_nil() && revision > 0, "站点地图读取身份无效");
-        let bytes: Vec<u8> = self.connection.query_row(
+        let bytes: Vec<u8> = self.0.connection.query_row(
             "SELECT CASE WHEN typeof(detail)='blob' AND length(detail)<=?3 THEN detail END
              FROM main.site_map_entries WHERE id=?1 AND revision=?2",
             params![entry_id.to_string(), revision, MAX_ENTRY_BYTES], |row| row.get(0),

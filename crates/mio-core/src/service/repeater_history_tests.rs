@@ -75,13 +75,13 @@ async fn rejected_send_recovery_never_registers_history_or_opens_a_socket() {
         assert!(!matches!(event, Event::SendStarted { .. }));
     }
     assert!(rejected);
-    assert!(state.sends.is_empty() && state.jobs.is_empty());
+    assert!(state.repeater.sends.is_empty() && state.repeater.jobs.is_empty());
     assert_eq!(
-        state.recovery.len(),
+        state.storage.recovery.len(),
         1,
         "retain the original write-failure recovery record"
     );
-    assert_eq!(state.recovery[0].record.summary.id, run_id);
+    assert_eq!(state.storage.recovery[0].record.summary.id, run_id);
     assert_eq!(page(&mut state, &mut receiver, tab.id).await.total, 0);
     state.store.reject_writes(false);
     let directory = tempfile::tempdir_in("/tmp").unwrap();
@@ -129,7 +129,7 @@ async fn registered_history_uses_recovery_summary_and_selects_original_draft_wit
         .store
         .begin_repeater_send(tab.id, &tab.draft, &pending, &CancellationToken::new())
         .unwrap();
-    state.recovery.push_back(finished.clone().into());
+    state.storage.recovery.push_back(finished.clone().into());
     let history = page(&mut state, &mut receiver, tab.id).await;
     assert_eq!(history.total, 1);
     assert_eq!(
@@ -174,7 +174,7 @@ async fn registered_history_uses_recovery_summary_and_selects_original_draft_wit
         workspace,
         "reading never mutates the saved workspace"
     );
-    assert!(state.jobs.is_empty() && state.sends.is_empty());
+    assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
     state
         .command(Command::ReadFlow {
             project: state.project,
@@ -228,5 +228,5 @@ async fn history_stale_project_and_cancel_return_correlated_errors() {
     assert!(
         matches!(receiver.try_recv().unwrap(), Event::RepeaterHistorySelected { operation_id: actual, result: Err(_), .. } if actual == operation_id)
     );
-    assert!(state.jobs.is_empty() && state.sends.is_empty());
+    assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
 }

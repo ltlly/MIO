@@ -388,7 +388,6 @@ impl UpstreamTlsJson {
             include_system_roots: self.include_system_roots,
             insecure_skip_verify: self.insecure_skip_verify,
             protocol_mode: self.protocol_mode,
-            allow_unsafe_renegotiation: false,
             disable_session_resume: self.disable_session_resume,
             client_certs_override_project_only: self.client_certs_override_project_only,
         })

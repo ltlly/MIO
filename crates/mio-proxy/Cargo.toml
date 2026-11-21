@@ -17,6 +17,7 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
 tokio-util.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1.5"

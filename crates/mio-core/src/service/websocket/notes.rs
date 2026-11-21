@@ -8,8 +8,9 @@ impl State {
     ) -> Result<WebSocketNotes> {
         self.check_project(project)?;
         ensure!(!id.is_nil(), "WebSocket 消息 ID 不能为空");
-        if self.store.websocket_ordinal(id)?.is_none() {
+        if self.store.websocket().ordinal(id)?.is_none() {
             if self
+                .storage
                 .websocket_recovery
                 .iter()
                 .any(|capture| capture.record.id == id)
@@ -20,7 +21,7 @@ impl State {
                 return Ok(notes);
             }
         }
-        self.store.websocket_notes(project, id)
+        self.store.websocket().notes(project, id)
     }
 
     pub(crate) fn set_websocket_notes(
@@ -44,13 +45,13 @@ impl State {
             return Err(WebSocketNotesError {
                 message: error.to_string(),
                 stored: if project == self.project {
-                    self.store.websocket_notes(project, id).ok()
+                    self.store.websocket().notes(project, id).ok()
                 } else {
                     None
                 },
             });
         }
-        if self.store.websocket_ordinal(id).ok().flatten().is_none()
+        if self.store.websocket().ordinal(id).ok().flatten().is_none()
             && let Ok(Some(notes)) = super::ext_archive::read_ext_websocket_notes(&self.store, id)
         {
             if expected == notes.revision && text == notes.text {
@@ -62,6 +63,7 @@ impl State {
             });
         }
         self.store
-            .set_websocket_notes(project, id, expected, text, cancel)
+            .websocket_mut()
+            .set_notes(project, id, expected, text, cancel)
     }
 }

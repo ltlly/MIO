@@ -339,36 +339,19 @@ pub fn default_ipc_socket_path() -> PathBuf {
     if let Some(explicit) = env_ipc_socket_path() {
         return explicit;
     }
-    #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        let app_support = PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("MIO")
-            .join("run")
-            .join("mio.sock");
-        if app_support.as_os_str().as_encoded_bytes().len() <= MAX_SUN_PATH_SAFE_LEN {
-            return app_support;
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if let Some(xdg_run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        let sock = PathBuf::from(xdg_run).join("mio").join("mio.sock");
-        if sock.as_os_str().as_encoded_bytes().len() <= MAX_SUN_PATH_SAFE_LEN {
-            return sock;
-        }
-    }
     #[cfg(unix)]
     {
+        if let Some(sock) = crate::fs_atomic::platform_runtime_dir().map(|d| d.join("mio.sock"))
+            && sock.as_os_str().as_encoded_bytes().len() <= MAX_SUN_PATH_SAFE_LEN
+        {
+            return sock;
+        }
         PathBuf::from(format!("/tmp/mio-{}/mio.sock", current_euid()))
     }
     #[cfg(not(unix))]
     {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
-            return PathBuf::from(local)
-                .join("MIO")
-                .join("run")
-                .join("mio.sock");
+        if let Some(dir) = crate::fs_atomic::platform_runtime_dir() {
+            return dir.join("mio.sock");
         }
         std::env::temp_dir().join("mio-run").join("mio.sock")
     }

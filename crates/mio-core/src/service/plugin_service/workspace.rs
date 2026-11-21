@@ -59,11 +59,11 @@ impl State {
         let result = (|| {
             self.plugin_check_call(&pending.call)?;
             self.require_saved()?;
-            let stored = self.store.workspace()?;
+            let stored = self.store.metadata().workspace()?;
             validate_workspace_edit(&stored, &workspace, tab_id, &pending.call.operation)?;
             // Recheck cancellation immediately before the atomic, single-writer commit.
             self.plugin_check_call(&pending.call)?;
-            self.store.save_workspace(&workspace)?;
+            self.store.metadata_mut().save_workspace(&workspace)?;
             if is_intruder {
                 Ok::<_, anyhow::Error>(None)
             } else {
@@ -124,7 +124,7 @@ impl State {
                 self.emit(Event::WorkspaceRejected {
                     project: self.project,
                     revision: workspace.revision,
-                    stored: self.store.workspace()?,
+                    stored: self.store.metadata().workspace()?,
                     message: message.clone(),
                 })
                 .await;

@@ -7,8 +7,8 @@ async fn repeater_progress_preserves_unread_update_until_capacity_recovers() {
     let record = tests::completed_flow();
     let tab_id = Uuid::new_v4();
     let (progress_tx, progress_rx) = watch::channel(None);
-    let task = state.jobs.spawn(std::future::pending());
-    state.sends.insert(
+    let task = state.repeater.jobs.spawn(std::future::pending());
+    state.repeater.sends.insert(
         tab_id,
         ActiveSend {
             cancel: CancellationToken::new(),
@@ -29,14 +29,14 @@ async fn repeater_progress_preserves_unread_update_until_capacity_recovers() {
     progress_tx.send(Some((response.clone(), 123))).unwrap();
     tokio::select! {
         biased;
-        _ = next_repeater_progress(&mut state.sends, &events, true) => {
+        _ = next_repeater_progress(&mut state.repeater.sends, &events, true) => {
             panic!("progress must not starve commands while only four slots are free");
         }
         _ = std::future::ready(()) => {}
     }
     assert_eq!(events.capacity(), 4);
     assert!(
-        state.sends[&tab_id]
+        state.repeater.sends[&tab_id]
             .progress_rx
             .as_ref()
             .unwrap()
@@ -46,12 +46,12 @@ async fn repeater_progress_preserves_unread_update_until_capacity_recovers() {
     receiver.try_recv().unwrap();
     tokio::select! {
         biased;
-        selected = next_repeater_progress(&mut state.sends, &events, true) => assert_eq!(selected, tab_id),
+        selected = next_repeater_progress(&mut state.repeater.sends, &events, true) => assert_eq!(selected, tab_id),
         _ = std::future::ready(()) => panic!("freeing a slot must release the pending progress"),
     }
     state.emit_repeater_progress(tab_id);
     assert!(
-        !state.sends[&tab_id]
+        !state.repeater.sends[&tab_id]
             .progress_rx
             .as_ref()
             .unwrap()
@@ -71,11 +71,11 @@ async fn repeater_progress_preserves_unread_update_until_capacity_recovers() {
     } if actual_tab == tab_id && run_id == record.summary.id && *actual_response == response));
     tokio::select! {
         biased;
-        _ = next_repeater_progress(&mut state.sends, &events, true) => panic!("consumed progress must park"),
+        _ = next_repeater_progress(&mut state.repeater.sends, &events, true) => panic!("consumed progress must park"),
         _ = std::future::ready(()) => {}
     }
     task.abort();
-    while state.jobs.join_next().await.is_some() {}
+    while state.repeater.jobs.join_next().await.is_some() {}
 }
 
 #[tokio::test]

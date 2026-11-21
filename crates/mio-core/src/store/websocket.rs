@@ -1,4 +1,4 @@
-mod query;
+pub(in crate::store) mod query;
 mod records;
 
 #[cfg(test)]

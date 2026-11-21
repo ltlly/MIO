@@ -44,7 +44,7 @@ pub(in crate::store::intruder) struct SessionData {
 }
 
 #[cfg(test)]
-pub(in crate::store::intruder) type SessionWriteHook =
+pub(in crate::store) type SessionWriteHook =
     std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn run_error_len(state: &IntruderRunState) -> usize {
@@ -1001,7 +1001,7 @@ impl SessionData {
             self.run.title_revision == expected_title_revision,
             "Intruder 任务名称 revision 已改变；名称未覆盖"
         );
-        let revision = intruder_mod::next_revision(expected_title_revision)?;
+        let revision = intruder_mod::next_revision(expected_title_revision);
         ensure!(!cancel.is_cancelled(), "Intruder 重命名已取消；名称未改变");
         #[cfg(test)]
         if let Some(hook) = hook {
@@ -1030,7 +1030,7 @@ impl SessionData {
             self.run.resource_pool != Some(pool_id),
             "Intruder 已绑定此资源池；未重复修改"
         );
-        let revision = intruder_mod::next_revision(expected)?;
+        let revision = intruder_mod::next_revision(expected);
         ensure!(!cancel.is_cancelled(), "Intruder 资源池绑定已取消");
         self.run.resource_pool = Some(pool_id);
         self.run.resource_pool_revision = revision;
@@ -1065,7 +1065,7 @@ impl SessionData {
             .checked_add(1)
             .filter(|total| *total <= crate::intruder::MAX_REQUESTS)
             .context("Intruder 基准请求超过总请求限额；未追加")?;
-        let revision = intruder_mod::next_revision(self.run.revision)?;
+        let revision = intruder_mod::next_revision(self.run.revision);
         let _: intruder_mod::SpecMeta = strict_json(&self.spec_meta)?;
         let (spec, _, _) = self.read_spec_with_settings()?;
         let mut expected = 0u64;
@@ -1159,7 +1159,7 @@ impl SessionData {
                     ensure!(
                         terminal
                             && after.summary.revision
-                                == intruder_mod::next_revision(before.revision)?,
+                                == intruder_mod::next_revision(before.revision),
                         "Intruder 仅允许在途结果进入下一 revision 的终态"
                     );
                     ensure!(
@@ -1200,7 +1200,7 @@ impl SessionData {
                 baseline.completed = true;
             }
         }
-        next_run.revision = intruder_mod::next_revision(next_run.revision)?;
+        next_run.revision = intruder_mod::next_revision(next_run.revision);
         ensure!(
             next_run.completed <= next_run.dispatched && next_run.dispatched <= next_run.total,
             "Intruder 计数不一致"
@@ -1442,7 +1442,7 @@ impl SessionData {
                 "Intruder 错误超过 64 KiB"
             );
         }
-        let next_rev = intruder_mod::next_revision(self.run.revision)?;
+        let next_rev = intruder_mod::next_revision(self.run.revision);
         self.run.state = state;
         self.run.revision = next_rev;
         Ok(self.run.clone())
@@ -1487,7 +1487,7 @@ impl SessionData {
             "Intruder 结果备注 revision 已改变；未覆盖（当前 {}）",
             row.notes_revision
         );
-        let revision = intruder_mod::next_revision(expected_notes_revision)?;
+        let revision = intruder_mod::next_revision(expected_notes_revision);
         ensure!(
             !cancel.is_cancelled(),
             "Intruder 结果备注修改已取消；数据保留"
@@ -1537,7 +1537,7 @@ impl SessionData {
                 row.highlight_revision == expected_highlight_revision,
                 "Intruder 结果高亮修改冲突"
             );
-            let revision = intruder_mod::next_revision(expected_highlight_revision)?;
+            let revision = intruder_mod::next_revision(expected_highlight_revision);
             updates.push((ordinal, revision));
         }
         ensure!(

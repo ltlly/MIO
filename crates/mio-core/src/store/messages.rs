@@ -103,7 +103,7 @@ fn existing_proxy_capture_number(
 
 fn allocate_proxy_capture_number(tx: &rusqlite::Transaction<'_>) -> Result<u64> {
     if let Some(assigned) = read_next_proxy_capture_number(tx)? {
-        let next = assigned.checked_add(1).context("HTTP 历史捕获序号已耗尽")?;
+        let next = assigned + 1;
         write_next_proxy_capture_number(tx, next)?;
         return Ok(assigned);
     }
@@ -138,10 +138,8 @@ fn allocate_proxy_capture_number(tx: &rusqlite::Transaction<'_>) -> Result<u64> 
         [max_ext_item],
         |row| row.get(0),
     )?;
-    let floor = u64::try_from(max_existing.max(0))?
-        .checked_add(1)
-        .context("HTTP 历史捕获序号已耗尽")?;
-    let next = floor.checked_add(1).context("HTTP 历史捕获序号已耗尽")?;
+    let floor = u64::try_from(max_existing.max(0))? + 1;
+    let next = floor + 1;
     write_next_proxy_capture_number(tx, next)?;
     Ok(floor)
 }

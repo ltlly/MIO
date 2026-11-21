@@ -93,10 +93,6 @@ pub struct Workspace {
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
-    /// Temporary field retained only until `store/` removes legacy `proxy_listener` references.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_listener: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_listeners: Vec<ProxyListenerConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -163,7 +159,6 @@ impl Default for Workspace {
         Self {
             revision: 0,
             project_name: None,
-            proxy_listener: None,
             proxy_listeners: Vec::new(),
             client_certificates: Vec::new(),
             orientation: Orientation::default(),
@@ -206,9 +201,7 @@ impl Workspace {
         if let Some(first) = self.proxy_listeners.first() {
             return first.bind_address.as_str();
         }
-        self.proxy_listener
-            .as_deref()
-            .unwrap_or(DEFAULT_PROXY_LISTENER)
+        DEFAULT_PROXY_LISTENER
     }
 
     pub fn effective_proxy_listeners(&self) -> Vec<ProxyListenerConfig> {
@@ -218,7 +211,7 @@ impl Workspace {
         vec![ProxyListenerConfig {
             id: Uuid::from_u128(1),
             enabled: true,
-            bind_address: self.proxy_listener_or_default().to_owned(),
+            bind_address: DEFAULT_PROXY_LISTENER.to_owned(),
             ..ProxyListenerConfig::default()
         }]
     }

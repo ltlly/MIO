@@ -48,7 +48,7 @@ async fn auto_positions_returns_byte_ranges_without_mutating_or_sending_the_draf
         assert!(receiver.try_recv().is_err());
     }
     assert_eq!(state.store.workspace().unwrap(), original);
-    assert!(state.sends.is_empty());
+    assert!(state.repeater.sends.is_empty());
     assert!(!state.intruder.has_resources());
 }
 

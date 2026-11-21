@@ -486,9 +486,6 @@ pub enum TlsProtocolMode {
     #[default]
     AllSupported,
     Default,
-    /// Temporary variant retained only until `store/` removes legacy `TlsProtocolMode::Custom` test coverage.
-    #[doc(hidden)]
-    Custom,
 }
 
 impl TlsProtocolMode {
@@ -537,10 +534,6 @@ pub struct UpstreamTlsSettings {
     pub insecure_skip_verify: bool,
     #[serde(default, skip_serializing_if = "TlsProtocolMode::is_default")]
     pub protocol_mode: TlsProtocolMode,
-    /// Temporary field retained only until `store/` removes legacy `allow_unsafe_renegotiation` test coverage.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_unsafe_renegotiation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_session_resume: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -554,7 +547,6 @@ impl Default for UpstreamTlsSettings {
             include_system_roots: true,
             insecure_skip_verify: false,
             protocol_mode: TlsProtocolMode::AllSupported,
-            allow_unsafe_renegotiation: false,
             disable_session_resume: false,
             client_certs_override_project_only: false,
         }
@@ -610,9 +602,7 @@ impl UpstreamTlsSettings {
     pub fn to_proxy_tls_options(&self) -> mio_proxy::UpstreamTlsOptions {
         let protocol_mode = match self.protocol_mode {
             TlsProtocolMode::AllSupported => mio_proxy::UpstreamTlsProtocolMode::AllSupported,
-            TlsProtocolMode::Default | TlsProtocolMode::Custom => {
-                mio_proxy::UpstreamTlsProtocolMode::Default
-            }
+            TlsProtocolMode::Default => mio_proxy::UpstreamTlsProtocolMode::Default,
         };
         mio_proxy::UpstreamTlsOptions {
             disable_session_resume: self.disable_session_resume,

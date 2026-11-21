@@ -9,7 +9,7 @@ impl State {
             } => {
                 let result = self
                     .check_project(project)
-                    .and_then(|()| self.store.read_audit_state().map(Box::new))
+                    .and_then(|()| self.store.audit().read_state().map(Box::new))
                     .map_err(|error| error.to_string());
                 self.emit(Event::Audit(AuditEvent::State {
                     project,
@@ -22,7 +22,7 @@ impl State {
                 self.check_project(project)?;
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未更改审计设置");
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 if state.live_passive_enabled != enabled {
                     state.live_passive_enabled = enabled;
                     state.revision = next_audit_revision(state.revision);
@@ -34,18 +34,18 @@ impl State {
                 self.check_project(project)?;
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未更改被动爬行设置");
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 if state.live_passive_crawl_enabled != enabled {
                     state.live_passive_crawl_enabled = enabled;
                     state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
-                if let Ok(mut workspace) = self.store.workspace()
+                if let Ok(mut workspace) = self.store.metadata().workspace()
                     && workspace.live_passive_crawl_enabled != enabled
                 {
                     workspace.live_passive_crawl_enabled = enabled;
                     workspace.revision = workspace.revision.saturating_add(1);
-                    if self.store.save_workspace(&workspace).is_ok() {
+                    if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
                         self.emit(Event::WorkspaceChanged { project, workspace })
                             .await;
                     }
@@ -75,7 +75,7 @@ impl State {
                 self.check_project(project)?;
                 let stopping_in_flight = self.audit.stop_task(project, task_id);
                 if !stopping_in_flight && self.unsaved_count() == 0 && !self.quiesced {
-                    let mut state = self.store.read_audit_state()?;
+                    let mut state = self.store.audit().read_state()?;
                     if let Some(idx) = state.tasks.iter().position(|t| {
                         t.id == task_id
                             && matches!(t.state, AuditTaskState::Running | AuditTaskState::Paused)
@@ -108,7 +108,7 @@ impl State {
                     !self.audit.active.contains_key(&task_id),
                     "审计任务仍在运行；请先停止扫描再删除"
                 );
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 let before = state.tasks.len();
                 state.tasks.retain(|t| t.id != task_id);
                 if state.tasks.len() != before {
@@ -126,7 +126,7 @@ impl State {
                 self.check_project(project)?;
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未更改审计告警等级");
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 if let Some(finding) = state.findings.iter_mut().find(|f| f.id == finding_id) {
                     finding.severity_label = severity.label().to_owned();
                     finding.severity_rank = severity.rank();
@@ -143,7 +143,7 @@ impl State {
                 self.check_project(project)?;
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未删除审计告警");
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 let before = state.findings.len();
                 state.findings.retain(|f| f.id != finding_id);
                 if state.findings.len() != before {
@@ -156,7 +156,7 @@ impl State {
                 self.check_project(project)?;
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未清空审计告警");
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 if !state.findings.is_empty() {
                     state.findings.clear();
                     state.revision = next_audit_revision(state.revision);
@@ -170,9 +170,9 @@ impl State {
                 ensure!(!self.quiesced, "正在保存或切换项目；未记录手动审计告警");
                 ensure!(!finding.url.trim().is_empty(), "审计告警 URL 不能为空");
                 if let Some(fid) = finding.flow_id {
-                    self.store.flow_url(fid).context("关联的实时流量记录不存在")?;
+                    self.store.websocket().flow_url(fid).context("关联的实时流量记录不存在")?;
                 }
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 ensure!(
                     !state.findings.iter().any(|f| f.id == finding.id),
                     "审计告警 ID 已存在"
@@ -198,9 +198,12 @@ impl State {
                 self.require_saved()?;
                 ensure!(!self.quiesced, "正在保存或切换项目；未更新审计告警关联报文");
                 if let Some(fid) = flow_id {
-                    self.store.flow_url(fid).context("关联的实时流量记录不存在")?;
+                    self.store
+                        .websocket()
+                        .flow_url(fid)
+                        .context("关联的实时流量记录不存在")?;
                 }
-                let mut state = self.store.read_audit_state()?;
+                let mut state = self.store.audit().read_state()?;
                 let finding = state
                     .findings
                     .iter_mut()
@@ -249,7 +252,7 @@ impl State {
                 "扫描任务未在暂停中或进程已结束，无法继续"
             }
         );
-        let mut state = self.store.read_audit_state()?;
+        let mut state = self.store.audit().read_state()?;
         let target_state = if paused {
             AuditTaskState::Paused
         } else {
@@ -295,7 +298,7 @@ impl State {
             }
         }
         let is_finished = matches!(signal.kind, AuditSignalKind::Finished { .. });
-        let Ok(mut state) = self.store.read_audit_state() else {
+        let Ok(mut state) = self.store.audit().read_state() else {
             return;
         };
         let Some(task_idx) = state.tasks.iter().position(|t| t.id == signal.task_id) else {
@@ -362,8 +365,8 @@ impl State {
             return None;
         }
         let resp = record.response.as_ref()?;
-        let mut state = self.store.read_audit_state().ok()?;
-        let workspace = self.store.workspace_arc().ok();
+        let mut state = self.store.audit().read_state().ok()?;
+        let workspace = self.store.metadata().workspace_arc().ok();
         if state.live_passive_crawl_enabled
             && let Some(ws) = workspace.as_ref()
         {
@@ -400,7 +403,7 @@ impl State {
                     },
                     original: crate::OriginalMessages::default(),
                 };
-                let _ = self.store.add_site_map_entry(
+                let _ = self.store.site_map_mut().add_entry(
                     ws.revision,
                     &owner,
                     crate::HistoryRow::Live(summary),
@@ -462,7 +465,7 @@ impl State {
         ensure!(!self.quiesced, "正在保存或切换项目；未启动审计扫描");
         ensure!(!task_id.is_nil(), "审计任务缺少有效 ID");
         ensure!(!cancel.is_cancelled(), "审计任务已取消；未发送请求");
-        let mut state = self.store.read_audit_state()?;
+        let mut state = self.store.audit().read_state()?;
         ensure!(
             !state.tasks.iter().any(|t| t.id == task_id),
             "审计任务 ID 已存在；未重复创建扫描"
@@ -560,7 +563,7 @@ impl State {
         mode: AuditTaskMode,
         crawl_same_origin: bool,
     ) -> Result<ScanPlan> {
-        let workspace = self.store.workspace()?;
+        let workspace = self.store.metadata().workspace()?;
         let repeater_settings = &workspace.repeater_settings;
         let upstream_tls = self
             .preferences
@@ -580,7 +583,7 @@ impl State {
         send_config.network.upstream_route = upstream_route;
         send_config.network.hostname_overrides = hostname_overrides;
         send_config.tls.trust = upstream_tls;
-        send_config.tls.client_certificates = self.compiled_client_certs.clone();
+        send_config.tls.client_certificates = self.tls.compiled_client_certs.clone();
         send_config.limits.timeout =
             Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600));
         send_config.limits.streaming_timeout = streaming_timeout;
@@ -614,13 +617,14 @@ impl State {
                 Vec::new()
             },
             custom_scan_checks: workspace.custom_scan_checks,
-            sessions: self.sessions.clone(),
+            sessions: self.sessions.runtime.clone(),
         })
     }
 
     pub(super) fn write_audit_snapshot(&mut self, state: &AuditStateSnapshot) -> Result<()> {
         self.store
-            .write_audit_state(state, &CancellationToken::new())
+            .audit_mut()
+            .write_state(state, &CancellationToken::new())
     }
 
     pub(super) async fn emit_audit_state(

@@ -16,15 +16,15 @@ async fn repeater_recovery_exposes_ordered_received_and_final_before_save_withou
             drain_events(&mut events_rx);
             state.store.reject_writes(true);
             release.send(()).unwrap();
-            let completion = state.jobs.join_next().await.unwrap().unwrap();
+            let completion = state.repeater.jobs.join_next().await.unwrap().unwrap();
             let listener = origin.await.unwrap();
             let received = completion.received.as_ref().unwrap().as_ref().clone();
             let final_record = completion.record.clone();
             let pending = state.store.read(final_record.summary.id).unwrap();
             assert!(state.complete(completion).await.is_err());
-            assert_eq!(state.recovery.iter().map(|capture| &capture.record).collect::<Vec<_>>(), [&received, &final_record]);
+            assert_eq!(state.storage.recovery.iter().map(|capture| &capture.record).collect::<Vec<_>>(), [&received, &final_record]);
             assert!(state.persist_repeater_completion(Some(&received), &final_record).is_err());
-            assert_eq!(state.recovery.len(), 2, "repeated recovery completion cannot duplicate the pair");
+            assert_eq!(state.storage.recovery.len(), 2, "repeated recovery completion cannot duplicate the pair");
             assert_eq!(state.store.read(final_record.summary.id).unwrap(), pending);
             let finished = drain_events(&mut events_rx);
             assert_eq!(finished.iter().filter(|event| matches!(event, Event::SendFinished { tab_id: id, record, persisted: false, .. } if *id == tab_id && **record == final_record)).count(), 1);
@@ -34,14 +34,14 @@ async fn repeater_recovery_exposes_ordered_received_and_final_before_save_withou
             assert_eq!(original.response, received.response);
             assert_eq!(original.request, None);
             assert!(state.command(Command::SaveProject { websocket_notes: Vec::new(), ext_http_notes: Vec::new(), ext_http_highlights: Vec::new(), project: state.project, path: None, workspace: None }).await.is_err());
-            assert_eq!(state.recovery.len(), 2);
+            assert_eq!(state.storage.recovery.len(), 2);
             if !save_as { state.store.reject_writes(false); }
             state.command(Command::SaveProject { websocket_notes: Vec::new(), ext_http_notes: Vec::new(), ext_http_highlights: Vec::new(), project: state.project, path: save_as.then(|| copy.clone()), workspace: None }).await.unwrap();
             assert_eq!(state.unsaved_count(), 0);
             if !save_as {
                 state.command(Command::SaveProject { websocket_notes: Vec::new(), ext_http_notes: Vec::new(), ext_http_highlights: Vec::new(), project: state.project, path: Some(copy.clone()), workspace: None }).await.unwrap();
             }
-            assert!(state.sends.is_empty() && state.jobs.is_empty());
+            assert!(state.repeater.sends.is_empty() && state.repeater.jobs.is_empty());
             state.store.close().unwrap();
             for saved in [&path, &copy] {
                 let reopened = ProjectStore::open(saved).unwrap();
@@ -65,8 +65,8 @@ async fn repeater_stop_deadline_retains_the_same_task_and_response_for_retry() {
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         let held = held_send(&mut state).await;
         let stopped = state.stop_resources().await;
-        let retained = state.jobs.len() == 1
-            && state.sends.get(&held.tab_id).is_some_and(|active| {
+        let retained = state.repeater.jobs.len() == 1
+            && state.repeater.sends.get(&held.tab_id).is_some_and(|active| {
                 active.task_id == held.task.id() && active.flow_id == held.expected.summary.id
             })
             && !held.task.is_finished();
@@ -86,7 +86,7 @@ async fn repeater_stop_deadline_retains_the_same_task_and_response_for_retry() {
         assert!(!early_events.iter().any(|event| matches!(event, Event::SendFinished { .. })));
         assert!(released.is_ok(), "the completion tail was not aborted");
         retried.unwrap();
-        assert!(state.jobs.is_empty() && state.sends.is_empty());
+        assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
         assert_eq!(final_record, held.expected);
         assert_eq!(final_events.iter().filter(|event| matches!(event, Event::SendFinished { record, persisted: true, .. } if **record == held.expected)).count(), 1);
         assert_eq!(extra_request.unwrap_err().kind(), ErrorKind::WouldBlock);
@@ -115,7 +115,7 @@ async fn unjoined_repeater_blocks_quiesce_even_with_pending_storage_recovery() {
         state.persist(&tests::completed_flow()).unwrap_err();
 
         let blocked = state.command(Command::Quiesce { project }).await;
-        let retained = state.jobs.len() == 1 && state.sends.contains_key(&held.tab_id);
+        let retained = state.repeater.jobs.len() == 1 && state.repeater.sends.contains_key(&held.tab_id);
         let pending_recovery = state.unsaved_count();
         let early_events = drain_events(&mut received);
         let released = held.release.send(());
@@ -140,7 +140,7 @@ async fn unjoined_repeater_blocks_quiesce_even_with_pending_storage_recovery() {
         retried.unwrap();
         assert_eq!(joined_events.iter().filter(|event| matches!(event, Event::Quiesced { project: actual } if *actual == project)).count(), 1);
         saved.unwrap();
-        assert!(state.jobs.is_empty() && state.sends.is_empty());
+        assert!(state.repeater.jobs.is_empty() && state.repeater.sends.is_empty());
         assert_eq!(state.unsaved_count(), 0);
         assert_eq!(final_record, held.expected);
         assert_eq!(extra_request.unwrap_err().kind(), ErrorKind::WouldBlock);
@@ -247,7 +247,7 @@ async fn repeater_send_uses_activation_settings_despite_newer_saved_defaults() {
                 state.command(Command::SaveWorkspace { project: state.project, workspace }).await.unwrap();
             }
             release.send(()).unwrap();
-            let completion = state.jobs.join_next().await.unwrap().unwrap();
+            let completion = state.repeater.jobs.join_next().await.unwrap().unwrap();
             assert_eq!(completion.tab_id, tab_id);
             assert_eq!(completion.received.is_some(), captured);
             let record = completion.record.clone();

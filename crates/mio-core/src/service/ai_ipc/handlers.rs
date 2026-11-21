@@ -10,15 +10,22 @@ use crate::{
     Command, Decision, Event, FlowId, FlowRecord, FlowState, FlowSummary, Header, HttpRequest,
     HttpVersion, InterceptStage, ProvenanceActor, SessionTool, SlimSaveOptions, TrafficSource,
     WorkTab, Workspace, authority, detect_request_line_version, parse_repeater_request,
-    request_to_raw, response_to_raw, service::State,
+    request_to_raw, response_to_raw,
+    service::{
+        State,
+        core_repeater_send::{
+            RepeaterSendRuntimeConfig, apply_repeater_protocol_options,
+            apply_repeater_session_rules, pending_repeater_flow_record, spawn_unpack_response,
+        },
+    },
 };
 
 impl State {
     pub(in crate::service) async fn stop_ipc_jobs(&mut self) {
-        self.ipc_job_cancel.cancel();
+        self.ai_ipc.job_cancel.cancel();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !self.ipc_jobs.is_empty() {
-            match tokio::time::timeout_at(deadline, self.ipc_jobs.join_next()).await {
+        while !self.ai_ipc.jobs.is_empty() {
+            match tokio::time::timeout_at(deadline, self.ai_ipc.jobs.join_next()).await {
                 Ok(Some(done)) => {
                     if let Ok(done) = done {
                         let _ = done
@@ -28,13 +35,13 @@ impl State {
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    self.ipc_jobs.abort_all();
-                    while self.ipc_jobs.join_next().await.is_some() {}
+                    self.ai_ipc.jobs.abort_all();
+                    while self.ai_ipc.jobs.join_next().await.is_some() {}
                     break;
                 }
             }
         }
-        self.ipc_job_cancel = self.cancel.child_token();
+        self.ai_ipc.job_cancel = self.cancel.child_token();
     }
 
     pub(in crate::service) async fn accept_ai_ipc_call(&mut self, call: AiIpcCall) {
@@ -113,12 +120,13 @@ impl State {
                     self.queue_repeater_event(Event::Audit(event));
                 }
                 self.spawn_plugin_passive_checks(&record);
-                if !self.history_dirty {
-                    self.history_dirty = true;
+                if !self.storage.history_dirty {
+                    self.storage.history_dirty = true;
                     self.queue_repeater_event(Event::HistoryChanged {
                         project: self.project,
                     });
                 }
+                self.refresh_project_disk_bytes_throttled();
                 let request_raw_text =
                     Some(String::from_utf8_lossy(&request_to_raw(&record.request)).into_owned());
                 let response_raw_text = record
@@ -207,7 +215,7 @@ impl State {
                 .await
             }
             AiIpcRequest::WorkspaceGet => {
-                let ws = self.store.workspace()?;
+                let ws = self.store.metadata().workspace()?;
                 Ok(AiIpcPayload::WorkspaceState {
                     workspace: serde_json::to_value(&ws)?,
                 })
@@ -220,7 +228,7 @@ impl State {
                     "项目正在切换或静默保存，暂无法修改工作区配置"
                 );
                 self.apply_save_workspace(self.project, workspace).await?;
-                let saved = self.store.workspace()?;
+                let saved = self.store.metadata().workspace()?;
                 Ok(AiIpcPayload::WorkspaceState {
                     workspace: serde_json::to_value(&saved)?,
                 })
@@ -232,24 +240,24 @@ impl State {
 
     fn latest_recovery_summaries(&self) -> HashMap<FlowId, FlowSummary> {
         let mut map = HashMap::new();
-        for capture in &self.recovery {
+        for capture in &self.storage.recovery {
             map.insert(capture.record.summary.id, capture.record.summary.clone());
         }
         map
     }
 
     fn ipc_status(&mut self) -> Result<AiIpcPayload> {
-        let mut total_flows = self.store.flow_count()?;
+        let mut total_flows = self.store.flows().flow_count()?;
         let recovery = self.latest_recovery_summaries();
         for &id in recovery.keys() {
-            if !self.store.has_flow(id)? {
+            if !self.store.flows().has_flow(id)? {
                 total_flows = total_flows.saturating_add(1);
             }
         }
         let project_disk_bytes = match self.store.total_bytes() {
             Ok(bytes) => {
-                self.project_disk_bytes = bytes;
-                self.last_disk_refresh = Some(std::time::Instant::now());
+                self.storage.project_disk_bytes = bytes;
+                self.storage.last_disk_refresh = Some(std::time::Instant::now());
                 if self.events.capacity() > 4 {
                     let _ = self.events.try_send(Event::ProjectDiskUsage {
                         project: self.project,
@@ -258,15 +266,15 @@ impl State {
                 }
                 bytes
             }
-            Err(_) => self.project_disk_bytes,
+            Err(_) => self.storage.project_disk_bytes,
         };
-        let proxy_address = self.proxy.as_ref().map(|p| p.address().to_string());
+        let proxy_address = self.proxy.primary_address().map(|addr| addr.to_string());
         Ok(AiIpcPayload::Status {
             project_id: self.project.id,
             project_generation: self.project.generation,
             proxy_address,
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
             total_flows,
             project_disk_bytes,
             process_memory_bytes: crate::current_process_memory_bytes(),
@@ -285,6 +293,7 @@ impl State {
         let recovery = self.latest_recovery_summaries();
         let (total, flows) =
             self.store
+                .flows()
                 .query_ai_flows(offset, clamped_limit, filter, method, status, &recovery)?;
         Ok(AiIpcPayload::FlowsList { total, flows })
     }
@@ -329,21 +338,20 @@ impl State {
             target.as_deref(),
             raw_request.as_deref(),
         )?;
-        let mut workspace = self.store.workspace()?;
+        let mut workspace = self.store.metadata().workspace()?;
         let resolved_title = match title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()) {
             Some(custom) => custom,
             None => next_repeater_tab_title(&workspace, &request),
         };
         let tab = WorkTab::from_request(Some(&request), resolved_title);
-        if self.unsaved_count() == 0
-            && let Some(next_rev) = workspace.revision.checked_add(1)
-        {
+        if self.unsaved_count() == 0 {
+            let next_rev = workspace.revision.saturating_add(1);
             workspace.revision = next_rev;
             workspace.active = Some(tab.id);
             workspace.active_websocket_tab = None;
             workspace.tabs.push(tab.clone());
-            if self.store.save_workspace(&workspace).is_ok() {
-                self.ipc_repeater_revisions.insert((tab.id, next_rev));
+            if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
+                self.ai_ipc.repeater_revisions.insert((tab.id, next_rev));
             }
         }
         let tab_id = tab.id;
@@ -381,7 +389,7 @@ impl State {
                 "项目正在切换或静默保存，暂无法执行 Repeater 发送"
             );
             ensure!(
-                self.ipc_jobs.len() < MAX_CONCURRENT_IPC_CLIENTS,
+                self.ai_ipc.jobs.len() < MAX_CONCURRENT_IPC_CLIENTS,
                 "并发 IPC Repeater 请求已达上限"
             );
             let mut request = resolve_repeater_open_request(
@@ -392,95 +400,47 @@ impl State {
                 raw_request.as_deref(),
             )?;
             let base_request = request.clone();
-            for name in remove_headers {
-                request
-                    .headers
-                    .retain(|h| !h.name.eq_ignore_ascii_case(&name));
-            }
-            for (name, value) in add_headers {
-                request
-                    .headers
-                    .retain(|h| !h.name.eq_ignore_ascii_case(&name));
-                request.headers.push(Header {
-                    name,
-                    value: value.into_bytes(),
-                });
-            }
-            if let Some(body) = override_body {
-                let bytes = body.into_bytes();
-                request
-                    .headers
-                    .retain(|h| !h.name.eq_ignore_ascii_case("content-length"));
-                request.headers.push(Header {
-                    name: "Content-Length".into(),
-                    value: bytes.len().to_string().into_bytes(),
-                });
-                request.body = bytes;
-            }
-            let workspace = self.store.workspace_arc()?;
+            apply_header_and_body_overrides(
+                &mut request.headers,
+                &mut request.body,
+                remove_headers,
+                add_headers,
+                override_body,
+            );
+            let workspace = self.store.metadata().workspace_arc()?;
             let settings = workspace.repeater_settings.clone();
-            let upstream_tls = if insecure {
-                mio_proxy::UpstreamTls::Insecure
-            } else {
-                self.preferences
-                    .effective_upstream_tls(&workspace.upstream_tls)?
-            };
-            let upstream_route = workspace
-                .upstream_proxy
-                .route_for_url_with_tls(&request.url, upstream_tls.clone())?;
-            let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
-            let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-            let timeout =
-                std::time::Duration::from_secs(settings.request_timeout_secs.clamp(1, 300));
-            let started_unix_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
-                .min(i64::MAX as u128) as i64;
+            let runtime_cfg = self.build_repeater_send_runtime_config(
+                &workspace,
+                &settings,
+                300,
+                insecure,
+                false,
+                false,
+            )?;
+            let started_unix_ms = crate::codec_util::now_unix_ms();
             Ok((
                 base_request,
                 request,
                 settings,
-                upstream_tls,
-                upstream_route,
-                hostname_overrides,
-                streaming_timeout,
-                timeout,
+                runtime_cfg,
                 started_unix_ms,
             ))
         })();
-        let (
-            base_request,
-            request,
-            settings,
-            upstream_tls,
-            upstream_route,
-            hostname_overrides,
-            streaming_timeout,
-            timeout,
-            started_unix_ms,
-        ) = match prepared {
+        let (base_request, request, settings, runtime_cfg, started_unix_ms) = match prepared {
             Ok(val) => val,
             Err(err) => return Err((reply, err)),
         };
         let project = self.project;
-        let client_certificates = self.compiled_client_certs.clone();
-        let sessions = self.sessions.clone();
-        let provenance = self.provenance.clone();
-        if self.ipc_jobs.is_empty() && self.ipc_job_cancel.is_cancelled() {
-            self.ipc_job_cancel = self.cancel.child_token();
-        }
-        let cancel = self.ipc_job_cancel.child_token();
-        self.ipc_jobs.spawn(async move {
+        let sessions = self.sessions.runtime.clone();
+        let provenance = self.storage.provenance.clone();
+        self.ai_ipc.refresh_cancel_if_idle(&self.cancel);
+        let cancel = self.ai_ipc.job_cancel.child_token();
+        self.ai_ipc.jobs.spawn(async move {
             let outcome = execute_ipc_repeater_send(
                 base_request,
                 request,
                 settings,
-                upstream_tls,
-                upstream_route,
-                hostname_overrides,
-                streaming_timeout,
-                client_certificates,
-                timeout,
+                runtime_cfg,
                 started_unix_ms,
                 sessions,
                 provenance,
@@ -505,12 +465,12 @@ impl State {
         ensure!(!trimmed.is_empty(), "瘦身保存目标路径不能为空");
         let dest = PathBuf::from(trimmed);
         let opts = options.unwrap_or_default();
-        let pending_prov = self.provenance.snapshot_all();
+        let pending_prov = self.storage.provenance.snapshot_all();
         let report = self.store.slim_save_as(
             Path::new(&dest),
             &opts,
-            self.recovery.make_contiguous(),
-            self.websocket_recovery.make_contiguous(),
+            self.storage.recovery.make_contiguous(),
+            self.storage.websocket_recovery.make_contiguous(),
             &self.intruder.recovery,
             &pending_prov,
             &self.cancel,
@@ -563,16 +523,16 @@ impl State {
             };
         let listen = explicit_override
             .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default loopback"));
-        if self.proxy.is_some() || !self.extra_proxies.is_empty() {
+        if self.proxy.is_running() {
             self.stop_proxy().await?;
         }
         self.start_proxy_with_override(self.project, listen, explicit_override)
             .await?;
         Ok(AiIpcPayload::ProxyControl {
-            proxy_running: self.proxy.is_some(),
-            proxy_address: self.proxy.as_ref().map(|p| p.address().to_string()),
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            proxy_running: self.proxy.primary.is_some(),
+            proxy_address: self.proxy.primary_address().map(|addr| addr.to_string()),
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
         })
     }
 
@@ -582,10 +542,10 @@ impl State {
         })
         .await?;
         Ok(AiIpcPayload::ProxyControl {
-            proxy_running: self.proxy.is_some(),
-            proxy_address: self.proxy.as_ref().map(|p| p.address().to_string()),
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            proxy_running: self.proxy.primary.is_some(),
+            proxy_address: self.proxy.primary_address().map(|addr| addr.to_string()),
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
         })
     }
 
@@ -595,8 +555,8 @@ impl State {
         responses: Option<bool>,
     ) -> Result<AiIpcPayload> {
         if requests.is_some() || responses.is_some() {
-            let reqs = requests.unwrap_or(self.intercept_requests);
-            let resps = responses.unwrap_or(self.intercept_responses);
+            let reqs = requests.unwrap_or(self.proxy.intercept_requests);
+            let resps = responses.unwrap_or(self.proxy.intercept_responses);
             self.command_proxy_intercept(Command::SetIntercept {
                 project: self.project,
                 requests: reqs,
@@ -605,15 +565,16 @@ impl State {
             .await?;
         }
         Ok(AiIpcPayload::ProxyControl {
-            proxy_running: self.proxy.is_some(),
-            proxy_address: self.proxy.as_ref().map(|p| p.address().to_string()),
-            intercept_requests: self.intercept_requests,
-            intercept_responses: self.intercept_responses,
+            proxy_running: self.proxy.primary.is_some(),
+            proxy_address: self.proxy.primary_address().map(|addr| addr.to_string()),
+            intercept_requests: self.proxy.intercept_requests,
+            intercept_responses: self.proxy.intercept_responses,
         })
     }
 
     fn ipc_proxy_pending(&self) -> AiIpcPayload {
         let mut items: Vec<AiIpcPendingItem> = self
+            .proxy
             .pending
             .iter()
             .filter(|(_, p)| !p.reply.is_closed())
@@ -651,33 +612,20 @@ impl State {
             Decision::Drop
         } else {
             let pending = self
+                .proxy
                 .pending
                 .get(&flow_id)
                 .context("拦截流量不存在或已结束")?;
             match pending.stage {
                 InterceptStage::Request => {
                     let mut req = pending.intercepted_request.clone();
-                    for name in remove_headers {
-                        req.headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
-                    }
-                    for (k, v) in add_headers {
-                        req.headers.retain(|h| !h.name.eq_ignore_ascii_case(&k));
-                        req.headers.push(Header {
-                            name: k,
-                            value: v.into_bytes(),
-                        });
-                    }
-                    if let Some(body) = override_body {
-                        let bytes = body.into_bytes();
-                        let len_str = bytes.len().to_string().into_bytes();
-                        req.headers
-                            .retain(|h| !h.name.eq_ignore_ascii_case("content-length"));
-                        req.headers.push(Header {
-                            name: "Content-Length".into(),
-                            value: len_str,
-                        });
-                        req.body = bytes;
-                    }
+                    apply_header_and_body_overrides(
+                        &mut req.headers,
+                        &mut req.body,
+                        remove_headers,
+                        add_headers,
+                        override_body,
+                    );
                     Decision::ForwardRequest(req)
                 }
                 InterceptStage::Response => {
@@ -688,29 +636,13 @@ impl State {
                     if let Some(code) = override_status {
                         resp.status = code;
                     }
-                    for name in remove_headers {
-                        resp.headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
-                    }
-                    for (k, v) in add_headers {
-                        resp.headers.retain(|h| !h.name.eq_ignore_ascii_case(&k));
-                        resp.headers.push(Header {
-                            name: k,
-                            value: v.into_bytes(),
-                        });
-                    }
-                    if let Some(body) = override_body
-                        && !pending.response_head_only
-                    {
-                        let bytes = body.into_bytes();
-                        let len_str = bytes.len().to_string().into_bytes();
-                        resp.headers
-                            .retain(|h| !h.name.eq_ignore_ascii_case("content-length"));
-                        resp.headers.push(Header {
-                            name: "Content-Length".into(),
-                            value: len_str,
-                        });
-                        resp.body = bytes;
-                    }
+                    apply_header_and_body_overrides(
+                        &mut resp.headers,
+                        &mut resp.body,
+                        remove_headers,
+                        add_headers,
+                        override_body.filter(|_| !pending.response_head_only),
+                    );
                     Decision::ForwardResponse(resp)
                 }
             }
@@ -729,8 +661,8 @@ impl State {
     }
 
     fn ipc_websocket_list(&self, limit: usize) -> Result<AiIpcPayload> {
-        let (mut total, mut messages) = self.store.list_websocket_messages(limit)?;
-        for cap in self.websocket_recovery.iter().rev() {
+        let (mut total, mut messages) = self.store.websocket().list_messages(limit)?;
+        for cap in self.storage.websocket_recovery.iter().rev() {
             if !messages.iter().any(|m| m.id == cap.record.id) {
                 total = total.saturating_add(1);
                 if messages.len() < limit.clamp(1, 500) {
@@ -847,22 +779,40 @@ fn concise_request_path(url: &str) -> String {
     }
 }
 
+fn apply_header_and_body_overrides(
+    headers: &mut Vec<Header>,
+    body: &mut Vec<u8>,
+    remove_headers: Vec<String>,
+    add_headers: Vec<(String, String)>,
+    override_body: Option<String>,
+) {
+    for name in remove_headers {
+        headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
+    }
+    for (name, value) in add_headers {
+        headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
+        headers.push(Header {
+            name,
+            value: value.into_bytes(),
+        });
+    }
+    if let Some(new_body) = override_body {
+        let bytes = new_body.into_bytes();
+        headers.retain(|h| !h.name.eq_ignore_ascii_case("content-length"));
+        headers.push(Header {
+            name: "Content-Length".into(),
+            value: bytes.len().to_string().into_bytes(),
+        });
+        *body = bytes;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_ipc_repeater_send(
     original_request: HttpRequest,
     mut request: HttpRequest,
     settings: crate::RepeaterSettings,
-    upstream_tls: mio_proxy::UpstreamTls,
-    upstream_route: mio_proxy::UpstreamRoute,
-    hostname_overrides: std::sync::Arc<[(String, std::net::IpAddr)]>,
-    streaming_timeout: Option<std::time::Duration>,
-    client_certificates: std::sync::Arc<
-        [(
-            crate::ClientCertificateRule,
-            mio_proxy::ParsedClientIdentity,
-        )],
-    >,
-    timeout: std::time::Duration,
+    runtime_cfg: RepeaterSendRuntimeConfig,
     started_unix_ms: i64,
     sessions: crate::sessions::SessionRuntime,
     provenance: crate::ProvenanceTracker,
@@ -877,93 +827,47 @@ async fn execute_ipc_repeater_send(
             &request,
         );
     }
-    let before_proto = request.clone();
     let req_version = request.version;
-    settings.apply_protocol_options(&mut request, req_version);
-    if request != before_proto {
-        provenance.record_request(
-            run_id,
-            &original_request,
-            ProvenanceActor::ProtocolNormalization {
-                description: "Repeater 协议选项".into(),
-            },
-            &request,
-        );
-    }
-    let mut record = FlowRecord {
-        summary: FlowSummary {
-            id: run_id,
-            revision: 1,
-            source: TrafficSource::Repeater,
-            method: request.method.clone(),
-            url: request.url.clone(),
-            status: None,
-            state: FlowState::Pending,
-            request_bytes: request.body.len() as u64,
-            response_bytes: 0,
-            started_unix_ms,
-            elapsed_ms: 0,
-        },
-        request: request.clone(),
-        response: None,
-    };
+    apply_repeater_protocol_options(
+        run_id,
+        &original_request,
+        &mut request,
+        &settings,
+        req_version,
+        &provenance,
+    );
+    let mut record = pending_repeater_flow_record(run_id, request, started_unix_ms);
     let started = std::time::Instant::now();
-    let deadline = started + timeout;
-    let mut send_config = mio_proxy::SendConfig::default();
-    send_config.network.upstream_route = upstream_route;
-    send_config.network.hostname_overrides = hostname_overrides;
-    send_config.tls.trust = upstream_tls;
-    send_config.tls.client_certificates = client_certificates;
-    send_config.limits.timeout = timeout;
-    send_config.limits.streaming_timeout = streaming_timeout;
-    send_config.http.version = Some(request.version);
-    let (changed, steps) = match sessions
-        .apply_to_flow_record_with_steps(
-            SessionTool::Repeater,
-            &mut record,
-            &send_config,
-            &cancel,
-            deadline,
-            started,
-        )
-        .await
+    let deadline = started + runtime_cfg.request_timeout;
+    let send_config = runtime_cfg.build_send_config(
+        Some(&record.request.url),
+        runtime_cfg.request_timeout,
+        Some(record.request.version),
+    );
+    if apply_repeater_session_rules(
+        &sessions,
+        &provenance,
+        run_id,
+        &original_request,
+        &mut record,
+        &settings,
+        None,
+        true,
+        &send_config,
+        &cancel,
+        deadline,
+        started,
+    )
+    .await
+    .is_none()
     {
-        Some(pair) => pair,
-        None => {
-            provenance.remove(run_id);
-            let msg = match &record.summary.state {
-                FlowState::Failed(reason) => reason.clone(),
-                _ => "Session 规则或宏前置请求失败，已拒绝裸发请求".into(),
-            };
-            bail!(msg);
-        }
-    };
-    for (rule_name, snap) in steps {
-        provenance.record_request(
-            run_id,
-            &original_request,
-            ProvenanceActor::SessionRule { rule_name },
-            &snap,
-        );
+        provenance.remove(run_id);
+        let msg = match &record.summary.state {
+            FlowState::Failed(reason) => reason.clone(),
+            _ => "Session 规则或宏前置请求失败，已拒绝裸发请求".into(),
+        };
+        bail!(msg);
     }
-    if changed {
-        let before_norm = record.request.clone();
-        let rec_version = record.request.version;
-        settings.apply_protocol_options(&mut record.request, rec_version);
-        if record.request != before_norm {
-            provenance.record_request(
-                run_id,
-                &original_request,
-                ProvenanceActor::ProtocolNormalization {
-                    description: "Repeater 协议选项".into(),
-                },
-                &record.request,
-            );
-        }
-    }
-    record.summary.method = record.request.method.clone();
-    record.summary.url = record.request.url.clone();
-    record.summary.request_bytes = record.request.body.len() as u64;
     let response =
         match mio_proxy::send(record.request.clone(), send_config.clone(), cancel.clone())
             .await
@@ -978,19 +882,13 @@ async fn execute_ipc_repeater_send(
     sessions.observe_response(SessionTool::Repeater, &record.request.url, &response);
     let original_response = response.clone();
     let unpacked = if settings.unpack_compressed_responses {
-        let resp_for_unpack = response.clone();
-        let method_for_unpack = record.request.method.clone();
-        let max_body = send_config.limits.max_body_bytes;
-        let cancel_for_unpack = cancel.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::http::unpack_response(
-                &resp_for_unpack,
-                &method_for_unpack,
-                max_body,
-                &cancel_for_unpack,
-                deadline,
-            )
-        })
+        spawn_unpack_response(
+            response.clone(),
+            record.request.method.clone(),
+            send_config.limits.max_body_bytes,
+            cancel.clone(),
+            deadline,
+        )
         .await
         .ok()
         .and_then(Result::ok)
@@ -1001,39 +899,14 @@ async fn execute_ipc_repeater_send(
     };
     let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let request_mutated = record.request != original_request;
-    let initial_pending = request_mutated.then(|| FlowRecord {
-        summary: FlowSummary {
-            id: run_id,
-            revision: 1,
-            source: TrafficSource::Repeater,
-            method: original_request.method.clone(),
-            url: original_request.url.clone(),
-            status: None,
-            state: FlowState::Pending,
-            request_bytes: original_request.body.len() as u64,
-            response_bytes: 0,
-            started_unix_ms,
-            elapsed_ms: 0,
-        },
-        request: original_request.clone(),
-        response: None,
+    let initial_pending = request_mutated.then(|| {
+        pending_repeater_flow_record(run_id, original_request.clone(), started_unix_ms)
     });
-    let mutated_pending = request_mutated.then(|| FlowRecord {
-        summary: FlowSummary {
-            id: run_id,
-            revision: 2,
-            source: TrafficSource::Repeater,
-            method: record.request.method.clone(),
-            url: record.request.url.clone(),
-            status: None,
-            state: FlowState::Pending,
-            request_bytes: record.request.body.len() as u64,
-            response_bytes: 0,
-            started_unix_ms,
-            elapsed_ms: 0,
-        },
-        request: record.request.clone(),
-        response: None,
+    let mutated_pending = request_mutated.then(|| {
+        let mut mutated =
+            pending_repeater_flow_record(run_id, record.request.clone(), started_unix_ms);
+        mutated.summary.revision = 2;
+        mutated
     });
     let base_rev = if request_mutated { 3 } else { 1 };
     let response_unpacked = unpacked.is_some();

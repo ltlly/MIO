@@ -126,7 +126,7 @@ impl State {
             "Sequencer 并发必须在 1..={MAX_SEQUENCER_CONCURRENCY} 之间"
         );
         validate_location(&config.location)?;
-        let workspace = self.store.workspace()?;
+        let workspace = self.store.metadata().workspace()?;
         let repeater_settings = &workspace.repeater_settings;
         let upstream_tls = self
             .preferences
@@ -149,7 +149,7 @@ impl State {
             },
             tls: mio_proxy::UpstreamTlsConfig {
                 trust: upstream_tls,
-                client_certificates: self.compiled_client_certs.clone(),
+                client_certificates: self.tls.compiled_client_certs.clone(),
                 ..Default::default()
             },
             limits: mio_proxy::SendLimits {
@@ -178,7 +178,7 @@ impl State {
             target_samples: config.target_samples,
             concurrency: config.concurrency,
             unpack_compressed_responses: repeater_settings.unpack_compressed_responses,
-            sessions: self.sessions.clone(),
+            sessions: self.sessions.runtime.clone(),
         })
     }
 }

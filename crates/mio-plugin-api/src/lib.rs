@@ -2,7 +2,6 @@
 
 pub mod panel;
 pub mod protocol;
-pub use protocol::{MatchAndReplaceRule, MatchReplaceTarget};
 
 use serde::{Deserialize, Serialize};
 pub use uuid::Uuid;

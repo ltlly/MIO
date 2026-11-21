@@ -231,11 +231,7 @@ fn write_batch(
         let value = if stored.color == change.color {
             stored
         } else if change.source_id.is_nil() {
-            let revision = stored
-                .revision
-                .checked_add(1)
-                .filter(|revision| *revision <= i64::MAX as u64)
-                .context("外部归档 HTTP 高亮 revision 已耗尽")?;
+            let revision = stored.revision + 1;
             let entry = live_map.entry(owner).or_default();
             entry.highlight_revision = revision;
             entry.highlight = change.color;
@@ -245,11 +241,7 @@ fn write_batch(
                 color: change.color,
             }
         } else {
-            let revision = stored
-                .revision
-                .checked_add(1)
-                .filter(|revision| *revision <= i64::MAX as u64)
-                .context("外部归档 HTTP 高亮 revision 已耗尽")?;
+            let revision = stored.revision + 1;
             if stored.revision == 0 {
                 transaction.execute(
                     "INSERT INTO main.ext_http_highlights(item,revision,color) VALUES(?1,?2,?3)",
@@ -284,15 +276,15 @@ pub(in crate::store) fn write_changes(
         .collect())
 }
 
-impl ProjectStore {
-    pub(crate) fn ext_http_highlights(
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub(crate) fn http_highlights(
         &self,
         project: ProjectKey,
         changes: &[ExtHttpHighlightChange],
     ) -> Result<SavedHighlights> {
         ensure!(changes.len() <= 500, "外部归档 HTTP 高亮批次超过 500 条限额");
-        let transaction = self.connection.unchecked_transaction()?;
-        project_guard(&transaction, project, self.id)?;
+        let transaction = self.0.connection.unchecked_transaction()?;
+        project_guard(&transaction, project, self.0.id)?;
         let mut owners = HashMap::new();
         for (source, ids) in source_ids(changes) {
             if validate_http_source(&transaction, source).is_ok()
@@ -345,8 +337,10 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(saved)
     }
+}
 
-    pub(crate) fn set_ext_http_highlights(
+impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
+    pub(crate) fn set_http_highlights(
         &mut self,
         project: ProjectKey,
         changes: &[ExtHttpHighlightChange],
@@ -356,9 +350,10 @@ impl ProjectStore {
             ensure!(!changes.is_empty(), "外部归档 HTTP 高亮修改批次为空");
             ensure!(!cancel.is_cancelled(), "外部归档 HTTP 高亮修改已取消");
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            project_guard(&transaction, project, self.id)?;
+            project_guard(&transaction, project, self.0.id)?;
             let saved = write_batch(&transaction, changes, cancel)?;
             ensure!(!cancel.is_cancelled(), "外部归档 HTTP 高亮修改已取消");
             transaction.commit()?;
@@ -369,7 +364,9 @@ impl ProjectStore {
             stored: if cancel.is_cancelled() {
                 Vec::new()
             } else {
-                self.ext_http_highlights(project, changes)
+                self.0
+                    .ext_archive()
+                    .http_highlights(project, changes)
                     .unwrap_or_default()
             },
         })

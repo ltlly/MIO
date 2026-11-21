@@ -28,12 +28,12 @@ struct BucketStats {
     unknown_subtypes: BTreeMap<(String, u8, u8), u64>,
 }
 
-impl ProjectStore {
-    pub fn ext_coverage_report(&self, source_id: Uuid) -> Result<ExtCoverageReport> {
-        if let Some(direct) = self.read_direct_ext_source()?
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub fn coverage_report(&self, source_id: Uuid) -> Result<ExtCoverageReport> {
+        if let Some(direct) = self.read_direct_source()?
             && direct.id == source_id
         {
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = self.0.connection.unchecked_transaction()?;
             let workspace = crate::store::metadata::workspace(&transaction)?;
             transaction.commit()?;
             let mut coverage = direct.report.coverage_report();
@@ -63,7 +63,7 @@ impl ProjectStore {
             }
             return Ok(coverage);
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"

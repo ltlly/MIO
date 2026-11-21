@@ -1,15 +1,15 @@
 use super::*;
 
-impl ProjectStore {
+impl crate::store::IntruderRepo<&mut ProjectStore> {
     #[cfg(test)]
-    pub fn create_intruder_run(
+    pub fn create_run(
         &mut self,
         id: Uuid,
         tab_id: TabId,
         spec: &IntruderSpec,
         started_unix_ms: i64,
     ) -> Result<IntruderRunSummary> {
-        self.create_project_intruder_run_with_pool_catalog(
+        self.create_project_run_with_pool_catalog(
             id,
             tab_id,
             spec,
@@ -19,7 +19,7 @@ impl ProjectStore {
         .map(|(run, _)| run)
     }
 
-    pub(in crate::store::intruder) fn create_project_intruder_run_with_pool_catalog(
+    pub(in crate::store::intruder) fn create_project_run_with_pool_catalog(
         &mut self,
         id: Uuid,
         tab_id: TabId,
@@ -32,15 +32,16 @@ impl ProjectStore {
             "Intruder Start 已取消；未创建资源池或运行"
         );
         ensure!(
-            !self.intruder_sessions.contains(id),
+            !self.0.intruder_sessions.contains(id),
             "Intruder Session run ID 已存在；未重新开始"
         );
         let total = spec.validate()?;
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
-            super::super::metadata::project_id(&transaction)? == self.id,
+            super::super::metadata::project_id(&transaction)? == self.0.id,
             "Intruder 项目归属已改变"
         );
         validate_retirements(&transaction)?;
@@ -113,7 +114,7 @@ impl ProjectStore {
     }
 
     /// The caller must exclude live senders and unsaved recovery before entering this transaction.
-    pub fn discard_intruder_run(
+    pub fn discard_run(
         &mut self,
         id: Uuid,
         expected_revision: u64,
@@ -121,16 +122,17 @@ impl ProjectStore {
         cancel: &CancellationToken,
     ) -> Result<IntruderDiscardReceipt> {
         ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
-        if self.intruder_sessions.contains(id) {
-            return self.discard_session_intruder(id, expected_revision, workspace, cancel);
+        if self.0.intruder_sessions.contains(id) {
+            return self.discard_session(id, expected_revision, workspace, cancel);
         }
-        self.validate_session_workspace(&workspace)?;
+        self.0.intruder().validate_session_workspace(&workspace)?;
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let receipt = discard_project_run(
             &transaction,
-            self.id,
+            self.0.id,
             id,
             expected_revision,
             workspace,
@@ -140,15 +142,8 @@ impl ProjectStore {
         Ok(receipt)
     }
 
-    pub fn read_intruder_run(&self, id: Uuid) -> Result<IntruderRunSummary> {
-        if let Some(dataset) = self.session_dataset(id)? {
-            return Ok(dataset.data.run.clone());
-        }
-        read_run(&self.connection, id)
-    }
-
     /// The caller excludes pending result recovery before changing an independent binding.
-    pub fn set_intruder_resource_pool(
+    pub fn set_resource_pool(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -156,9 +151,9 @@ impl ProjectStore {
         pool_id: Uuid,
         cancel: &CancellationToken,
     ) -> Result<IntruderRunSummary> {
-        self.check_intruder_session_owner(project, id)?;
-        if self.intruder_sessions.contains(id) {
-            return self.set_session_intruder_resource_pool(
+        self.0.intruder().check_session_owner(project, id)?;
+        if self.0.intruder_sessions.contains(id) {
+            return self.set_session_resource_pool(
                 id,
                 expected_pool_revision,
                 pool_id,
@@ -166,6 +161,7 @@ impl ProjectStore {
             );
         }
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -182,29 +178,20 @@ impl ProjectStore {
         Ok(run)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_intruder_connection(&self, id: Uuid) -> Result<&Connection> {
-        ensure!(
-            !self.intruder_sessions.contains(id),
-            "Intruder Session 运行无 SQLite 连接"
-        );
-        Ok(&self.connection)
-    }
-
     /// The caller excludes pending recovery before this explicit admission.
-    pub fn request_intruder_baseline(
+    pub fn request_baseline(
         &mut self,
         project: ProjectKey,
         id: Uuid,
         expected_revision: u64,
         cancel: &CancellationToken,
     ) -> Result<IntruderRunSummary> {
-        self.request_intruder_baseline_with(project, id, expected_revision, cancel, |_| Ok(()))
+        self.request_baseline_with(project, id, expected_revision, cancel, |_| Ok(()))
             .map(|(run, ())| run)
     }
 
     /// Prepares the sender from the single validated owned spec before committing its slot.
-    pub(crate) fn request_intruder_baseline_with<T>(
+    pub(crate) fn request_baseline_with<T>(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -212,11 +199,12 @@ impl ProjectStore {
         cancel: &CancellationToken,
         prepare: impl FnOnce(IntruderSpec) -> Result<T>,
     ) -> Result<(IntruderRunSummary, T)> {
-        self.check_intruder_session_owner(project, id)?;
-        if self.intruder_sessions.contains(id) {
-            return self.request_session_intruder_baseline(id, expected_revision, cancel, prepare);
+        self.0.intruder().check_session_owner(project, id)?;
+        if self.0.intruder_sessions.contains(id) {
+            return self.request_session_baseline(id, expected_revision, cancel, prepare);
         }
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -228,20 +216,40 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(prepared)
     }
+}
 
-    pub fn find_intruder_run(&self, id: Uuid) -> Result<Option<IntruderRunSummary>> {
-        if let Some(dataset) = self.session_dataset(id)? {
-            return Ok(Some(dataset.data.run.clone()));
+impl<'a> crate::store::IntruderRepo<&'a ProjectStore> {
+    #[cfg(test)]
+    pub(crate) fn test_connection(self, id: Uuid) -> Result<&'a Connection> {
+        ensure!(
+            !self.0.intruder_sessions.contains(id),
+            "Intruder Session 运行无 SQLite 连接"
+        );
+        Ok(&self.0.connection)
+    }
+}
+
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::IntruderRepo<S> {
+    pub fn read_run(&self, id: Uuid) -> Result<IntruderRunSummary> {
+        if let Some(dataset) = self.0.intruder().session_dataset(id)? {
+            return Ok(dataset.data.run.clone());
         }
-        find_run(&self.connection, id)
+        read_run(&self.0.connection, id)
     }
 
-    pub fn intruder_runs(&self, after: Option<Uuid>, limit: usize) -> Result<IntruderRunPage> {
+    pub fn find_run(&self, id: Uuid) -> Result<Option<IntruderRunSummary>> {
+        if let Some(dataset) = self.0.intruder().session_dataset(id)? {
+            return Ok(Some(dataset.data.run.clone()));
+        }
+        find_run(&self.0.connection, id)
+    }
+
+    pub fn runs(&self, after: Option<Uuid>, limit: usize) -> Result<IntruderRunPage> {
         ensure!((1..=500).contains(&limit), "Intruder 分页大小必须为 1–500");
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let cursor = after
             .map(|id| {
-                self.session_intruder_cursor(id)
+                self.session_cursor(id)
                     .map(Ok)
                     .unwrap_or_else(|| run_cursor(&transaction, id))
             })
@@ -279,7 +287,7 @@ impl ProjectStore {
             }
         }
         let next_after = more.then(|| output.last().expect("nonempty bounded page").id);
-        let page = self.merge_session_intruder_runs(
+        let page = self.merge_session_runs(
             &transaction,
             cursor,
             limit,
@@ -292,25 +300,25 @@ impl ProjectStore {
         Ok(page)
     }
 
-    pub fn read_intruder_spec(&self, id: Uuid) -> Result<IntruderSpec> {
-        self.read_intruder_spec_with_settings(id)
+    pub fn read_spec(&self, id: Uuid) -> Result<IntruderSpec> {
+        self.read_spec_with_settings(id)
             .map(|(spec, _, _)| spec)
     }
 
-    pub(crate) fn read_intruder_run_settings_only(
+    pub(crate) fn read_run_settings_only(
         &self,
         id: Uuid,
     ) -> Result<(
         crate::IntruderAttackSettings,
         Vec<crate::IntruderPayloadSetConfig>,
     )> {
-        if let Some(dataset) = self.session_dataset(id)? {
+        if let Some(dataset) = self.0.intruder().session_dataset(id)? {
             return dataset.data.read_settings_only();
         }
-        read_run_settings_only(&self.connection, id)
+        read_run_settings_only(&self.0.connection, id)
     }
 
-    pub(crate) fn read_intruder_spec_with_settings(
+    pub(crate) fn read_spec_with_settings(
         &self,
         id: Uuid,
     ) -> Result<(
@@ -318,10 +326,10 @@ impl ProjectStore {
         crate::IntruderAttackSettings,
         Vec<crate::IntruderPayloadSetConfig>,
     )> {
-        if let Some(dataset) = self.session_dataset(id)? {
+        if let Some(dataset) = self.0.intruder().session_dataset(id)? {
             return dataset.data.read_spec_with_settings();
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let out = read_spec_with_settings(&transaction, id)?;
         transaction.commit()?;
         Ok(out)

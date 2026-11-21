@@ -36,7 +36,7 @@ async fn failed_pause_or_resume_never_ack_success_and_saving_cannot_replay_the_c
             );
             assert_eq!(state.store.read_intruder_run(id).unwrap(), before);
             assert!(state.intruder.runs[&id].cancel.is_cancelled());
-            let first_storage_error = state.storage_error.clone().unwrap();
+            let first_storage_error = state.storage.error.clone().unwrap();
             assert!(
                 control(&mut state, &mut events, project, id, false)
                     .await
@@ -44,7 +44,7 @@ async fn failed_pause_or_resume_never_ack_success_and_saving_cannot_replay_the_c
             );
             assert!(state.stop_intruder().await.is_err());
             assert!(!state.intruder.has_resources());
-            let stopped_storage_error = state.storage_error.clone();
+            let stopped_storage_error = state.storage.error.clone();
             let failed = state.intruder_result_page(id, None, 1).unwrap();
             assert!(!failed.persisted);
             assert!(matches!(failed.run.state, IntruderRunState::Failed(_)));

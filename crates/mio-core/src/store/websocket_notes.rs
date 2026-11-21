@@ -96,14 +96,14 @@ pub(super) fn fill_previews(connection: &Connection, rows: &mut [WebSocketSummar
     Ok(())
 }
 
-impl ProjectStore {
-    pub(crate) fn websocket_notes(&self, project: ProjectKey, id: Uuid) -> Result<WebSocketNotes> {
+impl<S: std::ops::Deref<Target = ProjectStore>> super::WebSocketRepo<S> {
+    pub(crate) fn notes(&self, project: ProjectKey, id: Uuid) -> Result<WebSocketNotes> {
         ensure!(!id.is_nil(), "WebSocket 消息 ID 不能为空");
         ensure!(
-            !project.id.is_nil() && project.generation > 0 && project.id == self.id,
+            !project.id.is_nil() && project.generation > 0 && project.id == self.0.id,
             "WebSocket 备注项目归属无效"
         );
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == super::SCHEMA, "WebSocket 备注项目版本已改变");
         super::schema_guard::validate(&transaction)?;
@@ -117,8 +117,10 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(notes)
     }
+}
 
-    pub(crate) fn set_websocket_notes(
+impl super::WebSocketRepo<&mut ProjectStore> {
+    pub(crate) fn set_notes(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -129,7 +131,7 @@ impl ProjectStore {
         let saved = (|| -> Result<WebSocketNotes> {
             ensure!(!id.is_nil(), "WebSocket 消息 ID 不能为空；备注未修改");
             ensure!(
-                !project.id.is_nil() && project.generation > 0 && project.id == self.id,
+                !project.id.is_nil() && project.generation > 0 && project.id == self.0.id,
                 "WebSocket 备注项目归属无效；备注未修改"
             );
             ensure!(
@@ -138,6 +140,7 @@ impl ProjectStore {
             );
             ensure!(!cancel.is_cancelled(), "WebSocket 备注修改已取消");
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             let schema: i32 =
@@ -158,7 +161,7 @@ impl ProjectStore {
         })();
         saved.map_err(|error| WebSocketNotesError {
             message: error.to_string(),
-            stored: self.websocket_notes(project, id).ok(),
+            stored: self.0.websocket().notes(project, id).ok(),
         })
     }
 }
@@ -209,10 +212,7 @@ pub(super) fn write(
     if stored.text == text {
         return Ok(stored);
     }
-    let revision = expected
-        .checked_add(1)
-        .filter(|revision| *revision <= i64::MAX as u64)
-        .context("WebSocket 备注 revision 已耗尽；备注未修改")?;
+    let revision = expected + 1;
     if expected == 0 {
         transaction.execute(
             "INSERT INTO websocket_notes(message,revision,text) VALUES(?1,?2,?3)",

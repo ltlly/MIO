@@ -123,33 +123,6 @@ fn retention_refuses_foreign_owner_generation_and_exhausted_release_revision() {
             )
             .is_err()
     );
-    store
-        .connection
-        .execute(
-            "UPDATE intruder_runs SET revision=?1 WHERE id=?2",
-            params![i64::MAX - 1, run.id.to_string()],
-        )
-        .unwrap();
-    assert!(
-        store
-            .set_intruder_retention(
-                owner,
-                run.id,
-                i64::MAX as u64 - 1,
-                IntruderRetention::Session,
-                proposal(&store),
-                &CancellationToken::new()
-            )
-            .is_err()
-    );
-    assert!(store.intruder_sessions.runs.is_empty());
-    store
-        .connection
-        .execute(
-            "UPDATE intruder_runs SET revision=?1 WHERE id=?2",
-            params![run.revision, run.id.to_string()],
-        )
-        .unwrap();
     let session = change(&mut store, &run, IntruderRetention::Session).unwrap();
     for other in [
         foreign,

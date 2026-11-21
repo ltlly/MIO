@@ -13,8 +13,10 @@ use rusqlite::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use super::ProjectStore;
 use super::{
-    EXT_CHUNK_BYTES, MAX_PAGE_SUMMARY_BYTES, MAX_SUMMARY_BYTES, ProjectStore, checked_range,
+    EXT_CHUNK_BYTES, MAX_PAGE_SUMMARY_BYTES, MAX_SUMMARY_BYTES, checked_range,
     proxy_history::{
         CANONICAL, LIVE_HISTORY, proxy_row, proxy_source, request_origin_from_metadata,
         validate_message_binding,
@@ -476,33 +478,33 @@ impl HttpHistoryQuery {
     }
 }
 
-impl ProjectStore {
-    pub(crate) fn http_history_snapshot(
-        path: &Path,
-        query: &HttpHistoryQuery,
-        pending: &[HttpHistoryPending],
-        cancel: &CancellationToken,
-    ) -> Result<HttpHistoryResult> {
-        query.validate()?;
-        ensure!(!cancel.is_cancelled(), "HTTP 历史查询已取消");
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(Duration::from_millis(500))?;
-        connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
-        let interrupt = cancel.clone();
-        connection.progress_handler(1000, Some(move || interrupt.is_cancelled()));
-        query_connection(&connection, query, pending, cancel)
-    }
+pub(crate) fn http_history_snapshot(
+    path: &Path,
+    query: &HttpHistoryQuery,
+    pending: &[HttpHistoryPending],
+    cancel: &CancellationToken,
+) -> Result<HttpHistoryResult> {
+    query.validate()?;
+    ensure!(!cancel.is_cancelled(), "HTTP 历史查询已取消");
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(500))?;
+    connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+    let interrupt = cancel.clone();
+    connection.progress_handler(1000, Some(move || interrupt.is_cancelled()));
+    query_connection(&connection, query, pending, cancel)
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
     pub(crate) fn query_http_history(
         &self,
         query: &HttpHistoryQuery,
         cancel: &CancellationToken,
     ) -> Result<HttpHistoryResult> {
-        query_connection(&self.connection, query, &[], cancel)
+        query_connection(&self.0.connection, query, &[], cancel)
     }
 }
 

@@ -122,14 +122,14 @@ pub(in crate::store) fn remove_flow_provenance(
     Ok(())
 }
 
-impl ProjectStore {
-    pub(crate) fn put_flow_provenance(
+impl super::FlowsRepo<&mut ProjectStore> {
+    pub(crate) fn put_provenance(
         &mut self,
         flow_id: FlowId,
         provenance: &FlowProvenance,
     ) -> Result<()> {
-        self.reject_session_intruder_flow_write(flow_id)?;
-        let tx = self.connection.transaction()?;
+        self.0.intruder().reject_session_flow_write(flow_id)?;
+        let tx = self.0.connection.transaction()?;
         write_flow_provenance(&tx, flow_id, provenance)?;
         tx.commit()?;
         Ok(())

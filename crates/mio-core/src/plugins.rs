@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use mio_plugin_api::{
     FlowId, FlowRecord, FlowSummary, HttpRequest, HttpResponse, ProjectKey, Uuid,
-    panel::{self, EditorSnapshot, PanelSnapshot, PanelState, UiEvent},
+    panel::{self, EditorSnapshot, PanelSnapshot, UiEvent},
     protocol::{
         self, ChannelIdentity, CommitEditor, Envelope, ErrorCode, Failure, HookAction, HostCall,
         HostResult, HttpHookResult, PANEL_ID, PayloadResult, Permission, SessionActionResult,
@@ -56,6 +56,8 @@ mod frame_dispatch;
 mod handle;
 mod outbound;
 mod package;
+pub mod panel_state;
+pub use panel_state::PanelState;
 mod panel_sync;
 mod prefs_store;
 mod registry;

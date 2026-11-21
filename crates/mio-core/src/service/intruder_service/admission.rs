@@ -22,8 +22,8 @@ impl State {
     }
 
     pub(super) fn intruder_history_changed(&mut self) {
-        if !self.history_dirty {
-            self.history_dirty = true;
+        if !self.storage.history_dirty {
+            self.storage.history_dirty = true;
             self.queue_intruder_event(Event::HistoryChanged {
                 project: self.project,
             });
@@ -68,7 +68,7 @@ impl State {
             "活动 Intruder 达到 {MAX_RUNS} 个 MIO 资源限额"
         );
         ensure!(
-            self.store.find_intruder_run(run_id)?.is_none(),
+            self.store.intruder().find_run(run_id)?.is_none(),
             "Intruder run ID 已存在；未重新开始或重发请求"
         );
         ensure!(
@@ -77,7 +77,7 @@ impl State {
                 .is_some_and(|payloads| payloads > 0),
             "Intruder payload 列表为空，无法生成请求；未开始"
         );
-        let workspace = self.store.workspace_arc()?;
+        let workspace = self.store.metadata().workspace_arc()?;
         let attack_settings = workspace
             .intruder
             .attack_settings
@@ -117,15 +117,12 @@ impl State {
                 .is_some_and(|payloads| payloads > 0),
             "Intruder payload 经处理管线过滤后无法生成请求；未开始"
         );
-        let (summary, resource_pools) = self.store.create_intruder_run_with_pool_catalog(
+        let (summary, resource_pools) = self.store.intruder_mut().create_run_with_pool_catalog(
             project,
             run_id,
             tab_id,
             &effective_spec,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_millis()
-                .min(i64::MAX as u128) as i64,
+            crate::codec_util::now_unix_ms(),
             &cancel,
         )?;
         // Start can add a fresh pool; existing shared timing is never reset by another run.
@@ -178,9 +175,10 @@ impl State {
         workspace: Workspace,
     ) -> Result<IntruderDiscardReceipt> {
         self.require_terminal_intruder(project, id, expected_revision)?;
-        let receipt =
-            self.store
-                .discard_intruder_run(id, expected_revision, workspace, &self.cancel)?;
+        let receipt = self
+            .store
+            .intruder_mut()
+            .discard_run(id, expected_revision, workspace, &self.cancel)?;
         self.intruder.capacity_released();
         Ok(receipt)
     }
@@ -198,14 +196,14 @@ impl State {
         {
             self.check_project(project)?;
             self.require_saved()?;
-            self.store.check_intruder_session_owner(project, id)?;
+            self.store.intruder().check_session_owner(project, id)?;
             ensure!(
                 !self.quiesced && !self.cancel.is_cancelled(),
                 "正在停止或切换项目；Intruder 数据保留"
             );
             ensure!(
                 active.summary.retention == IntruderRetention::Session
-                    && self.store.is_session_intruder_run(id)
+                    && self.store.intruder().is_session_run(id)
                     && matches!(
                         active.summary.state,
                         IntruderRunState::Running | IntruderRunState::Paused
@@ -251,7 +249,8 @@ impl State {
                 );
                 let page = self
                     .store
-                    .intruder_results(id, request.ordinal.checked_sub(1), 1)?;
+                    .intruder()
+                    .results(id, request.ordinal.checked_sub(1), 1)?;
                 ensure!(
                     page.run == active.summary,
                     "Intruder 在途摘要已改变；未改变保存方式"
@@ -269,7 +268,7 @@ impl State {
         } else {
             self.require_terminal_intruder(project, id, expected_revision)?;
         }
-        let receipt = self.store.set_intruder_retention(
+        let receipt = self.store.intruder_mut().set_retention(
             project,
             id,
             expected_revision,
@@ -294,7 +293,7 @@ impl State {
     ) -> Result<()> {
         self.check_project(project)?;
         self.require_saved()?;
-        self.store.check_intruder_session_owner(project, id)?;
+        self.store.intruder().check_session_owner(project, id)?;
         ensure!(
             !self.quiesced && !self.cancel.is_cancelled(),
             "正在停止或切换项目；Intruder 数据保留"
@@ -340,7 +339,8 @@ impl State {
                     "正在停止或切换项目；Intruder 控制未应用"
                 );
                 self.store
-                    .set_intruder_state(id, IntruderRunState::Stopped)?;
+                    .intruder_mut()
+                    .set_state(id, IntruderRunState::Stopped)?;
                 self.intruder.dirty = true;
                 return Ok(());
             }

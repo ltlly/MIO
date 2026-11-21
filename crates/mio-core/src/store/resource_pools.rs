@@ -73,11 +73,7 @@ pub(super) fn write(
         "Intruder 默认资源池不能删除或用同名资源池替换"
     );
     let next = IntruderResourcePools {
-        revision: current
-            .revision
-            .checked_add(1)
-            .filter(|value| *value <= i64::MAX as u64)
-            .context("Intruder 资源池目录 revision 已耗尽")?,
+        revision: current.revision + 1,
         pools,
         default_pool_id,
     };
@@ -146,15 +142,30 @@ pub(super) fn resolve_start(
     }
 }
 
-impl ProjectStore {
-    pub fn ensure_intruder_default_pool(
+impl<S: std::ops::Deref<Target = ProjectStore>> super::ResourcePoolsRepo<S> {
+    pub fn list(&self) -> Result<IntruderResourcePools> {
+        let transaction = self.0.connection.unchecked_transaction()?;
+        ensure!(
+            metadata::project_id(&transaction)? == self.0.id,
+            "Intruder 资源池项目归属已改变"
+        );
+        read(&transaction)
+    }
+}
+
+impl super::ResourcePoolsRepo<&mut ProjectStore> {
+    pub fn ensure_default(
         &mut self,
         project: ProjectKey,
         cancel: &CancellationToken,
     ) -> Result<IntruderResourcePools> {
-        ensure!(project.id == self.id, "Intruder 默认资源池项目归属不匹配");
+        ensure!(
+            project.id == self.0.id,
+            "Intruder 默认资源池项目归属不匹配"
+        );
         ensure!(!cancel.is_cancelled(), "Intruder 默认资源池建立已取消");
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -183,25 +194,17 @@ impl ProjectStore {
         Ok(next)
     }
 
-    pub fn intruder_resource_pools(&self) -> Result<IntruderResourcePools> {
-        let transaction = self.connection.unchecked_transaction()?;
-        ensure!(
-            metadata::project_id(&transaction)? == self.id,
-            "Intruder 资源池项目归属已改变"
-        );
-        read(&transaction)
-    }
-
-    pub fn set_intruder_resource_pools(
+    pub fn set(
         &mut self,
         project: ProjectKey,
         expected_revision: u64,
         pools: Vec<IntruderResourcePool>,
         cancel: &CancellationToken,
     ) -> Result<IntruderResourcePools> {
-        ensure!(project.id == self.id, "Intruder 资源池项目归属不匹配");
+        ensure!(project.id == self.0.id, "Intruder 资源池项目归属不匹配");
         ensure!(!cancel.is_cancelled(), "Intruder 资源池变更已取消");
         let transaction = self
+            .0
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(
@@ -222,7 +225,7 @@ impl ProjectStore {
         if !removed.is_empty() {
             intruder::ensure_resource_pools_unreferenced(
                 &transaction,
-                &self.intruder_sessions,
+                &self.0.intruder_sessions,
                 &removed,
                 cancel,
             )?;

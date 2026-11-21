@@ -161,32 +161,6 @@ fn discard_accepts_interrupted_and_failed_runs_but_not_exhausted_revisions() {
         let terminal = store.read_intruder_run(attack.id).unwrap();
         let proposal = discard_proposal(&store);
         store
-            .connection
-            .execute(
-                "UPDATE intruder_runs SET revision=?1 WHERE id=?2",
-                params![i64::MAX, attack.id.to_string()],
-            )
-            .unwrap();
-        let changes = total_changes(&store);
-        assert!(
-            store
-                .discard_intruder_run(
-                    attack.id,
-                    i64::MAX as u64,
-                    proposal.clone(),
-                    &CancellationToken::new()
-                )
-                .is_err()
-        );
-        assert_eq!(total_changes(&store), changes);
-        store
-            .connection
-            .execute(
-                "UPDATE intruder_runs SET revision=?1 WHERE id=?2",
-                params![terminal.revision, attack.id.to_string()],
-            )
-            .unwrap();
-        store
             .discard_intruder_run(
                 attack.id,
                 terminal.revision,

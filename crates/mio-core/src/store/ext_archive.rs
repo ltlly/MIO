@@ -81,7 +81,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-impl ProjectStore {
+impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
     #[cfg(test)]
     pub fn begin_source(&mut self, source_id: Uuid, report: &ExtImportReport) -> Result<()> {
         ensure!(
@@ -89,7 +89,7 @@ impl ProjectStore {
             "尚未写入的 外部源归档不能标记为完整"
         );
         let bytes = encode_report(report)?;
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         let exists: bool =
             transaction.query_row("SELECT EXISTS(SELECT 1 FROM ext_sources)", [], |row| {
                 row.get(0)
@@ -110,7 +110,7 @@ impl ProjectStore {
 
     #[cfg(test)]
     pub fn append_source_chunk(&mut self, source_id: Uuid, ordinal: u64, raw: &[u8]) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         write_chunk(&transaction, source_id, ordinal, raw)?;
         transaction.commit()?;
         Ok(())
@@ -124,7 +124,7 @@ impl ProjectStore {
         chunks: &[Vec<u8>],
     ) -> Result<()> {
         ensure!(chunks.len() <= 8, "外部归档批次不得超过 8 块/8 MiB");
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         for (index, chunk) in chunks.iter().enumerate() {
             let ordinal = first
                 .checked_add(index as u64)
@@ -136,17 +136,17 @@ impl ProjectStore {
     }
 
     #[cfg(test)]
-    pub fn put_ext_item(&mut self, item: &ExtItem) -> Result<()> {
-        self.put_ext_batch(std::slice::from_ref(item), &[])
+    pub fn put_item(&mut self, item: &ExtItem) -> Result<()> {
+        self.put_batch(std::slice::from_ref(item), &[])
     }
 
     #[cfg(test)]
-    pub fn put_ext_message(&mut self, message: &ExtMessageSummary) -> Result<()> {
-        self.put_ext_batch(&[], std::slice::from_ref(message))
+    pub fn put_message(&mut self, message: &ExtMessageSummary) -> Result<()> {
+        self.put_batch(&[], std::slice::from_ref(message))
     }
 
     #[cfg(test)]
-    pub fn put_ext_batch(
+    pub fn put_batch(
         &mut self,
         items: &[ExtItem],
         messages: &[ExtMessageSummary],
@@ -155,7 +155,7 @@ impl ProjectStore {
             items.len() <= 256 && messages.len() <= 512,
             "External 索引批次超过 256 条目或 512 消息限额"
         );
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         for item in items {
             write_item(&transaction, item)?;
         }
@@ -168,7 +168,7 @@ impl ProjectStore {
 
     #[cfg(test)]
     pub fn finish_source(&mut self, source_id: Uuid, report: &ExtImportReport) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         finish_source_in(&transaction, source_id, report)?;
         transaction.commit()?;
         Ok(())
@@ -189,7 +189,7 @@ impl ProjectStore {
             ),
             "未确认的 外部归档标签恢复版本"
         );
-        let transaction = self.connection.transaction()?;
+        let transaction = self.0.connection.transaction()?;
         ensure!(
             !source_state(&transaction, source_id)?.complete,
             "已完成的 外部来源不能重复恢复或修改报告"
@@ -213,12 +213,14 @@ impl ProjectStore {
         transaction.commit()?;
         Ok(final_report)
     }
+}
 
-    pub fn ext_sources(&self) -> Result<Vec<ExtSourceInfo>> {
-        if let Some(direct) = self.read_direct_ext_source()? {
+impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> {
+    pub fn sources(&self) -> Result<Vec<ExtSourceInfo>> {
+        if let Some(direct) = self.read_direct_source()? {
             return Ok(vec![direct]);
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let ids = {
             let mut query = transaction.prepare(
                 "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))=36 THEN id END
@@ -245,16 +247,16 @@ impl ProjectStore {
     }
 
     #[cfg(test)]
-    pub fn ext_report(&self, source_id: Uuid) -> Result<ExtImportReport> {
-        read_report(&self.connection, source_id)
+    pub fn report(&self, source_id: Uuid) -> Result<ExtImportReport> {
+        read_report(&self.0.connection, source_id)
     }
 
     #[cfg(test)]
-    pub fn ext_item(&self, id: Uuid) -> Result<ExtItem> {
-        read_item(&self.connection, id)
+    pub fn item(&self, id: Uuid) -> Result<ExtItem> {
+        read_item(&self.0.connection, id)
     }
 
-    pub fn ext_message_page(
+    pub fn message_page(
         &self,
         source_id: Uuid,
         collection: Option<&str>,
@@ -270,7 +272,7 @@ impl ProjectStore {
             database_offset.checked_add(limit as i64).is_some(),
             "External 分页范围溢出"
         );
-        if let Some(direct) = self.read_direct_ext_source()?
+        if let Some(direct) = self.read_direct_source()?
             && direct.id == source_id
         {
             return Ok(ExtMessagePage {
@@ -279,7 +281,7 @@ impl ProjectStore {
                 next_offset: None,
             });
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         ensure!(
             source_state(&transaction, source_id)?.complete,
             "External 源文件导入尚未完成"
@@ -346,13 +348,13 @@ impl ProjectStore {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let bytes = read_range(&transaction, source_id, offset, length)?;
         transaction.commit()?;
         Ok(bytes)
     }
 
-    pub fn ext_message_fragment(
+    pub fn message_fragment(
         &self,
         id: Uuid,
         offset: u64,
@@ -362,7 +364,7 @@ impl ProjectStore {
             length <= EXT_FRAGMENT_BYTES,
             "外部归档消息读取不得超过 64 KiB"
         );
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.0.connection.unchecked_transaction()?;
         let message = read_message_summary(&transaction, id)?;
         checked_range(offset, length as u64, message.raw_bytes)?;
         let absolute = message

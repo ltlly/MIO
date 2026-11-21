@@ -22,6 +22,8 @@ use convert::{
     validate_dataset, validate_dataset_snapshot, validate_ticket, validate_workspace_links,
 };
 use session_data::SessionData;
+#[cfg(test)]
+pub(in crate::store) use session_data::SessionWriteHook;
 
 // MIO logical SQL-data limits, not External defaults or a process RSS guarantee.
 const SESSION_LOGICAL_QUOTA: u64 = 64 * 1024 * 1024;
@@ -117,8 +119,59 @@ pub(in crate::store) fn ensure_resource_pools_unreferenced(
     Ok(())
 }
 
-impl ProjectStore {
-    pub fn rename_intruder_run(
+impl<S: std::ops::Deref<Target = ProjectStore>> store::IntruderRepo<S> {
+    pub(in crate::store) fn validate_session_snapshot(&self, reopened: &ProjectStore) -> Result<()> {
+        if self.0.intruder_sessions.runs.is_empty() {
+            return Ok(());
+        }
+        let source = self.0.connection.unchecked_transaction()?;
+        let destination = reopened.connection.unchecked_transaction()?;
+        ensure!(
+            store::resource_pools::read(&source)? == store::resource_pools::read(&destination)?,
+            "另存为的 Intruder 资源池目录已改变；Session 数据保留"
+        );
+        for dataset in self.0.intruder_sessions.runs.values() {
+            validate_pool_binding(&source, &dataset.run)?;
+            validate_ticket(&source, self.0.id, dataset)?;
+            validate_ticket(&destination, self.0.id, dataset)?;
+            for flow in dataset.data.flow_ids_in_order() {
+                ensure!(
+                    same_flow(&source, &destination, flow, true)?,
+                    "另存为的 Intruder 共享流量或 ID 归属已改变；原项目与 Session 数据保留"
+                );
+            }
+        }
+        destination.commit()?;
+        source.commit()?;
+        Ok(())
+    }
+
+    /// New/Open must refuse before replacing a store that still owns Session datasets.
+    pub fn require_sessions_resolved(&self) -> Result<()> {
+        ensure!(
+            self.0.intruder_sessions.runs.is_empty(),
+            "仍有 Intruder Session 数据；请显式保存到项目或丢弃后再新建/打开项目（普通保存不会转换）"
+        );
+        Ok(())
+    }
+
+    pub fn check_session_owner(&self, project: ProjectKey, id: Uuid) -> Result<()> {
+        ensure!(
+            project.id == self.0.id,
+            "Intruder 项目归属不匹配；数据保留"
+        );
+        if let Some(dataset) = self.0.intruder_sessions.runs.get(&id) {
+            ensure!(
+                dataset.owner == project,
+                "Intruder Session generation 或项目归属已改变"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl store::IntruderRepo<&mut ProjectStore> {
+    pub fn rename_run(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -126,14 +179,15 @@ impl ProjectStore {
         title: &str,
         cancel: &CancellationToken,
     ) -> Result<IntruderRunSummary> {
-        self.check_intruder_session_owner(project, id)?;
+        self.0.intruder().check_session_owner(project, id)?;
         ensure!(
             title.len() <= MAX_TITLE_BYTES,
             "Intruder 任务名称超过 4096 字节；名称未改变"
         );
         ensure!(!cancel.is_cancelled(), "Intruder 重命名已取消；名称未改变");
-        let Some(dataset) = self.intruder_sessions.runs.get_mut(&id) else {
+        let Some(dataset) = self.0.intruder_sessions.runs.get_mut(&id) else {
             let transaction = self
+                .0
                 .connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             ensure!(
@@ -144,8 +198,8 @@ impl ProjectStore {
             transaction.commit()?;
             return Ok(run);
         };
-        let ticket = self.connection.unchecked_transaction()?;
-        validate_ticket(&ticket, self.id, dataset)?;
+        let ticket = self.0.connection.unchecked_transaction()?;
+        validate_ticket(&ticket, self.0.id, dataset)?;
         ticket.commit()?;
         ensure!(
             dataset.data.run == dataset.run,
@@ -159,6 +213,7 @@ impl ProjectStore {
             .and_then(|bytes| bytes.checked_add(new_bytes))
             .context("Intruder Session 名称配额计量溢出")?;
         let total_bytes = self
+            .0
             .intruder_sessions
             .logical_bytes
             .checked_sub(dataset.logical_bytes)
@@ -166,8 +221,8 @@ impl ProjectStore {
             .context("Intruder Session 总配额计量溢出")?;
         ensure!(
             total_bytes
-                .checked_add(self.intruder_sessions.reserved_bytes)
-                .is_some_and(|bytes| bytes <= self.intruder_sessions.quota),
+                .checked_add(self.0.intruder_sessions.reserved_bytes)
+                .is_some_and(|bytes| bytes <= self.0.intruder_sessions.quota),
             "Intruder Session 逻辑 RAM 数据配额不足；名称未改变"
         );
         #[cfg(test)]
@@ -193,65 +248,19 @@ impl ProjectStore {
         run.retention = IntruderRetention::Session;
         dataset.run = run.clone();
         dataset.logical_bytes = logical_bytes;
-        self.intruder_sessions.logical_bytes = total_bytes;
+        self.0.intruder_sessions.logical_bytes = total_bytes;
         Ok(run)
     }
 
-    pub(in crate::store) fn validate_session_snapshot(&self, reopened: &Self) -> Result<()> {
-        if self.intruder_sessions.runs.is_empty() {
-            return Ok(());
-        }
-        let source = self.connection.unchecked_transaction()?;
-        let destination = reopened.connection.unchecked_transaction()?;
-        ensure!(
-            store::resource_pools::read(&source)? == store::resource_pools::read(&destination)?,
-            "另存为的 Intruder 资源池目录已改变；Session 数据保留"
-        );
-        for dataset in self.intruder_sessions.runs.values() {
-            validate_pool_binding(&source, &dataset.run)?;
-            validate_ticket(&source, self.id, dataset)?;
-            validate_ticket(&destination, self.id, dataset)?;
-            for flow in dataset.data.flow_ids_in_order() {
-                ensure!(
-                    same_flow(&source, &destination, flow, true)?,
-                    "另存为的 Intruder 共享流量或 ID 归属已改变；原项目与 Session 数据保留"
-                );
-            }
-        }
-        destination.commit()?;
-        source.commit()?;
-        Ok(())
-    }
-
-    /// New/Open must refuse before replacing a store that still owns Session datasets.
-    pub fn require_intruder_sessions_resolved(&self) -> Result<()> {
-        ensure!(
-            self.intruder_sessions.runs.is_empty(),
-            "仍有 Intruder Session 数据；请显式保存到项目或丢弃后再新建/打开项目（普通保存不会转换）"
-        );
-        Ok(())
-    }
-
     #[cfg(test)]
-    pub fn set_intruder_session_quota(&mut self, bytes: u64) {
-        assert!(self.intruder_sessions.runs.is_empty());
-        self.intruder_sessions.quota = bytes;
-    }
-
-    pub fn check_intruder_session_owner(&self, project: ProjectKey, id: Uuid) -> Result<()> {
-        ensure!(project.id == self.id, "Intruder 项目归属不匹配；数据保留");
-        if let Some(dataset) = self.intruder_sessions.runs.get(&id) {
-            ensure!(
-                dataset.owner == project,
-                "Intruder Session generation 或项目归属已改变"
-            );
-        }
-        Ok(())
+    pub fn set_session_quota(&mut self, bytes: u64) {
+        assert!(self.0.intruder_sessions.runs.is_empty());
+        self.0.intruder_sessions.quota = bytes;
     }
 
     /// Promotion permits a healthy Running/Paused Session snapshot; reverse transfer remains terminal.
     /// The caller excludes pending recovery and validates active request ownership and ProjectKey.
-    pub fn set_intruder_retention(
+    pub fn set_retention(
         &mut self,
         project: ProjectKey,
         id: Uuid,
@@ -260,22 +269,22 @@ impl ProjectStore {
         workspace: Workspace,
         cancel: &CancellationToken,
     ) -> Result<IntruderRetentionReceipt> {
-        self.check_intruder_session_owner(project, id)?;
+        self.0.intruder().check_session_owner(project, id)?;
         ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；数据保留");
         match retention {
             IntruderRetention::Session => {
                 ensure!(
-                    !self.intruder_sessions.contains(id),
+                    !self.0.intruder_sessions.contains(id),
                     "Intruder 已在 Session；未重复应用工作区修改"
                 );
-                self.move_intruder_to_session(project, id, expected_revision, workspace, cancel)
+                self.move_to_session(project, id, expected_revision, workspace, cancel)
             }
             IntruderRetention::Project => {
                 ensure!(
-                    self.intruder_sessions.contains(id),
+                    self.0.intruder_sessions.contains(id),
                     "Intruder 不在 Session；未重复应用工作区修改"
                 );
-                self.promote_session_intruder(id, expected_revision, workspace, cancel)
+                self.promote_session(id, expected_revision, workspace, cancel)
             }
         }
     }

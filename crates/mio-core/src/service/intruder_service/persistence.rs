@@ -17,7 +17,7 @@ impl State {
         mut result: std::result::Result<Box<FlowRecord>, String>,
         reason_phrase: Option<&[u8]>,
     ) -> Result<()> {
-        let session = self.store.is_session_intruder_run(id);
+        let session = self.store.intruder().is_session_run(id);
         let blocked = if session {
             self.intruder
                 .recovery
@@ -27,7 +27,7 @@ impl State {
             self.unsaved_count() != 0
         };
         let saved = if !blocked {
-            self.store.put_intruder_result_with_reason_phrase(
+            self.store.intruder_mut().put_result_with_reason_phrase(
                 id,
                 ordinal,
                 result.as_deref().map_err(String::as_str),
@@ -110,7 +110,7 @@ impl State {
         id: Uuid,
         state: IntruderRunState,
     ) -> Result<()> {
-        let session = self.store.is_session_intruder_run(id);
+        let session = self.store.intruder().is_session_run(id);
         let terminal = state.is_terminal();
         let blocked = if session {
             self.intruder
@@ -121,7 +121,7 @@ impl State {
             self.unsaved_count() != 0
         };
         let saved = if !blocked {
-            self.store.set_intruder_state(id, state.clone())
+            self.store.intruder_mut().set_state(id, state.clone())
         } else {
             Err(anyhow::anyhow!(
                 "先前变更仍待写盘；Intruder 状态保留等待保存"
@@ -267,7 +267,7 @@ impl State {
         let mut project = Vec::new();
         for mutation in std::mem::take(&mut self.intruder.recovery) {
             let id = mutation_run(&mutation).id;
-            if self.store.is_session_intruder_run(id) {
+            if self.store.intruder().is_session_run(id) {
                 sessions.entry(id).or_default().push(mutation);
             } else {
                 project.push(mutation);
@@ -278,7 +278,8 @@ impl State {
         for (_, mutations) in sessions {
             match self
                 .store
-                .retry_session_intruder_mutations(&mutations, &self.cancel)
+                .intruder_mut()
+                .retry_session_mutations(&mutations, &self.cancel)
             {
                 Ok(()) => self.intruder.capacity_released(),
                 Err(error) => {
@@ -293,7 +294,7 @@ impl State {
     pub(super) fn intruder_run(&self, id: Uuid) -> Result<IntruderRunSummary> {
         self.pending_intruder_run(id)
             .map(Ok)
-            .unwrap_or_else(|| self.store.read_intruder_run(id))
+            .unwrap_or_else(|| self.store.intruder().read_run(id))
     }
 
     pub(in crate::service) fn pending_intruder_run(&self, id: Uuid) -> Option<IntruderRunSummary> {
@@ -313,7 +314,7 @@ impl State {
         after: Option<Uuid>,
         limit: usize,
     ) -> Result<IntruderRunPage> {
-        let stored = self.store.intruder_runs(after, limit)?;
+        let stored = self.store.intruder().runs(after, limit)?;
         let mut rows = Vec::with_capacity(stored.rows.len());
         let mut bytes = 2;
         let mut more = stored.next_after.is_some();
@@ -342,7 +343,7 @@ impl State {
         after: Option<u64>,
         limit: usize,
     ) -> Result<IntruderResultPage> {
-        let stored = self.store.intruder_results(id, after, limit)?;
+        let stored = self.store.intruder().results(id, after, limit)?;
         let run = self.intruder_run(id)?;
         let mut results: BTreeMap<_, _> = stored
             .rows

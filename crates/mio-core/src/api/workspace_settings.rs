@@ -823,7 +823,66 @@ impl Default for ScheduledTask {
     }
 }
 
-pub use mio_plugin_api::protocol::{MatchAndReplaceRule, MatchReplaceTarget};
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchReplaceTarget {
+    #[default]
+    RequestHeader,
+    RequestBody,
+    ResponseHeader,
+    ResponseBody,
+    RequestParamName,
+    RequestParamValue,
+    RequestFirstLine,
+    RequestScript,
+    ResponseScript,
+}
+
+impl MatchReplaceTarget {
+    pub fn is_script(self) -> bool {
+        matches!(self, Self::RequestScript | Self::ResponseScript)
+    }
+
+    pub fn is_response(self) -> bool {
+        matches!(
+            self,
+            Self::ResponseHeader | Self::ResponseBody | Self::ResponseScript
+        )
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::RequestHeader => "Request header",
+            Self::RequestBody => "Request body",
+            Self::ResponseHeader => "Response header",
+            Self::ResponseBody => "Response body",
+            Self::RequestParamName => "Request param name",
+            Self::RequestParamValue => "Request param value",
+            Self::RequestFirstLine => "Request first line",
+            Self::RequestScript => "Request script",
+            Self::ResponseScript => "Response script",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchAndReplaceRule {
+    pub id: Uuid,
+    pub enabled: bool,
+    pub item_type: MatchReplaceTarget,
+    #[serde(default)]
+    pub match_pattern: String,
+    #[serde(default)]
+    pub replace_with: String,
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub script_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub filter_script: String,
+}
 
 const MAX_SCOPE_JSON_BYTES: usize = 256 * 1024;
 

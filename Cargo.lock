@@ -4969,7 +4969,6 @@ dependencies = [
  "mio-plugin-sdk",
  "mio-proxy",
  "multer",
- "rama",
  "regex",
  "rhai",
  "roxmltree 0.21.2",
@@ -5038,6 +5037,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "url",
 ]
 
 [[package]]
