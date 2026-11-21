@@ -7,16 +7,17 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-httparse = "=1.10.1"
+httparse.workspace = true
+mime.workspace = true
 mio-plugin-api = { path = "../mio-plugin-api" }
 mio-proxy = { path = "../mio-proxy" }
+# Kept strictly for updater.rs::http_download_to_temp_file until mio-proxy exposes a chunk-streaming sink.
 rama.workspace = true
-rama-http-headers = "=0.4.0"
-scraper = "=0.22.0"
+scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_ignored = "=0.1.14"
-tokio.workspace = true
+serde_ignored = "0.1.14"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "process"] }
 tokio-util.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
@@ -31,11 +32,11 @@ chrono.workspace = true
 hex.workspace = true
 md-5.workspace = true
 sha1.workspace = true
-sha2 = "=0.11.1"
-form_urlencoded = "=1.2.2"
-futures-util = "=0.3.34"
-multer = "=3.1.0"
-crc32fast = "=1.5.4"
+sha2.workspace = true
+form_urlencoded.workspace = true
+futures-util = "0.3.34"
+multer.workspace = true
+crc32fast.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

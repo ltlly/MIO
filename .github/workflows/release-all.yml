@@ -35,9 +35,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Read Rust toolchain channel
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          if [[ -z "$channel" ]]; then
+            echo "Failed to determine Rust toolchain channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Build macOS .app, .dmg, and .zip
@@ -57,15 +69,21 @@ jobs:
 
   build-linux:
     name: Build Linux (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
+          - runner: ubuntu-24.04
+            arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
             zig_target: x86_64-unknown-linux-gnu.2.34
             gnu_triple: x86_64-linux-gnu
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            rust_target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-unknown-linux-gnu.2.34
+            gnu_triple: aarch64-linux-gnu
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -106,9 +124,21 @@ jobs:
           cp /tmp/xkb-build/libxkbcommon-x11.a "$dest/libxkbcommon-x11.a"
           ls -lh "$dest"
 
+      - name: Read Rust toolchain channel
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          if [[ -z "$channel" ]]; then
+            echo "Failed to determine Rust toolchain channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.rust_target }}
 
       - name: Install Zig
@@ -128,9 +158,13 @@ jobs:
       - name: Pack Linux tar.gz release artifact
         shell: bash
         run: |
-          version="$(awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version *= *"/{sub(/^version *= *"/,""); sub(/".*/,""); print; exit}' Cargo.toml)"
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; meta = json.load(sys.stdin); print(next(p["version"] for p in meta["packages"] if p["name"] == "mio-app"))')"
+          if [[ -z "$version" ]]; then
+            echo "Failed to determine workspace version from cargo metadata" >&2
+            exit 1
+          fi
           mkdir -p release-artifacts
-          tar -C "dist/linux-${{ matrix.arch }}" -czf "release-artifacts/MIO-v${version}-linux-${{ matrix.arch }}.tar.gz" .
+          tar -C "dist/linux-${{ matrix.arch }}" --exclude='./preview-build.json' --exclude='preview-build.json' -czf "release-artifacts/MIO-v${version}-linux-${{ matrix.arch }}.tar.gz" .
 
       - name: Upload Linux staging artifact
         uses: actions/upload-artifact@v4
@@ -176,9 +210,21 @@ jobs:
             }
           }
 
+      - name: Read Rust toolchain channel
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          if [[ -z "$channel" ]]; then
+            echo "Failed to determine Rust toolchain channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Build & package Windows release
@@ -188,10 +234,18 @@ jobs:
       - name: Pack Windows zip release artifact
         shell: pwsh
         run: |
-          $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          $version = $versionLine.Matches[0].Groups[1].Value
+          $ErrorActionPreference = "Stop"
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object { $_.name -eq "mio-app" } | Select-Object -First 1).version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Failed to determine workspace version from cargo metadata"
+          }
           New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
-          Compress-Archive -Path "dist\windows-${{ matrix.arch }}\*" -DestinationPath "release-artifacts\MIO-v$version-windows-${{ matrix.arch }}.zip" -Force
+          $items = Get-ChildItem -Path "dist\windows-${{ matrix.arch }}" | Where-Object { $_.Name -ne "preview-build.json" }
+          if (-not $items) {
+            throw "No release files found in dist\windows-${{ matrix.arch }}"
+          }
+          Compress-Archive -Path $items.FullName -DestinationPath "release-artifacts\MIO-v$version-windows-${{ matrix.arch }}.zip" -Force
 
       - name: Upload Windows staging artifact
         uses: actions/upload-artifact@v4

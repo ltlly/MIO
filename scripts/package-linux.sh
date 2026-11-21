@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 build_profile="release"
 build_flags=(--release)
@@ -175,18 +176,39 @@ else
   bin_sha="$(/usr/bin/shasum -a 256 "$dist_dir/bin/mio" | awk '{print $1}')"
 fi
 
-cat > "$dist_dir/preview-build.json" <<EOF
-{
-  "app": "mio",
-  "platform": "linux",
-  "architecture": "$arch",
-  "profile": "$build_profile",
-  "branch": "$source_branch",
-  "sourceCommit": "$source_commit",
-  "sourceDirty": $source_dirty,
-  "binarySha256": "$bin_sha",
-  "packagedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+packaged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+manifest="$(mktemp "$dist_dir/.preview-build.XXXXXX")"
+cleanup() {
+  if [[ -e "$manifest" ]]; then unlink "$manifest"; fi
 }
-EOF
+trap cleanup EXIT
+MIO_PKG_ARCH="$arch" \
+MIO_PKG_PROFILE="$build_profile" \
+MIO_PKG_BRANCH="$source_branch" \
+MIO_PKG_COMMIT="$source_commit" \
+MIO_PKG_DIRTY="$source_dirty" \
+MIO_PKG_SHA256="$bin_sha" \
+MIO_PKG_PACKAGED_AT="$packaged_at" \
+python3 - "$manifest" <<'PY'
+import json
+import os
+import sys
+
+payload = {
+    "app": "mio",
+    "platform": "linux",
+    "architecture": os.environ["MIO_PKG_ARCH"],
+    "profile": os.environ["MIO_PKG_PROFILE"],
+    "branch": os.environ["MIO_PKG_BRANCH"],
+    "sourceCommit": os.environ["MIO_PKG_COMMIT"],
+    "sourceDirty": os.environ["MIO_PKG_DIRTY"] == "true",
+    "binarySha256": os.environ["MIO_PKG_SHA256"],
+    "packagedAt": os.environ["MIO_PKG_PACKAGED_AT"],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2)
+    fh.write("\n")
+PY
+mv "$manifest" "$dist_dir/preview-build.json"
 
 echo "$dist_dir"

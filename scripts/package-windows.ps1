@@ -7,9 +7,17 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
+if ([string]::IsNullOrWhiteSpace($env:CARGO_INCREMENTAL)) {
+    $env:CARGO_INCREMENTAL = "0"
+}
 
 $SourceCommit = (git rev-parse HEAD).Trim()
-$SourceBranch = try { (git symbolic-ref --quiet --short HEAD).Trim() } catch { "detached" }
+$BranchOut = git symbolic-ref --quiet --short HEAD 2>$null
+if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($BranchOut)) {
+    $SourceBranch = $BranchOut.Trim()
+} else {
+    $SourceBranch = "detached"
+}
 $SourceDirty = [bool](git status --porcelain --untracked-files=normal)
 
 $CargoArgs = @("build", "--locked", "-p", "mio-app", "-p", "mio-cli", "--bins")
@@ -68,5 +76,6 @@ $Manifest = [ordered]@{
     binarySha256 = $Sha256
     packagedAt   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }
-$Manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $DistDir "preview-build.json")
+$ManifestJson = ($Manifest | ConvertTo-Json -Depth 4) + "`n"
+[System.IO.File]::WriteAllText((Join-Path $DistDir "preview-build.json"), $ManifestJson, [System.Text.UTF8Encoding]::new($false))
 Write-Output $DistDir

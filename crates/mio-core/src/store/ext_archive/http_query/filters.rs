@@ -275,7 +275,7 @@ pub(crate) fn history_body_has_parameters(
     body: &[u8],
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    use rama::http::mime::{self, Mime};
+    use mime::Mime;
     ensure!(!cancel.is_cancelled(), "HTTP 历史查询已取消");
     ensure!(body.len() <= crate::intruder::MAX_AUTO_BYTES,
         crate::intruder::AutomaticParameterLimit("HTTP 参数分析最多解析 4 MiB"));

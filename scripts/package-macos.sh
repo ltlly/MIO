@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "package-macos.sh must be run on macOS (use package-linux.sh or package-windows.ps1/sh for Linux/Windows)." >&2
   exit 1
@@ -43,9 +44,9 @@ else
   fi
   distribution_dir="$project_root/dist"
 fi
-version="$(awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version *= *"/{sub(/^version *= *"/,""); sub(/".*/,""); print; exit}' Cargo.toml)"
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; meta = json.load(sys.stdin); print(next(p["version"] for p in meta["packages"] if p["name"] == "mio-app"))')"
 if [[ -z "$version" ]]; then
-  echo "Failed to determine workspace version from Cargo.toml" >&2
+  echo "Failed to determine workspace version from cargo metadata" >&2
   exit 1
 fi
 if [[ "$(git rev-parse HEAD)" != "$source_commit" ]]; then
@@ -71,6 +72,7 @@ mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
 install -m 755 "$bin_dir/mio" "$app_bundle/Contents/MacOS/mio"
 install -m 755 "$bin_dir/mio-cli" "$app_bundle/Contents/MacOS/mio-cli"
 install -m 644 crates/mio-app/Info.plist "$app_bundle/Contents/Info.plist"
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$version" "$app_bundle/Contents/Info.plist"
 install -m 644 crates/mio-app/assets/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
 /usr/bin/plutil -lint "$app_bundle/Contents/Info.plist"
 /usr/bin/codesign --force --sign - "$app_bundle/Contents/MacOS/mio-cli"
@@ -104,20 +106,43 @@ ln -s /Applications "$dmg_stage/Applications"
 /usr/bin/hdiutil create -volname "MIO" -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path" >/dev/null
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$distribution_bundle" "$zip_path"
 packaged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-/usr/bin/plutil -create xml1 "$manifest"
-/usr/bin/plutil -insert version -string "$version" "$manifest"
-/usr/bin/plutil -insert sourceCommit -string "$source_commit" "$manifest"
-/usr/bin/plutil -insert sourceDirty -bool "$source_dirty" "$manifest"
-/usr/bin/plutil -insert branch -string "$source_branch" "$manifest"
-/usr/bin/plutil -insert profile -string "$build_profile" "$manifest"
-/usr/bin/plutil -insert architecture -string "$binary_arch" "$manifest"
-/usr/bin/plutil -insert app -string MIO.app "$manifest"
-/usr/bin/plutil -insert dmg -string "$dmg_name" "$manifest"
-/usr/bin/plutil -insert zip -string "$zip_name" "$manifest"
-/usr/bin/plutil -insert binarySha256 -string "$binary_sha256" "$manifest"
-/usr/bin/plutil -insert packagedAt -string "$packaged_at" "$manifest"
-/usr/bin/plutil -insert validation -json '{"status":"not_run_by_package_script","plist":"passed","signature":"passed"}' "$manifest"
-/usr/bin/plutil -convert json -r "$manifest"
+MIO_PKG_VERSION="$version" \
+MIO_PKG_COMMIT="$source_commit" \
+MIO_PKG_DIRTY="$source_dirty" \
+MIO_PKG_BRANCH="$source_branch" \
+MIO_PKG_PROFILE="$build_profile" \
+MIO_PKG_ARCH="$binary_arch" \
+MIO_PKG_DMG="$dmg_name" \
+MIO_PKG_ZIP="$zip_name" \
+MIO_PKG_SHA256="$binary_sha256" \
+MIO_PKG_PACKAGED_AT="$packaged_at" \
+python3 - "$manifest" <<'PY'
+import json
+import os
+import sys
+
+payload = {
+    "version": os.environ["MIO_PKG_VERSION"],
+    "sourceCommit": os.environ["MIO_PKG_COMMIT"],
+    "sourceDirty": os.environ["MIO_PKG_DIRTY"] == "true",
+    "branch": os.environ["MIO_PKG_BRANCH"],
+    "profile": os.environ["MIO_PKG_PROFILE"],
+    "architecture": os.environ["MIO_PKG_ARCH"],
+    "app": "MIO.app",
+    "dmg": os.environ["MIO_PKG_DMG"],
+    "zip": os.environ["MIO_PKG_ZIP"],
+    "binarySha256": os.environ["MIO_PKG_SHA256"],
+    "packagedAt": os.environ["MIO_PKG_PACKAGED_AT"],
+    "validation": {
+        "status": "not_run_by_package_script",
+        "plist": "passed",
+        "signature": "passed",
+    },
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2)
+    fh.write("\n")
+PY
 mv "$manifest" "$distribution_dir/preview-build.json"
 echo "$distribution_bundle"
 echo "$dmg_path"

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  ci:
+    name: Workspace Check & Test
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check git whitespace hygiene
+        shell: bash
+        run: |
+          git diff --check
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          fi
+
+      - name: Validate shell scripts
+        shell: bash
+        run: bash -n scripts/test.sh scripts/package-macos.sh scripts/package-linux.sh scripts/package-windows.sh
+
+      - name: Read Rust toolchain channel
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          if [[ -z "$channel" ]]; then
+            echo "Failed to determine Rust toolchain channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: clippy, rustfmt
+
+      - name: Check workspace targets
+        run: cargo check --workspace --tests --locked
+
+      - name: Run core, proxy, plugin, and CLI tests
+        run: cargo test -p mio-plugin-api -p mio-plugin-sdk -p mio-proxy -p mio-core -p mio-cli -p mio-protocol-lab --locked
+
+      - name: Run UI library tests
+        run: cargo test -p mio-ui --lib --locked

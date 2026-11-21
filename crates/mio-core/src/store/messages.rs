@@ -1,6 +1,4 @@
 use super::*;
-use rama::http::HeaderValue;
-use rama_http_headers::{Cookie, HeaderDecode, SetCookie};
 
 pub(in crate::store) const HTTP_HISTORY_META_PREFIX: &str = "http_history_meta:";
 pub(in crate::store) const NEXT_PROXY_CAPTURE_NUMBER_KEY: &str = "next_proxy_capture_number";
@@ -166,24 +164,59 @@ pub(in crate::store) fn write_http_history_metadata(
     Ok(())
 }
 
+fn parse_cookie_header_str(bytes: &[u8]) -> Result<&str> {
+    ensure!(
+        bytes.iter().all(|&b| (32..127).contains(&b) || b == b'\t'),
+        "HTTP Cookie header 字节无效"
+    );
+    std::str::from_utf8(bytes).context("HTTP Cookie header 字节无效")
+}
+
+fn split_cookie_segments(value: &str) -> impl Iterator<Item = &str> {
+    let mut in_quotes = false;
+    value
+        .split(move |c| {
+            if in_quotes {
+                if c == '"' {
+                    in_quotes = false;
+                }
+                false
+            } else if c == ';' {
+                true
+            } else {
+                if c == '"' {
+                    in_quotes = true;
+                }
+                false
+            }
+        })
+        .map(str::trim)
+}
+
 pub(in crate::store) fn history_cookie_names(headers: &[crate::Header], response: bool) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for header in headers.iter().filter(|header| header.name.eq_ignore_ascii_case(if response { "set-cookie" } else { "cookie" })) {
         ensure!(header.value.len() <= crate::http::MAX_HEAD, "HTTP Cookie header 超过 128 KiB");
-        let value = HeaderValue::from_bytes(&header.value).context("HTTP Cookie header 字节无效")?;
+        let value = parse_cookie_header_str(&header.value)?;
         if response {
-            let set_cookie = SetCookie::decode(&mut std::iter::once(&value))?;
-            for value in set_cookie.iter_header_values() {
-                let cookie = Cookie::decode(&mut std::iter::once(value))?;
-                ensure!(cookie.0.head.contains('='), "HTTP Set-Cookie 缺少名称和值");
-                let (name, _) = cookie.iter().next().context("HTTP Set-Cookie 缺少名称和值")?;
-                append_history_cookie_name(&mut names, name)?;
-            }
+            let head = split_cookie_segments(value)
+                .next()
+                .context("HTTP Set-Cookie 缺少名称和值")?;
+            let (name, _) = head
+                .split_once('=')
+                .context("HTTP Set-Cookie 缺少名称和值")?;
+            append_history_cookie_name(&mut names, name.trim())?;
         } else {
-            let cookie = Cookie::decode(&mut std::iter::once(&value))?;
-            ensure!(cookie.iter().count() == cookie.0.len(), "HTTP Cookie 包含缺少等号的字段");
-            for (name, _) in cookie.iter() {
-                append_history_cookie_name(&mut names, name)?;
+            let segments: Vec<&str> = split_cookie_segments(value).collect();
+            ensure!(
+                segments.iter().all(|segment| segment.contains('=')),
+                "HTTP Cookie 包含缺少等号的字段"
+            );
+            for segment in segments {
+                let (name, _) = segment
+                    .split_once('=')
+                    .context("HTTP Cookie 包含缺少等号的字段")?;
+                append_history_cookie_name(&mut names, name.trim())?;
             }
         }
     }
@@ -839,4 +872,79 @@ pub(super) fn finish_pending_records(
         changed += 1;
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::history_cookie_names;
+
+    fn hdr(name: &str, value: &[u8]) -> crate::Header {
+        crate::Header {
+            name: name.to_owned(),
+            value: value.to_vec(),
+        }
+    }
+
+    #[test]
+    fn parses_request_cookies_and_quoted_semicolons() {
+        let headers = vec![
+            hdr("Cookie", b"sid=alpha; theme=dark"),
+            hdr("cookie", b"quoted=\"a;b\"; theme=override; token=ok"),
+        ];
+        assert_eq!(
+            history_cookie_names(&headers, false).unwrap(),
+            vec!["sid", "theme", "quoted", "token"]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_request_cookies() {
+        let bare = history_cookie_names(&[hdr("Cookie", b"sid=1; bare_without_equals")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(bare.contains("等号"), "{bare}");
+
+        let trailing = history_cookie_names(&[hdr("Cookie", b"a=1;")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(trailing.contains("等号"), "{trailing}");
+
+        let empty = history_cookie_names(&[hdr("Cookie", b"")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("等号"), "{empty}");
+
+        let ctl = history_cookie_names(&[hdr("Cookie", b"sid=1\r\n")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(ctl.contains("字节无效"), "{ctl}");
+
+        let non_ascii = history_cookie_names(&[hdr("Cookie", b"sid=\x80")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(non_ascii.contains("字节无效"), "{non_ascii}");
+
+        let bad_name = history_cookie_names(&[hdr("Cookie", b"bad name=1")], false)
+            .unwrap_err()
+            .to_string();
+        assert!(bad_name.contains("名称无效"), "{bad_name}");
+    }
+
+    #[test]
+    fn parses_and_validates_set_cookie_headers() {
+        let headers = vec![
+            hdr("Set-Cookie", b"csrf=token123; Path=/; HttpOnly"),
+            hdr("set-cookie", b"quoted=\"a;b\"; Path=/"),
+            hdr("Set-Cookie", b"csrf=renewed; Secure"),
+        ];
+        assert_eq!(
+            history_cookie_names(&headers, true).unwrap(),
+            vec!["csrf", "quoted"]
+        );
+
+        let missing_eq = history_cookie_names(&[hdr("Set-Cookie", b"HttpOnly; Path=/")], true)
+            .unwrap_err()
+            .to_string();
+        assert!(missing_eq.contains("缺少名称和值"), "{missing_eq}");
+    }
 }

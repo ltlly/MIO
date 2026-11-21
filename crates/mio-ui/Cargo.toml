@@ -2,43 +2,42 @@
 name = "mio-ui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
-crc32fast = "=1.5.4"
 encoding_rs.workspace = true
-form_urlencoded = "=1.2.2"
-futures = "=0.3.34"
+form_urlencoded.workspace = true
+futures = "0.3.34"
 gpui-kit.workspace = true
-httparse = "=1.10.1"
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-imagesize = "=0.14.0"
-markdown = "=1.0.0"
-mime = "=0.3.17"
+httparse.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+imagesize = "0.14.0"
+markdown = "1.0.0"
+mime.workspace = true
 mio-core = { path = "../mio-core" }
-multer = "=3.1.0"
+multer.workspace = true
 regex.workspace = true
 roxmltree.workspace = true
-scraper = "=0.22.0"
+scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "=0.11.1"
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 url.workspace = true
-quick-xml = "=0.41.0"
+quick-xml = "0.41.0"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = "=0.6.2"
-objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSTimer", "block2", "objc2-core-foundation"] }
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSTimer", "block2", "objc2-core-foundation"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

@@ -5,7 +5,7 @@ use super::MAX_MIME_SNIFF_BYTES;
 pub(crate) fn infer_history_display_mime_type(headers: &[Header], body: &[u8]) -> &'static str {
     for header in headers.iter().filter(|header| header.name.eq_ignore_ascii_case("content-type")) {
         let Ok(value) = std::str::from_utf8(&header.value) else { continue; };
-        let Ok(content_type) = value.parse::<rama::http::mime::Mime>() else { continue; };
+        let Ok(content_type) = value.parse::<mime::Mime>() else { continue; };
         let essence = content_type.essence_str();
         if essence == "application/json" || essence == "text/json" || essence.ends_with("+json") {
             return "JSON";
