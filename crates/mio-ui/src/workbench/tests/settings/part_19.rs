@@ -112,7 +112,7 @@ fn repeater_sse_streaming_progress_and_cancel_preserves_partial_response(cx: &mu
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         let editors = &view.tab_editors[&tab_id];
-        assert_eq!(editors.response.view, MessageView::Hex);
+        assert_eq!(editors.response.view(), MessageView::Hex);
         assert_eq!(
             editors.result.as_deref(),
             Some("正在接收… · 85 ms · 30 字节")
@@ -240,7 +240,7 @@ fn repeater_compressed_and_utf8_boundary_progress_do_not_lock_response_in_hex(
     cx.run_until_parked();
     cx.read(|cx| {
         let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
-        assert_eq!(resp_ed.view, MessageView::Raw);
+        assert_eq!(resp_ed.view(), MessageView::Raw);
         assert!(!resp_ed.auto_hex_fallback);
     });
 
@@ -275,8 +275,8 @@ fn repeater_compressed_and_utf8_boundary_progress_do_not_lock_response_in_hex(
     cx.run_until_parked();
     cx.read(|cx| {
         let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
-        assert_eq!(resp_ed.view, MessageView::Raw);
-        assert!(resp_ed.pretty_active);
+        assert_eq!(resp_ed.view(), MessageView::Raw);
+        assert!(resp_ed.pretty_active());
         assert!(resp_ed.raw.read(cx).value().contains("\"ok\": true"));
     });
     for cmd in drain(&mut fixture.commands) {
@@ -335,7 +335,7 @@ fn repeater_compressed_and_utf8_boundary_progress_do_not_lock_response_in_hex(
     cx.run_until_parked();
     cx.read(|cx| {
         let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
-        assert_eq!(resp_ed.view, MessageView::Hex);
+        assert_eq!(resp_ed.view(), MessageView::Hex);
         assert!(resp_ed.auto_hex_fallback);
     });
 
@@ -359,9 +359,9 @@ fn repeater_compressed_and_utf8_boundary_progress_do_not_lock_response_in_hex(
     cx.run_until_parked();
     cx.read(|cx| {
         let resp_ed = &fixture.view.read(cx).tab_editors[&tab_id].response;
-        assert_eq!(resp_ed.view, MessageView::Raw);
+        assert_eq!(resp_ed.view(), MessageView::Raw);
         assert!(!resp_ed.auto_hex_fallback);
-        assert!(resp_ed.pretty_active);
+        assert!(resp_ed.pretty_active());
     });
 }
 

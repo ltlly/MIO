@@ -34,9 +34,9 @@ pub(in crate::workbench) fn message_editor_rev_key(
         raw_id: ed.raw.entity_id(),
         raw_rev: ed.raw.read(cx).document_revision(),
         hex_rev: ed.hex.read(cx).document_revision(),
-        view: ed.view,
-        pretty_active: ed.pretty_active,
-        hide_headers: ed.hide_headers,
+        view: ed.view(),
+        pretty_active: ed.pretty_active(),
+        hide_headers: ed.hide_headers(),
     }
 }
 
@@ -1408,8 +1408,8 @@ impl Workbench {
                 tab.draft.raw = next_raw.clone();
                 tab.draft.revision = next_revision;
                 if let Some(editors) = self.tab_editors.get_mut(&tab_id) {
-                    let was_pretty = editors.request.pretty_active;
-                    let prev_view = editors.request.view;
+                    let was_pretty = editors.request.pretty_active();
+                    let prev_view = editors.request.view();
                     editors.request.load(&next_raw, window, cx);
                     if was_pretty {
                         let _ = editors.request.switch_pretty(window, cx);
@@ -1431,8 +1431,8 @@ impl Workbench {
                     .iter_mut()
                     .find(|p| p.id() == id && p.is_http())
                 {
-                    let was_pretty = pending.editor.pretty_active;
-                    let prev_view = pending.editor.view;
+                    let was_pretty = pending.editor.pretty_active();
+                    let prev_view = pending.editor.view();
                     pending.editor.load(&next_raw, window, cx);
                     if was_pretty {
                         let _ = pending.editor.switch_pretty(window, cx);

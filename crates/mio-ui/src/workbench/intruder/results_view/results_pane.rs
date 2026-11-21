@@ -239,11 +239,11 @@ impl IntruderResultsWindow {
             } else {
                 &view.request
             };
-            let state = message.state().clone();
-            let message_view = message.view;
-            let pretty_active = message.pretty_active;
+            let state = message.state();
+            let message_view = message.view();
+            let pretty_active = message.pretty_active();
             let render_active = response && message.render_active;
-            let non_printable_active = message.show_non_printable;
+            let non_printable_active = message.show_non_printable();
             let soft_wrap_active = message.soft_wrap;
             let detail_error = view.detail_error.clone();
             let page_error = view.query.error.clone().or_else(|| view.error.clone());
@@ -273,10 +273,10 @@ impl IntruderResultsWindow {
                     .as_ref()
                     .is_some_and(|page| !page.rows.is_empty());
             let search_input = message.search.clone();
-            let case_sensitive = message.case_sensitive;
-            let regex = message.regex;
-            let has_error = message.search_error.borrow().is_some()
-                || message.search_status_label(cx) == "正则无效";
+            let case_sensitive = message.case_sensitive();
+            let regex = message.regex();
+            let has_error =
+                message.has_search_error() || message.search_status_label(cx) == "正则无效";
             let status = message.search_status_label(cx);
             (
                 state,

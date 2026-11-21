@@ -237,12 +237,13 @@ impl Workbench {
         can_send_to_repeater: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const ID: &str = "websocket-payload";
+        const SLOT: crate::workbench::wb_editors::EditorSlot =
+            crate::workbench::wb_editors::EditorSlot::WebsocketPayload;
         let dark = theme::is_dark();
-        let pretty = self.is_message_pretty(ID);
-        let non_printable = self.is_message_non_printable(ID);
-        let soft_wrap = self.is_message_soft_wrap(ID);
-        let view = self.websocket.payload.view;
+        let pretty = self.is_message_pretty(SLOT);
+        let non_printable = self.is_message_non_printable(SLOT);
+        let soft_wrap = self.is_message_soft_wrap(SLOT);
+        let view = self.websocket.payload.view();
         let raw_selected = !pretty && view == MessageView::Raw;
         let hex_selected = !pretty && view == MessageView::Hex;
         let title_fg: gpui_kit::Hsla = if dark {
@@ -440,21 +441,21 @@ impl Workbench {
                         view_tab("websocket-payload-pretty", "Pretty", 64., pretty)
                             .tooltip("格式化预览视图（自动美化 JSON / XML / HTML / 表单，只读）")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.switch_pretty_view(ID, window, cx)
+                                this.switch_pretty_view(SLOT, window, cx)
                             })),
                     )
                     .child(
                         view_tab("websocket-payload-raw", "Raw", 56., raw_selected)
                             .tooltip("原始字节流文本视图（按字节展示完整载荷）")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.switch_message_view(ID, MessageView::Raw, window, cx)
+                                this.switch_message_view(SLOT, MessageView::Raw, window, cx)
                             })),
                     )
                     .child(
                         view_tab("websocket-payload-hex", "Hex", 53., hex_selected)
                             .tooltip("十六进制字节视图（按精确字节偏移查看载荷）")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.switch_message_view(ID, MessageView::Hex, window, cx)
+                                this.switch_message_view(SLOT, MessageView::Hex, window, cx)
                             })),
                     )
                     .child(
@@ -495,7 +496,7 @@ impl Workbench {
                                         "自动换行已关闭（点击开启长行自动折行显示）"
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_message_soft_wrap(ID, window, cx)
+                                        this.toggle_message_soft_wrap(SLOT, window, cx)
                                     })),
                             )
                             .child(
@@ -578,7 +579,7 @@ impl Workbench {
                                         "显示非打印字符（Show non-printable characters：可视化呈现 \\r\\n、制表符与控制字符）"
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_message_non_printable(ID, window, cx)
+                                        this.toggle_message_non_printable(SLOT, window, cx)
                                     })),
                             )
                             .child(
@@ -774,11 +775,11 @@ impl Workbench {
                 .flex_col()
                 .child(
                     div().flex_1().min_h_0().child(
-                        editing::message_editor(self.websocket.payload.state())
+                        editing::message_editor(&self.websocket.payload)
                             .readonly(true)
                             .context_menu(
                                 self.websocket_payload_context_menu(
-                                    self.websocket.payload.state().clone(),
+                                    self.websocket.payload.state(),
                                     true,
                                 ),
                             )
@@ -790,7 +791,12 @@ impl Workbench {
                     "websocket-payload",
                     cx,
                     |this, action, window, cx| {
-                        this.handle_message_search_action("websocket-payload", action, window, cx);
+                        this.handle_message_search_action(
+                            crate::workbench::wb_editors::EditorSlot::WebsocketPayload,
+                            action,
+                            window,
+                            cx,
+                        );
                     },
                 ))
                 .into_any_element()

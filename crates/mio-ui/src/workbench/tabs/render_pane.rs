@@ -35,7 +35,7 @@ std::thread_local! {
 }
 
 fn cached_message_byte_len(editor: &MessageEditor, cx: &App) -> usize {
-    let text_len = if editor.pretty_active || editor.view == MessageView::Raw {
+    let text_len = if editor.pretty_active() || editor.view() == MessageView::Raw {
         editor.raw.read(cx).text().len()
     } else {
         editor.hex.read(cx).text().len()
@@ -379,8 +379,8 @@ impl RepeaterTargetDialog {
                             state.set_value(target.clone(), window, cx);
                         });
                         if editors.request.bytes(window, cx)? != next_raw {
-                            let was_pretty = editors.request.pretty_active;
-                            let previous_view = editors.request.view;
+                            let was_pretty = editors.request.pretty_active();
+                            let previous_view = editors.request.view();
                             editors.request.load(&next_raw, window, cx);
                             if was_pretty {
                                 editors.request.switch_pretty(window, cx)?;

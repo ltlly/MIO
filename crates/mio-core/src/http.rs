@@ -69,7 +69,7 @@ pub use parse_message::{
     parse_request, parse_response, redirect_location_url, resolve_redirect_request,
     resolve_redirect_request_with_options, validate_target_origin,
 };
-pub use pretty::format_pretty_message;
+pub use pretty::{PrettyMessage, format_pretty_message, format_pretty_message_with_line_map};
 
 pub fn decode_http_body(fields: &[Header], raw: &[u8]) -> Result<(Vec<u8>, Vec<Header>)> {
     body(fields, raw)

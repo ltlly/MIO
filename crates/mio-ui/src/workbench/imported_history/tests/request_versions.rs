@@ -125,7 +125,7 @@ fn imported_request_version_menu_defaults_original_preserves_response_and_transf
                 assert!(view.imported_history_request_ready());
                 assert_eq!(view.history_request.bytes(window, cx).unwrap(), edited);
                 assert_eq!(view.history_response.bytes(window, cx).unwrap(), response);
-                assert_eq!(view.history_request.view, MessageView::Hex);
+                assert_eq!(view.history_request.view(), MessageView::Hex);
             });
             window.click("history-request-message-actions", cx);
             window.render_frame(cx);

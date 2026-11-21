@@ -2528,13 +2528,13 @@ impl Workbench {
         if let Some(updated) = outcome.updated_request {
             let next_raw = mio_core::request_to_raw(&updated);
             if let Some(editors) = self.tab_editors.get_mut(&tab_id) {
-                let was_pretty = editors.request.pretty_active;
-                let prev_view = editors.request.view;
+                let was_pretty = editors.request.pretty_active();
+                let prev_view = editors.request.view();
                 editors.request.load(&next_raw, window, cx);
                 if was_pretty {
                     let _ = editors.request.switch_pretty(window, cx);
                 } else if prev_view == crate::editing::MessageView::Hex
-                    && editors.request.view != crate::editing::MessageView::Hex
+                    && editors.request.view() != crate::editing::MessageView::Hex
                 {
                     let _ = editors
                         .request

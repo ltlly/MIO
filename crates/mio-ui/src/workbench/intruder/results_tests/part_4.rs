@@ -88,8 +88,8 @@ fn result_selection_reads_only_flows_and_correlates_success_and_failure(cx: &mut
     update(&fixture, cx, |view, window, cx| {
         let result = &view.intruder.results.views[&run.id];
         assert_eq!(result.detail.as_deref(), Some(&b));
-        assert!(result.request.view == MessageView::Hex);
-        assert!(result.response.view == MessageView::Hex);
+        assert!(result.request.view() == MessageView::Hex);
+        assert!(result.response.view() == MessageView::Hex);
         assert_eq!(
             result.request.bytes(window, cx).unwrap(),
             request_to_raw(&b.request)

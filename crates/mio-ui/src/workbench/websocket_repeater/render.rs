@@ -350,14 +350,19 @@ impl Workbench {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.message_header("ws-repeater-history", "历史消息", editors.history.view, cx))
+            .child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::WsRepeaterHistory,
+                "历史消息",
+                editors.history.view(),
+                cx,
+            ))
             .child(
                 div().flex_1().min_h_0().child(
-                    editing::message_editor(editors.history.state())
+                    editing::message_editor(&editors.history)
                         .readonly(true)
                         .size_full()
                         .context_menu(
-                            self.request_context_menu(editors.history.state().clone(), true),
+                            self.request_context_menu(editors.history.state(), true),
                         )
                         .aria_label("WebSocket 历史消息编辑器"),
                 ),
@@ -366,7 +371,12 @@ impl Workbench {
                 "ws-repeater-history",
                 cx,
                 |this, action, window, cx| {
-                    this.handle_message_search_action("ws-repeater-history", action, window, cx);
+                    this.handle_message_search_action(
+                        crate::workbench::wb_editors::EditorSlot::WsRepeaterHistory,
+                        action,
+                        window,
+                        cx,
+                    );
                 },
             ))
             .into_any_element()
@@ -750,18 +760,18 @@ impl Workbench {
                     .border_r_1()
                     .border_color(theme::border())
                     .child(self.message_header(
-                        "ws-repeater-draft",
+                        crate::workbench::wb_editors::EditorSlot::WsRepeaterDraft,
                         "待发送消息",
-                        editors.draft.view,
+                        editors.draft.view(),
                         cx,
                     ))
                     .child(
                         div().flex_1().min_h_0().child(
-                            editing::message_editor(editors.draft.state())
+                            editing::message_editor(&editors.draft)
                                 .readonly(!can_operate || editors.draft.is_readonly_preview())
                                 .size_full()
                                 .context_menu(self.request_context_menu(
-                                    editors.draft.state().clone(),
+                                    editors.draft.state(),
                                     !can_operate || editors.draft.is_readonly_preview(),
                                 ))
                                 .aria_label("WebSocket 待发送消息编辑器"),
@@ -773,7 +783,7 @@ impl Workbench {
                         cx,
                         |this, action, window, cx| {
                             this.handle_message_search_action(
-                                "ws-repeater-draft",
+                                crate::workbench::wb_editors::EditorSlot::WsRepeaterDraft,
                                 action,
                                 window,
                                 cx,

@@ -17,7 +17,6 @@ use std::{
 };
 
 mod codec;
-mod hash;
 mod hex_grid;
 mod http_head;
 mod message_editor;
@@ -40,14 +39,11 @@ mod tests_search;
 mod tests_syntax_highlight;
 
 pub(crate) use codec::{
-    DEFAULT_HIDDEN_REQUEST_HEADERS, DEFAULT_HIDDEN_RESPONSE_HEADERS,
-    RenderedBodySummary, base64_decode_bytes, convert_bytes, convert_selection,
-    extract_http_response_body, filter_http_headers_bytes,
-    hex_decode, hex_encode, parse_rendered_http_response, validate_http_header_names,
+    DEFAULT_HIDDEN_REQUEST_HEADERS, DEFAULT_HIDDEN_RESPONSE_HEADERS, RenderedBodySummary,
+    base64_decode_bytes, convert_bytes, convert_selection, extract_http_response_body,
+    extract_http_response_body_and_content_type, filter_http_headers_bytes, hex_decode, hex_encode,
+    parse_rendered_http_response, validate_http_header_names,
 };
-pub(crate) use hash::{md5_digest, sha256_digest};
-#[cfg(test)]
-pub(crate) use hash::{md5_hex, sha256_hex};
 #[cfg(test)]
 pub(crate) use hex_grid::{
     hex_byte_range_to_text_range, hex_text_range_to_byte_range, hex_text_range_to_byte_range_in_str,
@@ -214,6 +210,7 @@ pub(crate) enum ConvertKind {
     UrlEncodeUnicode,
     UrlDecode,
     HtmlEncodeKey,
+    HtmlEncodeAll,
     HtmlEncodeDecimal,
     HtmlEncodeHex,
     HtmlDecode,
@@ -223,20 +220,6 @@ pub(crate) enum ConvertKind {
     Base64UrlSafeDecode,
     AsciiHexEncode,
     AsciiHexDecode,
-    #[cfg(test)]
-    ConstructJsString,
-    #[cfg(test)]
-    ConstructSqlChar,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
-#[action(namespace = mio, no_json)]
-pub(crate) struct CopyConvertedSelection(pub(crate) ConvertKind);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
-#[action(namespace = mio, no_json)]
-pub(crate) enum ExtendedConvertKind {
-    HtmlEncodeAll,
     ConstructJsFromCharCode,
     ConstructMssqlChar,
     ConstructOracleChr,
@@ -245,7 +228,7 @@ pub(crate) enum ExtendedConvertKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
 #[action(namespace = mio, no_json)]
-pub(crate) struct CopyExtendedConvertedSelection(pub(crate) ExtendedConvertKind);
+pub(crate) struct CopyConvertedSelection(pub(crate) ConvertKind);
 
 #[cfg(not(test))]
 static URL_ENCODE_AS_YOU_TYPE: std::sync::atomic::AtomicBool =
@@ -290,95 +273,6 @@ pub(crate) fn url_encode_typed_char(byte: u8) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn convert_selection_extended(kind: ExtendedConvertKind, input: &str) -> String {
-    use std::fmt::Write;
-    match kind {
-        ExtendedConvertKind::HtmlEncodeAll => {
-            let mut out = String::with_capacity(input.len().saturating_mul(5));
-            for ch in input.chars() {
-                match ch {
-                    '&' => out.push_str("&amp;"),
-                    '<' => out.push_str("&lt;"),
-                    '>' => out.push_str("&gt;"),
-                    '"' => out.push_str("&quot;"),
-                    '\'' => out.push_str("&#39;"),
-                    other => {
-                        let _ = write!(out, "&#{};", other as u32);
-                    }
-                }
-            }
-            out
-        }
-        ExtendedConvertKind::ConstructJsFromCharCode => {
-            let mut units = Vec::new();
-            let mut buf = [0u16; 2];
-            for ch in input.chars() {
-                for &mut unit in ch.encode_utf16(&mut buf) {
-                    units.push(unit.to_string());
-                }
-            }
-            format!("String.fromCharCode({})", units.join(","))
-        }
-        ExtendedConvertKind::ConstructMssqlChar => {
-            if input.is_empty() {
-                return "''".to_owned();
-            }
-            input
-                .chars()
-                .map(|ch| {
-                    let code = ch as u32;
-                    if code <= 255 {
-                        format!("char({code})")
-                    } else {
-                        format!("nchar({code})")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        }
-        ExtendedConvertKind::ConstructOracleChr => {
-            if input.is_empty() {
-                return "''".to_owned();
-            }
-            input
-                .chars()
-                .map(|ch| format!("chr({})", ch as u32))
-                .collect::<Vec<_>>()
-                .join("||")
-        }
-        ExtendedConvertKind::ConstructMysqlChar => {
-            if input.is_empty() {
-                return "''".to_owned();
-            }
-            let bytes = input
-                .as_bytes()
-                .iter()
-                .map(|b| b.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("CHAR({bytes})")
-        }
-    }
-}
-
-pub(crate) fn convert_selected_editor_text_extended(
-    editor: &Entity<EditorState>,
-    kind: ExtendedConvertKind,
-    window: &mut Window,
-    cx: &mut App,
-) -> Result<String, String> {
-    if editor.update(cx, |state, cx| {
-        state.marked_text_range(window, cx).is_some()
-    }) {
-        return Err(COMPOSITION_PENDING.into());
-    }
-    let selected = editor.read(cx).selected_value();
-    if selected.is_empty() {
-        return Err("请先在消息编辑器中选中要转换的文本。".into());
-    }
-    Ok(convert_selection_extended(kind, selected.as_ref()))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
 #[action(namespace = mio, no_json)]
 pub(crate) struct InvokePluginContextMenu(pub(crate) mio_core::Uuid);
@@ -401,43 +295,68 @@ pub(crate) struct PendingReplaceAll {
     pub match_count: usize,
 }
 
-pub(crate) struct MessageEditor {
-    pub pretty: Entity<EditorState>,
+pub(super) struct MessageEditorShared {
+    pub view: MessageView,
     pub pretty_active: bool,
-    pub(super) original_wire_bytes: Vec<u8>,
-    pub(super) pretty_baseline_text: Option<String>,
-    pub(crate) hide_headers: bool,
-    hide_headers_override: Option<bool>,
-    pub(crate) show_non_printable: bool,
+    pub hide_headers: bool,
+    pub show_non_printable: bool,
+    pub case_sensitive: bool,
+    pub regex: bool,
+    pub auto_scroll_to_match: bool,
+    pub header_preview: Option<Entity<EditorState>>,
+    pub non_printable: Option<Entity<EditorState>>,
+    pub hex_grid: Option<Entity<HexGridView>>,
+    pub search_error: Option<String>,
+    pub wire_bytes: Vec<u8>,
+    pub hex_synced_revision: Option<u64>,
+}
+
+impl MessageEditorShared {
+    pub(super) fn active_editor(
+        &self,
+        raw: &Entity<EditorState>,
+        hex: &Entity<EditorState>,
+    ) -> Entity<EditorState> {
+        if self.hide_headers
+            && let Some(editor) = &self.header_preview
+        {
+            return editor.clone();
+        }
+        if self.show_non_printable
+            && let Some(editor) = &self.non_printable
+        {
+            return editor.clone();
+        }
+        if self.pretty_active {
+            return raw.clone();
+        }
+        match self.view {
+            MessageView::Raw => raw.clone(),
+            MessageView::Hex => hex.clone(),
+        }
+    }
+}
+
+pub(crate) struct MessageEditor {
+    pub(super) shared: Rc<RefCell<MessageEditorShared>>,
     pub(crate) render_active: bool,
-    pub(super) header_preview: Option<Entity<EditorState>>,
-    pub(super) non_printable: Option<Entity<EditorState>>,
-    header_preview_slot: Rc<RefCell<Option<Entity<EditorState>>>>,
-    non_printable_slot: Rc<RefCell<Option<Entity<EditorState>>>>,
+    hide_headers_override: Option<bool>,
     pub(crate) hidden_headers: Option<Vec<String>>,
     pub(crate) header_preview_error: Option<String>,
+    pub(super) pretty_baseline_text: Option<String>,
+    pretty_baseline_revision: Option<u64>,
+    raw_baseline_revision: Option<u64>,
+    raw_display_charset: MessageDisplayCharset,
+    raw_charset_pref: (u8, String),
     pub soft_wrap: bool,
     pub raw: Entity<EditorState>,
     pub hex: Entity<EditorState>,
-    pub(crate) hex_grid: Option<Entity<HexGridView>>,
     pub search: Entity<InputState>,
     pub replace: Entity<InputState>,
     pub replace_open: bool,
     pub pending_replace_all: Option<PendingReplaceAll>,
-    pub case_sensitive: bool,
-    pub regex: bool,
-    pub auto_scroll_to_match: bool,
-    pub search_error: Rc<RefCell<Option<String>>>,
-    pub view: MessageView,
     pub(crate) auto_hex_fallback: bool,
     selection_seq: Rc<Cell<u64>>,
-    view_cell: Rc<Cell<MessageView>>,
-    pretty_cell: Rc<Cell<bool>>,
-    hide_headers_cell: Rc<Cell<bool>>,
-    non_printable_cell: Rc<Cell<bool>>,
-    case_sensitive_cell: Rc<Cell<bool>>,
-    regex_cell: Rc<Cell<bool>>,
-    auto_scroll_cell: Rc<Cell<bool>>,
     notify_owner: Rc<dyn Fn(&mut App)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -468,13 +387,6 @@ fn convert_selection_submenu_for(disabled: bool, copy_to_clipboard: bool) -> Nat
     let action = |kind: ConvertKind| -> Box<dyn gpui_kit::Action> {
         if copy_to_clipboard {
             Box::new(CopyConvertedSelection(kind))
-        } else {
-            Box::new(kind)
-        }
-    };
-    let ext_action = |kind: ExtendedConvertKind| -> Box<dyn gpui_kit::Action> {
-        if copy_to_clipboard {
-            Box::new(CopyExtendedConvertedSelection(kind))
         } else {
             Box::new(kind)
         }
@@ -512,7 +424,7 @@ fn convert_selection_submenu_for(disabled: bool, copy_to_clipboard: bool) -> Nat
                 .menu_with_disabled(
                     "HTML 编码（全部字符）",
                     disabled,
-                    ext_action(ExtendedConvertKind::HtmlEncodeAll),
+                    action(ConvertKind::HtmlEncodeAll),
                 )
                 .menu_with_disabled(
                     "HTML 编码（十进制数字实体）",
@@ -567,22 +479,22 @@ fn convert_selection_submenu_for(disabled: bool, copy_to_clipboard: bool) -> Nat
                 .menu_with_disabled(
                     "JavaScript",
                     disabled,
-                    ext_action(ExtendedConvertKind::ConstructJsFromCharCode),
+                    action(ConvertKind::ConstructJsFromCharCode),
                 )
                 .menu_with_disabled(
                     "Microsoft SQL Server",
                     disabled,
-                    ext_action(ExtendedConvertKind::ConstructMssqlChar),
+                    action(ConvertKind::ConstructMssqlChar),
                 )
                 .menu_with_disabled(
                     "Oracle",
                     disabled,
-                    ext_action(ExtendedConvertKind::ConstructOracleChr),
+                    action(ConvertKind::ConstructOracleChr),
                 )
                 .menu_with_disabled(
                     "MySQL",
                     disabled,
-                    ext_action(ExtendedConvertKind::ConstructMysqlChar),
+                    action(ConvertKind::ConstructMysqlChar),
                 ),
         )
         .separator()
@@ -619,8 +531,32 @@ pub(crate) fn new_plain_editor(window: &mut Window, cx: &mut App) -> Entity<Edit
     new_editor_with_language("plaintext", window, cx)
 }
 
-pub(crate) fn message_editor(state: &Entity<EditorState>) -> MessageEditorElement {
-    MessageEditorElement::new(state)
+pub(crate) struct MessageEditorTarget {
+    state: Entity<EditorState>,
+    hex_grid: Option<Entity<HexGridView>>,
+}
+
+impl From<&MessageEditor> for MessageEditorTarget {
+    fn from(editor: &MessageEditor) -> Self {
+        Self {
+            state: editor.state(),
+            hex_grid: editor.active_hex_grid(),
+        }
+    }
+}
+
+impl From<&Entity<EditorState>> for MessageEditorTarget {
+    fn from(state: &Entity<EditorState>) -> Self {
+        Self {
+            state: state.clone(),
+            hex_grid: None,
+        }
+    }
+}
+
+pub(crate) fn message_editor(target: impl Into<MessageEditorTarget>) -> MessageEditorElement {
+    let target = target.into();
+    MessageEditorElement::new(target.state, target.hex_grid)
 }
 
 fn new_editor_with_language(
@@ -859,23 +795,23 @@ mod extended_convert_and_url_encode_tests {
     #[test]
     fn extended_convert_matches_ext_html_all_and_construct_string_targets() {
         assert_eq!(
-            convert_selection_extended(ExtendedConvertKind::HtmlEncodeAll, "A<&"),
+            convert_selection(ConvertKind::HtmlEncodeAll, "A<&").unwrap(),
             "&#65;&lt;&amp;"
         );
         assert_eq!(
-            convert_selection_extended(ExtendedConvertKind::ConstructJsFromCharCode, "AB"),
+            convert_selection(ConvertKind::ConstructJsFromCharCode, "AB").unwrap(),
             "String.fromCharCode(65,66)"
         );
         assert_eq!(
-            convert_selection_extended(ExtendedConvertKind::ConstructMssqlChar, "AB"),
+            convert_selection(ConvertKind::ConstructMssqlChar, "AB").unwrap(),
             "char(65)+char(66)"
         );
         assert_eq!(
-            convert_selection_extended(ExtendedConvertKind::ConstructOracleChr, "AB"),
+            convert_selection(ConvertKind::ConstructOracleChr, "AB").unwrap(),
             "chr(65)||chr(66)"
         );
         assert_eq!(
-            convert_selection_extended(ExtendedConvertKind::ConstructMysqlChar, "AB"),
+            convert_selection(ConvertKind::ConstructMysqlChar, "AB").unwrap(),
             "CHAR(65,66)"
         );
     }

@@ -371,7 +371,7 @@ fn intruder_results_window_renders_grep_summary_for_text_and_binary_and_hides_wi
     cx.update_window(started.window, |_, window, cx| {
         window.render_frame(cx);
         let result_view = &fixture.view.read(cx).intruder.results.views[&started.summary.id];
-        assert_eq!(result_view.response.view, MessageView::Hex);
+        assert_eq!(result_view.response.view(), MessageView::Hex);
         let bar = window.find("intruder-result-grep-summary");
         assert!(bar.visible());
         assert_eq!(bar.label(), Some("Grep 命中: 无 | 提取: tok=..;: bin77"));

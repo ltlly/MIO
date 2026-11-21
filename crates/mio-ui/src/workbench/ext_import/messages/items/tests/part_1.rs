@@ -86,7 +86,7 @@ fn all_positions_keep_null_failed_empty_duplicate_addresses_and_readonly_origina
     cx.run_until_parked();
     cx.read(|cx| {
         let messages = fixture.view.read(cx).ext_import.messages.as_ref().unwrap();
-        assert_eq!(messages.payload.view, MessageView::Hex);
+        assert_eq!(messages.payload.view(), MessageView::Hex);
         assert_eq!(messages.payload.hex.read(cx).value().as_ref(), "00 ff");
     });
     select(&fixture, "ext-items-table", 4, cx);

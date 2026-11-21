@@ -190,8 +190,8 @@ fn imported_proxy_history_shows_source_number_raw_response_length_and_binary_pai
                 assert!(view.selected_flow.is_none());
                 assert_eq!(view.history_request.bytes(window, cx).unwrap(), request);
                 assert_eq!(view.history_response.bytes(window, cx).unwrap(), response);
-                assert_eq!(view.history_request.view, MessageView::Hex);
-                assert_eq!(view.history_response.view, MessageView::Hex);
+                assert_eq!(view.history_request.view(), MessageView::Hex);
+                assert_eq!(view.history_response.view(), MessageView::Hex);
                 assert!(view.detail.is_none());
             });
         })

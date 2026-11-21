@@ -34,7 +34,7 @@ fn editing_repeater_nonprintable_render_view_and_pretty_rewrite_preserve_wire_by
         window.render_frame(cx);
         let actual = f.view.update(cx, |view, cx| {
             let editor = &view.tab_editors[&tab_id].request;
-            assert!(editor.show_non_printable);
+            assert!(editor.show_non_printable());
             assert!(editor.state().read(cx).value().contains(" \\r   \\n "));
             editor.bytes(window, cx).unwrap()
         });
@@ -44,14 +44,14 @@ fn editing_repeater_nonprintable_render_view_and_pretty_rewrite_preserve_wire_by
         window.render_frame(cx);
         let restored = f.view.update(cx, |view, cx| {
             let editor = &view.tab_editors[&tab_id].request;
-            assert!(!editor.show_non_printable);
+            assert!(!editor.show_non_printable());
             editor.bytes(window, cx).unwrap()
         });
         assert_eq!(restored, orig_wire);
 
         window.click("repeater-request-pretty", cx);
         window.render_frame(cx);
-        assert!(f.view.read(cx).tab_editors[&tab_id].request.pretty_active);
+        assert!(f.view.read(cx).tab_editors[&tab_id].request.pretty_active());
         window.dispatch_action(Box::new(crate::ChangeRequestMethod), cx);
     })
     .unwrap();
@@ -247,7 +247,7 @@ fn ext_message_editor_two_row_header_search_gear_menu_and_send_cancel_coplace(
         assert!(window.try_find("repeater-request-search-replace-toggle").is_some());
         window.click("repeater-request-search-case", cx);
         window.render_frame(cx);
-        assert!(f.view.read(cx).tab_editors[&tab_id].request.case_sensitive);
+        assert!(f.view.read(cx).tab_editors[&tab_id].request.case_sensitive());
 
         // 5. Inspector sidebar width and 39px section headers.
         let inspector_bounds = window.find("inspector-sidebar").bounds();
@@ -399,7 +399,7 @@ fn history_message_actions_support_scan_launcher_selection_copy_save_and_browser
         window.click("history-layout-side", cx);
         window.render_frame(cx);
         f.view.update(cx, |view, cx| {
-            view.copy_selected_editor_text("history-request", window, cx);
+            view.copy_selected_editor_text(EditorSlot::HistoryRequest, window, cx);
         });
         assert!(
             f.view
@@ -410,13 +410,13 @@ fn history_message_actions_support_scan_launcher_selection_copy_save_and_browser
         );
 
         f.view.update(cx, |view, cx| {
-            let req_state = view.history_request.state().clone();
+            let req_state = view.history_request.state();
             let text = req_state.read(cx).value().to_string();
             let start = text.find("secret123").expect("token in request");
             req_state.update(cx, |s, cx| {
                 s.set_selected_range_with_direction(start..start + 9, false, cx);
             });
-            view.copy_selected_editor_text("history-request", window, cx);
+            view.copy_selected_editor_text(EditorSlot::HistoryRequest, window, cx);
         });
         assert!(f.view.read(cx).error.is_none());
     })
@@ -428,7 +428,7 @@ fn history_message_actions_support_scan_launcher_selection_copy_save_and_browser
 
     cx.update_window(f.window, |_, window, cx| {
         f.view.update(cx, |view, cx| {
-            view.save_selected_text_to_file("history-request", window, cx);
+            view.save_selected_text_to_file(EditorSlot::HistoryRequest, window, cx);
         });
     })
     .unwrap();
@@ -740,8 +740,7 @@ fn hex_grid_in_place_edit_marks_repeater_tab_dirty(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let grid = f.view.read(cx).tab_editors[&tab_id]
             .request
-            .hex_grid
-            .clone()
+            .hex_grid()
             .expect("switching to Hex must initialize hex_grid");
         grid.update(cx, |g, cx| {
             g.select_byte(0, false, false, window, cx);

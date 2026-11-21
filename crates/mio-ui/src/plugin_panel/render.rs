@@ -135,7 +135,7 @@ impl NativePanel {
                 }
             }
             node::Kind::Tabs(tabs) => {
-                let active = latest_overlay(&self.tabs, id).unwrap_or(tabs.active);
+                let active = self.overlays.latest_tab(id).unwrap_or(tabs.active);
                 let horizontal = tabs.axis == Axis::Horizontal as i32;
                 let mut bar = div()
                     .flex()
@@ -171,7 +171,7 @@ impl NativePanel {
                                 this.cancel_interaction(cx);
                                 if this.enabled {
                                     let seq = this.next_ui_seq();
-                                    push_overlay(&mut this.tabs, id, selected, seq);
+                                    this.overlays.push(id, ControlOverlay::Tab(selected), seq);
                                     this.remember_visible_document();
                                     this.emit_with_seq(
                                         id,
@@ -206,7 +206,7 @@ impl NativePanel {
             }
             node::Kind::Split(split) => {
                 let horizontal = split.axis == Axis::Horizontal as i32;
-                let fraction = latest_overlay(&self.splits, id).unwrap_or(split.fraction);
+                let fraction = self.overlays.latest_split(id).unwrap_or(split.fraction);
                 let bounds = self.geometry[&id].clone();
                 let handle = div()
                     .id(("plugin-split", id))
@@ -285,7 +285,10 @@ impl NativePanel {
         checkbox: &panel::CheckboxNode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let checked = latest_overlay(&self.checkboxes, id).unwrap_or(checkbox.checked);
+        let checked = self
+            .overlays
+            .latest_checkbox(id)
+            .unwrap_or(checkbox.checked);
         let expected_label = checkbox.label.clone();
         Checkbox::new(("plugin-checkbox", id))
             .label(checkbox.label.clone())
@@ -307,7 +310,7 @@ impl NativePanel {
                 }
                 if this.enabled {
                     let seq = this.next_ui_seq();
-                    push_overlay(&mut this.checkboxes, id, *next, seq);
+                    this.overlays.push(id, ControlOverlay::Checkbox(*next), seq);
                     this.emit_with_seq(id, seq, ui_event::Event::Toggled(*next), cx);
                 }
             }))
@@ -320,7 +323,9 @@ impl NativePanel {
         select: &panel::SelectNode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = latest_overlay(&self.selects, id)
+        let selected = self
+            .overlays
+            .latest_select(id)
             .filter(|idx| (*idx as usize) < select.options.len())
             .unwrap_or(select.selected_index);
         let current = select
@@ -368,7 +373,7 @@ impl NativePanel {
                                                 return;
                                             }
                                             let seq = this.next_ui_seq();
-                                            push_overlay(&mut this.selects, id, idx, seq);
+                                            this.overlays.push(id, ControlOverlay::Select(idx), seq);
                                             this.emit_with_seq(
                                                 id,
                                                 seq,
@@ -400,7 +405,7 @@ impl NativePanel {
                 row.child(
                     div()
                         .text_size(theme::scaled_px(11.))
-                        .text_color(rgb(0x6b6b6b))
+                        .text_color(theme::muted_foreground())
                         .child(progress.label.clone()),
                 )
             })
@@ -415,10 +420,94 @@ impl NativePanel {
             .child(
                 div()
                     .text_size(theme::scaled_px(11.))
-                    .text_color(rgb(0x6b6b6b))
+                    .text_color(theme::muted_foreground())
                     .child(format!("{pct}%")),
             )
             .into_any_element()
+    }
+}
+
+struct WindowPointerCapture {
+    child: AnyElement,
+    panel: gpui_kit::WeakEntity<NativePanel>,
+    active: bool,
+}
+
+impl IntoElement for WindowPointerCapture {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui_kit::Element for WindowPointerCapture {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui_kit::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui_kit::GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui_kit::LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui_kit::GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui_kit::GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+        if self.active {
+            let moving = self.panel.clone();
+            window.on_mouse_event::<MouseMoveEvent>(move |event, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    let _ = moving.update(cx, |this, cx| {
+                        this.drag_pointer(event.position, PointerPhase::Move, cx);
+                        this.resize_split(event.position, cx);
+                    });
+                }
+            });
+            let releasing = self.panel.clone();
+            window.on_mouse_event::<MouseUpEvent>(move |event, phase, _, cx| {
+                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                    let _ = releasing.update(cx, |this, cx| {
+                        this.drag_pointer(event.position, PointerPhase::Up, cx);
+                        this.resize_split(event.position, cx);
+                        this.resize = None;
+                        cx.notify();
+                    });
+                }
+            });
+        }
     }
 }
 
@@ -459,7 +548,7 @@ impl Render for NativePanel {
             .flex_col()
             .overflow_hidden()
             .when_some(self.error.clone(), |root, error| {
-                root.child(div().text_color(rgb(0xb42318)).child(error))
+                root.child(div().text_color(theme::danger_fg()).child(error))
             })
             .child(
                 div()
@@ -489,37 +578,10 @@ impl Render for NativePanel {
                     })),
             );
         }
-        if self.capture.is_some() || self.resize.is_some() {
-            let weak = cx.weak_entity();
-            root = root.child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, _| {
-                        let moving = weak.clone();
-                        window.on_mouse_event::<MouseMoveEvent>(move |event, phase, _, cx| {
-                            if phase == DispatchPhase::Bubble {
-                                let _ = moving.update(cx, |this, cx| {
-                                    this.drag_pointer(event.position, PointerPhase::Move, cx);
-                                    this.resize_split(event.position, cx);
-                                });
-                            }
-                        });
-                        window.on_mouse_event::<MouseUpEvent>(move |event, phase, _, cx| {
-                            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.drag_pointer(event.position, PointerPhase::Up, cx);
-                                    this.resize_split(event.position, cx);
-                                    this.resize = None;
-                                    cx.notify();
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .size(px(0.)),
-            );
+        WindowPointerCapture {
+            child: root.into_any_element(),
+            panel: cx.weak_entity(),
+            active: self.capture.is_some() || self.resize.is_some(),
         }
-        root
     }
 }

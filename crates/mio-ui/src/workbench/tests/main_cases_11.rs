@@ -295,7 +295,7 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
             assert!(
                 fixture.view.read(cx).tab_editors[&id]
                     .request
-                    .case_sensitive
+                    .case_sensitive()
             );
             assert_eq!(
                 fixture.view.read(cx).tab_editors[&id]
@@ -307,7 +307,7 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
             assert!(
                 !fixture.view.read(cx).tab_editors[&id]
                     .request
-                    .case_sensitive
+                    .case_sensitive()
             );
             (req_raw, req_search, resp_raw, resp_search)
         })
@@ -331,7 +331,7 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
             window.render_frame(cx);
         }
         window.click("repeater-request-search-regex", cx);
-        assert!(fixture.view.read(cx).tab_editors[&id].request.regex);
+        assert!(fixture.view.read(cx).tab_editors[&id].request.regex());
         assert_eq!(
             fixture.view.read(cx).tab_editors[&id]
                 .request
@@ -372,7 +372,7 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
             window.render_frame(cx);
         }
         window.click("repeater-request-search-regex", cx);
-        assert!(!fixture.view.read(cx).tab_editors[&id].request.regex);
+        assert!(!fixture.view.read(cx).tab_editors[&id].request.regex());
     })
     .unwrap();
 
@@ -427,7 +427,7 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
         assert!(
             !fixture.view.read(cx).tab_editors[&id]
                 .request
-                .case_sensitive
+                .case_sensitive()
         );
         assert_eq!(
             fixture.view.read(cx).error.as_deref(),

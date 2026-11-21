@@ -98,6 +98,11 @@ fn convert_selection_covers_html_base64_and_ascii_hex_codecs() {
 
 #[test]
 fn sha256_and_md5_digests_match_standard_vectors_and_binary() {
+    use mio_core::codec_util::{hex_encode as core_hex_encode, md5_digest, sha256_digest};
+
+    let sha256_hex = |input: &[u8]| core_hex_encode(&sha256_digest(input));
+    let md5_hex = |input: &[u8]| core_hex_encode(&md5_digest(input));
+
     assert_eq!(
         sha256_hex(b""),
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -190,12 +195,12 @@ fn convert_selection_covers_base64_url_safe_and_construct_string_codecs() {
         raw
     );
     assert_eq!(
-        convert_selection(ConvertKind::ConstructJsString, "a'b\n").unwrap(),
-        "'a' + '\\'' + 'b' + '\\n'"
+        convert_selection(ConvertKind::ConstructJsFromCharCode, "AB").unwrap(),
+        "String.fromCharCode(65,66)"
     );
     assert_eq!(
-        convert_selection(ConvertKind::ConstructSqlChar, "Az").unwrap(),
-        "CHAR(65)+CHAR(122)"
+        convert_selection(ConvertKind::ConstructMysqlChar, "Az").unwrap(),
+        "CHAR(65,122)"
     );
 }
 

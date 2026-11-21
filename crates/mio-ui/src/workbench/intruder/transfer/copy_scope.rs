@@ -81,38 +81,6 @@ fn ensure_editor_context_actions_registered(
             });
         });
     });
-    cx.on_action(|kind: &crate::editing::ExtendedConvertKind, cx: &mut App| {
-        let Some(reg) = cx.try_global::<EditorContextActionRegistry>() else {
-            return;
-        };
-        let owner = reg.owner.clone();
-        let win = reg.window;
-        let kind = *kind;
-        cx.defer(move |cx| {
-            let _ = win.update(cx, |_, window, cx| {
-                let _ = owner.update(cx, |view, cx| {
-                    view.apply_extended_conversion_action(kind, false, window, cx);
-                });
-            });
-        });
-    });
-    cx.on_action(
-        |action: &crate::editing::CopyExtendedConvertedSelection, cx: &mut App| {
-            let Some(reg) = cx.try_global::<EditorContextActionRegistry>() else {
-                return;
-            };
-            let owner = reg.owner.clone();
-            let win = reg.window;
-            let kind = action.0;
-            cx.defer(move |cx| {
-                let _ = win.update(cx, |_, window, cx| {
-                    let _ = owner.update(cx, |view, cx| {
-                        view.apply_extended_conversion_action(kind, true, window, cx);
-                    });
-                });
-            });
-        },
-    );
 }
 
 impl Workbench {

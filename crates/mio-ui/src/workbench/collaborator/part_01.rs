@@ -114,7 +114,7 @@ impl CollaboratorPane {
         let raw_editor = MessageEditor::new(window, cx);
 
         let mut subscriptions = Vec::new();
-        for editor in [&raw_editor.raw, &raw_editor.hex, &raw_editor.pretty] {
+        for editor in [&raw_editor.raw, &raw_editor.hex] {
             let mut composing = false;
             subscriptions.push(cx.observe_in(editor, window, move |_, input, window, cx| {
                 let marked = input.update(cx, |state, cx| {
@@ -233,7 +233,6 @@ impl CollaboratorPane {
         for editor in [
             &self.raw_editor.raw,
             &self.raw_editor.hex,
-            &self.raw_editor.pretty,
         ] {
             editing::snapshot(editor, window, cx)?;
         }

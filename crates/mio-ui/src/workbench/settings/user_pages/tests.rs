@@ -485,9 +485,9 @@ fn user_settings_pretty_default_auto_inspector_search_case_and_preview_truncatio
             assert!(view.inspector.open);
             let tab_id = view.workspace.active.unwrap();
             let editors = view.tab_editors.get_mut(&tab_id).unwrap();
-            assert!(editors.request.case_sensitive);
+            assert!(editors.request.case_sensitive());
             editors.request.load(raw_json, window, cx);
-            assert!(editors.request.pretty_active);
+            assert!(editors.request.pretty_active());
             assert_eq!(editors.request.bytes(window, cx).unwrap(), raw_json);
         });
     })
@@ -756,7 +756,7 @@ fn user_settings_hide_specified_headers_layout_validation_and_editor_sync(
             let tab_id = view.workspace.active.unwrap();
             let editors = view.tab_editors.get_mut(&tab_id).unwrap();
             editors.request.load(raw, window, cx);
-            assert!(editors.request.hide_headers);
+            assert!(editors.request.hide_headers());
             let text = editors.request.state().read(cx).value().to_string();
             assert!(!text.contains("X-Secret-Trace"));
             assert!(text.contains("Content-Length: 2"));
@@ -794,7 +794,7 @@ fn user_settings_hide_specified_headers_layout_validation_and_editor_sync(
             let tab_id = view.workspace.active.unwrap();
             let editors = view.tab_editors.get_mut(&tab_id).unwrap();
             let text = editors.request.state().read(cx).value().to_string();
-            assert!(editors.request.hide_headers);
+            assert!(editors.request.hide_headers());
             assert!(!text.contains("X-Secret-Trace"));
             assert!(!text.contains("Content-Length:"));
             assert!(!text.contains("Content-Type:"));
@@ -824,7 +824,7 @@ fn user_settings_hide_specified_headers_layout_validation_and_editor_sync(
             let editors = view.tab_editors.get_mut(&tab_id).unwrap();
             editors.request.toggle_hide_headers(window, cx).unwrap();
             editors.request.load(raw, window, cx);
-            assert!(editors.request.hide_headers);
+            assert!(editors.request.hide_headers());
             let text = editors.request.state().read(cx).value().to_string();
             assert!(!text.contains("Accept: */*"));
             assert!(text.contains("Content-Length: 2"));
@@ -976,14 +976,14 @@ fn user_settings_intruder_display_editor_charset_and_hotkeys_persistence(
         fixture.view.update(cx, |view, cx| {
             let tab_id = view.workspace.active.unwrap();
             let editors = view.tab_editors.get_mut(&tab_id).unwrap();
-            assert!(editors.request.regex);
-            assert!(editors.request.auto_scroll_to_match);
+            assert!(editors.request.regex());
+            assert!(editors.request.auto_scroll_to_match());
 
             let mut fresh = crate::editing::MessageEditor::new(window, cx);
-            assert!(fresh.regex);
-            assert!(fresh.auto_scroll_to_match);
+            assert!(fresh.regex());
+            assert!(fresh.auto_scroll_to_match());
             fresh.load(latin1_raw, window, cx);
-            assert_eq!(fresh.view, crate::editing::MessageView::Raw);
+            assert_eq!(fresh.view(), crate::editing::MessageView::Raw);
             assert!(fresh.state().read(cx).value().contains("café"));
             assert_eq!(fresh.bytes(window, cx).unwrap(), latin1_raw);
         });

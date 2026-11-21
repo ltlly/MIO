@@ -12,6 +12,7 @@ pub(crate) fn convert_selection(kind: ConvertKind, input: &str) -> Result<String
         ConvertKind::UrlEncodeUnicode => Ok(url_encode_unicode(input)),
         ConvertKind::UrlDecode => url_decode(input),
         ConvertKind::HtmlEncodeKey => Ok(html_encode_key(input)),
+        ConvertKind::HtmlEncodeAll => Ok(html_encode_all(input)),
         ConvertKind::HtmlEncodeDecimal => Ok(html_encode_decimal(input)),
         ConvertKind::HtmlEncodeHex => Ok(html_encode_hex(input)),
         ConvertKind::HtmlDecode => Ok(html_decode(input)),
@@ -21,10 +22,10 @@ pub(crate) fn convert_selection(kind: ConvertKind, input: &str) -> Result<String
         ConvertKind::Base64UrlSafeDecode => base64_url_safe_decode(input),
         ConvertKind::AsciiHexEncode => Ok(ascii_hex_encode(input)),
         ConvertKind::AsciiHexDecode => ascii_hex_decode(input),
-        #[cfg(test)]
-        ConvertKind::ConstructJsString => Ok(construct_js_string(input.as_bytes())),
-        #[cfg(test)]
-        ConvertKind::ConstructSqlChar => Ok(construct_sql_char(input.as_bytes())),
+        ConvertKind::ConstructJsFromCharCode => Ok(construct_js_from_char_code(input)),
+        ConvertKind::ConstructMssqlChar => Ok(construct_mssql_char(input)),
+        ConvertKind::ConstructOracleChr => Ok(construct_oracle_chr(input)),
+        ConvertKind::ConstructMysqlChar => Ok(construct_mysql_char(input.as_bytes())),
     }
 }
 
@@ -33,30 +34,33 @@ pub(crate) fn convert_bytes(
     input_bytes: &[u8],
     input_text: &str,
 ) -> Result<Vec<u8>, String> {
+    let require_utf8 = |err_msg: &'static str| {
+        std::str::from_utf8(input_bytes).map_err(|_| err_msg.to_owned())
+    };
     match kind {
         ConvertKind::UrlEncodeKey => Ok(url_encode_key_bytes(input_bytes).into_bytes()),
         ConvertKind::UrlEncodeAll => Ok(url_encode_all_bytes(input_bytes).into_bytes()),
-        ConvertKind::UrlEncodeUnicode => {
-            let text = std::str::from_utf8(input_bytes)
-                .map_err(|_| "当前输入包含非 UTF-8 字节，无法执行 Unicode URL 编码。".to_owned())?;
-            Ok(url_encode_unicode(text).into_bytes())
-        }
+        ConvertKind::UrlEncodeUnicode => Ok(url_encode_unicode(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法执行 Unicode URL 编码。",
+        )?)
+        .into_bytes()),
         ConvertKind::UrlDecode => Ok(url_decode_bytes(input_text)),
-        ConvertKind::HtmlEncodeKey => {
-            let text = std::str::from_utf8(input_bytes)
-                .map_err(|_| "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。".to_owned())?;
-            Ok(html_encode_key(text).into_bytes())
-        }
-        ConvertKind::HtmlEncodeDecimal => {
-            let text = std::str::from_utf8(input_bytes)
-                .map_err(|_| "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。".to_owned())?;
-            Ok(html_encode_decimal(text).into_bytes())
-        }
-        ConvertKind::HtmlEncodeHex => {
-            let text = std::str::from_utf8(input_bytes)
-                .map_err(|_| "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。".to_owned())?;
-            Ok(html_encode_hex(text).into_bytes())
-        }
+        ConvertKind::HtmlEncodeKey => Ok(html_encode_key(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。",
+        )?)
+        .into_bytes()),
+        ConvertKind::HtmlEncodeAll => Ok(html_encode_all(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。",
+        )?)
+        .into_bytes()),
+        ConvertKind::HtmlEncodeDecimal => Ok(html_encode_decimal(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。",
+        )?)
+        .into_bytes()),
+        ConvertKind::HtmlEncodeHex => Ok(html_encode_hex(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法执行 HTML 编码。",
+        )?)
+        .into_bytes()),
         ConvertKind::HtmlDecode => Ok(html_decode(input_text).into_bytes()),
         ConvertKind::Base64Encode => Ok(STANDARD.encode(input_bytes).into_bytes()),
         ConvertKind::Base64Decode => base64_decode_bytes(input_text),
@@ -64,10 +68,19 @@ pub(crate) fn convert_bytes(
         ConvertKind::Base64UrlSafeDecode => base64_url_safe_decode_bytes(input_text),
         ConvertKind::AsciiHexEncode => Ok(ascii_hex_encode_bytes(input_bytes).into_bytes()),
         ConvertKind::AsciiHexDecode => hex_decode(input_text),
-        #[cfg(test)]
-        ConvertKind::ConstructJsString => Ok(construct_js_string(input_bytes).into_bytes()),
-        #[cfg(test)]
-        ConvertKind::ConstructSqlChar => Ok(construct_sql_char(input_bytes).into_bytes()),
+        ConvertKind::ConstructJsFromCharCode => Ok(construct_js_from_char_code(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法构造 JS 字符串。",
+        )?)
+        .into_bytes()),
+        ConvertKind::ConstructMssqlChar => Ok(construct_mssql_char(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法构造 SQL 字符串。",
+        )?)
+        .into_bytes()),
+        ConvertKind::ConstructOracleChr => Ok(construct_oracle_chr(require_utf8(
+            "当前输入包含非 UTF-8 字节，无法构造 SQL 字符串。",
+        )?)
+        .into_bytes()),
+        ConvertKind::ConstructMysqlChar => Ok(construct_mysql_char(input_bytes).into_bytes()),
     }
 }
 
@@ -343,65 +356,75 @@ fn base64_url_safe_decode(input: &str) -> Result<String, String> {
     })
 }
 
-#[cfg(test)]
-fn construct_js_string(bytes: &[u8]) -> String {
+fn html_encode_all(input: &str) -> String {
     use std::fmt::Write;
 
-    if bytes.is_empty() {
-        return "\"\"".to_owned();
-    }
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        let mut parts = Vec::with_capacity(text.chars().count());
-        for ch in text.chars() {
-            let literal = match ch {
-                '\\' => "'\\\\'".to_owned(),
-                '\'' => "'\\''".to_owned(),
-                '\r' => "'\\r'".to_owned(),
-                '\n' => "'\\n'".to_owned(),
-                '\t' => "'\\t'".to_owned(),
-                c if c.is_control() => {
-                    let mut buf = String::new();
-                    let mut utf16 = [0u16; 2];
-                    for (idx, &mut unit) in c.encode_utf16(&mut utf16).iter_mut().enumerate() {
-                        if idx > 0 {
-                            buf.push_str(" + ");
-                        }
-                        write!(buf, "'\\u{unit:04x}'").expect("writing to a String cannot fail");
-                    }
-                    buf
-                }
-                c => format!("'{c}'"),
-            };
-            parts.push(literal);
+    let mut out = String::with_capacity(input.len().saturating_mul(5));
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => {
+                let _ = write!(out, "&#{};", other as u32);
+            }
         }
-        return parts.join(" + ");
     }
-    bytes
-        .iter()
-        .map(|byte| format!("'\\x{byte:02x}'"))
-        .collect::<Vec<_>>()
-        .join(" + ")
+    out
 }
 
-#[cfg(test)]
-fn construct_sql_char(bytes: &[u8]) -> String {
+fn construct_js_from_char_code(input: &str) -> String {
+    let mut units = Vec::new();
+    let mut buf = [0u16; 2];
+    for ch in input.chars() {
+        for &mut unit in ch.encode_utf16(&mut buf) {
+            units.push(unit.to_string());
+        }
+    }
+    format!("String.fromCharCode({})", units.join(","))
+}
+
+fn construct_mssql_char(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_owned();
+    }
+    input
+        .chars()
+        .map(|ch| {
+            let code = ch as u32;
+            if code <= 255 {
+                format!("char({code})")
+            } else {
+                format!("nchar({code})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn construct_oracle_chr(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_owned();
+    }
+    input
+        .chars()
+        .map(|ch| format!("chr({})", ch as u32))
+        .collect::<Vec<_>>()
+        .join("||")
+}
+
+fn construct_mysql_char(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "''".to_owned();
     }
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && text.chars().all(|ch| (ch as u32) <= 0xFFFF)
-    {
-        let codes = text
-            .chars()
-            .map(|ch| format!("CHAR({})", ch as u32))
-            .collect::<Vec<_>>();
-        return codes.join("+");
-    }
-    bytes
+    let formatted = bytes
         .iter()
-        .map(|byte| format!("CHAR({byte})"))
+        .map(|b| b.to_string())
         .collect::<Vec<_>>()
-        .join("+")
+        .join(",");
+    format!("CHAR({formatted})")
 }
 
 const MAX_HTTP_HEADER_SLOTS: usize = 4096;
@@ -832,73 +855,85 @@ pub(crate) struct RenderedHttpResponse {
     pub status_code: Option<u16>,
     pub content_type: Option<String>,
     pub location: Option<String>,
+    pub body: Vec<u8>,
     pub body_len: usize,
     pub summary: RenderedBodySummary,
 }
 
-pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
-    let (status_line, status_code, content_type, location, body_slice) =
-        match mio_core::parse_response(raw, mio_core::HttpVersion::Http11) {
-            Ok(resp) => {
-                let version = match resp.version {
-                    mio_core::HttpVersion::Http10 => "HTTP/1.0",
-                    mio_core::HttpVersion::Http2 => "HTTP/2",
-                    mio_core::HttpVersion::Http11 => "HTTP/1.1",
-                };
-                let mut ct = None;
-                let mut loc = None;
-                for header in &resp.headers {
-                    if header.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
-                        ct = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
-                    } else if header.name.eq_ignore_ascii_case("location") && loc.is_none() {
-                        loc = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
-                    }
+fn parse_http_response_parts(
+    raw: &[u8],
+) -> (
+    String,
+    Option<u16>,
+    Option<String>,
+    Option<String>,
+    Vec<u8>,
+) {
+    match mio_core::parse_response(raw, mio_core::HttpVersion::Http11) {
+        Ok(resp) => {
+            let version = match resp.version {
+                mio_core::HttpVersion::Http10 => "HTTP/1.0",
+                mio_core::HttpVersion::Http2 => "HTTP/2",
+                mio_core::HttpVersion::Http11 => "HTTP/1.1",
+            };
+            let mut ct = None;
+            let mut loc = None;
+            for header in &resp.headers {
+                if header.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
+                    ct = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
+                } else if header.name.eq_ignore_ascii_case("location") && loc.is_none() {
+                    loc = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
                 }
-                (
-                    format!("{version} {}", resp.status),
-                    Some(resp.status),
-                    ct,
-                    loc,
-                    resp.body,
-                )
             }
-            Err(_) => {
-                let mut headers_buf = vec![httparse::EMPTY_HEADER; 2048];
-                let mut parsed = httparse::Response::new(&mut headers_buf);
-                match parsed.parse(raw) {
-                    Ok(httparse::Status::Complete(offset)) => {
-                        let ver = match parsed.version {
-                            Some(0) => "HTTP/1.0",
-                            _ => "HTTP/1.1",
-                        };
-                        let code = parsed.code;
-                        let reason = parsed.reason.unwrap_or("").trim();
-                        let status_line = match (code, reason.is_empty()) {
-                            (Some(c), false) => format!("{ver} {c} {reason}"),
-                            (Some(c), true) => format!("{ver} {c}"),
-                            _ => ver.to_owned(),
-                        };
-                        let mut ct = None;
-                        let mut loc = None;
-                        for h in parsed.headers.iter() {
-                            if h.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
-                                ct = Some(String::from_utf8_lossy(h.value).trim().to_owned());
-                            } else if h.name.eq_ignore_ascii_case("location") && loc.is_none() {
-                                loc = Some(String::from_utf8_lossy(h.value).trim().to_owned());
-                            }
+            (
+                format!("{version} {}", resp.status),
+                Some(resp.status),
+                ct,
+                loc,
+                resp.body,
+            )
+        }
+        Err(_) => {
+            let mut headers_buf = vec![httparse::EMPTY_HEADER; 2048];
+            let mut parsed = httparse::Response::new(&mut headers_buf);
+            match parsed.parse(raw) {
+                Ok(httparse::Status::Complete(offset)) => {
+                    let ver = match parsed.version {
+                        Some(0) => "HTTP/1.0",
+                        _ => "HTTP/1.1",
+                    };
+                    let code = parsed.code;
+                    let reason = parsed.reason.unwrap_or("").trim();
+                    let status_line = match (code, reason.is_empty()) {
+                        (Some(c), false) => format!("{ver} {c} {reason}"),
+                        (Some(c), true) => format!("{ver} {c}"),
+                        _ => ver.to_owned(),
+                    };
+                    let mut ct = None;
+                    let mut loc = None;
+                    for h in parsed.headers.iter() {
+                        if h.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
+                            ct = Some(String::from_utf8_lossy(h.value).trim().to_owned());
+                        } else if h.name.eq_ignore_ascii_case("location") && loc.is_none() {
+                            loc = Some(String::from_utf8_lossy(h.value).trim().to_owned());
                         }
-                        (status_line, code, ct, loc, raw[offset..].to_vec())
                     }
-                    _ => (
-                        "无标准 HTTP 状态行".to_owned(),
-                        None,
-                        None,
-                        None,
-                        raw.to_vec(),
-                    ),
+                    (status_line, code, ct, loc, raw[offset..].to_vec())
                 }
+                _ => (
+                    "无标准 HTTP 状态行".to_owned(),
+                    None,
+                    None,
+                    None,
+                    raw.to_vec(),
+                ),
             }
-        };
+        }
+    }
+}
+
+pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
+    let (status_line, status_code, content_type, location, body) = parse_http_response_parts(raw);
     let parsed_mime = content_type
         .as_deref()
         .and_then(|ct| ct.parse::<mime::Mime>().ok());
@@ -919,7 +954,7 @@ pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
                 })
             })
         });
-    let body_slice = body_slice.as_slice();
+    let body_slice = body.as_slice();
     let decoded_body_text = header_charset
         .as_deref()
         .and_then(|label| {
@@ -974,26 +1009,27 @@ pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
         }
     };
 
+    let body_len = body.len();
     RenderedHttpResponse {
         status_line,
         status_code,
         content_type,
         location,
-        body_len: body_slice.len(),
+        body,
+        body_len,
         summary,
     }
 }
 
+pub(crate) fn extract_http_response_body_and_content_type(
+    raw: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    let (_, _, content_type, _, body) = parse_http_response_parts(raw);
+    (body, content_type)
+}
+
 pub(crate) fn extract_http_response_body(raw: &[u8]) -> Vec<u8> {
-    if let Ok(resp) = mio_core::parse_response(raw, mio_core::HttpVersion::Http11) {
-        return resp.body;
-    }
-    let mut headers_buf = vec![httparse::EMPTY_HEADER; 2048];
-    let mut parsed = httparse::Response::new(&mut headers_buf);
-    if let Ok(httparse::Status::Complete(offset)) = parsed.parse(raw) {
-        return raw[offset..].to_vec();
-    }
-    raw.to_vec()
+    parse_http_response_parts(raw).4
 }
 
 fn looks_like_html_bytes(body: &[u8]) -> bool {

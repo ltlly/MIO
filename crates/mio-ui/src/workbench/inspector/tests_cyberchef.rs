@@ -170,14 +170,14 @@ fn inspector_selection_works_across_tools_and_provenance_dropdown_renders(cx: &m
             let pretty_val = view
                 .target_pane
                 .response
-                .pretty
+                .raw
                 .read(cx)
                 .value()
                 .to_string();
             let pos = pretty_val.find("aGVsbG8=").unwrap();
             view.target_pane
                 .response
-                .pretty
+                .raw
                 .update(cx, |s, cx| s.set_selected_range(pos..pos + 8, cx));
             let prev = view.current_selection_preview(cx).unwrap();
             assert_eq!(prev.decoded, "hello");

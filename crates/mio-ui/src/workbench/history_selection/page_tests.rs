@@ -298,7 +298,7 @@ fn offpage_selection_keeps_detail_and_late_highlight_receipts_for_the_whole_batc
     let ids = [rows[0].id(), rows[1].id()];
     let (raw, revision, selection_revision) = cx.read(|cx| {
         let view = f.view.read(cx);
-        assert!(view.history_request.view == MessageView::Hex);
+        assert!(view.history_request.view() == MessageView::Hex);
         (
             view.history_request.hex.read(cx).value().to_string(),
             view.history_request.hex.read(cx).document_revision(),
@@ -339,7 +339,7 @@ fn offpage_selection_keeps_detail_and_late_highlight_receipts_for_the_whole_batc
     cx.read(|cx| {
         let view = f.view.read(cx);
         assert!(view.history.read(cx).selected_row().is_none());
-        assert!(view.history_request.view == MessageView::Hex);
+        assert!(view.history_request.view() == MessageView::Hex);
         assert_eq!(view.history_request.hex.read(cx).value().as_ref(), raw);
         assert_eq!(
             view.history_request.hex.read(cx).document_revision(),

@@ -137,7 +137,7 @@ fn table_real_selection_keys_filter_and_failed_page_are_retryable(cx: &mut TestA
         window.input("中文条件", cx);
         window.press("enter", cx);
         window.click(("plugin-next", 10u64), cx);
-        assert!(fixture.view.read(cx).tables[&10].requested_offset.is_some());
+        assert!(fixture.view.read(cx).tables[&10].requested_offset().is_some());
         fixture.view.update(cx, |view, cx| {
             view.event_failed(Some(10), "deadline expired", cx)
         });
@@ -468,7 +468,7 @@ fn table_allocator_separates_from_effective_watermark_across_failure_and_recover
     cx.update_window(fixture.window, |_, window, cx| {
         window.click(("plugin-next", 10u64), cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.tables[&10].next_viewport_revision, 2);
+        assert_eq!(view.tables[&10].viewport.next_revision(), 2);
         assert_eq!(view.tables[&10].active_viewport_revision(), 2);
         assert_eq!(read_commit_vp(&view.commit_snapshot()), 2);
 
@@ -477,9 +477,9 @@ fn table_allocator_separates_from_effective_watermark_across_failure_and_recover
             view.event_failed(Some(10), "pre-dispatch failed", cx);
         });
         let view = fixture.view.read(cx);
-        assert_eq!(view.tables[&10].next_viewport_revision, 2);
+        assert_eq!(view.tables[&10].viewport.next_revision(), 2);
         assert_eq!(view.tables[&10].active_viewport_revision(), 1);
-        assert!(view.tables[&10].requested_offset.is_none());
+        assert!(view.tables[&10].requested_offset().is_none());
         let commit_snap = view.commit_snapshot();
         assert!(commit_panel_semantically_matches(
             Some(&make_snapshot(1, 1, 0, 0)),
@@ -491,17 +491,17 @@ fn table_allocator_separates_from_effective_watermark_across_failure_and_recover
         window.render_frame(cx);
         window.click(("plugin-next", 10u64), cx);
         fixture.view.update(cx, |view, cx| {
-            push_overlay(&mut view.selects, 11, 1, 99);
-            assert_eq!(view.tables[&10].next_viewport_revision, 3);
+            view.overlays.push(11, ControlOverlay::Select(1), 99);
+            assert_eq!(view.tables[&10].viewport.next_revision(), 3);
             assert_eq!(view.tables[&10].active_viewport_revision(), 3);
             view.replace(Arc::new(make_snapshot(2, 1, 0, 0)), &[], window, cx)
                 .unwrap();
         });
         let view = fixture.view.read(cx);
-        assert_eq!(view.tables[&10].next_viewport_revision, 3);
+        assert_eq!(view.tables[&10].viewport.next_revision(), 3);
         assert_eq!(view.tables[&10].active_viewport_revision(), 1);
-        assert!(view.tables[&10].requested_offset.is_none());
-        assert!(view.selects.is_empty());
+        assert!(view.tables[&10].requested_offset().is_none());
+        assert!(view.overlays.is_empty());
         assert!(commit_panel_semantically_matches(
             Some(&make_snapshot(2, 1, 0, 0)),
             &view.commit_snapshot(),
@@ -512,15 +512,15 @@ fn table_allocator_separates_from_effective_watermark_across_failure_and_recover
         window.render_frame(cx);
         window.click(("plugin-next", 10u64), cx);
         fixture.view.update(cx, |view, cx| {
-            assert_eq!(view.tables[&10].next_viewport_revision, 4);
+            assert_eq!(view.tables[&10].viewport.next_revision(), 4);
             assert_eq!(view.tables[&10].active_viewport_revision(), 4);
             view.replace(Arc::new(make_snapshot(2, 1, 0, 0)), &[], window, cx)
                 .unwrap();
         });
         let view = fixture.view.read(cx);
-        assert_eq!(view.tables[&10].next_viewport_revision, 4);
+        assert_eq!(view.tables[&10].viewport.next_revision(), 4);
         assert_eq!(view.tables[&10].active_viewport_revision(), 1);
-        assert!(view.tables[&10].requested_offset.is_none());
+        assert!(view.tables[&10].requested_offset().is_none());
         assert_eq!(read_commit_vp(&view.commit_snapshot()), 1);
 
         // Next page click uses monotonic revision 5.
@@ -636,8 +636,14 @@ fn same_revision_panel_synced_preserves_newer_local_overrides_by_interaction_seq
 
         {
             let view = fixture.view.read(cx);
-            assert_eq!(view.checkboxes[&10], vec![(true, 1)]);
-            assert_eq!(view.selects[&11], vec![(1, 2)]);
+            assert_eq!(
+                view.overlays.entries_for(10),
+                vec![(ControlOverlay::Checkbox(true), 1)]
+            );
+            assert_eq!(
+                view.overlays.entries_for(11),
+                vec![(ControlOverlay::Select(1), 2)]
+            );
             assert_eq!(view.tables[&12].active_viewport_seq(), 3);
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 2));
@@ -646,7 +652,7 @@ fn same_revision_panel_synced_preserves_newer_local_overrides_by_interaction_seq
         // Older same-rev PanelSynced(synced_ui_seq = Some(1), rejected_ui_seqs = &[33], checked=true, selected=0, vp=1):
         // Clears seq<=1 checkbox (now in snapshot), PRESERVES seq=2 select & seq=3 viewport!
         fixture.view.update(cx, |view, cx| {
-            push_overlay(&mut view.selects, 999, 0, 33);
+            view.overlays.push(999, ControlOverlay::Select(0), 33);
             view.replace_with_sync(
                 Arc::new(make_snapshot(true, 0, 1)),
                 &[],
@@ -659,19 +665,25 @@ fn same_revision_panel_synced_preserves_newer_local_overrides_by_interaction_seq
         });
         {
             let view = fixture.view.read(cx);
-            assert!(!view.checkboxes.contains_key(&10));
-            assert!(!view.selects.contains_key(&999));
-            assert_eq!(view.selects[&11], vec![(1, 2)]);
+            assert!(!view.overlays.contains_key(10));
+            assert!(!view.overlays.contains_key(999));
+            assert_eq!(
+                view.overlays.entries_for(11),
+                vec![(ControlOverlay::Select(1), 2)]
+            );
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 3);
-            assert!(view.tables[&12].requested_offset.is_some());
+            assert!(view.tables[&12].requested_offset().is_some());
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 2));
         }
 
         // seq 4: toggle checkbox true -> false before sync(cutoff=3) arrives.
         window.render_frame(cx);
         window.click(("plugin-checkbox", 10u64), cx);
-        assert_eq!(fixture.view.read(cx).checkboxes[&10], vec![(false, 4)]);
+        assert_eq!(
+            fixture.view.read(cx).overlays.entries_for(10),
+            vec![(ControlOverlay::Checkbox(false), 4)]
+        );
 
         // PanelSynced(synced_ui_seq = Some(3), checked=true, selected=1, vp=1):
         // Retracts vp -> 1 & clears seq<=3 select, while PRESERVING newer seq=4 checkbox (false)!
@@ -690,11 +702,14 @@ fn same_revision_panel_synced_preserves_newer_local_overrides_by_interaction_seq
         });
         {
             let view = fixture.view.read(cx);
-            assert_eq!(view.checkboxes[&10], vec![(false, 4)]);
-            assert!(!view.selects.contains_key(&11));
+            assert_eq!(
+                view.overlays.entries_for(10),
+                vec![(ControlOverlay::Checkbox(false), 4)]
+            );
+            assert!(!view.overlays.contains_key(11));
             assert_eq!(view.tables[&12].active_viewport_revision(), 1);
             assert_eq!(view.tables[&12].active_viewport_seq(), 0);
-            assert!(view.tables[&12].requested_offset.is_none());
+            assert!(view.tables[&12].requested_offset().is_none());
             assert_eq!(read_commit(&view.commit_snapshot()), (false, 1, 1));
         }
 
@@ -702,8 +717,11 @@ fn same_revision_panel_synced_preserves_newer_local_overrides_by_interaction_seq
         window.render_frame(cx);
         window.click(("plugin-checkbox", 10u64), cx);
         assert_eq!(
-            fixture.view.read(cx).checkboxes[&10],
-            vec![(false, 4), (true, 5)]
+            fixture.view.read(cx).overlays.entries_for(10),
+            vec![
+                (ControlOverlay::Checkbox(false), 4),
+                (ControlOverlay::Checkbox(true), 5)
+            ]
         );
     })
     .unwrap();
@@ -836,11 +854,14 @@ fn rejecting_newer_click_on_same_control_restores_earlier_queued_override(cx: &m
         });
         {
             let view = fixture.view.read(cx);
-            assert_eq!(view.checkboxes[&10], vec![(true, 1)]);
-            assert_eq!(latest_overlay(&view.checkboxes, 10), Some(true));
+            assert_eq!(
+                view.overlays.entries_for(10),
+                vec![(ControlOverlay::Checkbox(true), 1)]
+            );
+            assert_eq!(view.overlays.latest_checkbox(10), Some(true));
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 5);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 0, 2));
         }
 
@@ -850,8 +871,11 @@ fn rejecting_newer_click_on_same_control_restores_earlier_queued_override(cx: &m
         });
         {
             let view = fixture.view.read(cx);
-            assert_eq!(view.selects[&11], vec![(1, 3)]);
-            assert_eq!(latest_overlay(&view.selects, 11), Some(1));
+            assert_eq!(
+                view.overlays.entries_for(11),
+                vec![(ControlOverlay::Select(1), 3)]
+            );
+            assert_eq!(view.overlays.latest_select(11), Some(1));
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 2));
         }
 
@@ -863,7 +887,7 @@ fn rejecting_newer_click_on_same_control_restores_earlier_queued_override(cx: &m
             let view = fixture.view.read(cx);
             assert_eq!(view.tables[&12].active_viewport_revision(), 1);
             assert_eq!(view.tables[&12].active_viewport_seq(), 0);
-            assert!(view.tables[&12].requested_offset.is_none());
+            assert!(view.tables[&12].requested_offset().is_none());
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 1));
         }
 
@@ -880,8 +904,7 @@ fn rejecting_newer_click_on_same_control_restores_earlier_queued_override(cx: &m
             .unwrap();
         });
         let view = fixture.view.read(cx);
-        assert!(view.checkboxes.is_empty());
-        assert!(view.selects.is_empty());
+        assert!(view.overlays.is_empty());
         assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 1));
     })
     .unwrap();
@@ -960,7 +983,7 @@ fn generic_panel_diagnostic_preserves_pending_table_viewports_until_exact_sync(
             let view = fixture.view.read(cx);
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 1);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
             assert_eq!(read_table_vp(&view.commit_snapshot()), 2);
         }
 
@@ -978,10 +1001,10 @@ fn generic_panel_diagnostic_preserves_pending_table_viewports_until_exact_sync(
         });
         {
             let view = fixture.view.read(cx);
-            assert!(view.checkboxes.is_empty());
+            assert!(view.overlays.is_empty());
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 1);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
             assert_eq!(read_table_vp(&view.commit_snapshot()), 2);
         }
 
@@ -992,7 +1015,7 @@ fn generic_panel_diagnostic_preserves_pending_table_viewports_until_exact_sync(
         let view = fixture.view.read(cx);
         assert_eq!(view.tables[&12].active_viewport_revision(), 1);
         assert_eq!(view.tables[&12].active_viewport_seq(), 0);
-        assert!(view.tables[&12].requested_offset.is_none());
+        assert!(view.tables[&12].requested_offset().is_none());
         assert_eq!(read_table_vp(&view.commit_snapshot()), 1);
     })
     .unwrap();
@@ -1094,8 +1117,14 @@ fn newer_revision_panel_preserves_unprocessed_local_overrides_unless_semanticall
         });
         {
             let view = fixture.view.read(cx);
-            assert_eq!(view.checkboxes[&10], vec![(true, 1)]);
-            assert_eq!(view.selects[&11], vec![(1, 2)]);
+            assert_eq!(
+                view.overlays.entries_for(10),
+                vec![(ControlOverlay::Checkbox(true), 1)]
+            );
+            assert_eq!(
+                view.overlays.entries_for(11),
+                vec![(ControlOverlay::Select(1), 2)]
+            );
             assert_eq!(view.tables[&12].active_viewport_seq(), 3);
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 2));
@@ -1116,11 +1145,14 @@ fn newer_revision_panel_preserves_unprocessed_local_overrides_unless_semanticall
         });
         {
             let view = fixture.view.read(cx);
-            assert!(!view.checkboxes.contains_key(&10));
-            assert_eq!(view.selects[&11], vec![(1, 2)]);
+            assert!(!view.overlays.contains_key(10));
+            assert_eq!(
+                view.overlays.entries_for(11),
+                vec![(ControlOverlay::Select(1), 2)]
+            );
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 3);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 1, 2));
         }
 
@@ -1139,10 +1171,10 @@ fn newer_revision_panel_preserves_unprocessed_local_overrides_unless_semanticall
         });
         {
             let view = fixture.view.read(cx);
-            assert!(!view.selects.contains_key(&11));
+            assert!(!view.overlays.contains_key(11));
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
             assert_eq!(view.tables[&12].active_viewport_seq(), 0);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
             assert_eq!(read_commit(&view.commit_snapshot()), (true, 0, 2));
         }
 
@@ -1159,7 +1191,7 @@ fn newer_revision_panel_preserves_unprocessed_local_overrides_unless_semanticall
             .unwrap();
         });
         let view = fixture.view.read(cx);
-        assert!(view.tables[&12].requested_offset.is_none());
+        assert!(view.tables[&12].requested_offset().is_none());
         assert_eq!(read_commit(&view.commit_snapshot()), (true, 0, 2));
     })
     .unwrap();
@@ -1225,7 +1257,7 @@ fn stale_open_select_menu_cannot_dispatch_reordered_option(cx: &mut TestAppConte
         window.pointer_up(pos_a, MouseButton::Left, cx);
 
         let view = fixture_a.view.read(cx);
-        assert!(view.selects.is_empty());
+        assert!(view.overlays.is_empty());
         assert!(
             view.error
                 .as_deref()
@@ -1317,7 +1349,7 @@ fn shrunk_table_total_rows_drops_out_of_range_pending_viewport_and_re_enables_pa
         {
             let view = fixture.view.read(cx);
             assert_eq!(view.tables[&12].active_viewport_revision(), 2);
-            assert_eq!(view.tables[&12].requested_offset, Some(50));
+            assert_eq!(view.tables[&12].requested_offset(), Some(50));
         }
 
         // Worker shrinks total_rows to 20 at rev=2 (still vp_rev=1) with synced_ui_seq=0:
@@ -1337,7 +1369,7 @@ fn shrunk_table_total_rows_drops_out_of_range_pending_viewport_and_re_enables_pa
             let view = fixture.view.read(cx);
             assert_eq!(view.tables[&12].active_viewport_revision(), 1);
             assert_eq!(view.tables[&12].active_viewport_seq(), 0);
-            assert!(view.tables[&12].requested_offset.is_none());
+            assert!(view.tables[&12].requested_offset().is_none());
         }
 
         // Direct out-of-range page_table(12, 50) against shrunk total_rows=20 is rejected locally.
@@ -1345,7 +1377,7 @@ fn shrunk_table_total_rows_drops_out_of_range_pending_viewport_and_re_enables_pa
             view.page_table(12, 50, cx);
         });
         let view = fixture.view.read(cx);
-        assert!(view.tables[&12].requested_offset.is_none());
+        assert!(view.tables[&12].requested_offset().is_none());
         assert!(
             view.error
                 .as_deref()
@@ -1401,10 +1433,10 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
         // Click "下一页" -> requests offset=64, vp_rev=2.
         window.render_frame(cx);
         window.click(("plugin-next", 12u64), cx);
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(64));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(64));
 
         // Phase-1 loading Snapshot(rev=2, vp=2, offset=0, synced_ui_seq=1):
-        // requested_offset MUST stay Some(64) and "下一页" stays disabled!
+        // requested_offset() MUST stay Some(64) and "下一页" stays disabled!
         fixture.view.update(cx, |view, cx| {
             view.replace_with_sync(
                 Arc::new(make_snapshot(2, 2, 0, 150)),
@@ -1416,7 +1448,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(64));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(64));
         window.render_frame(cx);
         window.click(("plugin-next", 12u64), cx);
 
@@ -1432,7 +1464,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(64));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(64));
 
         // Phase-2 target page Snapshot(rev=3, vp=2, offset=64) clears requested_offset and re-enables paging!
         fixture.view.update(cx, |view, cx| {
@@ -1446,7 +1478,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert!(fixture.view.read(cx).tables[&12].requested_offset.is_none());
+        assert!(fixture.view.read(cx).tables[&12].requested_offset().is_none());
 
         // Supersede path: click "下一页" again (offset=128, vp=3) -> Phase-1 loading Snapshot(rev=4, vp=3, offset=64)
         // keeps Some(128); Worker QueryHistory error / Refresh bumps vp=4 -> clears requested_offset to None!
@@ -1463,7 +1495,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(128));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(128));
         // Worker QueryHistory error / Refresh bumps vp=4 -> clears requested_offset to None!
         fixture.view.update(cx, |view, cx| {
             view.replace_with_sync(
@@ -1476,16 +1508,16 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert!(fixture.view.read(cx).tables[&12].requested_offset.is_none());
+        assert!(fixture.view.read(cx).tables[&12].requested_offset().is_none());
 
         // Same-revision rejection after Phase-1 loading Snapshot accepted the watermark:
         // click "下一页" again (offset=128, vp=5, seq=3) -> Phase-1 loading Snapshot(rev=6, vp=5, offset=64)
-        // keeps requested_offset == Some(128) even when synced_ui_seq catches up without rejection;
+        // keeps requested_offset() == Some(128) even when synced_ui_seq catches up without rejection;
         // then same-rev PanelSynced(rev=6, vp=5, offset=64, synced_ui_seq=3, rejected_ui_seqs=&[3]) clears it!
         window.render_frame(cx);
         window.click(("plugin-next", 12u64), cx);
         let failed_seq = fixture.view.read(cx).tables[&12].active_viewport_seq();
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(128));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(128));
         fixture.view.update(cx, |view, cx| {
             view.replace_with_sync(
                 Arc::new(make_snapshot(6, 5, 64, 150)),
@@ -1497,7 +1529,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(128));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(128));
         fixture.view.update(cx, |view, cx| {
             view.replace_with_sync(
                 Arc::new(make_snapshot(6, 5, 64, 150)),
@@ -1509,7 +1541,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert!(fixture.view.read(cx).tables[&12].requested_offset.is_none());
+        assert!(fixture.view.read(cx).tables[&12].requested_offset().is_none());
 
         // Bare Ack path (SDK Ok(None) without publishing any newer-revision loading Snapshot):
         // Host settles confirmed viewport into same-revision PanelSynced(rev=6, vp=6, offset=64) ->
@@ -1517,7 +1549,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
         window.render_frame(cx);
         window.click(("plugin-next", 12u64), cx);
         let acked_seq = fixture.view.read(cx).tables[&12].active_viewport_seq();
-        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset, Some(128));
+        assert_eq!(fixture.view.read(cx).tables[&12].requested_offset(), Some(128));
         fixture.view.update(cx, |view, cx| {
             view.replace_with_sync(
                 Arc::new(make_snapshot(6, 6, 64, 150)),
@@ -1529,7 +1561,7 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
             )
             .unwrap();
         });
-        assert!(fixture.view.read(cx).tables[&12].requested_offset.is_none());
+        assert!(fixture.view.read(cx).tables[&12].requested_offset().is_none());
     })
     .unwrap();
     cx.run_until_parked();
@@ -1543,4 +1575,54 @@ fn async_loading_viewport_keeps_paging_disabled_until_target_page_or_supersede(
         })
         .collect();
     assert_eq!(offsets, [64, 128, 128, 128]);
+}
+
+#[gpui_kit::test]
+fn removing_clean_editor_prunes_document_while_keeping_unsaved_recovery(cx: &mut TestAppContext) {
+    let fixture = fixture(cx, model());
+    let hex_state = cx.read(|cx| fixture.view.read(cx).documents[&902].state.clone());
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click(("input", hex_state.entity_id()), cx);
+        window.press(crate::kbd!("a"), cx);
+        window.input("aa bb", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        fixture.view.update(cx, |panel, cx| {
+            assert!(panel.documents.contains_key(&401));
+            assert!(panel.documents.contains_key(&902));
+            panel
+                .replace(
+                    Arc::new(PanelSnapshot {
+                        revision: 2,
+                        title: "Pruned Clean Doc".into(),
+                        root: Some(Node::new(
+                            1,
+                            "状态",
+                            node::Kind::Text(panel::Text {
+                                text: "clean 401 pruned".into(),
+                                tone: panel::Tone::Foreground as i32,
+                            }),
+                        )),
+                    }),
+                    &[],
+                    window,
+                    cx,
+                )
+                .unwrap();
+            assert!(
+                !panel.documents.contains_key(&401),
+                "clean unreferenced document must be pruned from self.documents"
+            );
+            assert!(
+                panel.documents.contains_key(&902),
+                "unsaved removed document must remain in self.documents for recovery"
+            );
+            assert!(!panel.documents[&902].live);
+            assert!(panel.documents[&902].unsaved);
+        });
+    })
+    .unwrap();
 }

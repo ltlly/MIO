@@ -437,17 +437,17 @@ impl Workbench {
             let (source, can_write_back) = if editor.is_readonly_preview() {
                 (editing::SelectionSource::Utf8, false)
             } else {
-                match if editor.pretty_active {
+                match if editor.pretty_active() {
                     MessageView::Raw
                 } else {
-                    editor.view
+                    editor.view()
                 } {
                     MessageView::Raw => (editing::SelectionSource::Utf8, writable),
                     MessageView::Hex => (editing::SelectionSource::Hex, writable),
                 }
             };
             let focused = active_entity.focus_handle(cx).is_focused(window)
-                || (editor.view == MessageView::Hex && editor.hex_grid_has_focus(window, cx));
+                || (editor.view() == MessageView::Hex && editor.hex_grid_has_focus(window, cx));
             identities.push((
                 SelectionIdentity {
                     editor_id: active_entity.entity_id(),
@@ -730,7 +730,7 @@ impl Workbench {
             self.fail("请切换到可编辑的 Raw 或 Pretty 视图后回写选区解码内容。", cx);
             return;
         }
-        if !editor.pretty_active && editor.view == MessageView::Hex {
+        if !editor.pretty_active() && editor.view() == MessageView::Hex {
             if editor.hex.entity_id() != cached_id.editor_id {
                 self.fail("选区所属编辑器与回写目标不一致，已拒绝跨面板回写。", cx);
                 return;

@@ -16,8 +16,6 @@ pub(crate) enum TokenKind {
     Method,
     Uri,
     QueryPunct,
-    #[allow(dead_code)]
-    QueryKey,
     QueryValue,
     HttpVersion,
     Status2xx,
@@ -51,7 +49,6 @@ impl TokenKind {
             Self::Method => color_style(0x141414, 0xff7b72, None),
             Self::Uri => color_style(0x141414, 0xd1e8f9, None),
             Self::QueryPunct | Self::HeaderSep => color_style(0x202020, 0xd1e8f9, None),
-            Self::QueryKey => color_style(0x141414, 0xbbcdff, None),
             Self::XmlAttrName => color_style(0x0000c0, 0xbbcdff, None),
             Self::QueryValue | Self::SensitiveHeaderValue => color_style(0xa31616, 0xa5c35b, None),
             Self::XmlString => color_style(0xa01010, 0xa5c35b, None),

@@ -133,7 +133,7 @@ fn active_archive_response_reads_sequential_fragments_and_publishes_only_complet
         .update(cx, |_, window, cx| {
             f.view.update(cx, |view, cx| {
                 let editors = &view.tab_editors[&id];
-                assert_eq!(editors.response.view, MessageView::Hex);
+                assert_eq!(editors.response.view(), MessageView::Hex);
                 assert_eq!(editors.response.bytes(window, cx).unwrap(), raw);
                 assert_eq!(editors.response_revision, Some(1));
                 assert!(editors.result.as_ref().unwrap().contains("归档响应"));
@@ -143,7 +143,7 @@ fn active_archive_response_reads_sequential_fragments_and_publishes_only_complet
     click(&f, "repeater-response-raw", cx);
     cx.read(|cx| {
         let view = f.view.read(cx);
-        assert_eq!(view.tab_editors[&id].response.view, MessageView::Hex);
+        assert_eq!(view.tab_editors[&id].response.view(), MessageView::Hex);
         assert!(view.error.as_ref().unwrap().contains("非 UTF-8"));
     });
 }

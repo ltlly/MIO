@@ -355,7 +355,7 @@ fn repeater_timeout_upstream_proxy_and_pretty_view_preserve_raw_bytes(cx: &mut T
     cx.update_window(fixture.window, |_, _, cx| {
         let id = fixture.view.read(cx).workspace.tabs[0].id;
         let editor = &fixture.view.read(cx).tab_editors[&id].request;
-        assert!(editor.pretty_active);
+        assert!(editor.pretty_active());
         let pretty_text = editor.state().read(cx).value().to_string();
         assert!(pretty_text.contains("{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}"));
     })

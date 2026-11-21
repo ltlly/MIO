@@ -15,12 +15,12 @@ fn editor_raw_bytes_snapshot(editor: &MessageEditor, cx: &App) -> Vec<u8> {
 impl Workbench {
     pub(in crate::workbench) fn render_message_provenance_menu(
         &self,
-        id: &'static str,
+        slot: super::wb_editors::EditorSlot,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let is_resp = match id {
-            "history-request" => false,
-            "history-response" => true,
+        let is_resp = match slot {
+            super::wb_editors::EditorSlot::HistoryRequest => false,
+            super::wb_editors::EditorSlot::HistoryResponse => true,
             _ => return None,
         };
         let imported = if is_resp {
@@ -1536,9 +1536,9 @@ impl DetachedHttpHistoryWindow {
         is_response: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let pretty = editor.pretty_active;
-        let raw_selected = !pretty && editor.view == MessageView::Raw;
-        let hex_selected = !pretty && editor.view == MessageView::Hex;
+        let pretty = editor.pretty_active();
+        let raw_selected = !pretty && editor.view() == MessageView::Raw;
+        let hex_selected = !pretty && editor.view() == MessageView::Hex;
         let tab_btn = |tab_id: String, label: &'static str, selected: bool| {
             Button::new(SharedString::from(tab_id))
                 .ghost()
@@ -1789,7 +1789,7 @@ impl Render for DetachedHttpHistoryWindow {
             ))
             .child(
                 div().flex_1().min_h_0().child(
-                    editing::message_editor(self.request_editor.state())
+                    editing::message_editor(&self.request_editor)
                         .readonly(true)
                         .size_full()
                         .aria_label("独立窗口请求报文"),
@@ -1822,7 +1822,7 @@ impl Render for DetachedHttpHistoryWindow {
             ))
             .child(
                 div().flex_1().min_h_0().child(
-                    editing::message_editor(self.response_editor.state())
+                    editing::message_editor(&self.response_editor)
                         .readonly(true)
                         .size_full()
                         .aria_label("独立窗口响应报文"),

@@ -40,7 +40,7 @@ fn background_binary_detail_keeps_focus_in_its_result_window(cx: &mut TestAppCon
         window.render_frame(cx);
         fixture.view.update(cx, |view, cx| {
             let result = &view.intruder.results.views[&a.id];
-            assert!(result.request.view == MessageView::Hex);
+            assert!(result.request.view() == MessageView::Hex);
             assert_eq!(result.detail.as_deref(), Some(&binary));
             assert!(!old_raw_focus.is_focused(window));
             assert!(result.request.state().focus_handle(cx).is_focused(window));
@@ -98,7 +98,7 @@ fn background_binary_detail_keeps_focus_in_its_result_window(cx: &mut TestAppCon
     cx.update_window(a_window, |_, window, cx| {
         window.render_frame(cx);
         let result = &fixture.view.read(cx).intruder.results.views[&a.id];
-        assert!(result.response.view == MessageView::Hex);
+        assert!(result.response.view() == MessageView::Hex);
         assert!(!response.focus_handle(cx).is_focused(window));
         assert!(result.response.state().focus_handle(cx).is_focused(window));
     })

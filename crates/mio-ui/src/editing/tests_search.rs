@@ -25,7 +25,7 @@ impl Render for SearchHarness {
             .flex_col()
             .child(
                 div().flex_1().min_h_0().child(
-                    Editor::new(self.editor.state())
+                    Editor::new(&self.editor.state())
                         .readonly(readonly)
                         .size_full()
                         .bordered(false)
@@ -117,12 +117,12 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
             assert_eq!(harness.editor.search_status_label(cx), "1/3 个匹配");
 
             harness.editor.toggle_case_sensitive(window, cx).unwrap();
-            assert!(harness.editor.case_sensitive);
+            assert!(harness.editor.case_sensitive());
             assert_eq!(harness.editor.search_match_count(cx), 1);
             assert_eq!(harness.editor.search_status_label(cx), "1/1 个匹配");
 
             harness.editor.toggle_case_sensitive(window, cx).unwrap();
-            assert!(!harness.editor.case_sensitive);
+            assert!(!harness.editor.case_sensitive());
             assert_eq!(harness.editor.search_match_count(cx), 3);
 
             harness.editor.search.update(cx, |input, cx| {
@@ -132,7 +132,7 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
             assert_eq!(harness.editor.search_match_count(cx), 0);
 
             harness.editor.toggle_regex(window, cx).unwrap();
-            assert!(harness.editor.regex);
+            assert!(harness.editor.regex());
             assert_eq!(harness.editor.search_match_count(cx), 2);
             assert_eq!(harness.editor.search_status_label(cx), "1/2 个匹配");
 
@@ -152,12 +152,12 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
     cx.update_window(window, |_, window, cx| {
         let raw_bytes = b"GET /items?token=Alpha HTTP/1.1\r\nX-Token: alpha\r\n\r\nTOKEN=ALPHA";
         harness.update(cx, |harness, cx| {
-            assert!(harness.editor.search_error.borrow().is_none());
+            assert!(!harness.editor.has_search_error());
             assert_eq!(harness.editor.search_status_label(cx), "1/2 个匹配");
 
             harness.editor.toggle_regex(window, cx).unwrap();
-            assert!(!harness.editor.regex);
-            assert!(harness.editor.search_error.borrow().is_none());
+            assert!(!harness.editor.regex());
+            assert!(!harness.editor.has_search_error());
 
             harness.editor.search.update(cx, |input, cx| {
                 input.set_value("41 6c 70 68 61", window, cx);
@@ -166,7 +166,7 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
             assert_eq!(harness.editor.search_match_count(cx), 0);
 
             harness.editor.switch(MessageView::Hex, window, cx).unwrap();
-            assert_eq!(harness.editor.view, MessageView::Hex);
+            assert_eq!(harness.editor.view(), MessageView::Hex);
             assert_eq!(harness.editor.search_match_count(cx), 1);
             assert!(!harness.editor.raw.read(cx).search_session().is_active());
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), raw_bytes);
@@ -185,7 +185,7 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
                 harness.editor.toggle_case_sensitive(window, cx),
                 Err(COMPOSITION_PENDING.into())
             );
-            assert!(!harness.editor.case_sensitive);
+            assert!(!harness.editor.case_sensitive());
             assert_eq!(
                 harness.editor.focus_search(window, cx),
                 Err(COMPOSITION_PENDING.into())
@@ -194,7 +194,7 @@ fn message_editor_search_handles_case_regex_navigation_raw_hex_and_ime(cx: &mut 
                 harness.editor.switch(MessageView::Hex, window, cx),
                 Err(COMPOSITION_PENDING.into())
             );
-            assert_eq!(harness.editor.view, MessageView::Raw);
+            assert_eq!(harness.editor.view(), MessageView::Raw);
 
             harness.editor.search.update(cx, |input, cx| {
                 input.replace_text_in_range(None, "", window, cx);
@@ -260,16 +260,16 @@ fn message_editor_pretty_view_formats_json_supports_search_and_preserves_raw_byt
             b"POST /api HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"alpha\":\"item1\",\"beta\":\"item2\"}";
         harness.update(cx, |harness, cx| {
             harness.editor.load(raw_bytes, window, cx);
-            if harness.editor.pretty_active {
+            if harness.editor.pretty_active() {
                 harness.editor.switch(MessageView::Raw, window, cx).unwrap();
             }
-            assert_eq!(harness.editor.view, MessageView::Raw);
-            assert!(!harness.editor.pretty_active);
+            assert_eq!(harness.editor.view(), MessageView::Raw);
+            assert!(!harness.editor.pretty_active());
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), raw_bytes);
 
             harness.editor.switch_pretty(window, cx).unwrap();
-            assert!(harness.editor.pretty_active);
-            assert_eq!(harness.editor.view, MessageView::Raw);
+            assert!(harness.editor.pretty_active());
+            assert_eq!(harness.editor.view(), MessageView::Raw);
             let pretty_text = harness.editor.state().read(cx).value();
             assert!(pretty_text.contains("\n  \"alpha\": \"item1\""));
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), raw_bytes);
@@ -294,16 +294,16 @@ fn message_editor_pretty_view_formats_json_supports_search_and_preserves_raw_byt
             assert!(!harness.editor.hex.read(cx).search_session().is_active());
 
             harness.editor.switch(MessageView::Raw, window, cx).unwrap();
-            assert!(!harness.editor.pretty_active);
-            assert_eq!(harness.editor.view, MessageView::Raw);
-            assert!(harness.editor.pretty.read(cx).search_session().is_active());
+            assert!(!harness.editor.pretty_active());
+            assert_eq!(harness.editor.view(), MessageView::Raw);
+            assert!(harness.editor.raw.read(cx).search_session().is_active());
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), raw_bytes);
 
             harness.editor.switch_pretty(window, cx).unwrap();
-            assert!(harness.editor.pretty_active);
+            assert!(harness.editor.pretty_active());
             harness.editor.switch(MessageView::Hex, window, cx).unwrap();
-            assert!(!harness.editor.pretty_active);
-            assert_eq!(harness.editor.view, MessageView::Hex);
+            assert!(!harness.editor.pretty_active());
+            assert_eq!(harness.editor.view(), MessageView::Hex);
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), raw_bytes);
         });
     })
@@ -385,11 +385,11 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
         harness.update(cx, |harness, cx| {
             harness.editor.load(req_bytes, window, cx);
             harness.editor.switch(MessageView::Raw, window, cx).unwrap();
-            assert!(!harness.editor.hide_headers);
+            assert!(!harness.editor.hide_headers());
             assert!(!harness.editor.is_readonly_preview());
 
             harness.editor.toggle_hide_headers(window, cx).unwrap();
-            assert!(harness.editor.hide_headers);
+            assert!(harness.editor.hide_headers());
             assert!(harness.editor.is_readonly_preview());
             let filtered_req = harness.editor.state().read(cx).value().to_string();
             assert_eq!(
@@ -444,8 +444,7 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
         harness.update(cx, |harness, cx| {
             harness
                 .editor
-                .header_preview
-                .as_ref()
+                .header_preview()
                 .unwrap()
                 .update(cx, |state, cx| {
                     state.set_line_number_mapping(Some(vec![1, 2, 4, 5, 6, 8, 10, 120]), cx);
@@ -466,8 +465,7 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
         harness.update(cx, |harness, cx| {
             harness
                 .editor
-                .header_preview
-                .as_ref()
+                .header_preview()
                 .unwrap()
                 .update(cx, |state, cx| {
                     state.insert("!", window, cx);
@@ -493,8 +491,8 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
             assert!(!harness.editor.raw.read(cx).search_session().is_active());
 
             harness.editor.switch_pretty(window, cx).unwrap();
-            assert!(harness.editor.pretty_active);
-            assert!(harness.editor.hide_headers);
+            assert!(harness.editor.pretty_active());
+            assert!(harness.editor.hide_headers());
             let pretty_filtered = harness.editor.state().read(cx).value().to_string();
             assert!(!pretty_filtered.contains("Sec-Fetch-Mode"));
             assert!(pretty_filtered.contains("Host: example.com"));
@@ -506,8 +504,8 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), req_bytes);
 
             harness.editor.toggle_non_printable(window, cx).unwrap();
-            assert!(harness.editor.show_non_printable);
-            assert!(harness.editor.hide_headers);
+            assert!(harness.editor.show_non_printable());
+            assert!(harness.editor.hide_headers());
             let np_filtered = harness.editor.state().read(cx).value().to_string();
             assert!(!np_filtered.contains("Sec-Fetch-Mode"));
             assert!(np_filtered.contains("Host: example.com \\r   \\n "));
@@ -518,8 +516,8 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
             assert_eq!(harness.editor.bytes(window, cx).unwrap(), req_bytes);
 
             harness.editor.toggle_non_printable(window, cx).unwrap();
-            assert!(!harness.editor.show_non_printable);
-            assert!(harness.editor.hide_headers);
+            assert!(!harness.editor.show_non_printable());
+            assert!(harness.editor.hide_headers());
             assert_eq!(
                 harness.editor.state().read(cx).line_number_mapping(),
                 Some(&[1, 2, 4, 5, 6, 8, 10, 11, 12, 13][..])
@@ -552,24 +550,23 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
             );
 
             harness.editor.switch(MessageView::Hex, window, cx).unwrap();
-            assert!(!harness.editor.hide_headers);
+            assert!(!harness.editor.hide_headers());
             assert_eq!(
                 harness
                     .editor
-                    .header_preview
-                    .as_ref()
+                    .header_preview()
                     .unwrap()
                     .read(cx)
                     .line_number_mapping(),
                 None
             );
-            assert_eq!(harness.editor.view, MessageView::Hex);
+            assert_eq!(harness.editor.view(), MessageView::Hex);
             assert!(harness.editor.toggle_hide_headers(window, cx).is_err());
 
             let mut h2_resp = b"HTTP/2 200 OK\r\nDate: Tue, 17 Nov 2026 12:17:54 GMT\r\nServer: MIO-Test\r\nX-Retcode: SUCCESS\r\n\r\n".to_vec();
             h2_resp.extend_from_slice(&[0xff, 0x00, b'O', b'K']);
             harness.editor.load(&h2_resp, window, cx);
-            assert_eq!(harness.editor.view, MessageView::Hex);
+            assert_eq!(harness.editor.view(), MessageView::Hex);
             harness.editor.toggle_non_printable(window, cx).unwrap();
             harness.editor.toggle_hide_headers(window, cx).unwrap();
             let h2_filtered = harness.editor.state().read(cx).value().to_string();
@@ -584,7 +581,7 @@ fn message_editor_hide_headers_preview_supports_request_response_pretty_nonprint
 
             let malformed = b"NOT_HTTP_WITHOUT_NEWLINE";
             harness.editor.load(malformed, window, cx);
-            assert!(harness.editor.hide_headers);
+            assert!(harness.editor.hide_headers());
             assert!(harness.editor.header_preview_error.is_some());
             assert_eq!(harness.editor.state().read(cx).line_number_mapping(), None);
             assert!(harness.editor.state().read(cx).value().contains("不包含可解析的 HTTP 起始行"));
@@ -634,7 +631,7 @@ fn message_editor_search_auto_scroll_reveals_matches_on_query_and_text_changes_a
     cx.update_window(window, |_, window, cx| {
         harness.update(cx, |h, cx| {
             h.editor.load(body.as_bytes(), window, cx);
-            assert!(!h.editor.auto_scroll_to_match);
+            assert!(!h.editor.auto_scroll_to_match());
         });
         window.render_frame(cx);
 
@@ -762,7 +759,7 @@ fn message_editor_search_auto_scroll_reveals_matches_on_query_and_text_changes_a
         window.click("test-search-autoscroll", cx);
         window.render_frame(cx);
         harness.update(cx, |h, cx| {
-            assert!(h.editor.auto_scroll_to_match);
+            assert!(h.editor.auto_scroll_to_match());
             assert_eq!(
                 h.editor
                     .raw
@@ -858,13 +855,13 @@ impl SearchHarness {
         self.editor.search.update(cx, |input, cx| {
             input.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
         });
-        assert!(self.editor.auto_scroll_to_match);
+        assert!(self.editor.auto_scroll_to_match());
         assert_eq!(
             self.editor.toggle_auto_scroll_to_match(window, cx),
             Err(COMPOSITION_PENDING.into())
         );
         assert!(
-            self.editor.auto_scroll_to_match,
+            self.editor.auto_scroll_to_match(),
             "IME composition must block disabling auto_scroll_to_match"
         );
         self.editor.search.update(cx, |input, cx| {
@@ -872,7 +869,7 @@ impl SearchHarness {
         });
 
         self.editor.toggle_auto_scroll_to_match(window, cx).unwrap();
-        assert!(!self.editor.auto_scroll_to_match);
+        assert!(!self.editor.auto_scroll_to_match());
 
         self.editor.raw.update(cx, |state, cx| {
             state.replace_and_mark_text_in_range(None, "hao", Some(3..3), window, cx);
@@ -882,7 +879,7 @@ impl SearchHarness {
             Err(COMPOSITION_PENDING.into())
         );
         assert!(
-            !self.editor.auto_scroll_to_match,
+            !self.editor.auto_scroll_to_match(),
             "IME composition must block enabling auto_scroll_to_match"
         );
         self.editor.raw.update(cx, |state, cx| {
@@ -915,28 +912,28 @@ fn message_editor_materializes_lazy_sub_editors_only_on_demand(cx: &mut TestAppC
     });
     cx.update_window(window, |_, window, cx| {
         harness.update(cx, |h, cx| {
-            assert!(h.editor.header_preview.is_none());
-            assert!(h.editor.non_printable.is_none());
-            assert!(h.editor.hex_grid.is_none());
+            assert!(h.editor.header_preview().is_none());
+            assert!(h.editor.non_printable().is_none());
+            assert!(h.editor.hex_grid().is_none());
 
             h.editor.load(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nhi", window, cx);
-            assert!(h.editor.header_preview.is_none());
-            assert!(h.editor.non_printable.is_none());
-            assert!(h.editor.hex_grid.is_none());
+            assert!(h.editor.header_preview().is_none());
+            assert!(h.editor.non_printable().is_none());
+            assert!(h.editor.hex_grid().is_none());
 
             h.editor.toggle_non_printable(window, cx).unwrap();
-            assert!(h.editor.non_printable.is_some());
-            assert!(h.editor.header_preview.is_none());
-            assert!(h.editor.hex_grid.is_none());
+            assert!(h.editor.non_printable().is_some());
+            assert!(h.editor.header_preview().is_none());
+            assert!(h.editor.hex_grid().is_none());
             h.editor.toggle_non_printable(window, cx).unwrap();
 
             h.editor.toggle_hide_headers(window, cx).unwrap();
-            assert!(h.editor.header_preview.is_some());
-            assert!(h.editor.hex_grid.is_none());
+            assert!(h.editor.header_preview().is_some());
+            assert!(h.editor.hex_grid().is_none());
             h.editor.toggle_hide_headers(window, cx).unwrap();
 
             h.editor.switch(MessageView::Hex, window, cx).unwrap();
-            assert!(h.editor.hex_grid.is_some());
+            assert!(h.editor.hex_grid().is_some());
         });
     })
     .unwrap();

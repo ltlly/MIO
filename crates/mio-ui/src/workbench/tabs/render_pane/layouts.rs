@@ -160,10 +160,10 @@ impl Workbench {
         if response.render_active {
             return self.render_response_visual_card("repeater-response", response, cx);
         }
-        editing::message_editor(response.state())
+        editing::message_editor(response)
             .readonly(true)
             .size_full()
-            .context_menu(self.repeater_editor_context_menu(response.state().clone(), true))
+            .context_menu(self.repeater_editor_context_menu(response.state(), true))
             .aria_label("响应消息编辑器")
             .into_any_element()
     }
@@ -191,31 +191,43 @@ impl Workbench {
     ) -> AnyElement {
         let request = &editors.request;
         let response = &editors.response;
-        let replace_readonly = self.is_message_replace_readonly("repeater-request");
+        let replace_readonly = self.is_message_replace_readonly(
+            crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+        );
         let req_readonly = request.is_readonly_preview();
         let request_pane = div()
             .size_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.message_header("repeater-request", "Request", request.view, cx))
+            .child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+                "Request",
+                request.view(),
+                cx,
+            ))
             .child(
                 div().flex_1().min_h_0().child(
-                    editing::message_editor(request.state())
+                    editing::message_editor(request)
                         .readonly(req_readonly)
                         .size_full()
                         .context_menu(
-                            self.repeater_editor_context_menu(request.state().clone(), req_readonly),
+                            self.repeater_editor_context_menu(request.state(), req_readonly),
                         )
                         .aria_label("请求消息编辑器"),
                 ),
             )
             .child(request.render_search_bar_editable(
                 "repeater-request",
-                replace_readonly || request.show_non_printable,
+                replace_readonly || request.show_non_printable(),
                 cx,
                 |this, action, window, cx| {
-                    this.handle_message_search_action("repeater-request", action, window, cx);
+                    this.handle_message_search_action(
+                        crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+                        action,
+                        window,
+                        cx,
+                    );
                 },
             ));
         let response_pane = div()
@@ -223,7 +235,12 @@ impl Workbench {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.message_header("repeater-response", "Response", response.view, cx))
+            .child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                "Response",
+                response.view(),
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -234,7 +251,12 @@ impl Workbench {
                 "repeater-response",
                 cx,
                 |this, action, window, cx| {
-                    this.handle_message_search_action("repeater-response", action, window, cx);
+                    this.handle_message_search_action(
+                        crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                        action,
+                        window,
+                        cx,
+                    );
                 },
             ));
         div()
@@ -265,7 +287,9 @@ impl Workbench {
     ) -> AnyElement {
         let request = &editors.request;
         let response = &editors.response;
-        let replace_readonly = self.is_message_replace_readonly("repeater-request");
+        let replace_readonly = self.is_message_replace_readonly(
+            crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+        );
         let req_readonly = request.is_readonly_preview();
         div()
             .size_full()
@@ -288,18 +312,18 @@ impl Workbench {
                             .border_b_1()
                             .border_color(theme::border())
                             .child(self.message_header(
-                                "repeater-request",
+                                crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
                                 "Request",
-                                request.view,
+                                request.view(),
                                 cx,
                             ))
                             .child(
                                 div().flex_1().min_h_0().child(
-                                    editing::message_editor(request.state())
+                                    editing::message_editor(request)
                                         .readonly(req_readonly)
                                         .size_full()
                                         .context_menu(self.repeater_editor_context_menu(
-                                            request.state().clone(),
+                                            request.state(),
                                             req_readonly,
                                         ))
                                         .aria_label("请求消息编辑器"),
@@ -307,11 +331,11 @@ impl Workbench {
                             )
                             .child(request.render_search_bar_editable(
                                 "repeater-request",
-                                replace_readonly || request.show_non_printable,
+                                replace_readonly || request.show_non_printable(),
                                 cx,
                                 |this, action, window, cx| {
                                     this.handle_message_search_action(
-                                        "repeater-request",
+                                        crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
                                         action,
                                         window,
                                         cx,
@@ -326,9 +350,9 @@ impl Workbench {
                             .flex()
                             .flex_col()
                             .child(self.message_header(
-                                "repeater-response",
+                                crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
                                 "Response",
-                                response.view,
+                                response.view(),
                                 cx,
                             ))
                             .child(
@@ -345,7 +369,7 @@ impl Workbench {
                                 cx,
                                 |this, action, window, cx| {
                                     this.handle_message_search_action(
-                                        "repeater-response",
+                                        crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
                                         action,
                                         window,
                                         cx,
@@ -402,7 +426,9 @@ impl Workbench {
         let active_pane = editors.combined_pane.get();
         let request = &editors.request;
         let response = &editors.response;
-        let replace_readonly = self.is_message_replace_readonly("repeater-request");
+        let replace_readonly = self.is_message_replace_readonly(
+            crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+        );
         let req_readonly = request.is_readonly_preview();
         let body = match active_pane {
             RepeaterCombinedPane::Request => div()
@@ -410,14 +436,19 @@ impl Workbench {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(self.message_header("repeater-request", "Request", request.view, cx))
+                .child(self.message_header(
+                    crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+                    "Request",
+                    request.view(),
+                    cx,
+                ))
                 .child(
                     div().flex_1().min_h_0().child(
-                        editing::message_editor(request.state())
+                        editing::message_editor(request)
                             .readonly(req_readonly)
                             .size_full()
                             .context_menu(self.repeater_editor_context_menu(
-                                request.state().clone(),
+                                request.state(),
                                 req_readonly,
                             ))
                             .aria_label("请求消息编辑器"),
@@ -425,10 +456,15 @@ impl Workbench {
                 )
                 .child(request.render_search_bar_editable(
                     "repeater-request",
-                    replace_readonly || request.show_non_printable,
+                    replace_readonly || request.show_non_printable(),
                     cx,
                     |this, action, window, cx| {
-                        this.handle_message_search_action("repeater-request", action, window, cx);
+                        this.handle_message_search_action(
+                            crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
+                            action,
+                            window,
+                            cx,
+                        );
                     },
                 ))
                 .into_any_element(),
@@ -437,7 +473,12 @@ impl Workbench {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(self.message_header("repeater-response", "Response", response.view, cx))
+                .child(self.message_header(
+                    crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                    "Response",
+                    response.view(),
+                    cx,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -448,7 +489,12 @@ impl Workbench {
                     "repeater-response",
                     cx,
                     |this, action, window, cx| {
-                        this.handle_message_search_action("repeater-response", action, window, cx);
+                        this.handle_message_search_action(
+                            crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                            action,
+                            window,
+                            cx,
+                        );
                     },
                 ))
                 .into_any_element(),

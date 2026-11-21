@@ -57,8 +57,8 @@ impl Workbench {
         tab.draft.raw = next_raw.clone();
         tab.draft.revision = next_revision;
         if let Some(editors) = self.tab_editors.get_mut(&id) {
-            let was_pretty = editors.request.pretty_active;
-            let prev_view = editors.request.view;
+            let was_pretty = editors.request.pretty_active();
+            let prev_view = editors.request.view();
             editors.request.load(&next_raw, window, cx);
             if was_pretty {
                 let _ = editors.request.switch_pretty(window, cx);

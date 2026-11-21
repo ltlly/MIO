@@ -51,7 +51,7 @@ pub(in crate::workbench) fn set_editor_plain_query(
     }) {
         return;
     }
-    editor.regex = false;
+    editor.set_regex(false);
     editor
         .search
         .update(cx, |state, cx| state.set_value(query, window, cx));
@@ -296,7 +296,6 @@ impl AuditDashboardPane {
         for editor in [
             &scan_request_editor.raw,
             &scan_request_editor.hex,
-            &scan_request_editor.pretty,
         ] {
             let mut composing = false;
             subscriptions.push(cx.observe_in(editor, window, move |_, input, window, cx| {

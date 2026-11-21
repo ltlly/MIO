@@ -1784,18 +1784,18 @@ impl Workbench {
         let pending_id = pending.id();
         let header_owner = cx.weak_entity();
         let editor_readonly = pending.deciding || pending.editor.is_readonly_preview();
-        let editor_base = editing::message_editor(pending.editor.state())
+        let editor_base = editing::message_editor(&pending.editor)
             .readonly(editor_readonly)
             .size_full()
             .aria_label("Intercept 消息编辑器");
         let editor = if matches!(pending.target, InterceptTarget::WebSocket { .. }) {
             editor_base.context_menu(self.websocket_payload_context_menu(
-                pending.editor.state().clone(),
+                pending.editor.state(),
                 editor_readonly,
             ))
         } else {
             editor_base.context_menu(self.request_context_menu(
-                pending.editor.state().clone(),
+                pending.editor.state(),
                 editor_readonly,
             ))
         };
@@ -1819,14 +1819,24 @@ impl Workbench {
                         )
                     }),
             )
-            .child(self.message_header("intercept", "消息", pending.editor.view, cx))
+            .child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::Intercept,
+                "消息",
+                pending.editor.view(),
+                cx,
+            ))
             .child(div().flex_1().min_h_0().child(editor))
             .child(pending.editor.render_search_bar_editable(
                 "intercept",
                 !can_decide || pending.editor.is_readonly_preview(),
                 cx,
                 |this, action, window, cx| {
-                    this.handle_message_search_action("intercept", action, window, cx);
+                    this.handle_message_search_action(
+                        crate::workbench::wb_editors::EditorSlot::Intercept,
+                        action,
+                        window,
+                        cx,
+                    );
                 },
             ))
             .into_any_element();

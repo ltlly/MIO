@@ -548,8 +548,8 @@ impl Workbench {
         let can_operate = self.collaborator_can_operate();
         let dark = theme::is_dark();
         let pane = &self.collaborator_pane;
-        let pretty = pane.raw_editor.pretty_active;
-        let view = pane.raw_editor.view;
+        let pretty = pane.raw_editor.pretty_active();
+        let view = pane.raw_editor.view();
         let selected = pane
             .selected_interaction
             .and_then(|id| pane.status.interactions.iter().find(|item| item.id == id))
@@ -740,11 +740,11 @@ impl Workbench {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        editing::message_editor(pane.raw_editor.state())
+                        editing::message_editor(&pane.raw_editor)
                             .readonly(true)
                             .size_full()
                             .context_menu(collaborator_raw_editor_context_menu(
-                                pane.raw_editor.state().clone(),
+                                pane.raw_editor.state(),
                                 can_operate,
                                 has_selected,
                                 is_http,
@@ -1106,7 +1106,7 @@ mod tests {
             window.render_frame(cx);
             let (selected, view) = {
                 let pane = &f.view.read(cx).collaborator_pane;
-                (pane.selected_interaction, pane.raw_editor.view)
+                (pane.selected_interaction, pane.raw_editor.view())
             };
             assert_eq!(selected, Some(dns_id));
             assert_eq!(view, MessageView::Hex);
@@ -1129,7 +1129,7 @@ mod tests {
                 let pane = &f.view.read(cx).collaborator_pane;
                 (
                     pane.selected_interaction,
-                    pane.raw_editor.view,
+                    pane.raw_editor.view(),
                     pane.raw_editor.state().read(cx).value().to_string(),
                 )
             };

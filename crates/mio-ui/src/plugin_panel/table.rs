@@ -46,26 +46,15 @@ impl NativePanel {
             self.show_diagnostic("表格行数已更新；旧视图翻页未执行，请重试", cx);
             return;
         }
-        let Some(revision) = self
-            .tables
-            .get(&id)
-            .map(|table| table.next_viewport_revision)
-        else {
+        if !self.tables.contains_key(&id) {
             return;
-        };
-        let Some(revision) = revision.checked_add(1) else {
+        }
+        let seq = self.next_ui_seq();
+        let table = self.tables.get_mut(&id).unwrap();
+        let Some(revision) = table.viewport.request_page(offset, seq) else {
             self.fail("表格 viewport revision 已耗尽。", cx);
             return;
         };
-        let seq = self.next_ui_seq();
-        let table = self.tables.get_mut(&id).unwrap();
-        table.next_viewport_revision = revision;
-        if table.pending_viewports.len() >= MAX_UI_OVERLAY_HISTORY {
-            table.pending_viewports.remove(0);
-        }
-        table.pending_viewports.push((revision, offset, seq));
-        table.requested_offset = Some(offset);
-        table.requested_viewport = Some((revision, seq, false));
         table.selected.clear();
         table.anchor = None;
         table.cursor = None;
@@ -345,7 +334,7 @@ impl NativePanel {
                             .disabled(
                                 !self.enabled
                                     || model.offset == 0
-                                    || table.requested_offset.is_some(),
+                                    || table.requested_offset().is_some(),
                             )
                             .on_click(
                                 cx.listener(move |this, _, _, cx| {
@@ -361,13 +350,13 @@ impl NativePanel {
                             .disabled(
                                 !self.enabled
                                     || next >= model.total_rows
-                                    || table.requested_offset.is_some(),
+                                    || table.requested_offset().is_some(),
                             )
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.page_table(id, next, cx)),
                             ),
                     )
-                    .child(if table.requested_offset.is_some() {
+                    .child(if table.requested_offset().is_some() {
                         "正在读取表格…".into()
                     } else {
                         format!(

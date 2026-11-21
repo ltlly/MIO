@@ -217,8 +217,8 @@ fn embedded_and_native_same_run_have_independent_pages_selections_and_frozen_spe
         let views = &fixture.view.read(cx).intruder.results.views;
         assert_eq!(views[&run.id].detail.as_deref(), Some(&flows[0]));
         assert_eq!(views[&embedded].detail.as_deref(), Some(&flows[1]));
-        assert!(views[&run.id].request.view == MessageView::Hex);
-        assert!(views[&embedded].request.view == MessageView::Raw);
+        assert!(views[&run.id].request.view() == MessageView::Hex);
+        assert!(views[&embedded].request.view() == MessageView::Raw);
     });
     // The native selection is deferred; a main-window selection must not cancel it.
     update(&fixture, cx, |view, window, cx| {

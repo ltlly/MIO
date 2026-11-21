@@ -336,7 +336,8 @@ impl NativePanel {
         }
         .clamp(0.05, 0.95);
         let seq = self.next_ui_seq();
-        push_overlay(&mut self.splits, resize.node_id, fraction, seq);
+        self.overlays
+            .push(resize.node_id, ControlOverlay::Split(fraction), seq);
         self.emit_with_seq(resize.node_id, seq, ui_event::Event::SplitResized(fraction), cx);
     }
 
@@ -350,7 +351,11 @@ impl NativePanel {
             self.cancel_pointer(cx);
             if let Some(resize) = self.resize.take() {
                 let seq = self.next_ui_seq();
-                push_overlay(&mut self.splits, resize.node_id, resize.original, seq);
+                self.overlays.push(
+                    resize.node_id,
+                    ControlOverlay::Split(resize.original),
+                    seq,
+                );
                 self.emit_with_seq(
                     resize.node_id,
                     seq,

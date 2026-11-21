@@ -109,8 +109,8 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let pane = &self.sequencer_pane;
-        let pretty = pane.request.pretty_active;
-        let view = pane.request.view;
+        let pretty = pane.request.pretty_active();
+        let view = pane.request.view();
         let add_current_btn = (!has_selected_request).then(|| {
             button("sequencer-request-add-current", "加入列表")
                 .tooltip("将当前编辑的目标 URL 与请求添加到实时捕获列表")
@@ -239,11 +239,11 @@ impl Workbench {
                     .min_h_0()
                     .bg(theme::surface())
                     .child(
-                        editing::message_editor(pane.request.state())
+                        editing::message_editor(&pane.request)
                             .readonly(request_readonly)
                             .size_full()
                             .context_menu(self.request_context_menu(
-                                pane.request.state().clone(),
+                                pane.request.state(),
                                 request_readonly,
                             ))
                             .aria_label("Sequencer 采样源请求编辑器"),

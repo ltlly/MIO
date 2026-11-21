@@ -515,7 +515,7 @@ fn inspector_supports_pretty_edits_protocol_switch_reorder_repeater_notes_and_ws
         f.view.update(cx, |view, cx| {
             let editors = view.tab_editors.get_mut(&tab1).unwrap();
             editors.request.switch_pretty(window, cx).unwrap();
-            assert!(editors.request.pretty_active);
+            assert!(editors.request.pretty_active());
         });
         window.click("inspector-toggle", cx);
         window.render_frame(cx);
@@ -526,7 +526,7 @@ fn inspector_supports_pretty_edits_protocol_switch_reorder_repeater_notes_and_ws
         window.render_frame(cx);
         window.click("inspector-move-down-query-0", cx);
         window.render_frame(cx);
-        assert!(f.view.read(cx).tab_editors[&tab1].request.pretty_active);
+        assert!(f.view.read(cx).tab_editors[&tab1].request.pretty_active());
         let raw_after_move =
             String::from_utf8(f.view.read(cx).workspace.tabs[0].draft.raw.clone()).unwrap();
         assert!(raw_after_move.starts_with("POST /api?second=2&first=1 HTTP/1.1\r\n"));
@@ -760,7 +760,7 @@ fn inspector_default_pretty_form_13_params_protocol_buttons_and_readonly_protect
         window.render_frame(cx);
 
         let req_editor = &f.view.read(cx).tab_editors[&tab_id].request;
-        assert!(req_editor.pretty_active);
+        assert!(req_editor.pretty_active());
         let pretty_display = req_editor.raw.read(cx).value().to_string();
         assert!(pretty_display.ends_with(form_body));
         assert_eq!(req_editor.bytes_lossless(cx), form_raw);
@@ -809,7 +809,7 @@ fn inspector_default_pretty_form_13_params_protocol_buttons_and_readonly_protect
         window.render_frame(cx);
 
         let req_editor = &f.view.read(cx).tab_editors[&tab_id].request;
-        assert!(req_editor.pretty_active);
+        assert!(req_editor.pretty_active());
         let updated_wire = f.view.read(cx).workspace.tabs[0].draft.raw.clone();
         assert_eq!(req_editor.bytes_lossless(cx), updated_wire);
         let updated_wire_str = String::from_utf8(updated_wire.clone()).unwrap();
@@ -932,7 +932,7 @@ fn inspector_default_pretty_form_13_params_protocol_buttons_and_readonly_protect
                 "",
             )));
             view.history_request.load(&readonly_h2_raw, window, cx);
-            assert!(view.history_request.pretty_active);
+            assert!(view.history_request.pretty_active());
             view.history_request
                 .raw
                 .update(cx, |s, cx| s.set_selected_range(0..3, cx));

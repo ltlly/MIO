@@ -64,17 +64,19 @@ impl MessageEditor {
 
     pub(super) fn active_pending_replace_all(&self, cx: &App) -> Option<usize> {
         let pending = self.pending_replace_all.as_ref()?;
-        let state = self.state().read(cx);
+        let active = self.state();
+        let state = active.read(cx);
         let query = self.search.read(cx).value();
         let replacement = self.replace.read(cx).value();
+        let s = self.shared.borrow();
         (!self.is_readonly_preview()
-            && pending.view == self.view
-            && pending.pretty_active == self.pretty_active
+            && pending.view == s.view
+            && pending.pretty_active == s.pretty_active
             && pending.document_revision == state.document_revision()
             && pending.query == query.as_ref()
             && pending.replacement == replacement.as_ref()
-            && pending.case_sensitive == self.case_sensitive
-            && pending.regex == self.regex)
+            && pending.case_sensitive == s.case_sensitive
+            && pending.regex == s.regex)
             .then_some(pending.match_count)
     }
 
@@ -118,8 +120,13 @@ impl MessageEditor {
         if query.is_empty() {
             return Err("请先输入要查找的内容。".into());
         }
+        let (view, pretty_active, case_sensitive, regex) = {
+            let s = self.shared.borrow();
+            (s.view, s.pretty_active, s.case_sensitive, s.regex)
+        };
         let (text, range) = {
-            let state = self.state().read(cx);
+            let active = self.state();
+            let state = active.read(cx);
             let session = state.search_session();
             let ix = session
                 .matcher
@@ -133,19 +140,19 @@ impl MessageEditor {
                 .ok_or_else(|| "当前没有可替换的匹配项。".to_owned())?;
             (state.value().to_string(), range)
         };
-        validate_payload_markers(self.view, &text, std::slice::from_ref(&range), &replacement)?;
+        validate_payload_markers(view, &text, std::slice::from_ref(&range), &replacement)?;
         let expanded = mio_core::expand_search_replace_one(
             &text,
             range.clone(),
             &query,
             &replacement,
-            !self.case_sensitive,
-            self.regex,
+            !case_sensitive,
+            regex,
             MAX_EDITOR_REPLACE_BYTES,
         )?;
-        let target = self.state().clone();
+        let target = self.state();
         let mut canonical_next_offset = None;
-        if self.view == MessageView::Hex && !self.pretty_active {
+        if view == MessageView::Hex && !pretty_active {
             let mut candidate = String::with_capacity(text.len() - range.len() + expanded.len());
             candidate.push_str(&text[..range.start]);
             candidate.push_str(&expanded);
@@ -165,10 +172,18 @@ impl MessageEditor {
                 .div_ceil(2)
                 .min(decoded.len());
             canonical_next_offset = Some(end_byte.saturating_mul(3));
-            let canonical = hex_encode(&decoded);
-            target.update(cx, |state, cx| {
-                state.replace_all_without_history(canonical, window, cx);
-            });
+            if let Some(grid) = self.hex_grid() {
+                grid.update(cx, |g, cx| g.replace_all_bytes(decoded, window, cx));
+            } else {
+                let canonical = hex_encode(&decoded);
+                let rev = target.update(cx, |state, cx| {
+                    state.replace_all_without_history(canonical, window, cx);
+                    state.document_revision()
+                });
+                let mut s = self.shared.borrow_mut();
+                s.wire_bytes = decoded;
+                s.hex_synced_revision = Some(rev);
+            }
         } else {
             target.update(cx, |state, cx| {
                 state.set_selected_range(range.clone(), cx);
@@ -178,7 +193,8 @@ impl MessageEditor {
         let next_offset = canonical_next_offset.unwrap_or(range.start + expanded.len());
         let _ = self.update_search(None, window, cx);
         let steps_needed = {
-            let state = self.state().read(cx);
+            let active = self.state();
+            let state = active.read(cx);
             let matcher = &state.search_session().matcher;
             let ranges = matcher.matched_ranges();
             if ranges.is_empty() {
@@ -204,15 +220,12 @@ impl MessageEditor {
                 }
                 last
             });
-            if self.view == MessageView::Hex
-                && !self.pretty_active
+            if view == MessageView::Hex
+                && !pretty_active
                 && let Some(match_range) = revealed
+                && let Some(grid) = self.hex_grid()
             {
-                super::hex_grid::scroll_hex_grid_to_text_range(
-                    target.entity_id(),
-                    match_range,
-                    cx,
-                );
+                grid.update(cx, |g, cx| g.scroll_to_text_range(match_range, cx));
             }
         }
         Ok(())
@@ -235,37 +248,42 @@ impl MessageEditor {
         if query.is_empty() {
             return Err("请先输入要查找的内容。".into());
         }
+        let (view, pretty_active, case_sensitive, regex) = {
+            let s = self.shared.borrow();
+            (s.view, s.pretty_active, s.case_sensitive, s.regex)
+        };
         let (text, ranges, doc_rev) = {
-            let state = self.state().read(cx);
+            let active = self.state();
+            let state = active.read(cx);
             let ranges = state.search_session().matcher.matched_ranges().to_vec();
             (state.value().to_string(), ranges, state.document_revision())
         };
         if ranges.is_empty() {
             return Err("当前没有可替换的匹配项。".into());
         }
-        validate_payload_markers(self.view, &text, &ranges, &replacement)?;
+        validate_payload_markers(view, &text, &ranges, &replacement)?;
         let candidate = mio_core::expand_search_replace_all(
             &text,
             &ranges,
             &query,
             &replacement,
-            !self.case_sensitive,
-            self.regex,
+            !case_sensitive,
+            regex,
             MAX_EDITOR_REPLACE_BYTES,
         )?;
-        if self.view == MessageView::Hex && !self.pretty_active {
+        if view == MessageView::Hex && !pretty_active {
             hex_decode(&candidate).map_err(|err| {
                 format!("全部替换结果不是有效的完整 Hex 字节（{err}）；原始字节未改变。")
             })?;
         }
         self.pending_replace_all = Some(PendingReplaceAll {
-            view: self.view,
-            pretty_active: self.pretty_active,
+            view,
+            pretty_active,
             document_revision: doc_rev,
             query,
             replacement,
-            case_sensitive: self.case_sensitive,
-            regex: self.regex,
+            case_sensitive,
+            regex,
             match_count: ranges.len(),
         });
         Ok(())
@@ -285,14 +303,19 @@ impl MessageEditor {
             );
         }
         let pending = self.pending_replace_all.take().expect("checked pending");
+        let (view, pretty_active) = {
+            let s = self.shared.borrow();
+            (s.view, s.pretty_active)
+        };
         let (text, ranges) = {
-            let state = self.state().read(cx);
+            let active = self.state();
+            let state = active.read(cx);
             (
                 state.value().to_string(),
                 state.search_session().matcher.matched_ranges().to_vec(),
             )
         };
-        validate_payload_markers(self.view, &text, &ranges, &pending.replacement)?;
+        validate_payload_markers(view, &text, &ranges, &pending.replacement)?;
         let replaced = mio_core::expand_search_replace_all(
             &text,
             &ranges,
@@ -302,14 +325,22 @@ impl MessageEditor {
             pending.regex,
             MAX_EDITOR_REPLACE_BYTES,
         )?;
-        if self.view == MessageView::Hex && !self.pretty_active {
+        if view == MessageView::Hex && !pretty_active {
             let decoded = hex_decode(&replaced).map_err(|err| {
                 format!("全部替换结果不是有效的完整 Hex 字节（{err}）；原始字节未改变。")
             })?;
-            let canonical = hex_encode(&decoded);
-            self.state().update(cx, |state, cx| {
-                state.replace_all_without_history(canonical, window, cx);
-            });
+            if let Some(grid) = self.hex_grid() {
+                grid.update(cx, |g, cx| g.replace_all_bytes(decoded, window, cx));
+            } else {
+                let canonical = hex_encode(&decoded);
+                let rev = self.state().update(cx, |state, cx| {
+                    state.replace_all_without_history(canonical, window, cx);
+                    state.document_revision()
+                });
+                let mut s = self.shared.borrow_mut();
+                s.wire_bytes = decoded;
+                s.hex_synced_revision = Some(rev);
+            }
         } else {
             self.state()
                 .update(cx, |state, cx| state.replace_all(replaced, window, cx));
@@ -328,7 +359,7 @@ impl MessageEditor {
     ) -> AnyElement {
         let has_matches = !self.is_readonly_preview()
             && !self.state().read(cx).search_session().matcher.is_empty()
-            && self.search_error.borrow().is_none();
+            && !self.has_search_error();
         let pending_count = self.active_pending_replace_all(cx);
         let replace_one_action = on_action.clone();
         let replace_all_action = on_action.clone();

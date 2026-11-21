@@ -159,40 +159,12 @@ impl NativePanel {
                 }
                 node::Kind::VirtualTable(table) => {
                     if let Some(state) = self.tables.get_mut(&node.id) {
-                        state.next_viewport_revision =
-                            state.next_viewport_revision.max(table.viewport_revision);
-                        let prev_active = state.active_viewport_revision();
-                        state.confirmed_viewport_revision = table.viewport_revision;
-                        state.pending_viewports.retain(|&(rev, offset, seq)| {
-                            rev > table.viewport_revision
-                                && (offset == 0 || offset < table.total_rows)
-                                && seq > sync_cutoff
-                                && !rejected_ui_seqs.contains(&seq)
-                        });
-                        if let Some(&(rev, offset, seq)) = state.pending_viewports.last() {
-                            state.requested_offset = Some(offset);
-                            state.requested_viewport = Some((rev, seq, false));
-                        } else if let Some(req_offset) = state.requested_offset {
-                            let target_arrived = table.offset == req_offset;
-                            let out_of_range = req_offset > 0 && req_offset >= table.total_rows;
-                            let (req_rev, req_seq, loading_snapshot_seen) =
-                                state.requested_viewport.unwrap_or((prev_active, 0, false));
-                            let rejected = req_seq != 0 && rejected_ui_seqs.contains(&req_seq);
-                            let worker_published_loading = loading_snapshot_seen || newer_revision;
-                            let awaiting_async_page = worker_published_loading
-                                && table.viewport_revision == req_rev
-                                && !target_arrived
-                                && !out_of_range
-                                && !rejected;
-                            if awaiting_async_page {
-                                if newer_revision && !loading_snapshot_seen {
-                                    state.requested_viewport = Some((req_rev, req_seq, true));
-                                }
-                            } else {
-                                state.requested_offset = None;
-                                state.requested_viewport = None;
-                            }
-                        }
+                        state.viewport.reconcile(
+                            table,
+                            newer_revision,
+                            sync_cutoff,
+                            rejected_ui_seqs,
+                        );
                         state
                             .selected
                             .retain(|id| table.rows.iter().any(|row| &row.id == id));
@@ -232,11 +204,7 @@ impl NativePanel {
                                 focus,
                                 scroll: UniformListScrollHandle::new(),
                                 horizontal: ScrollHandle::new(),
-                                next_viewport_revision: table.viewport_revision,
-                                confirmed_viewport_revision: table.viewport_revision,
-                                pending_viewports: Vec::new(),
-                                requested_offset: None,
-                                requested_viewport: None,
+                                viewport: TableViewportTracker::new(table.viewport_revision),
                                 _subscription: subscription,
                                 _focus_subscriptions: vec![focused, blurred],
                             },
@@ -246,7 +214,8 @@ impl NativePanel {
                 node::Kind::Canvas(model) => {
                     let entry = self.drawings.entry(node.id).or_insert_with(|| Drawing {
                         model: model.clone(),
-                        image: None,
+                        prepared: None,
+                        images: Arc::new(Vec::new()),
                         error: None,
                         bounds: Rc::new(Cell::new(Bounds::default())),
                         focus: HashMap::new(),
@@ -255,6 +224,8 @@ impl NativePanel {
                     });
                     if entry.model != *model {
                         entry.model = model.clone();
+                        entry.prepared = None;
+                        entry.images = Arc::new(Vec::new());
                         entry.dirty = true;
                         entry.error = None;
                     }
@@ -293,93 +264,29 @@ impl NativePanel {
         self.tables.retain(|id, _| ids.contains(id));
         self.drawings.retain(|id, _| ids.contains(id));
         self.geometry.retain(|id, _| ids.contains(id));
+        self.documents
+            .retain(|_, document| document.live || document.unsaved);
+        if self
+            .recovery
+            .is_some_and(|id| !self.documents.contains_key(&id))
+        {
+            self.recovery = None;
+        }
+        if self
+            .focused_document
+            .is_some_and(|id| !self.documents.contains_key(&id))
+        {
+            self.focused_document = None;
+        }
         if newer_revision {
-            let old_root = self.snapshot.root.as_ref();
-            let new_root = snapshot.root.as_ref();
-            retain_semantic_overlays(
-                &mut self.tabs,
+            self.overlays.retain_semantic(
                 sync_cutoff,
                 rejected_ui_seqs,
-                old_root,
-                new_root,
-                |old_node, new_node, &tab_id| {
-                    matches!(
-                        (&old_node.kind, &new_node.kind),
-                        (Some(node::Kind::Tabs(old_t)), Some(node::Kind::Tabs(new_t)))
-                            if old_t
-                                .tabs
-                                .iter()
-                                .find_map(|t| {
-                                    t.content
-                                        .as_ref()
-                                        .is_some_and(|c| c.id == tab_id)
-                                        .then_some(t.title.as_str())
-                                })
-                                .is_some_and(|old_title| {
-                                    new_t.tabs.iter().any(|t| {
-                                        t.content.as_ref().is_some_and(|c| c.id == tab_id)
-                                            && t.title == old_title
-                                    })
-                                })
-                    )
-                },
-            );
-            retain_semantic_overlays(
-                &mut self.splits,
-                sync_cutoff,
-                rejected_ui_seqs,
-                old_root,
-                new_root,
-                |old_node, new_node, _| {
-                    matches!(
-                        (&old_node.kind, &new_node.kind),
-                        (Some(node::Kind::Split(old_s)), Some(node::Kind::Split(new_s)))
-                            if old_s.axis == new_s.axis
-                    )
-                },
-            );
-            retain_semantic_overlays(
-                &mut self.checkboxes,
-                sync_cutoff,
-                rejected_ui_seqs,
-                old_root,
-                new_root,
-                |old_node, new_node, _| {
-                    matches!(
-                        (&old_node.kind, &new_node.kind),
-                        (
-                            Some(node::Kind::Checkbox(old_c)),
-                            Some(node::Kind::Checkbox(new_c))
-                        ) if new_c.enabled && old_c.label == new_c.label
-                    )
-                },
-            );
-            retain_semantic_overlays(
-                &mut self.selects,
-                sync_cutoff,
-                rejected_ui_seqs,
-                old_root,
-                new_root,
-                |old_node, new_node, &idx| {
-                    matches!(
-                        (&old_node.kind, &new_node.kind),
-                        (
-                            Some(node::Kind::Select(old_s)),
-                            Some(node::Kind::Select(new_s))
-                        ) if new_s.enabled
-                            && old_s.label == new_s.label
-                            && new_s
-                                .options
-                                .get(idx as usize)
-                                .is_some_and(|opt| old_s.options.get(idx as usize) == Some(opt))
-                    )
-                },
+                self.snapshot.root.as_ref(),
+                snapshot.root.as_ref(),
             );
         } else {
-            prune_overlays(&mut self.tabs, sync_cutoff, rejected_ui_seqs);
-            prune_overlays(&mut self.splits, sync_cutoff, rejected_ui_seqs);
-            prune_overlays(&mut self.checkboxes, sync_cutoff, rejected_ui_seqs);
-            prune_overlays(&mut self.selects, sync_cutoff, rejected_ui_seqs);
+            self.overlays.prune(sync_cutoff, rejected_ui_seqs);
         }
         if let Some(capture) = self.capture
             && !self.drawings.get(&capture.node_id).is_some_and(|drawing| {
@@ -424,7 +331,8 @@ impl NativePanel {
         let visible: HashSet<_> = visible.into_iter().collect();
         for (id, drawing) in &mut self.drawings {
             if !visible.contains(id) {
-                drawing.image = None;
+                drawing.prepared = None;
+                drawing.images = Arc::new(Vec::new());
                 drawing.dirty = true;
             }
         }
@@ -435,7 +343,7 @@ impl NativePanel {
             .count()
             .max(1);
         // All visible canvases in this panel share the same raster budget; inactive tabs
-        // release their images instead of multiplying the per-canvas allocation limit.
+        // release their decoded PNGs instead of multiplying the per-canvas allocation limit.
         let pixel_budget = canvas::PANEL_PIXEL_BUDGET / count;
         for (id, drawing) in &mut self.drawings {
             if visible.contains(id) && drawing.pixel_budget != pixel_budget {
@@ -443,34 +351,45 @@ impl NativePanel {
                 drawing.dirty = true;
             }
         }
-        if self.image_task.is_some() {
+        let mut pending_images = Vec::new();
+        for (&id, drawing) in &mut self.drawings {
+            if !drawing.dirty || !visible.contains(&id) {
+                continue;
+            }
+            match canvas::prepare_canvas(&drawing.model, pixel_budget) {
+                Ok(prepared) => {
+                    let has_images = prepared.image_count > 0;
+                    drawing.prepared = Some(Arc::new(prepared));
+                    drawing.images = Arc::new(Vec::new());
+                    drawing.error = None;
+                    if has_images {
+                        pending_images.push((id, drawing.model.clone()));
+                    } else {
+                        drawing.dirty = false;
+                    }
+                }
+                Err(error) => {
+                    drawing.prepared = None;
+                    drawing.images = Arc::new(Vec::new());
+                    drawing.error = Some(error);
+                    drawing.dirty = false;
+                }
+            }
+        }
+        if self.image_task.is_some() || pending_images.is_empty() {
             return;
         }
-        let pending: Vec<_> = self
-            .drawings
-            .iter()
-            .filter(|(id, drawing)| drawing.dirty && visible.contains(id))
-            .map(|(id, drawing)| (*id, drawing.model.clone()))
-            .collect();
-        if pending.is_empty() {
-            return;
-        }
-        let renderer = cx.svg_renderer();
-        let render = cx.background_executor().spawn(async move {
-            pending
+        let decode = cx.background_executor().spawn(async move {
+            pending_images
                 .into_iter()
                 .map(|(id, model)| {
-                    let result = canvas::svg(&model, pixel_budget).and_then(|svg| {
-                        renderer
-                            .render_single_frame(&svg, 1.)
-                            .map_err(|error| format!("Canvas 绘制失败：{error}"))
-                    });
+                    let result = canvas::decode_canvas_images(&model, pixel_budget);
                     (id, model, result)
                 })
                 .collect::<Vec<_>>()
         });
         self.image_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = render.await;
+            let result = decode.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.image_task = None;
                 let mut visible = Vec::new();
@@ -483,19 +402,20 @@ impl NativePanel {
                     {
                         drawing.dirty = false;
                         match result {
-                            Ok(image) => {
-                                drawing.image = Some(image);
+                            Ok(images) => {
+                                drawing.images = Arc::new(images);
                                 drawing.error = None;
                             }
                             Err(error) => {
-                                drawing.image = None;
+                                drawing.prepared = None;
+                                drawing.images = Arc::new(Vec::new());
                                 drawing.error = Some(error);
                             }
                         }
                     }
                 }
                 // Coalesce patches received during this one background job. Never spawn an
-                // unbounded queue of raster jobs or install a result for a replaced canvas.
+                // unbounded queue of decode jobs or install images for a replaced canvas.
                 this.prepare_drawings(window, cx);
                 cx.notify();
             });
@@ -517,7 +437,7 @@ impl NativePanel {
                 self.visible_nodes(split.second.as_ref().unwrap(), output);
             }
             node::Kind::Tabs(tabs) => {
-                let active = latest_overlay(&self.tabs, node.id).unwrap_or(tabs.active);
+                let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);
                 if let Some(child) = tabs
                     .tabs
                     .iter()
@@ -530,28 +450,4 @@ impl NativePanel {
             _ => {}
         }
     }
-}
-
-fn retain_semantic_overlays<V>(
-    map: &mut HashMap<u64, Vec<(V, u64)>>,
-    sync_cutoff: u64,
-    rejected_ui_seqs: &[u64],
-    old_root: Option<&Node>,
-    new_root: Option<&Node>,
-    mut valid_target: impl FnMut(&Node, &Node, &V) -> bool,
-) {
-    map.retain(|&node_id, history| {
-        let Some((old_node, new_node)) = old_root
-            .and_then(|r| r.find(node_id))
-            .zip(new_root.and_then(|r| r.find(node_id)))
-        else {
-            return false;
-        };
-        history.retain(|(value, seq)| {
-            *seq > sync_cutoff
-                && !rejected_ui_seqs.contains(seq)
-                && valid_target(old_node, new_node, value)
-        });
-        !history.is_empty()
-    });
 }

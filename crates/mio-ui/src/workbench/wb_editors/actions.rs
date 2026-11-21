@@ -1,66 +1,29 @@
 use super::*;
 
 impl Workbench {
-    pub(in crate::workbench) fn is_message_soft_wrap(&self, id: &'static str) -> bool {
-        match id {
-            "history-request" => self.history_request.soft_wrap,
-            "history-response" => self.history_response.soft_wrap,
-            "logger-request" => self.extra_tools.logger_request.soft_wrap,
-            "logger-response" => self.extra_tools.logger_response.soft_wrap,
-            "target-request" => self.target_pane.request.soft_wrap,
-            "target-response" => self.target_pane.response.soft_wrap,
-            "organiser-request" => self.organiser.request.soft_wrap,
-            "organiser-response" => self.organiser.response.soft_wrap,
-            "dashboard-issue-request" => self.audit_dashboard.issue_request_editor.soft_wrap,
-            "dashboard-issue-response" => self.audit_dashboard.issue_response_editor.soft_wrap,
-            "websocket-payload" => self.websocket.payload.soft_wrap,
-            "intercept" => self
-                .intercepts
-                .iter()
-                .find(|pending| Some(pending.id()) == self.selected_intercept)
-                .is_some_and(|pending| pending.editor.soft_wrap),
-            "repeater-request" => self
-                .workspace
-                .active
-                .and_then(|id| self.tab_editors.get(&id))
-                .is_some_and(|editors| editors.request.soft_wrap),
-            "repeater-response" => self
-                .workspace
-                .active
-                .and_then(|id| self.tab_editors.get(&id))
-                .is_some_and(|editors| editors.response.soft_wrap),
-            "ws-repeater-draft" => self
-                .workspace
-                .active_websocket_tab
-                .and_then(|id| self.websocket_repeater.editors.get(&id))
-                .is_some_and(|editors| editors.draft.soft_wrap),
-            "ws-repeater-history" => self
-                .workspace
-                .active_websocket_tab
-                .and_then(|id| self.websocket_repeater.editors.get(&id))
-                .is_some_and(|editors| editors.history.soft_wrap),
-            _ => theme::editor_soft_wrap(),
-        }
+    pub(in crate::workbench) fn is_message_soft_wrap(&self, slot: EditorSlot) -> bool {
+        self.message_editor_ref(slot)
+            .map_or_else(theme::editor_soft_wrap, |editor| editor.soft_wrap)
     }
 
     pub(in crate::workbench) fn toggle_message_soft_wrap(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id) {
+        if let Some(editor) = self.message_editor_mut(slot) {
             editor.toggle_soft_wrap(window, cx);
         }
         cx.notify();
     }
 
-    pub(in crate::workbench) fn is_message_replace_readonly(&self, id: &'static str) -> bool {
-        match id {
-            "repeater-request" => {
+    pub(in crate::workbench) fn is_message_replace_readonly(&self, slot: EditorSlot) -> bool {
+        match slot {
+            EditorSlot::RepeaterRequest => {
                 self.project.is_none() || self.transition == Some(TransitionPhase::Switching)
             }
-            "intercept" => {
+            EditorSlot::Intercept => {
                 !self.backend_available()
                     || self.transition.is_some()
                     || self
@@ -68,7 +31,7 @@ impl Workbench {
                         .and_then(|sel| self.intercepts.iter().find(|p| p.id() == sel))
                         .is_none_or(|p| p.deciding)
             }
-            "ws-repeater-draft" => {
+            EditorSlot::WsRepeaterDraft => {
                 self.project.is_none() || self.transition.is_some() || !self.backend_available()
             }
             _ => true,
@@ -77,58 +40,59 @@ impl Workbench {
 
     pub(in crate::workbench) fn message_editor_mut(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
     ) -> Option<&mut MessageEditor> {
-        match id {
-            "history-request" => Some(&mut self.history_request),
-            "history-response" => Some(&mut self.history_response),
-            "logger-request" => Some(&mut self.extra_tools.logger_request),
-            "logger-response" => Some(&mut self.extra_tools.logger_response),
-            "target-request" => Some(&mut self.target_pane.request),
-            "target-response" => Some(&mut self.target_pane.response),
-            "organiser-request" => Some(&mut self.organiser.request),
-            "organiser-response" => Some(&mut self.organiser.response),
-            "dashboard-issue-request" => Some(&mut self.audit_dashboard.issue_request_editor),
-            "dashboard-issue-response" => Some(&mut self.audit_dashboard.issue_response_editor),
-            "websocket-payload" => Some(&mut self.websocket.payload),
-            "ext-message" => self.ext_import.message_editor(),
-            "intercept" => self
+        match slot {
+            EditorSlot::HistoryRequest => Some(&mut self.history_request),
+            EditorSlot::HistoryResponse => Some(&mut self.history_response),
+            EditorSlot::LoggerRequest => Some(&mut self.extra_tools.logger_request),
+            EditorSlot::LoggerResponse => Some(&mut self.extra_tools.logger_response),
+            EditorSlot::TargetRequest => Some(&mut self.target_pane.request),
+            EditorSlot::TargetResponse => Some(&mut self.target_pane.response),
+            EditorSlot::OrganiserRequest => Some(&mut self.organiser.request),
+            EditorSlot::OrganiserResponse => Some(&mut self.organiser.response),
+            EditorSlot::DashboardIssueRequest => Some(&mut self.audit_dashboard.issue_request_editor),
+            EditorSlot::DashboardIssueResponse => {
+                Some(&mut self.audit_dashboard.issue_response_editor)
+            }
+            EditorSlot::WebsocketPayload => Some(&mut self.websocket.payload),
+            EditorSlot::ExtMessage => self.ext_import.message_editor(),
+            EditorSlot::Intercept => self
                 .intercepts
                 .iter_mut()
                 .find(|pending| Some(pending.id()) == self.selected_intercept)
                 .map(|pending| &mut pending.editor),
-            "repeater-request" => self
+            EditorSlot::RepeaterRequest => self
                 .workspace
                 .active
                 .and_then(|id| self.tab_editors.get_mut(&id))
                 .map(|editors| &mut editors.request),
-            "repeater-response" => self
+            EditorSlot::RepeaterResponse => self
                 .workspace
                 .active
                 .and_then(|id| self.tab_editors.get_mut(&id))
                 .map(|editors| &mut editors.response),
-            "ws-repeater-draft" => self
+            EditorSlot::WsRepeaterDraft => self
                 .workspace
                 .active_websocket_tab
                 .and_then(|id| self.websocket_repeater.editors.get_mut(&id))
                 .map(|editors| &mut editors.draft),
-            "ws-repeater-history" => self
+            EditorSlot::WsRepeaterHistory => self
                 .workspace
                 .active_websocket_tab
                 .and_then(|id| self.websocket_repeater.editors.get_mut(&id))
                 .map(|editors| &mut editors.history),
-            _ => None,
         }
     }
 
     pub(in crate::workbench) fn switch_message_view(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         view: MessageView,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id)
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) = editor.switch(view, window, cx)
         {
             self.fail(error, cx);
@@ -138,11 +102,11 @@ impl Workbench {
 
     pub(in crate::workbench) fn switch_pretty_view(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id)
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) = editor.switch_pretty(window, cx)
         {
             self.fail(error, cx);
@@ -152,11 +116,11 @@ impl Workbench {
 
     pub(in crate::workbench) fn switch_render_view(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id)
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) = editor.switch_render(window, cx)
         {
             self.fail(error, cx);
@@ -166,11 +130,11 @@ impl Workbench {
 
     pub(in crate::workbench) fn toggle_message_non_printable(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id)
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) = editor.toggle_non_printable(window, cx)
         {
             self.fail(error, cx);
@@ -180,11 +144,11 @@ impl Workbench {
 
     pub(in crate::workbench) fn toggle_message_hide_headers(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.message_editor_mut(id)
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) = editor.toggle_hide_headers(window, cx)
         {
             self.fail(error, cx);
@@ -194,13 +158,13 @@ impl Workbench {
 
     pub(in crate::workbench) fn handle_message_search_action(
         &mut self,
-        id: &'static str,
+        slot: EditorSlot,
         action: SearchBarAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let readonly = self.is_message_replace_readonly(id);
-        if let Some(editor) = self.message_editor_mut(id)
+        let readonly = self.is_message_replace_readonly(slot);
+        if let Some(editor) = self.message_editor_mut(slot)
             && let Err(error) =
                 editor.handle_search_bar_action_editable(action, readonly, window, cx)
         {
@@ -486,14 +450,12 @@ impl Workbench {
                 return;
             }
         };
-        let parsed = editing::parse_rendered_http_response(&raw);
-        let body = editing::extract_http_response_body(&raw);
+        let (body, content_type) = editing::extract_http_response_body_and_content_type(&raw);
         if body.is_empty() {
             self.fail("当前 HTTP 响应正文为空，无法在浏览器中打开。", cx);
             return;
         }
-        let content_type = parsed
-            .content_type
+        let content_type = content_type
             .as_deref()
             .unwrap_or("text/html; charset=utf-8");
         self.open_rendered_response_in_browser(&body, content_type, cx);

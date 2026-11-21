@@ -157,174 +157,94 @@ fn active_display_charset(original_wire_bytes: &[u8]) -> MessageDisplayCharset {
     }
 }
 
-pub(super) fn decode_message_bytes(bytes: &[u8]) -> Option<String> {
+pub(super) fn decode_message_bytes_with_charset(bytes: &[u8]) -> (MessageDisplayCharset, Option<String>) {
     let (mode, specific) = crate::theme::message_editor_charset();
     match mode {
         // 0: Recognize automatically based on message headers
         0 => {
-            if let Some(charset) = extract_header_charset(bytes) {
-                decode_named_charset(bytes, &charset)
-            } else {
-                std::str::from_utf8(bytes).ok().map(str::to_owned)
+            if let Some(charset) = extract_header_charset(bytes)
+                && let Some(resolved) = MessageDisplayCharset::from_label(&charset)
+            {
+                let decoded = resolved.decode(bytes);
+                return (resolved, decoded);
             }
+            (
+                MessageDisplayCharset::Utf8,
+                std::str::from_utf8(bytes).ok().map(str::to_owned),
+            )
         }
         // 1: Use platform default (UTF-8)
-        1 => std::str::from_utf8(bytes).ok().map(str::to_owned),
+        1 => (
+            MessageDisplayCharset::Utf8,
+            std::str::from_utf8(bytes).ok().map(str::to_owned),
+        ),
         // 2: Display as raw bytes (1:1 ISO-8859-1 byte view)
-        2 => Some(decode_latin1(bytes)),
+        2 => (MessageDisplayCharset::Iso8859_1, Some(decode_latin1(bytes))),
         // 3: Use a specific character set
-        _ => decode_named_charset(bytes, &specific.trim().to_ascii_lowercase()),
+        _ => {
+            let resolved =
+                MessageDisplayCharset::from_label(&specific).unwrap_or(MessageDisplayCharset::Utf8);
+            let decoded = decode_named_charset(bytes, &specific.trim().to_ascii_lowercase());
+            (resolved, decoded)
+        }
     }
 }
 
-pub(super) fn encode_raw_text_bytes(text: &str, original_wire_bytes: &[u8]) -> Vec<u8> {
-    if decode_message_bytes(original_wire_bytes).as_deref() == Some(text) {
-        return original_wire_bytes.to_vec();
-    }
-    active_display_charset(original_wire_bytes).encode(text)
+pub(super) fn decode_message_bytes(bytes: &[u8]) -> Option<String> {
+    decode_message_bytes_with_charset(bytes).1
 }
 
-pub(super) fn pretty_line_number_mapping(
-    raw_bytes: &[u8],
-    formatted: &str,
-) -> Option<Vec<usize>> {
-    const MAX_RAW_LINE_SCAN_BYTES: usize = 8 * 1024;
-    const MAX_TOTAL_SCAN_BYTES: usize = 256 * 1024;
-
-    let raw_text = std::str::from_utf8(raw_bytes).ok()?;
-    let raw_lines: Vec<&str> = raw_text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
-    let pretty_lines: Vec<&str> = formatted.split('\n').collect();
-    if raw_lines.is_empty() || pretty_lines.is_empty() {
-        return None;
-    }
-    if raw_lines.len() == pretty_lines.len()
-        && raw_lines.iter().zip(&pretty_lines).all(|(r, p)| *r == *p)
-    {
-        return None;
-    }
-    let mut mapping = Vec::with_capacity(pretty_lines.len());
-    let mut raw_idx = 0usize;
-    let mut byte_pos = 0usize;
-    let mut last_assigned = 0usize;
-    let mut scanned_bytes = 0usize;
-    let mut fast_fallback = false;
-
-    for pretty_line in &pretty_lines {
-        if fast_fallback {
-            let line_no = raw_idx + 1;
-            if raw_idx < raw_lines.len() && line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if byte_pos == 0 && raw_idx < raw_lines.len() && raw_lines[raw_idx] == *pretty_line {
-            let line_no = raw_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            raw_idx += 1;
-            continue;
-        }
-        let needle = pretty_line.trim();
-        if needle.is_empty() {
-            if raw_idx < raw_lines.len() {
-                if byte_pos > 0 && raw_idx + 1 < raw_lines.len() {
-                    raw_idx += 1;
-                    byte_pos = 0;
-                }
-                while raw_idx < raw_lines.len() && !raw_lines[raw_idx].trim().is_empty() {
-                    raw_idx += 1;
-                    byte_pos = 0;
-                }
-                let line_no = raw_idx + 1;
-                if raw_idx < raw_lines.len() && line_no > last_assigned {
-                    mapping.push(line_no);
-                    last_assigned = line_no;
-                    raw_idx += 1;
-                    byte_pos = 0;
-                } else {
-                    mapping.push(0);
-                }
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if raw_idx < raw_lines.len()
-            && (raw_lines[raw_idx].len() > MAX_RAW_LINE_SCAN_BYTES
-                || scanned_bytes >= MAX_TOTAL_SCAN_BYTES)
-        {
-            fast_fallback = true;
-            let line_no = raw_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        let mut found: Option<(usize, usize)> = None;
-        if raw_idx < raw_lines.len() {
-            let tail = raw_lines[raw_idx].get(byte_pos..).unwrap_or("");
-            scanned_bytes = scanned_bytes.saturating_add(tail.len());
-            if let Some(rel) = tail.find(needle) {
-                found = Some((raw_idx, byte_pos + rel + needle.len()));
-            }
-        }
-        if found.is_none() {
-            for (cand_idx, raw_line) in raw_lines.iter().enumerate().skip(raw_idx + 1) {
-                if raw_line.len() > MAX_RAW_LINE_SCAN_BYTES
-                    || scanned_bytes >= MAX_TOTAL_SCAN_BYTES
-                {
-                    fast_fallback = true;
-                    if raw_line.len() > MAX_RAW_LINE_SCAN_BYTES {
-                        raw_idx = cand_idx;
-                    }
-                    break;
-                }
-                scanned_bytes = scanned_bytes.saturating_add(raw_line.len());
-                if let Some(rel) = raw_line.find(needle) {
-                    found = Some((cand_idx, rel + needle.len()));
-                    break;
-                }
-            }
-        }
-        if fast_fallback {
-            let line_no = raw_idx + 1;
-            if raw_idx < raw_lines.len() && line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if let Some((hit_idx, next_pos)) = found {
-            let line_no = hit_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            raw_idx = hit_idx;
-            byte_pos = next_pos;
-        } else {
-            mapping.push(0);
-        }
-    }
-    // Only apply custom mapping if Pretty actually introduced synthetic lines (zeros).
-    if mapping.len() == pretty_lines.len() && mapping.contains(&0) {
-        Some(mapping)
+pub(super) fn encode_raw_text_bytes(
+    text: &str,
+    cached_charset: MessageDisplayCharset,
+    cached_pref: &(u8, String),
+    original_wire_bytes: &[u8],
+) -> Vec<u8> {
+    if crate::theme::message_editor_charset() == *cached_pref {
+        cached_charset.encode(text)
     } else {
-        None
+        active_display_charset(original_wire_bytes).encode(text)
+    }
+}
+
+fn parse_http_head_with_buf<'a>(
+    input: &'a [u8],
+    headers: &mut [httparse::Header<'a>],
+) -> Result<(usize, Vec<mio_core::Header>), httparse::Error> {
+    let mut config = httparse::ParserConfig::default();
+    config
+        .allow_multiple_spaces_in_request_line_delimiters(true)
+        .allow_multiple_spaces_in_response_status_delimiters(true)
+        .allow_space_before_first_header_name(true)
+        .allow_obsolete_multiline_headers_in_responses(true);
+    let (status, parsed_headers) = if input.starts_with(b"HTTP/") {
+        let mut resp = httparse::Response::new(headers);
+        let status = config.parse_response(&mut resp, input)?;
+        let list = resp
+            .headers
+            .iter()
+            .map(|h| mio_core::Header {
+                name: h.name.to_owned(),
+                value: h.value.to_vec(),
+            })
+            .collect();
+        (status, list)
+    } else {
+        let mut req = httparse::Request::new(headers);
+        let status = config.parse_request(&mut req, input)?;
+        let list = req
+            .headers
+            .iter()
+            .map(|h| mio_core::Header {
+                name: h.name.to_owned(),
+                value: h.value.to_vec(),
+            })
+            .collect();
+        (status, list)
+    };
+    match status {
+        httparse::Status::Complete(offset) => Ok((offset, parsed_headers)),
+        httparse::Status::Partial => Err(httparse::Error::HeaderValue),
     }
 }
 
@@ -364,41 +284,15 @@ pub(super) fn parse_http_head_info(bytes: &[u8]) -> Option<(usize, Vec<mio_core:
     };
     let input = normalized.as_deref().unwrap_or(bytes);
     let added = input.len() - bytes.len();
-    let mut headers = vec![httparse::EMPTY_HEADER; 4096];
-    let mut config = httparse::ParserConfig::default();
-    config
-        .allow_multiple_spaces_in_request_line_delimiters(true)
-        .allow_multiple_spaces_in_response_status_delimiters(true)
-        .allow_space_before_first_header_name(true)
-        .allow_obsolete_multiline_headers_in_responses(true);
-    let (status, parsed_headers) = if input.starts_with(b"HTTP/") {
-        let mut resp = httparse::Response::new(&mut headers);
-        let status = config.parse_response(&mut resp, input).ok()?;
-        let list = resp
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    } else {
-        let mut req = httparse::Request::new(&mut headers);
-        let status = config.parse_request(&mut req, input).ok()?;
-        let list = req
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    };
-    match status {
-        httparse::Status::Complete(offset) => Some((offset - added, parsed_headers)),
-        httparse::Status::Partial => None,
+    let mut small_headers = [httparse::EMPTY_HEADER; 64];
+    match parse_http_head_with_buf(input, &mut small_headers) {
+        Ok((offset, list)) => Some((offset - added, list)),
+        Err(httparse::Error::TooManyHeaders) => {
+            let mut large_headers = vec![httparse::EMPTY_HEADER; 4096];
+            let (offset, list) = parse_http_head_with_buf(input, &mut large_headers).ok()?;
+            Some((offset - added, list))
+        }
+        Err(_) => None,
     }
 }
 

@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use gpui_kit::component::button::{ButtonRounded, ButtonVariants};
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 use gpui_kit::{
-    ClipboardItem, Context, EntityId, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, RenderOnce, StyleRefinement,
-    UniformListScrollHandle, WeakEntity, uniform_list,
+    ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, RenderOnce, StyleRefinement, UniformListScrollHandle,
+    uniform_list,
 };
 
 use super::*;
@@ -54,51 +54,6 @@ pub(crate) struct HexRedo;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
 #[action(namespace = mio, no_json)]
 pub(crate) struct HexToggleInsertMode;
-
-std::thread_local! {
-    static HEX_GRID_REGISTRY: RefCell<HashMap<EntityId, WeakEntity<HexGridView>>> =
-        RefCell::new(HashMap::new());
-}
-
-pub(crate) fn register_hex_grid(hex_id: EntityId, grid: WeakEntity<HexGridView>) {
-    HEX_GRID_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(hex_id, grid);
-    });
-}
-
-pub(crate) fn scroll_hex_grid_to_text_range(
-    hex_id: EntityId,
-    text_range: Range<usize>,
-    cx: &mut App,
-) {
-    let weak = HEX_GRID_REGISTRY.with(|reg| reg.borrow().get(&hex_id).cloned());
-    if let Some(weak) = weak {
-        let _ = weak.update(cx, |grid, cx| {
-            let byte_range = hex_text_range_to_byte_range_for_rope(
-                grid.hex_editor.read(cx).text(),
-                text_range,
-                grid.bytes.len(),
-            );
-            grid.search_match_range = byte_range.clone();
-            if let Some(ref r) = byte_range {
-                grid.scroll_handle
-                    .scroll_to_item(r.start / 16, gpui_kit::ScrollStrategy::Center);
-            }
-            cx.notify();
-        });
-    }
-}
-
-pub(crate) fn clear_hex_grid_search_match(hex_id: EntityId, cx: &mut App) {
-    let weak = HEX_GRID_REGISTRY.with(|reg| reg.borrow().get(&hex_id).cloned());
-    if let Some(weak) = weak {
-        let _ = weak.update(cx, |grid, cx| {
-            if grid.search_match_range.take().is_some() {
-                cx.notify();
-            }
-        });
-    }
-}
 
 fn count_hex_digits_in_chunks<'a>(
     chunks: impl Iterator<Item = &'a str>,
@@ -198,6 +153,7 @@ impl HexUndoEntry {
 #[derive(IntoElement)]
 pub(crate) struct MessageEditorElement {
     state: Entity<EditorState>,
+    hex_grid: Option<Entity<HexGridView>>,
     style: StyleRefinement,
     readonly: bool,
     aria_label: Option<SharedString>,
@@ -205,9 +161,13 @@ pub(crate) struct MessageEditorElement {
 }
 
 impl MessageEditorElement {
-    pub(crate) fn new(state: &Entity<EditorState>) -> Self {
+    pub(crate) fn new(
+        state: Entity<EditorState>,
+        hex_grid: Option<Entity<HexGridView>>,
+    ) -> Self {
         Self {
-            state: state.clone(),
+            state,
+            hex_grid,
             style: StyleRefinement::default(),
             readonly: false,
             aria_label: None,
@@ -242,13 +202,8 @@ impl Styled for MessageEditorElement {
 
 impl RenderOnce for MessageEditorElement {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let grid_entity = HEX_GRID_REGISTRY.with(|reg| {
-            reg.borrow()
-                .get(&self.state.entity_id())
-                .and_then(WeakEntity::upgrade)
-        });
         let caller_style = self.style;
-        let Some(grid) = grid_entity else {
+        let Some(grid) = self.hex_grid else {
             let mut base_editor = Editor::new(&self.state);
             *base_editor.style() = caller_style;
             base_editor = base_editor
@@ -300,7 +255,7 @@ impl RenderOnce for MessageEditorElement {
 pub(crate) struct HexGridView {
     pub(crate) hex_editor: Entity<EditorState>,
     pub(crate) byte_input: Entity<InputState>,
-    pub(crate) bytes: Vec<u8>,
+    shared: Rc<RefCell<MessageEditorShared>>,
     pub(crate) selected_range: Option<Range<usize>>,
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) active_cursor: Option<usize>,
@@ -311,11 +266,9 @@ pub(crate) struct HexGridView {
     pub(crate) search_match_range: Option<Range<usize>>,
     pub(crate) dragging: bool,
     pub(crate) readonly: bool,
-    pub(crate) last_synced_revision: u64,
     pub(crate) last_synced_text_range: Range<usize>,
-    committing_to_editor: bool,
-    undo_stack: Vec<HexUndoEntry>,
-    redo_stack: Vec<HexUndoEntry>,
+    undo_stack: VecDeque<HexUndoEntry>,
+    redo_stack: VecDeque<HexUndoEntry>,
     pub(crate) scroll_handle: UniformListScrollHandle,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) context_menu: Option<EditorContextMenuBuilder>,
@@ -328,81 +281,90 @@ impl Focusable for HexGridView {
     }
 }
 
+fn diff_byte_slices(old: &[u8], new: &[u8]) -> (usize, Vec<u8>, Vec<u8>) {
+    let prefix = old
+        .iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_rem = old.len() - prefix;
+    let new_rem = new.len() - prefix;
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take(old_rem.min(new_rem))
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_mid = old[prefix..old.len() - suffix].to_vec();
+    let new_mid = new[prefix..new.len() - suffix].to_vec();
+    (prefix, old_mid, new_mid)
+}
+
 impl HexGridView {
-    pub(crate) fn new(
+    pub(super) fn new(
         hex_editor: Entity<EditorState>,
+        shared: Rc<RefCell<MessageEditorShared>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let byte_input = cx.new(|cx| InputState::new(window, cx).placeholder("Hex (如 41)"));
         let focus_handle = cx.focus_handle();
         let sub_change = cx.subscribe(&hex_editor, |this, editor, event, cx| {
-            if this.committing_to_editor {
+            if !matches!(event, InputEvent::Change) {
                 return;
             }
-            if matches!(event, InputEvent::Change) {
-                let rev = editor.read(cx).document_revision();
-                if rev != this.last_synced_revision {
-                    let text = editor.read(cx).value();
-                    if let Ok(decoded) = hex_decode(text.as_ref()) {
-                        let prefix = this
-                            .bytes
-                            .iter()
-                            .zip(decoded.iter())
-                            .take_while(|(a, b)| a == b)
-                            .count();
-                        let old_rem = this.bytes.len() - prefix;
-                        let new_rem = decoded.len() - prefix;
-                        let suffix = this.bytes[prefix..]
-                            .iter()
-                            .rev()
-                            .zip(decoded[prefix..].iter().rev())
-                            .take(old_rem.min(new_rem))
-                            .take_while(|(a, b)| a == b)
-                            .count();
-                        let old_mid = this.bytes[prefix..this.bytes.len() - suffix].to_vec();
-                        let new_mid = decoded[prefix..decoded.len() - suffix].to_vec();
-                        let prev_selection = this.selected_range.clone();
-                        let prev_cursor = this.active_cursor;
-                        let editing_ascii = this.editing_ascii;
-                        this.bytes = decoded;
-                        this.last_synced_revision = rev;
-                        this.low_nibble_pending = false;
-                        if !old_mid.is_empty() || !new_mid.is_empty() {
-                            let next_end = prefix + new_mid.len();
-                            let next_sel = (prefix < next_end).then_some(prefix..next_end);
-                            let next_cursor =
-                                (!this.bytes.is_empty()).then_some(prefix.min(this.bytes.len()));
-                            this.push_undo_delta(HexUndoEntry {
-                                start: prefix,
-                                old_bytes: old_mid,
-                                new_bytes: new_mid,
-                                prev_selection,
-                                prev_cursor,
-                                next_selection: next_sel,
-                                next_cursor,
-                                editing_ascii,
-                            });
-                        }
-                        if let Some(r) = &this.selected_range
-                            && r.end > this.bytes.len()
-                        {
-                            this.selected_range = None;
-                        }
-                        if let Some(r) = &this.search_match_range
-                            && r.end > this.bytes.len()
-                        {
-                            this.search_match_range = None;
-                        }
-                        if let Some(cur) = this.active_cursor
-                            && cur >= this.bytes.len()
-                        {
-                            this.active_cursor = this.bytes.len().checked_sub(1);
-                        }
-                        cx.notify();
-                    }
-                }
+            let rev = editor.read(cx).document_revision();
+            if this.shared.borrow().hex_synced_revision == Some(rev) {
+                return;
             }
+            let text = editor.read(cx).value();
+            let Ok(decoded) = hex_decode(text.as_ref()) else {
+                return;
+            };
+            let (prefix, old_mid, new_mid, new_len) = {
+                let mut shared = this.shared.borrow_mut();
+                let (prefix, old_mid, new_mid) = diff_byte_slices(&shared.wire_bytes, &decoded);
+                let new_len = decoded.len();
+                shared.wire_bytes = decoded;
+                shared.hex_synced_revision = Some(rev);
+                (prefix, old_mid, new_mid, new_len)
+            };
+            let prev_selection = this.selected_range.clone();
+            let prev_cursor = this.active_cursor;
+            let editing_ascii = this.editing_ascii;
+            this.low_nibble_pending = false;
+            if !old_mid.is_empty() || !new_mid.is_empty() {
+                let next_end = prefix + new_mid.len();
+                let next_sel = (prefix < next_end).then_some(prefix..next_end);
+                let next_cursor = (new_len > 0).then_some(prefix.min(new_len));
+                this.push_undo_delta(HexUndoEntry {
+                    start: prefix,
+                    old_bytes: old_mid,
+                    new_bytes: new_mid,
+                    prev_selection,
+                    prev_cursor,
+                    next_selection: next_sel,
+                    next_cursor,
+                    editing_ascii,
+                });
+            }
+            if let Some(r) = &this.selected_range
+                && r.end > new_len
+            {
+                this.selected_range = None;
+            }
+            if let Some(r) = &this.search_match_range
+                && r.end > new_len
+            {
+                this.search_match_range = None;
+            }
+            if let Some(cur) = this.active_cursor
+                && cur >= new_len
+            {
+                this.active_cursor = new_len.checked_sub(1);
+            }
+            cx.notify();
         });
         let sub_obs = cx.observe(&hex_editor, |this, editor, cx| {
             let state = editor.read(cx);
@@ -411,11 +373,9 @@ impl HexGridView {
                 return;
             }
             this.last_synced_text_range = text_range.clone();
-            let mapped = hex_text_range_to_byte_range_for_rope(
-                state.text(),
-                text_range,
-                this.bytes.len(),
-            );
+            let total_bytes = this.shared.borrow().wire_bytes.len();
+            let mapped =
+                hex_text_range_to_byte_range_for_rope(state.text(), text_range, total_bytes);
             if mapped != this.selected_range {
                 this.selected_range = mapped.clone();
                 this.active_cursor = mapped.as_ref().map(|r| r.start);
@@ -430,7 +390,7 @@ impl HexGridView {
         Self {
             hex_editor,
             byte_input,
-            bytes: Vec::new(),
+            shared,
             selected_range: None,
             selection_anchor: None,
             active_cursor: None,
@@ -441,15 +401,42 @@ impl HexGridView {
             search_match_range: None,
             dragging: false,
             readonly: false,
-            last_synced_revision: 0,
             last_synced_text_range: 0..0,
-            committing_to_editor: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             scroll_handle: UniformListScrollHandle::new(),
             focus_handle,
             context_menu: None,
             _subscriptions: [sub_change, sub_obs],
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> std::cell::Ref<'_, Vec<u8>> {
+        std::cell::Ref::map(self.shared.borrow(), |s| &s.wire_bytes)
+    }
+
+    pub(super) fn scroll_to_text_range(
+        &mut self,
+        text_range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let total_bytes = self.shared.borrow().wire_bytes.len();
+        let byte_range = hex_text_range_to_byte_range_for_rope(
+            self.hex_editor.read(cx).text(),
+            text_range,
+            total_bytes,
+        );
+        self.search_match_range = byte_range.clone();
+        if let Some(ref r) = byte_range {
+            self.scroll_handle
+                .scroll_to_item(r.start / 16, gpui_kit::ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn clear_search_match(&mut self, cx: &mut Context<Self>) {
+        if self.search_match_range.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -458,34 +445,32 @@ impl HexGridView {
     }
 
     pub(crate) fn selected_byte_range(&self) -> Option<Range<usize>> {
+        let len = self.shared.borrow().wire_bytes.len();
         self.selected_range
             .clone()
-            .filter(|r| r.start < r.end && r.end <= self.bytes.len())
+            .filter(|r| r.start < r.end && r.end <= len)
     }
 
     fn effective_byte_selection(&self) -> Option<Range<usize>> {
+        let len = self.shared.borrow().wire_bytes.len();
         self.selected_byte_range().or_else(|| {
             self.active_cursor
-                .filter(|&c| c < self.bytes.len())
+                .filter(|&c| c < len)
                 .map(|c| c..c + 1)
         })
     }
 
-    pub(crate) fn sync_bytes_and_selection(
+    pub(super) fn reset_view_state(
         &mut self,
-        bytes: Vec<u8>,
         selected_range: Option<Range<usize>>,
-        revision: u64,
         cx: &mut Context<Self>,
     ) {
-        self.bytes = bytes;
         self.selected_range = selected_range.clone();
-        self.active_cursor = selected_range.clone().map(|r| r.start);
+        self.active_cursor = selected_range.as_ref().map(|r| r.start);
         self.selection_anchor = self.active_cursor;
         self.low_nibble_pending = false;
         self.search_match_range = None;
         self.dragging = false;
-        self.last_synced_revision = revision;
         self.last_synced_text_range = selected_range.map(hex_byte_range_to_text_range).unwrap_or(0..0);
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -511,21 +496,23 @@ impl HexGridView {
                 && self.total_undo_bytes().saturating_add(entry.retained_bytes())
                     > MAX_HEX_UNDO_BYTES)
         {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
-        self.undo_stack.push(entry);
+        self.undo_stack.push_back(entry);
     }
 
     fn sync_byte_input_to_cursor(&mut self, window: &mut Window, cx: &mut App) {
         if self.byte_input.focus_handle(cx).is_focused(window) {
             return;
         }
-        let next = self
-            .active_cursor
-            .or_else(|| self.selected_range.as_ref().map(|r| r.start))
-            .and_then(|idx| self.bytes.get(idx))
-            .map(|b| format!("{b:02X}"))
-            .unwrap_or_default();
+        let next = {
+            let shared = self.shared.borrow();
+            self.active_cursor
+                .or_else(|| self.selected_range.as_ref().map(|r| r.start))
+                .and_then(|idx| shared.wire_bytes.get(idx))
+                .map(|b| format!("{b:02X}"))
+                .unwrap_or_default()
+        };
         if self.byte_input.read(cx).value().as_ref() != next {
             self.byte_input.update(cx, |inp, cx| inp.set_value(next, window, cx));
         }
@@ -538,11 +525,10 @@ impl HexGridView {
         self.insert_mode = !self.insert_mode;
         self.low_nibble_pending = false;
         if !self.insert_mode {
-            let max_idx = self.bytes.len().checked_sub(1);
+            let max_idx = self.shared.borrow().wire_bytes.len().checked_sub(1);
             self.active_cursor = match (self.active_cursor, max_idx) {
                 (Some(cur), Some(last)) => Some(cur.min(last)),
-                (_, None) => None,
-                (None, Some(_)) => None,
+                (_, None) | (None, Some(_)) => None,
             };
             self.selection_anchor = match (self.selection_anchor, max_idx) {
                 (Some(anc), Some(last)) => Some(anc.min(last)),
@@ -562,14 +548,19 @@ impl HexGridView {
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        let old_bytes = self.bytes[byte_range.clone()].to_vec();
-        self.bytes.splice(byte_range.clone(), replacement.iter().copied());
+        let (old_bytes, new_len) = {
+            let mut shared = self.shared.borrow_mut();
+            let old_bytes = shared.wire_bytes[byte_range.clone()].to_vec();
+            shared
+                .wire_bytes
+                .splice(byte_range.clone(), replacement.iter().copied());
+            (old_bytes, shared.wire_bytes.len())
+        };
         self.low_nibble_pending = false;
         let new_end = byte_range.start + replacement.len();
         let next_sel = (!replacement.is_empty()).then_some(byte_range.start..new_end);
         let next_cursor = next_sel.as_ref().map(|r| r.start).or_else(|| {
-            self.bytes
-                .len()
+            new_len
                 .checked_sub(1)
                 .map(|last| byte_range.start.min(last))
         });
@@ -584,7 +575,7 @@ impl HexGridView {
             next_cursor,
             editing_ascii,
         });
-        self.commit_bytes_to_editor(next_sel.clone(), window, cx);
+        let rev = self.commit_bytes_to_editor(next_sel.clone(), window, cx);
         let new_text_range = hex_byte_range_to_text_range(byte_range.start..new_end);
         if next_sel.is_none() {
             self.active_cursor = next_cursor;
@@ -593,7 +584,42 @@ impl HexGridView {
                 .update(cx, |state, cx| state.set_selected_range(new_text_range.clone(), cx));
             self.sync_byte_input_to_cursor(window, cx);
         }
-        (self.last_synced_revision, new_text_range)
+        (rev, new_text_range)
+    }
+
+    pub(super) fn replace_all_bytes(
+        &mut self,
+        new_bytes: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prev_selection = self.selected_range.clone();
+        let prev_cursor = self.active_cursor;
+        let editing_ascii = self.editing_ascii;
+        let (prefix, old_mid, new_mid) = {
+            let mut shared = self.shared.borrow_mut();
+            let diff = diff_byte_slices(&shared.wire_bytes, &new_bytes);
+            shared.wire_bytes = new_bytes;
+            diff
+        };
+        self.low_nibble_pending = false;
+        let next_end = prefix + new_mid.len();
+        let next_sel = (prefix < next_end).then_some(prefix..next_end);
+        let next_cursor = next_sel.as_ref().map(|r| r.start);
+        self.selection_anchor = next_cursor;
+        if !old_mid.is_empty() || !new_mid.is_empty() {
+            self.push_undo_delta(HexUndoEntry {
+                start: prefix,
+                old_bytes: old_mid,
+                new_bytes: new_mid,
+                prev_selection,
+                prev_cursor,
+                next_selection: next_sel.clone(),
+                next_cursor,
+                editing_ascii,
+            });
+        }
+        self.commit_bytes_to_editor(next_sel, window, cx);
     }
 
     fn commit_bytes_to_editor(
@@ -601,8 +627,8 @@ impl HexGridView {
         next_selection: Option<Range<usize>>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let encoded = hex_encode(&self.bytes);
+    ) -> u64 {
+        let encoded = hex_encode(&self.shared.borrow().wire_bytes);
         let text_range = next_selection
             .clone()
             .map(hex_byte_range_to_text_range)
@@ -610,16 +636,15 @@ impl HexGridView {
         self.selected_range = next_selection.clone();
         self.active_cursor = next_selection.map(|r| r.start);
         self.last_synced_text_range = text_range.clone();
-        self.committing_to_editor = true;
         let rev = self.hex_editor.update(cx, |state, cx| {
             state.replace_all_without_history(encoded, window, cx);
             state.set_selected_range(text_range, cx);
             state.document_revision()
         });
-        self.committing_to_editor = false;
-        self.last_synced_revision = rev;
+        self.shared.borrow_mut().hex_synced_revision = Some(rev);
         self.sync_byte_input_to_cursor(window, cx);
         cx.notify();
+        rev
     }
 
     fn apply_history_delta(
@@ -645,21 +670,27 @@ impl HexGridView {
             )
         };
         let end = entry.start.checked_add(remove_len)?;
-        if end > self.bytes.len() {
-            return None;
-        }
-        self.bytes.splice(entry.start..end, insert_bytes.iter().copied());
+        let len = {
+            let mut shared = self.shared.borrow_mut();
+            if end > shared.wire_bytes.len() {
+                return None;
+            }
+            shared
+                .wire_bytes
+                .splice(entry.start..end, insert_bytes.iter().copied());
+            shared.wire_bytes.len()
+        };
         self.editing_ascii = entry.editing_ascii;
         self.low_nibble_pending = false;
-        let clamped_sel = target_sel.filter(|r| r.start < r.end && r.end <= self.bytes.len());
+        let clamped_sel = target_sel.filter(|r| r.start < r.end && r.end <= len);
         let valid_end_cursor = if self.insert_mode {
-            self.bytes.len()
+            len
         } else {
-            self.bytes.len().saturating_sub(1)
+            len.saturating_sub(1)
         };
         let restored_cursor = target_cursor
-            .filter(|&c| !self.bytes.is_empty() && c <= valid_end_cursor || c == 0 && self.bytes.is_empty())
-            .filter(|&c| self.insert_mode || c < self.bytes.len())
+            .filter(|&c| (len > 0 && c <= valid_end_cursor) || (c == 0 && len == 0))
+            .filter(|&c| self.insert_mode || c < len)
             .or_else(|| clamped_sel.as_ref().map(|r| r.start));
         self.selection_anchor = restored_cursor;
         self.commit_bytes_to_editor(clamped_sel, window, cx);
@@ -672,11 +703,11 @@ impl HexGridView {
         if self.readonly {
             return;
         }
-        let Some(entry) = self.undo_stack.pop() else {
+        let Some(entry) = self.undo_stack.pop_back() else {
             return;
         };
         if let Some(applied) = self.apply_history_delta(entry, true, window, cx) {
-            self.redo_stack.push(applied);
+            self.redo_stack.push_back(applied);
         }
     }
 
@@ -684,22 +715,23 @@ impl HexGridView {
         if self.readonly {
             return;
         }
-        let Some(entry) = self.redo_stack.pop() else {
+        let Some(entry) = self.redo_stack.pop_back() else {
             return;
         };
         if let Some(applied) = self.apply_history_delta(entry, false, window, cx) {
             while self.undo_stack.len() >= MAX_HEX_UNDO {
-                self.undo_stack.remove(0);
+                self.undo_stack.pop_front();
             }
-            self.undo_stack.push(applied);
+            self.undo_stack.push_back(applied);
         }
     }
 
     pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.bytes.is_empty() {
+        let len = self.shared.borrow().wire_bytes.len();
+        if len == 0 {
             return;
         }
-        let all = 0..self.bytes.len();
+        let all = 0..len;
         let text_range = hex_byte_range_to_text_range(all.clone());
         self.selected_range = Some(all);
         self.selection_anchor = Some(0);
@@ -720,7 +752,8 @@ impl HexGridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if byte_ix >= self.bytes.len() {
+        let len = self.shared.borrow().wire_bytes.len();
+        if byte_ix >= len {
             return;
         }
         self.focus_handle.focus(window, cx);
@@ -733,7 +766,7 @@ impl HexGridView {
             byte_ix
         };
         let start = anchor.min(byte_ix);
-        let end = (anchor.max(byte_ix) + 1).min(self.bytes.len());
+        let end = (anchor.max(byte_ix) + 1).min(len);
         let range = start..end;
         self.selected_range = Some(range.clone());
         self.active_cursor = Some(byte_ix);
@@ -759,14 +792,18 @@ impl HexGridView {
         force_ascii: Option<bool>,
         cx: &mut Context<Self>,
     ) {
-        let slice = &self.bytes[range];
-        let as_ascii = force_ascii.unwrap_or(self.editing_ascii);
-        let text = if as_ascii {
-            String::from_utf8_lossy(slice).into_owned()
-        } else {
-            hex_encode(slice)
+        let (text, meta) = {
+            let shared = self.shared.borrow();
+            let slice = &shared.wire_bytes[range];
+            let as_ascii = force_ascii.unwrap_or(self.editing_ascii);
+            let text = if as_ascii {
+                String::from_utf8_lossy(slice).into_owned()
+            } else {
+                hex_encode(slice)
+            };
+            let meta = format!("{HEX_CLIPBOARD_META_PREFIX}{}", hex_encode(slice));
+            (text, meta)
         };
-        let meta = format!("{HEX_CLIPBOARD_META_PREFIX}{}", hex_encode(slice));
         cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, meta));
     }
 
@@ -815,20 +852,23 @@ impl HexGridView {
         let editing_ascii = self.editing_ascii;
         self.low_nibble_pending = false;
         let len = bytes_to_paste.len();
-        let (insert_pos, old_bytes) = if let Some(sel) = self.selected_byte_range() {
-            let start = sel.start;
-            let removed = self.bytes[sel.clone()].to_vec();
-            self.bytes.splice(sel, bytes_to_paste.iter().copied());
-            (start, removed)
-        } else {
-            let at = self
-                .active_cursor
-                .unwrap_or(self.bytes.len())
-                .min(self.bytes.len());
-            self.bytes.splice(at..at, bytes_to_paste.iter().copied());
-            (at, Vec::new())
+        let selected_sel = self.selected_byte_range();
+        let (insert_pos, old_bytes, new_len) = {
+            let mut shared = self.shared.borrow_mut();
+            let (insert_pos, old_bytes) = if let Some(sel) = selected_sel {
+                let start = sel.start;
+                let removed = shared.wire_bytes[sel.clone()].to_vec();
+                shared.wire_bytes.splice(sel, bytes_to_paste.iter().copied());
+                (start, removed)
+            } else {
+                let wire_len = shared.wire_bytes.len();
+                let at = self.active_cursor.unwrap_or(wire_len).min(wire_len);
+                shared.wire_bytes.splice(at..at, bytes_to_paste.iter().copied());
+                (at, Vec::new())
+            };
+            (insert_pos, old_bytes, shared.wire_bytes.len())
         };
-        let end = (insert_pos + len).min(self.bytes.len());
+        let end = (insert_pos + len).min(new_len);
         let next_sel = (insert_pos < end).then_some(insert_pos..end);
         self.selection_anchor = (insert_pos < end).then_some(insert_pos);
         self.push_undo_delta(HexUndoEntry {
@@ -854,30 +894,41 @@ impl HexGridView {
     }
 
     pub(crate) fn edit_selected_byte(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly || self.bytes.is_empty() {
+        let wire_len = self.shared.borrow().wire_bytes.len();
+        if self.readonly || wire_len == 0 {
             return;
         }
-        let last_idx = self.bytes.len() - 1;
+        let last_idx = wire_len - 1;
         let target = self
             .selected_byte_range()
             .or_else(|| {
                 self.active_cursor
-                    .filter(|&c| c < self.bytes.len())
+                    .filter(|&c| c < wire_len)
                     .map(|c| c..c + 1)
             })
             .unwrap_or(last_idx..last_idx + 1);
-        if target.end > self.bytes.len() {
+        if target.end > wire_len {
             return;
         }
-        let cur_val = self.bytes.get(target.start).copied().unwrap_or(0);
+        let cur_val = self
+            .shared
+            .borrow()
+            .wire_bytes
+            .get(target.start)
+            .copied()
+            .unwrap_or(0);
         let replacement = self.parse_input_or_default(cur_val.wrapping_add(1), cx);
         let start = target.start;
-        let old_bytes = self.bytes[target.clone()].to_vec();
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        self.bytes.splice(target, replacement.iter().copied());
-        let end = (start + replacement.len()).min(self.bytes.len());
+        let (old_bytes, new_len) = {
+            let mut shared = self.shared.borrow_mut();
+            let old_bytes = shared.wire_bytes[target.clone()].to_vec();
+            shared.wire_bytes.splice(target, replacement.iter().copied());
+            (old_bytes, shared.wire_bytes.len())
+        };
+        let end = (start + replacement.len()).min(new_len);
         let next_sel = (start < end).then_some(start..end);
         self.low_nibble_pending = false;
         self.selection_anchor = (start < end).then_some(start);
@@ -898,18 +949,22 @@ impl HexGridView {
         if self.readonly {
             return;
         }
+        let wire_len = self.shared.borrow().wire_bytes.len();
         let insert_at = self
             .selected_byte_range()
             .map(|r| r.start)
             .or(self.active_cursor)
             .unwrap_or(0)
-            .min(self.bytes.len());
+            .min(wire_len);
         let inserted = self.parse_input_or_default(0x00, cx);
         let len = inserted.len();
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        self.bytes.splice(insert_at..insert_at, inserted.iter().copied());
+        self.shared
+            .borrow_mut()
+            .wire_bytes
+            .splice(insert_at..insert_at, inserted.iter().copied());
         self.low_nibble_pending = false;
         self.selection_anchor = Some(insert_at);
         let next_sel = Some(insert_at..insert_at + len);
@@ -930,13 +985,16 @@ impl HexGridView {
         if self.readonly {
             return;
         }
-        let start = self.bytes.len();
+        let start = self.shared.borrow().wire_bytes.len();
         let appended = self.parse_input_or_default(0x00, cx);
         let len = appended.len();
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        self.bytes.extend_from_slice(&appended);
+        self.shared
+            .borrow_mut()
+            .wire_bytes
+            .extend_from_slice(&appended);
         self.low_nibble_pending = false;
         self.selection_anchor = Some(start);
         let next_sel = Some(start..start + len);
@@ -954,7 +1012,7 @@ impl HexGridView {
     }
 
     pub(crate) fn delete_selected_bytes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly || self.bytes.is_empty() {
+        if self.readonly || self.shared.borrow().wire_bytes.is_empty() {
             return;
         }
         let Some(range) = self.effective_byte_selection() else {
@@ -969,21 +1027,26 @@ impl HexGridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.readonly || range.start >= range.end || range.end > self.bytes.len() {
+        let wire_len = self.shared.borrow().wire_bytes.len();
+        if self.readonly || range.start >= range.end || range.end > wire_len {
             return;
         }
         let start = range.start;
-        let old_bytes = self.bytes[range.clone()].to_vec();
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        self.bytes.drain(range);
+        let (old_bytes, new_len) = {
+            let mut shared = self.shared.borrow_mut();
+            let old_bytes = shared.wire_bytes[range.clone()].to_vec();
+            shared.wire_bytes.drain(range);
+            (old_bytes, shared.wire_bytes.len())
+        };
         self.low_nibble_pending = false;
-        let next_sel = if self.bytes.is_empty() {
+        let next_sel = if new_len == 0 {
             self.selection_anchor = None;
             None
         } else {
-            let idx = start.min(self.bytes.len() - 1);
+            let idx = start.min(new_len - 1);
             self.selection_anchor = Some(idx);
             Some(idx..idx + 1)
         };
@@ -1004,11 +1067,12 @@ impl HexGridView {
         let prev_selection = self.selected_range.clone();
         let prev_cursor = self.active_cursor;
         let editing_ascii = self.editing_ascii;
-        if self.bytes.is_empty() {
+        let wire_len = self.shared.borrow().wire_bytes.len();
+        if wire_len == 0 {
             if self.editing_ascii {
                 if ch.is_ascii() && !ch.is_ascii_control() {
                     let b = ch as u8;
-                    self.bytes.push(b);
+                    self.shared.borrow_mut().wire_bytes.push(b);
                     self.selection_anchor = Some(0);
                     self.low_nibble_pending = false;
                     let next = usize::from(self.insert_mode);
@@ -1031,7 +1095,7 @@ impl HexGridView {
                 }
             } else if let Some(nibble) = ch.to_digit(16).map(|d| d as u8) {
                 let b = nibble << 4;
-                self.bytes.push(b);
+                self.shared.borrow_mut().wire_bytes.push(b);
                 self.low_nibble_pending = true;
                 self.selection_anchor = Some(0);
                 self.push_undo_delta(HexUndoEntry {
@@ -1049,9 +1113,9 @@ impl HexGridView {
             return;
         }
         let max_cursor = if self.insert_mode && !self.low_nibble_pending {
-            self.bytes.len()
+            wire_len
         } else {
-            self.bytes.len() - 1
+            wire_len - 1
         };
         let cursor = self
             .active_cursor
@@ -1062,9 +1126,13 @@ impl HexGridView {
             if ch.is_ascii() && !ch.is_ascii_control() {
                 let b = ch as u8;
                 if self.insert_mode {
-                    self.bytes.insert(cursor, b);
+                    let new_len = {
+                        let mut shared = self.shared.borrow_mut();
+                        shared.wire_bytes.insert(cursor, b);
+                        shared.wire_bytes.len()
+                    };
                     let next = cursor + 1;
-                    let sel = (next < self.bytes.len()).then_some(next..next + 1);
+                    let sel = (next < new_len).then_some(next..next + 1);
                     self.push_undo_delta(HexUndoEntry {
                         start: cursor,
                         old_bytes: Vec::new(),
@@ -1079,9 +1147,13 @@ impl HexGridView {
                     self.active_cursor = Some(next);
                     self.selection_anchor = Some(next);
                 } else {
-                    let old_byte = self.bytes[cursor];
-                    self.bytes[cursor] = b;
-                    let next = (cursor + 1).min(self.bytes.len() - 1);
+                    let (old_byte, next) = {
+                        let mut shared = self.shared.borrow_mut();
+                        let old_byte = shared.wire_bytes[cursor];
+                        shared.wire_bytes[cursor] = b;
+                        let next = (cursor + 1).min(shared.wire_bytes.len() - 1);
+                        (old_byte, next)
+                    };
                     self.selection_anchor = Some(next);
                     self.push_undo_delta(HexUndoEntry {
                         start: cursor,
@@ -1099,7 +1171,7 @@ impl HexGridView {
         } else if let Some(nibble) = ch.to_digit(16).map(|d| d as u8) {
             if self.insert_mode && !self.low_nibble_pending {
                 let b = nibble << 4;
-                self.bytes.insert(cursor, b);
+                self.shared.borrow_mut().wire_bytes.insert(cursor, b);
                 self.low_nibble_pending = true;
                 self.selection_anchor = Some(cursor);
                 self.push_undo_delta(HexUndoEntry {
@@ -1114,9 +1186,13 @@ impl HexGridView {
                 });
                 self.commit_bytes_to_editor(Some(cursor..cursor + 1), window, cx);
             } else if !self.low_nibble_pending {
-                let old_byte = self.bytes[cursor];
-                let b = (old_byte & 0x0F) | (nibble << 4);
-                self.bytes[cursor] = b;
+                let (old_byte, b) = {
+                    let mut shared = self.shared.borrow_mut();
+                    let old_byte = shared.wire_bytes[cursor];
+                    let b = (old_byte & 0x0F) | (nibble << 4);
+                    shared.wire_bytes[cursor] = b;
+                    (old_byte, b)
+                };
                 self.low_nibble_pending = true;
                 self.selection_anchor = Some(cursor);
                 self.push_undo_delta(HexUndoEntry {
@@ -1131,16 +1207,20 @@ impl HexGridView {
                 });
                 self.commit_bytes_to_editor(Some(cursor..cursor + 1), window, cx);
             } else {
-                let old_byte = self.bytes[cursor];
-                let b = (old_byte & 0xF0) | nibble;
-                self.bytes[cursor] = b;
+                let (old_byte, b, new_len) = {
+                    let mut shared = self.shared.borrow_mut();
+                    let old_byte = shared.wire_bytes[cursor];
+                    let b = (old_byte & 0xF0) | nibble;
+                    shared.wire_bytes[cursor] = b;
+                    (old_byte, b, shared.wire_bytes.len())
+                };
                 self.low_nibble_pending = false;
                 if self.insert_mode {
                     let next = cursor + 1;
-                    let sel = (next < self.bytes.len()).then_some(next..next + 1);
+                    let sel = (next < new_len).then_some(next..next + 1);
                     if let Some(last) = self
                         .undo_stack
-                        .last_mut()
+                        .back_mut()
                         .filter(|e| e.start == cursor && e.new_bytes.len() == 1 && !e.editing_ascii)
                     {
                         last.new_bytes[0] = b;
@@ -1163,11 +1243,11 @@ impl HexGridView {
                     self.active_cursor = Some(next);
                     self.selection_anchor = Some(next);
                 } else {
-                    let next = (cursor + 1).min(self.bytes.len() - 1);
+                    let next = (cursor + 1).min(new_len - 1);
                     let sel = Some(next..next + 1);
                     if let Some(last) = self
                         .undo_stack
-                        .last_mut()
+                        .back_mut()
                         .filter(|e| e.start == cursor && e.new_bytes.len() == 1 && !e.editing_ascii)
                     {
                         last.new_bytes[0] = b;
@@ -1210,6 +1290,7 @@ impl HexGridView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
+        let wire_len = self.shared.borrow().wire_bytes.len();
         if ks.modifiers.platform || ks.modifiers.control {
             if ks.modifiers.alt {
                 return;
@@ -1230,10 +1311,10 @@ impl HexGridView {
                 }
             } else if ks.key.eq_ignore_ascii_case("y") {
                 self.redo(window, cx);
-            } else if ks.key == "home" && !self.bytes.is_empty() {
+            } else if ks.key == "home" && wire_len > 0 {
                 self.select_byte(0, ks.modifiers.shift, self.editing_ascii, window, cx);
-            } else if ks.key == "end" && !self.bytes.is_empty() {
-                let last = self.bytes.len() - 1;
+            } else if ks.key == "end" && wire_len > 0 {
+                let last = wire_len - 1;
                 self.select_byte(last, ks.modifiers.shift, self.editing_ascii, window, cx);
             }
             return;
@@ -1248,35 +1329,35 @@ impl HexGridView {
                 cx.notify();
                 return;
             }
-            "home" if !self.bytes.is_empty() => {
-                let cur = self.active_cursor.unwrap_or(0).min(self.bytes.len() - 1);
+            "home" if wire_len > 0 => {
+                let cur = self.active_cursor.unwrap_or(0).min(wire_len - 1);
                 let row_start = (cur / 16) * 16;
                 self.select_byte(row_start, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
-            "end" if !self.bytes.is_empty() => {
-                let cur = self.active_cursor.unwrap_or(0).min(self.bytes.len() - 1);
-                let row_end = ((cur / 16) * 16 + 15).min(self.bytes.len() - 1);
+            "end" if wire_len > 0 => {
+                let cur = self.active_cursor.unwrap_or(0).min(wire_len - 1);
+                let row_end = ((cur / 16) * 16 + 15).min(wire_len - 1);
                 self.select_byte(row_end, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
-            "left" if !self.bytes.is_empty() => {
+            "left" if wire_len > 0 => {
                 let cur = self.active_cursor.unwrap_or(0).saturating_sub(1);
                 self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
-            "right" if !self.bytes.is_empty() => {
-                let cur = (self.active_cursor.unwrap_or(0) + 1).min(self.bytes.len() - 1);
+            "right" if wire_len > 0 => {
+                let cur = (self.active_cursor.unwrap_or(0) + 1).min(wire_len - 1);
                 self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
-            "up" if !self.bytes.is_empty() => {
+            "up" if wire_len > 0 => {
                 let cur = self.active_cursor.unwrap_or(0).saturating_sub(16);
                 self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
-            "down" if !self.bytes.is_empty() => {
-                let cur = (self.active_cursor.unwrap_or(0) + 16).min(self.bytes.len() - 1);
+            "down" if wire_len > 0 => {
+                let cur = (self.active_cursor.unwrap_or(0) + 16).min(wire_len - 1);
                 self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
                 return;
             }
@@ -1285,8 +1366,8 @@ impl HexGridView {
                     self.delete_selected_bytes(window, cx);
                 } else if let Some(cur) = self.active_cursor
                     && cur > 0
-                    && cur <= self.bytes.len()
-                    && (self.insert_mode || cur == self.bytes.len())
+                    && cur <= wire_len
+                    && (self.insert_mode || cur == wire_len)
                 {
                     self.delete_byte_range((cur - 1)..cur, window, cx);
                 } else {
@@ -1319,10 +1400,32 @@ impl HexGridView {
 impl Render for HexGridView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = crate::theme::is_dark();
-        let total_bytes = self.bytes.len();
+        let selected_range = self.selected_range.clone();
+        let (total_bytes, status_summary) = {
+            let shared = self.shared.borrow();
+            let total_bytes = shared.wire_bytes.len();
+            let summary = if let Some(ref range) = selected_range {
+                let len = range.len();
+                if len == 1
+                    && let Some(&b) = shared.wire_bytes.get(range.start)
+                {
+                    format!(
+                        "Offset: {:08X} · Byte: 0x{b:02X} ({b}) · Total: {total_bytes} B",
+                        range.start
+                    )
+                } else {
+                    format!(
+                        "Range: {:08X}..{:08X} ({len} B / 0x{len:x}) · Total: {total_bytes} B",
+                        range.start, range.end
+                    )
+                }
+            } else {
+                format!("Total: {total_bytes} bytes (0x{total_bytes:x})")
+            };
+            (total_bytes, summary)
+        };
         let row_count = total_bytes.div_ceil(16).max(1);
         let readonly = self.readonly;
-        let selected_range = self.selected_range.clone();
         let insert_mode = self.insert_mode;
         let can_undo = !readonly && !self.undo_stack.is_empty();
         let can_redo = !readonly && !self.redo_stack.is_empty();
@@ -1333,25 +1436,6 @@ impl Render for HexGridView {
         let border_col = crate::theme::border();
         let mono_font = crate::theme::mono_font_family();
         let hex_entity_id = self.hex_editor.entity_id();
-
-        let status_summary = if let Some(ref range) = selected_range {
-            let len = range.len();
-            if len == 1
-                && let Some(&b) = self.bytes.get(range.start)
-            {
-                format!(
-                    "Offset: {:08X} · Byte: 0x{b:02X} ({b}) · Total: {total_bytes} B",
-                    range.start
-                )
-            } else {
-                format!(
-                    "Range: {:08X}..{:08X} ({len} B / 0x{len:x}) · Total: {total_bytes} B",
-                    range.start, range.end
-                )
-            }
-        } else {
-            format!("Total: {total_bytes} bytes (0x{total_bytes:x})")
-        };
 
         let toolbar = div()
             .id(("hex-grid-toolbar", hex_entity_id))
@@ -1563,7 +1647,7 @@ impl Render for HexGridView {
                     return Vec::new();
                 };
                 let grid = entity.read(cx);
-                let bytes = &grid.bytes;
+                let bytes = grid.bytes();
                 let total = bytes.len();
                 let sel = grid.selected_range.clone();
                 let search_hit = grid.search_match_range.clone();

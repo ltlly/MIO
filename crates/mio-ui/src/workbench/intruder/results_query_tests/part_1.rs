@@ -383,7 +383,7 @@ fn result_filter_failure_preserves_baseline_hex_and_success_excludes_it(cx: &mut
         assert_eq!(view.query.page.as_ref().unwrap().rows, rows);
         assert_eq!(view.selected, Some(2));
         assert_eq!(view.detail.as_deref(), Some(&flows[2]));
-        assert_eq!(view.request.view, MessageView::Hex);
+        assert_eq!(view.request.view(), MessageView::Hex);
         assert_eq!(view.request.hex.read(cx).value().to_string(), before_hex);
     });
     cx.update_window(filter_window, |_, window, cx| {

@@ -38,7 +38,7 @@ fn switching_focused_archive_raw_to_hex_keeps_quit_shortcut_routed(cx: &mut Test
         window.click("ext-message-hex", cx);
         window.render_frame(cx);
         let messages = fixture.view.read(cx).ext_import.messages.as_ref().unwrap();
-        assert_eq!(messages.payload.view, MessageView::Hex);
+        assert_eq!(messages.payload.view(), MessageView::Hex);
         assert_eq!(
             messages.payload.hex.read(cx).value().as_ref(),
             "62 6f 64 79"

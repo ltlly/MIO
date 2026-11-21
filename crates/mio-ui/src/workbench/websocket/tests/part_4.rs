@@ -315,7 +315,7 @@ fn websocket_edited_marker_and_original_final_toggle_without_losing_bytes(cx: &m
                         assert_eq!(state.original_view, original);
                         assert_eq!(state.payload.bytes(window, cx).unwrap(), expected);
                         assert_eq!(
-                            state.payload.view,
+                            state.payload.view(),
                             if kind == WebSocketKind::Binary {
                                 MessageView::Hex
                             } else {
@@ -360,7 +360,7 @@ fn websocket_edited_marker_and_original_final_toggle_without_losing_bytes(cx: &m
                 assert!(!state.original_view);
                 assert!(state.original_payload.is_none());
                 assert_eq!(state.detail.as_deref(), Some(&plain_record));
-                assert_eq!(state.payload.view, MessageView::Raw);
+                assert_eq!(state.payload.view(), MessageView::Raw);
                 assert_eq!(
                     state.payload.bytes(window, cx).unwrap(),
                     plain_record.payload

@@ -489,12 +489,12 @@ impl Workbench {
 
     pub(in crate::workbench) fn focus_message_editor_by_id(
         &self,
-        id: &'static str,
+        slot: super::wb_editors::EditorSlot,
         window: &mut Window,
         cx: &mut App,
     ) {
-        if let Some(editor) = self.message_editor_ref(id) {
-            let state = editor.state().clone();
+        if let Some(editor) = self.message_editor_ref(slot) {
+            let state = editor.state();
             state.update(cx, |s, cx| s.focus(window, cx));
         }
     }
@@ -526,14 +526,14 @@ impl Workbench {
 
     pub(in crate::workbench) fn copy_selected_editor_text(
         &mut self,
-        id: &'static str,
+        slot: super::wb_editors::EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.transition.is_some() || self.project.is_none() || !self.backend_available() {
             return;
         }
-        self.focus_message_editor_by_id(id, window, cx);
+        self.focus_message_editor_by_id(slot, window, cx);
         match self.focused_tool_selection(window, cx) {
             Ok(Some(selected)) if !selected.is_empty() => {
                 cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(selected));
@@ -548,7 +548,7 @@ impl Workbench {
 
     pub(in crate::workbench) fn save_selected_text_to_file(
         &mut self,
-        id: &'static str,
+        slot: super::wb_editors::EditorSlot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -559,7 +559,7 @@ impl Workbench {
         {
             return;
         }
-        self.focus_message_editor_by_id(id, window, cx);
+        self.focus_message_editor_by_id(slot, window, cx);
         self.save_focused_selected_text_to_file(window, cx);
     }
 
@@ -1330,175 +1330,6 @@ impl Workbench {
         self.open_csrf_poc_modal(&url, &draft.raw, cx);
     }
 
-    pub(in crate::workbench) fn apply_extended_conversion_action(
-        &mut self,
-        kind: editing::ExtendedConvertKind,
-        copy_only: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.transition.is_some() {
-            self.fail("正在切换或保存项目；未转换选区。", cx);
-            return;
-        }
-        let apply_in_place = |editor: &Entity<gpui_kit::component::input::EditorState>,
-                              window: &mut Window,
-                              cx: &mut App|
-         -> Result<(), String> {
-            let converted = editing::convert_selected_editor_text_extended(editor, kind, window, cx)?;
-            let range = editor.read(cx).selected_range();
-            let reversed = editor.read(cx).is_selection_reversed();
-            editor.update(cx, |state, cx| {
-                state.replace(converted.clone(), window, cx);
-                state.set_selected_range_with_direction(
-                    range.start..range.start + converted.len(),
-                    reversed,
-                    cx,
-                );
-            });
-            Ok(())
-        };
-        if !copy_only {
-            let in_place = match self.tool {
-                Tool::Repeater if self.workspace.active.is_none() => {
-                    self.workspace.active_websocket_tab.and_then(|ws_id| {
-                        let editors = self.websocket_repeater.editors.get_mut(&ws_id)?;
-                        if editors.draft.has_focus(window, cx)
-                            && !editors.draft.is_readonly_preview()
-                            && editors.draft.view == MessageView::Raw
-                        {
-                            let st = editors.draft.state().clone();
-                            let res = apply_in_place(&st, window, cx);
-                            if res.is_ok() {
-                                editors.dirty = true;
-                            }
-                            Some(res)
-                        } else {
-                            None
-                        }
-                    })
-                }
-                Tool::Repeater => self.workspace.active.and_then(|tab_id| {
-                    let editors = self.tab_editors.get_mut(&tab_id)?;
-                    if editors.request.has_focus(window, cx)
-                        && !editors.request.is_readonly_preview()
-                        && editors.request.view == MessageView::Raw
-                    {
-                        let st = editors.request.state().clone();
-                        let res = apply_in_place(&st, window, cx);
-                        if res.is_ok() {
-                            editors.dirty = true;
-                        }
-                        Some(res)
-                    } else {
-                        None
-                    }
-                }),
-                Tool::Proxy if self.proxy_page == ProxyPage::Intercept => {
-                    let sel = self.selected_intercept;
-                    self.intercepts
-                        .iter_mut()
-                        .find(|p| Some(p.id()) == sel && !p.deciding)
-                        .and_then(|p| {
-                            if !p.editor.is_readonly_preview() && p.editor.view == MessageView::Raw
-                            {
-                                let st = p.editor.state().clone();
-                                Some(apply_in_place(&st, window, cx))
-                            } else {
-                                None
-                            }
-                        })
-                }
-                Tool::Intruder => self.workspace.intruder.active.and_then(|id| {
-                    let editors = self.intruder.editors.get_mut(&id)?;
-                    if editors.request.view == MessageView::Raw && !editors.request.has_unplaced() {
-                        let raw = editors.request.raw.clone();
-                        if raw.update(cx, |s, cx| s.marked_text_range(window, cx).is_some()) {
-                            return Some(Err(editing::COMPOSITION_PENDING.into()));
-                        }
-                        let range = raw.read(cx).selected_range();
-                        let reversed = raw.read(cx).is_selection_reversed();
-                        if range.is_empty() {
-                            return Some(Err("请先在消息编辑器中选中要转换的文本。".into()));
-                        }
-                        let selected = raw.read(cx).selected_value();
-                        let converted = editing::convert_selection_extended(kind, selected.as_ref());
-                        raw.update(cx, |state, cx| {
-                            state.replace(converted.clone(), window, cx);
-                            state.set_selected_range_with_direction(
-                                range.start..range.start + converted.len(),
-                                reversed,
-                                cx,
-                            );
-                        });
-                        Some(Ok(()))
-                    } else {
-                        None
-                    }
-                }),
-                Tool::Sequencer if self.sequencer_pane.page == sequencer::SequencerPage::Live => {
-                    if self.sequencer_pane.running.is_none()
-                        && self.sequencer_pane.request.has_focus(window, cx)
-                        && !self.sequencer_pane.request.is_readonly_preview()
-                        && self.sequencer_pane.request.view == MessageView::Raw
-                    {
-                        let st = self.sequencer_pane.request.state().clone();
-                        Some(apply_in_place(&st, window, cx))
-                    } else {
-                        None
-                    }
-                }
-                Tool::Dashboard
-                    if self.audit_dashboard.new_scan_open
-                        && self.audit_can_operate()
-                        && self
-                            .audit_dashboard
-                            .scan_request_editor
-                            .has_focus(window, cx)
-                        && !self.audit_dashboard.scan_request_editor.is_readonly_preview()
-                        && self.audit_dashboard.scan_request_editor.view == MessageView::Raw =>
-                {
-                    let st = self.audit_dashboard.scan_request_editor.state().clone();
-                    Some(apply_in_place(&st, window, cx))
-                }
-                Tool::Decoder
-                    if self
-                        .extra_tools
-                        .decoder_input
-                        .focus_handle(cx)
-                        .is_focused(window) =>
-                {
-                    let st = self.extra_tools.decoder_input.clone();
-                    Some(apply_in_place(&st, window, cx))
-                }
-                _ => None,
-            };
-            if let Some(outcome) = in_place {
-                match outcome {
-                    Ok(()) => {
-                        self.error = None;
-                        self.status = "已转换选区内容。".into();
-                        cx.notify();
-                    }
-                    Err(err) => self.fail(err, cx),
-                }
-                return;
-            }
-        }
-        // Readonly fallback (or explicit copy_only): convert selection and copy to clipboard.
-        match self.focused_tool_selection(window, cx) {
-            Ok(Some(selected)) if !selected.is_empty() => {
-                let converted = editing::convert_selection_extended(kind, &selected);
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(converted));
-                self.error = None;
-                self.status = "已转换选区并复制到剪贴板。".into();
-                cx.notify();
-            }
-            Ok(_) => self.fail("请先在消息编辑器中选中要转换的文本。", cx),
-            Err(err) => self.fail(err, cx),
-        }
-    }
-
     pub(in crate::workbench) fn insert_bytes_into_editable_target(
         &mut self,
         bytes: &[u8],
@@ -1633,14 +1464,14 @@ fn insert_bytes_into_message_editor(
     cx: &mut App,
 ) -> Result<(), String> {
     if editor.is_readonly_preview() {
-        let target_view = if std::str::from_utf8(bytes).is_ok() && editor.view == MessageView::Raw {
+        let target_view = if std::str::from_utf8(bytes).is_ok() && editor.view() == MessageView::Raw {
             MessageView::Raw
         } else {
-            editor.view
+            editor.view()
         };
         editor.switch(target_view, window, cx)?;
     }
-    match editor.view {
+    match editor.view() {
         MessageView::Raw => match std::str::from_utf8(bytes) {
             Ok(text) => {
                 if editor

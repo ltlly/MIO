@@ -23,17 +23,17 @@ std::thread_local! {
 impl Workbench {
     pub(in crate::workbench) fn render_response_editor_body(
         &self,
-        id: &'static str,
+        slot: EditorSlot,
         response: &MessageEditor,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if response.render_active {
-            return self.render_response_visual_card(id, response, cx);
+            return self.render_response_visual_card(slot.id(), response, cx);
         }
-        editing::message_editor(response.state())
+        editing::message_editor(response)
             .readonly(true)
             .size_full()
-            .context_menu(self.request_context_menu(response.state().clone(), true))
+            .context_menu(self.request_context_menu(response.state(), true))
             .aria_label("响应消息编辑器")
             .into_any_element()
     }
@@ -61,8 +61,7 @@ impl Workbench {
                 None
             } else {
                 let parsed = editing::parse_rendered_http_response(&raw);
-                let body_for_browser =
-                    std::sync::Arc::new(editing::extract_http_response_body(&raw));
+                let body_for_browser = std::sync::Arc::new(parsed.body);
                 Some(std::rc::Rc::new(CachedRenderedResponse {
                     status_line: parsed.status_line,
                     status_code: parsed.status_code,

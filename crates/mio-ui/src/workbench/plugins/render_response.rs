@@ -98,13 +98,18 @@ impl Workbench {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.message_header("repeater-response", "Response", editors.response.view, cx))
+            .child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                "Response",
+                editors.response.view(),
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_response_editor_body(
-                        "repeater-response",
+                        crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
                         &editors.response,
                         cx,
                     )),
@@ -113,7 +118,12 @@ impl Workbench {
                 "repeater-response",
                 cx,
                 |this, action, window, cx| {
-                    this.handle_message_search_action("repeater-response", action, window, cx);
+                    this.handle_message_search_action(
+                        crate::workbench::wb_editors::EditorSlot::RepeaterResponse,
+                        action,
+                        window,
+                        cx,
+                    );
                 },
             ))
             .into_any_element()
@@ -125,7 +135,8 @@ impl Workbench {
         active_resp: Option<Uuid>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let replace_readonly = self.is_message_replace_readonly("repeater-request");
+        let replace_readonly =
+            self.is_message_replace_readonly(crate::workbench::wb_editors::EditorSlot::RepeaterRequest);
         div()
             .size_full()
             .flex()
@@ -138,18 +149,18 @@ impl Workbench {
                     .border_r_1()
                     .border_color(theme::border())
                     .child(self.message_header(
-                        "repeater-request",
+                        crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
                         "Request",
-                        editors.request.view,
+                        editors.request.view(),
                         cx,
                     ))
                     .child(
                         div().flex_1().min_h_0().child(
-                            editing::message_editor(editors.request.state())
+                            editing::message_editor(&editors.request)
                                 .readonly(editors.request.is_readonly_preview())
                                 .size_full()
                                 .context_menu(self.request_context_menu(
-                                    editors.request.state().clone(),
+                                    editors.request.state(),
                                     false,
                                 ))
                                 .aria_label("请求消息编辑器"),
@@ -161,7 +172,7 @@ impl Workbench {
                         cx,
                         |this, action, window, cx| {
                             this.handle_message_search_action(
-                                "repeater-request",
+                                crate::workbench::wb_editors::EditorSlot::RepeaterRequest,
                                 action,
                                 window,
                                 cx,
@@ -352,13 +363,30 @@ impl Workbench {
         active_resp: Option<Uuid>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (request_id, response_id) = match owner {
-            "logger" => ("logger-request", "logger-response"),
-            "target" => ("target-request", "target-response"),
-            "organiser" => ("organiser-request", "organiser-response"),
-            "dashboard" => ("dashboard-issue-request", "dashboard-issue-response"),
-            _ => ("history-request", "history-response"),
+        let (request_slot, response_slot) = match owner {
+            "logger" => (
+                crate::workbench::wb_editors::EditorSlot::LoggerRequest,
+                crate::workbench::wb_editors::EditorSlot::LoggerResponse,
+            ),
+            "target" => (
+                crate::workbench::wb_editors::EditorSlot::TargetRequest,
+                crate::workbench::wb_editors::EditorSlot::TargetResponse,
+            ),
+            "organiser" => (
+                crate::workbench::wb_editors::EditorSlot::OrganiserRequest,
+                crate::workbench::wb_editors::EditorSlot::OrganiserResponse,
+            ),
+            "dashboard" => (
+                crate::workbench::wb_editors::EditorSlot::DashboardIssueRequest,
+                crate::workbench::wb_editors::EditorSlot::DashboardIssueResponse,
+            ),
+            _ => (
+                crate::workbench::wb_editors::EditorSlot::HistoryRequest,
+                crate::workbench::wb_editors::EditorSlot::HistoryResponse,
+            ),
         };
+        let request_id = request_slot.id();
+        let response_id = response_slot.id();
         let left = if let Some(instance) =
             active_instance.and_then(|id| self.extensions.instance(id))
         {
@@ -377,13 +405,13 @@ impl Workbench {
                 .flex_col()
                 .border_r_1()
                 .border_color(theme::border())
-                .child(self.message_header(request_id, "Request", request.view, cx))
+                .child(self.message_header(request_slot, "Request", request.view(), cx))
                 .child(
                     div().flex_1().min_h_0().child(
-                        editing::message_editor(request.state())
+                        editing::message_editor(request)
                             .readonly(true)
                             .size_full()
-                            .context_menu(self.request_context_menu(request.state().clone(), true))
+                            .context_menu(self.request_context_menu(request.state(), true))
                             .aria_label("请求消息编辑器"),
                     ),
                 )
@@ -391,7 +419,7 @@ impl Workbench {
                     request_id,
                     cx,
                     move |this, action, window, cx| {
-                        this.handle_message_search_action(request_id, action, window, cx);
+                        this.handle_message_search_action(request_slot, action, window, cx);
                     },
                 ))
                 .into_any_element()
@@ -409,13 +437,13 @@ impl Workbench {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(self.message_header(response_id, "Response", response.view, cx))
+                .child(self.message_header(response_slot, "Response", response.view(), cx))
                 .child(
                     div().flex_1().min_h_0().child(
-                        editing::message_editor(response.state())
+                        editing::message_editor(response)
                             .readonly(true)
                             .size_full()
-                            .context_menu(self.request_context_menu(response.state().clone(), true))
+                            .context_menu(self.request_context_menu(response.state(), true))
                             .aria_label("响应消息编辑器"),
                     ),
                 )
@@ -423,7 +451,7 @@ impl Workbench {
                     response_id,
                     cx,
                     move |this, action, window, cx| {
-                        this.handle_message_search_action(response_id, action, window, cx);
+                        this.handle_message_search_action(response_slot, action, window, cx);
                     },
                 ))
                 .into_any_element()

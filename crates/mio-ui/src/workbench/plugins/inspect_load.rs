@@ -484,7 +484,7 @@ impl Workbench {
                 tab.draft.raw = raw_request.clone();
                 tab.draft.revision = next_revision;
                 if let Some(editors) = self.tab_editors.get_mut(&tab_id) {
-                    let prev_view = editors.request.view;
+                    let prev_view = editors.request.view();
                     editors.request.load(&raw_request, window, cx);
                     let _ = editors.request.switch(prev_view, window, cx);
                     editors.loaded_revision = next_revision;
@@ -508,7 +508,7 @@ impl Workbench {
                             }
                         )
                 }) {
-                    let prev_view = pending.editor.view;
+                    let prev_view = pending.editor.view();
                     pending.editor.load(&raw_request, window, cx);
                     let _ = pending.editor.switch(prev_view, window, cx);
                     self.extensions.push_log("已原地替换当前拦截请求报文");

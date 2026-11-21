@@ -105,17 +105,21 @@ impl MessageEditor {
         cx: &mut App,
     ) -> Result<(), String> {
         let query = input_snapshot(&self.search, window, cx).map_err(str::to_owned)?;
-        self.view_cell.set(self.view);
-        self.pretty_cell.set(self.pretty_active);
-        self.hide_headers_cell.set(self.hide_headers);
-        self.non_printable_cell.set(self.show_non_printable);
-        self.case_sensitive_cell.set(self.case_sensitive);
-        self.regex_cell.set(self.regex);
-        self.auto_scroll_cell.set(self.auto_scroll_to_match);
-        let active = self.state().clone();
+        let (header_preview, non_printable, case_sensitive, regex, auto_scroll_to_match, hex_grid) = {
+            let s = self.shared.borrow();
+            (
+                s.header_preview.clone(),
+                s.non_printable.clone(),
+                s.case_sensitive,
+                s.regex,
+                s.auto_scroll_to_match,
+                s.hex_grid.clone(),
+            )
+        };
+        let active = self.state();
         for candidate in [
-            self.header_preview.as_ref(),
-            self.non_printable.as_ref(),
+            header_preview.as_ref(),
+            non_printable.as_ref(),
             Some(&self.raw),
             Some(&self.hex),
         ]
@@ -126,8 +130,7 @@ impl MessageEditor {
                 candidate.update(cx, |state, cx| state.close_search(cx));
             }
         }
-        let case_insensitive = !self.case_sensitive;
-        let regex = self.regex;
+        let case_insensitive = !case_sensitive;
         let result = active.update(cx, |state, cx| {
             if query.is_empty() {
                 let _ = state.set_search_regex("", case_insensitive, regex, cx);
@@ -140,33 +143,33 @@ impl MessageEditor {
             let revealed_range = match next {
                 Some(true) => state.next_search_match(cx),
                 Some(false) => state.previous_search_match(cx),
-                None if self.auto_scroll_to_match => state.reveal_current_search_match(cx),
+                None if auto_scroll_to_match => state.reveal_current_search_match(cx),
                 None => None,
             };
             Ok::<_, String>(revealed_range)
         });
         match result {
             Ok(revealed_range) => {
-                *self.search_error.borrow_mut() = None;
-                if active.entity_id() == self.hex.entity_id() {
+                self.shared.borrow_mut().search_error = None;
+                if active.entity_id() == self.hex.entity_id()
+                    && let Some(grid) = hex_grid
+                {
                     if let Some(match_range) = revealed_range {
-                        hex_grid::scroll_hex_grid_to_text_range(
-                            active.entity_id(),
-                            match_range,
-                            cx,
-                        );
+                        grid.update(cx, |g, cx| g.scroll_to_text_range(match_range, cx));
                     } else if query.is_empty()
                         || active.read(cx).search_session().matcher.is_empty()
                     {
-                        hex_grid::clear_hex_grid_search_match(active.entity_id(), cx);
+                        grid.update(cx, |g, cx| g.clear_search_match(cx));
                     }
                 }
                 Ok(())
             }
             Err(error) => {
-                *self.search_error.borrow_mut() = Some(error.clone());
-                if active.entity_id() == self.hex.entity_id() {
-                    hex_grid::clear_hex_grid_search_match(active.entity_id(), cx);
+                self.shared.borrow_mut().search_error = Some(error.clone());
+                if active.entity_id() == self.hex.entity_id()
+                    && let Some(grid) = hex_grid
+                {
+                    grid.update(cx, |g, cx| g.clear_search_match(cx));
                 }
                 Err(error)
             }
@@ -178,14 +181,12 @@ impl MessageEditor {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let next = !self.case_sensitive;
-        self.case_sensitive = next;
-        self.case_sensitive_cell.set(next);
+        let next = !self.case_sensitive();
+        self.shared.borrow_mut().case_sensitive = next;
         self.pending_replace_all = None;
         if let Err(error) = self.update_search(None, window, cx) {
             if error == COMPOSITION_PENDING {
-                self.case_sensitive = !next;
-                self.case_sensitive_cell.set(!next);
+                self.shared.borrow_mut().case_sensitive = !next;
             }
             return Err(error);
         }
@@ -193,14 +194,12 @@ impl MessageEditor {
     }
 
     pub fn toggle_regex(&mut self, window: &mut Window, cx: &mut App) -> Result<(), String> {
-        let next = !self.regex;
-        self.regex = next;
-        self.regex_cell.set(next);
+        let next = !self.regex();
+        self.shared.borrow_mut().regex = next;
         self.pending_replace_all = None;
         if let Err(error) = self.update_search(None, window, cx) {
             if error == COMPOSITION_PENDING {
-                self.regex = !next;
-                self.regex_cell.set(!next);
+                self.shared.borrow_mut().regex = !next;
             }
             return Err(error);
         }
@@ -215,13 +214,11 @@ impl MessageEditor {
         if self.has_any_composition(window, cx) {
             return Err(COMPOSITION_PENDING.into());
         }
-        let next = !self.auto_scroll_to_match;
-        self.auto_scroll_to_match = next;
-        self.auto_scroll_cell.set(next);
+        let next = !self.auto_scroll_to_match();
+        self.shared.borrow_mut().auto_scroll_to_match = next;
         if next && let Err(error) = self.update_search(None, window, cx) {
             if error == COMPOSITION_PENDING {
-                self.auto_scroll_to_match = !next;
-                self.auto_scroll_cell.set(!next);
+                self.shared.borrow_mut().auto_scroll_to_match = !next;
             }
             return Err(error);
         }
@@ -234,10 +231,11 @@ impl MessageEditor {
     }
 
     pub fn search_status_label(&self, cx: &App) -> String {
-        if self.search_error.borrow().is_some() {
+        if self.has_search_error() {
             return "正则无效".into();
         }
-        let session = self.state().read(cx).search_session();
+        let active = self.state();
+        let session = active.read(cx).search_session();
         if session.query.is_empty() {
             return "0 个匹配".into();
         }
@@ -356,9 +354,10 @@ impl MessageEditor {
         + 'static,
     ) -> AnyElement {
         let owner = cx.weak_entity();
-        let case_sensitive = self.case_sensitive;
-        let regex_active = self.regex;
-        let auto_scroll = self.auto_scroll_to_match;
+        let (case_sensitive, regex_active, auto_scroll) = {
+            let s = self.shared.borrow();
+            (s.case_sensitive, s.regex, s.auto_scroll_to_match)
+        };
         let replace_open = self.replace_open;
         let case_action = on_action.clone();
         let regex_action = on_action.clone();
@@ -674,7 +673,7 @@ impl MessageEditor {
     ) -> AnyElement {
         let prev_action = on_action.clone();
         let next_action = on_action.clone();
-        let has_error = self.search_error.borrow().is_some();
+        let has_error = self.has_search_error();
         let status = self.search_status_label(cx);
         let selected_len = Some(self.selected_byte_len(cx)).filter(|&n| n > 0);
         let can_show_replace = !readonly && !self.is_readonly_preview();

@@ -115,7 +115,7 @@ fn imported_repeater_workspace_restores_order_titles_and_selected_pairs_without_
     cx.read(|cx| {
         let view = f.view.read(cx);
         assert_eq!(view.workspace.active, Some(second.id));
-        assert_eq!(view.tab_editors[&second.id].request.view, MessageView::Hex);
+        assert_eq!(view.tab_editors[&second.id].request.view(), MessageView::Hex);
         assert_eq!(view.workspace.tabs, [first, second]);
         assert!(view.sending.is_empty() && view.pending_sends.is_empty());
     });

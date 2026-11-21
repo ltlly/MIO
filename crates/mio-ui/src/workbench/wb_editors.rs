@@ -29,40 +29,118 @@ std::thread_local! {
     > = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn owner_for_editor_id(id: &'static str) -> Option<&'static str> {
-    match id {
-        "repeater-request" | "repeater-response" => Some("repeater"),
-        "history-request" | "history-response" => Some("history"),
-        "target-request" | "target-response" => Some("target"),
-        "logger-request" | "logger-response" => Some("logger"),
-        "organiser-request" | "organiser-response" => Some("organiser"),
-        "dashboard-issue-request" | "dashboard-issue-response" => Some("dashboard"),
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(in crate::workbench) enum EditorSlot {
+    HistoryRequest,
+    HistoryResponse,
+    LoggerRequest,
+    LoggerResponse,
+    TargetRequest,
+    TargetResponse,
+    OrganiserRequest,
+    OrganiserResponse,
+    DashboardIssueRequest,
+    DashboardIssueResponse,
+    WebsocketPayload,
+    ExtMessage,
+    Intercept,
+    RepeaterRequest,
+    RepeaterResponse,
+    WsRepeaterDraft,
+    WsRepeaterHistory,
+}
+
+impl EditorSlot {
+    pub(in crate::workbench) const fn id(self) -> &'static str {
+        match self {
+            Self::HistoryRequest => "history-request",
+            Self::HistoryResponse => "history-response",
+            Self::LoggerRequest => "logger-request",
+            Self::LoggerResponse => "logger-response",
+            Self::TargetRequest => "target-request",
+            Self::TargetResponse => "target-response",
+            Self::OrganiserRequest => "organiser-request",
+            Self::OrganiserResponse => "organiser-response",
+            Self::DashboardIssueRequest => "dashboard-issue-request",
+            Self::DashboardIssueResponse => "dashboard-issue-response",
+            Self::WebsocketPayload => "websocket-payload",
+            Self::ExtMessage => "ext-message",
+            Self::Intercept => "intercept",
+            Self::RepeaterRequest => "repeater-request",
+            Self::RepeaterResponse => "repeater-response",
+            Self::WsRepeaterDraft => "ws-repeater-draft",
+            Self::WsRepeaterHistory => "ws-repeater-history",
+        }
+    }
+
+    pub(in crate::workbench) const fn owner(self) -> Option<&'static str> {
+        match self {
+            Self::RepeaterRequest | Self::RepeaterResponse => Some("repeater"),
+            Self::HistoryRequest | Self::HistoryResponse => Some("history"),
+            Self::TargetRequest | Self::TargetResponse => Some("target"),
+            Self::LoggerRequest | Self::LoggerResponse => Some("logger"),
+            Self::OrganiserRequest | Self::OrganiserResponse => Some("organiser"),
+            Self::DashboardIssueRequest | Self::DashboardIssueResponse => Some("dashboard"),
+            _ => None,
+        }
+    }
+
+    pub(in crate::workbench) const fn is_request(self) -> bool {
+        matches!(
+            self,
+            Self::RepeaterRequest
+                | Self::HistoryRequest
+                | Self::TargetRequest
+                | Self::LoggerRequest
+                | Self::OrganiserRequest
+                | Self::DashboardIssueRequest
+        )
+    }
+
+    pub(in crate::workbench) const fn is_response(self) -> bool {
+        matches!(
+            self,
+            Self::RepeaterResponse
+                | Self::HistoryResponse
+                | Self::TargetResponse
+                | Self::LoggerResponse
+                | Self::OrganiserResponse
+                | Self::DashboardIssueResponse
+        )
+    }
+
+    pub(in crate::workbench) const fn pair_for_owner(owner: &str) -> (Self, Self) {
+        match owner {
+            _ if matches_str(owner, "history") || matches_str(owner, "imported-history") => {
+                (Self::HistoryRequest, Self::HistoryResponse)
+            }
+            _ if matches_str(owner, "logger") => (Self::LoggerRequest, Self::LoggerResponse),
+            _ if matches_str(owner, "target") => (Self::TargetRequest, Self::TargetResponse),
+            _ if matches_str(owner, "organiser") => {
+                (Self::OrganiserRequest, Self::OrganiserResponse)
+            }
+            _ if matches_str(owner, "dashboard") => {
+                (Self::DashboardIssueRequest, Self::DashboardIssueResponse)
+            }
+            _ => (Self::RepeaterRequest, Self::RepeaterResponse),
+        }
     }
 }
 
-fn is_request_editor_id(id: &str) -> bool {
-    matches!(
-        id,
-        "repeater-request"
-            | "history-request"
-            | "target-request"
-            | "logger-request"
-            | "organiser-request"
-            | "dashboard-issue-request"
-    )
-}
-
-fn is_response_editor_id(id: &str) -> bool {
-    matches!(
-        id,
-        "repeater-response"
-            | "history-response"
-            | "target-response"
-            | "logger-response"
-            | "organiser-response"
-            | "dashboard-issue-response"
-    )
+const fn matches_str(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 fn message_view_tab(id: SharedString, label: &'static str, width: f32, selected: bool) -> Button {
@@ -273,30 +351,31 @@ impl Workbench {
     #[inline(never)]
     pub(in crate::workbench) fn message_header(
         &self,
-        id: &'static str,
+        slot: EditorSlot,
         title: &'static str,
         view: MessageView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let pretty = self.is_message_pretty(id);
-        let hide_headers = self.is_message_hide_headers(id);
-        let non_printable = self.is_message_non_printable(id);
-        let render_active = self.is_message_render(id);
-        let soft_wrap = self.is_message_soft_wrap(id);
+        let id = slot.id();
+        let pretty = self.is_message_pretty(slot);
+        let hide_headers = self.is_message_hide_headers(slot);
+        let non_printable = self.is_message_non_printable(slot);
+        let render_active = self.is_message_render(slot);
+        let soft_wrap = self.is_message_soft_wrap(slot);
         let raw_selected = !pretty && !render_active && view == MessageView::Raw;
         let hex_selected = !pretty && !render_active && view == MessageView::Hex;
         let provenance = self
-            .render_message_provenance_menu(id, cx)
-            .or_else(|| self.render_repeater_provenance_menu(id, cx))
-            .or_else(|| self.render_target_provenance_menu(id, cx));
-        let title = if is_response_editor_id(id) {
+            .render_message_provenance_menu(slot, cx)
+            .or_else(|| self.render_repeater_provenance_menu(slot, cx))
+            .or_else(|| self.render_target_provenance_menu(slot, cx));
+        let title = if slot.is_response() {
             "Response"
-        } else if is_request_editor_id(id) {
+        } else if slot.is_request() {
             "Request"
         } else {
             title
         };
-        let editor_owner = owner_for_editor_id(id);
+        let editor_owner = slot.owner();
         let current_layout = editor_owner.map(|owner| {
             if owner == "repeater" {
                 self.workspace.repeater_settings.layout
@@ -310,19 +389,19 @@ impl Workbench {
             if is_combined {
                 true
             } else if is_top_bottom {
-                is_request_editor_id(id)
+                slot.is_request()
             } else {
-                is_response_editor_id(id)
+                slot.is_response()
             }
         });
-        let is_target_editor = id == "target-request" || id == "target-response";
+        let is_target_editor = matches!(slot, EditorSlot::TargetRequest | EditorSlot::TargetResponse);
         let compact_header = is_target_editor && !is_combined;
         let narrow_view_tabs = is_target_editor && self.inspector.open && !is_combined && !is_top_bottom;
         let row1_h = if compact_header { px(30.) } else { px(39.) };
         let row2_h = if compact_header { px(30.) } else { px(38.) };
         let header_h = if compact_header { px(60.) } else { px(77.) };
         let tab_h = if compact_header { px(29.) } else { px(37.) };
-        let overflow_active = hex_selected || (is_response_editor_id(id) && render_active);
+        let overflow_active = hex_selected || (slot.is_response() && render_active);
         let overflow_menu_owner = cx.weak_entity();
         div()
             .w_full()
@@ -436,7 +515,7 @@ impl Workbench {
                         .h(tab_h)
                         .tooltip("格式化视图（自动美化 JSON / XML / HTML / 表单，可编辑模式下支持实时编辑）")
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.switch_pretty_view(id, window, cx)
+                            this.switch_pretty_view(slot, window, cx)
                         })),
                     )
                     .child(
@@ -449,7 +528,7 @@ impl Workbench {
                         .h(tab_h)
                         .tooltip("原始字节流文本视图（按字节展示完整报文，可编辑模式下支持直接修改）")
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.switch_message_view(id, MessageView::Raw, window, cx)
+                            this.switch_message_view(slot, MessageView::Raw, window, cx)
                         })),
                     )
                     .when(!narrow_view_tabs, |group| {
@@ -464,10 +543,10 @@ impl Workbench {
                                 .h(tab_h)
                                 .tooltip("十六进制字节编辑器视图（按精确字节偏移查看与修改载荷）")
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.switch_message_view(id, MessageView::Hex, window, cx)
+                                    this.switch_message_view(slot, MessageView::Hex, window, cx)
                                 })),
                             )
-                            .when(is_response_editor_id(id), |group| {
+                            .when(slot.is_response(), |group| {
                                 group.child(
                                     message_view_tab(
                                         format!("{id}-render").into(),
@@ -478,13 +557,13 @@ impl Workbench {
                                     .h(tab_h)
                                     .tooltip("安全离线页面渲染预览（提取 HTML 结构、超链接、表单控件与图片元数据，绝不发起外部请求）")
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.switch_render_view(id, window, cx)
+                                        this.switch_render_view(slot, window, cx)
                                     })),
                                 )
                             })
                     })
                     .when(narrow_view_tabs, |group| {
-                        let is_resp = is_response_editor_id(id);
+                        let is_resp = slot.is_response();
                         group.child(
                             Button::new(SharedString::from(format!("{id}-view-overflow")))
                                 .ghost()
@@ -525,7 +604,7 @@ impl Workbench {
                                                 .on_click(move |_, window, cx| {
                                                     let _ = owner_hex.update(cx, |this, cx| {
                                                         this.switch_message_view(
-                                                            id,
+                                                            slot,
                                                             MessageView::Hex,
                                                             window,
                                                             cx,
@@ -539,7 +618,7 @@ impl Workbench {
                                                     .checked(render_active)
                                                     .on_click(move |_, window, cx| {
                                                         let _ = owner_render.update(cx, |this, cx| {
-                                                            this.switch_render_view(id, window, cx);
+                                                            this.switch_render_view(slot, window, cx);
                                                         });
                                                     }),
                                             )
@@ -547,7 +626,7 @@ impl Workbench {
                                 }),
                         )
                     })
-                    .when(id != "ext-message", |row| {
+                    .when(slot != EditorSlot::ExtMessage, |row| {
                         let unavailable = self.project.is_none()
                             || self.transition.is_some()
                             || self.backend_disconnected;
@@ -584,7 +663,7 @@ impl Workbench {
                                             "Hide specified headers"
                                         })
                                         .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.toggle_message_hide_headers(id, window, cx)
+                                            this.toggle_message_hide_headers(slot, window, cx)
                                         })),
                                 )
                                 .child(
@@ -607,7 +686,7 @@ impl Workbench {
                                         .toggled(soft_wrap)
                                         .tooltip(if soft_wrap { "自动换行已开启（点击切换为单行水平滚动）" } else { "自动换行已关闭（点击开启长行自动折行显示）" })
                                         .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.toggle_message_soft_wrap(id, window, cx)
+                                            this.toggle_message_soft_wrap(slot, window, cx)
                                         })),
                                 )
                                 .child(
@@ -675,7 +754,7 @@ impl Workbench {
                             "显示非打印字符（Show non-printable characters：可视化呈现 \\r\\n、制表符与控制字符）"
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.toggle_message_non_printable(id, window, cx)
+                            this.toggle_message_non_printable(slot, window, cx)
                         })),
                                 )
                                 .child(
@@ -698,7 +777,7 @@ impl Workbench {
                                             populate_message_actions_menu(
                                                 menu,
                                                 menu_owner.clone(),
-                                                id,
+                                                slot,
                                                 unavailable,
                                                 window,
                                                 cx,
@@ -720,20 +799,15 @@ impl Workbench {
         readonly: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (request_id, response_id) = match owner {
-            "history" | "imported-history" => ("history-request", "history-response"),
-            "logger" => ("logger-request", "logger-response"),
-            "target" => ("target-request", "target-response"),
-            "organiser" => ("organiser-request", "organiser-response"),
-            "dashboard" => ("dashboard-issue-request", "dashboard-issue-response"),
-            _ => ("repeater-request", "repeater-response"),
-        };
+        let (request_slot, response_slot) = EditorSlot::pair_for_owner(owner);
+        let request_id = request_slot.id();
+        let response_id = response_slot.id();
         let split_id: SharedString = if owner == "target" {
             "target-messages-hsplit".into()
         } else {
             format!("{owner}-hsplit").into()
         };
-        let replace_readonly = readonly || self.is_message_replace_readonly(request_id);
+        let replace_readonly = readonly || self.is_message_replace_readonly(request_slot);
         let req_readonly = readonly || request.is_readonly_preview();
         editing::set_url_encode_as_you_type(self.url_encode_as_you_type_enabled());
         let request_pane = div()
@@ -741,14 +815,14 @@ impl Workbench {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.message_header(request_id, "Request", request.view, cx))
+            .child(self.message_header(request_slot, "Request", request.view(), cx))
             .child(
                 div().flex_1().min_h_0().child(
-                    editing::message_editor(request.state())
+                    editing::message_editor(request)
                         .readonly(req_readonly)
                         .size_full()
                         .context_menu(self.request_context_menu(
-                            request.state().clone(),
+                            request.state(),
                             readonly,
                         ))
                         .aria_label("请求消息编辑器"),
@@ -756,10 +830,10 @@ impl Workbench {
             )
             .child(request.render_search_bar_editable(
                 request_id,
-                replace_readonly || request.show_non_printable,
+                replace_readonly || request.show_non_printable(),
                 cx,
                 move |this, action, window, cx| {
-                    this.handle_message_search_action(request_id, action, window, cx);
+                    this.handle_message_search_action(request_slot, action, window, cx);
                 },
             ));
         let response_pane = div()
@@ -767,16 +841,16 @@ impl Workbench {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.message_header(response_id, "Response", response.view, cx))
+            .child(self.message_header(response_slot, "Response", response.view(), cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_response_editor_body(response_id, response, cx)),
+                    .child(self.render_response_editor_body(response_slot, response, cx)),
             )
             .child(
                 response.render_search_bar(response_id, cx, move |this, action, window, cx| {
-                    this.handle_message_search_action(response_id, action, window, cx);
+                    this.handle_message_search_action(response_slot, action, window, cx);
                 }),
             );
         let layout_mode = if owner == "repeater" {
@@ -847,118 +921,80 @@ impl Workbench {
             .into_any_element()
     }
 
-    pub(in crate::workbench) fn is_message_pretty(&self, id: &'static str) -> bool {
-        match id {
-            "history-request" => self.history_request.pretty_active,
-            "history-response" => self.history_response.pretty_active,
-            "logger-request" => self.extra_tools.logger_request.pretty_active,
-            "logger-response" => self.extra_tools.logger_response.pretty_active,
-            "target-request" => self.target_pane.request.pretty_active,
-            "target-response" => self.target_pane.response.pretty_active,
-            "organiser-request" => self.organiser.request.pretty_active,
-            "organiser-response" => self.organiser.response.pretty_active,
-            "dashboard-issue-request" => self.audit_dashboard.issue_request_editor.pretty_active,
-            "dashboard-issue-response" => self.audit_dashboard.issue_response_editor.pretty_active,
-            "websocket-payload" => self.websocket.payload.pretty_active,
-            "ext-message" => self.ext_import.is_message_pretty(),
-            "intercept" => self
-                .intercepts
-                .iter()
-                .find(|pending| Some(pending.id()) == self.selected_intercept)
-                .is_some_and(|pending| pending.editor.pretty_active),
-            "repeater-request" => self
-                .workspace
-                .active
-                .and_then(|id| self.tab_editors.get(&id))
-                .is_some_and(|editors| editors.request.pretty_active),
-            "repeater-response" => self
-                .workspace
-                .active
-                .and_then(|id| self.tab_editors.get(&id))
-                .is_some_and(|editors| editors.response.pretty_active),
-            "ws-repeater-draft" => self
-                .workspace
-                .active_websocket_tab
-                .and_then(|id| self.websocket_repeater.editors.get(&id))
-                .is_some_and(|editors| editors.draft.pretty_active),
-            "ws-repeater-history" => self
-                .workspace
-                .active_websocket_tab
-                .and_then(|id| self.websocket_repeater.editors.get(&id))
-                .is_some_and(|editors| editors.history.pretty_active),
-            _ => false,
-        }
+    pub(in crate::workbench) fn is_message_pretty(&self, slot: EditorSlot) -> bool {
+        self.message_editor_ref(slot)
+            .is_some_and(MessageEditor::pretty_active)
     }
 
-    pub(in crate::workbench) fn is_message_non_printable(&self, id: &'static str) -> bool {
-        self.message_editor_ref(id)
-            .is_some_and(|editor| editor.show_non_printable)
+    pub(in crate::workbench) fn is_message_non_printable(&self, slot: EditorSlot) -> bool {
+        self.message_editor_ref(slot)
+            .is_some_and(MessageEditor::show_non_printable)
     }
 
-    pub(in crate::workbench) fn is_message_hide_headers(&self, id: &'static str) -> bool {
-        self.message_editor_ref(id)
-            .is_some_and(|editor| editor.hide_headers)
+    pub(in crate::workbench) fn is_message_hide_headers(&self, slot: EditorSlot) -> bool {
+        self.message_editor_ref(slot)
+            .is_some_and(MessageEditor::hide_headers)
     }
 
-    pub(in crate::workbench) fn is_message_render(&self, id: &'static str) -> bool {
-        self.message_editor_ref(id)
+    pub(in crate::workbench) fn is_message_render(&self, slot: EditorSlot) -> bool {
+        self.message_editor_ref(slot)
             .is_some_and(|editor| editor.render_active)
     }
 
     pub(in crate::workbench) fn message_editor_ref(
         &self,
-        id: &'static str,
+        slot: EditorSlot,
     ) -> Option<&MessageEditor> {
-        match id {
-            "history-request" => Some(&self.history_request),
-            "history-response" => Some(&self.history_response),
-            "logger-request" => Some(&self.extra_tools.logger_request),
-            "logger-response" => Some(&self.extra_tools.logger_response),
-            "target-request" => Some(&self.target_pane.request),
-            "target-response" => Some(&self.target_pane.response),
-            "organiser-request" => Some(&self.organiser.request),
-            "organiser-response" => Some(&self.organiser.response),
-            "dashboard-issue-request" => Some(&self.audit_dashboard.issue_request_editor),
-            "dashboard-issue-response" => Some(&self.audit_dashboard.issue_response_editor),
-            "websocket-payload" => Some(&self.websocket.payload),
-            "intercept" => self
+        match slot {
+            EditorSlot::HistoryRequest => Some(&self.history_request),
+            EditorSlot::HistoryResponse => Some(&self.history_response),
+            EditorSlot::LoggerRequest => Some(&self.extra_tools.logger_request),
+            EditorSlot::LoggerResponse => Some(&self.extra_tools.logger_response),
+            EditorSlot::TargetRequest => Some(&self.target_pane.request),
+            EditorSlot::TargetResponse => Some(&self.target_pane.response),
+            EditorSlot::OrganiserRequest => Some(&self.organiser.request),
+            EditorSlot::OrganiserResponse => Some(&self.organiser.response),
+            EditorSlot::DashboardIssueRequest => Some(&self.audit_dashboard.issue_request_editor),
+            EditorSlot::DashboardIssueResponse => Some(&self.audit_dashboard.issue_response_editor),
+            EditorSlot::WebsocketPayload => Some(&self.websocket.payload),
+            EditorSlot::ExtMessage => self.ext_import.message_editor_ref(),
+            EditorSlot::Intercept => self
                 .intercepts
                 .iter()
                 .find(|pending| Some(pending.id()) == self.selected_intercept)
                 .map(|pending| &pending.editor),
-            "repeater-request" => self
+            EditorSlot::RepeaterRequest => self
                 .workspace
                 .active
                 .and_then(|id| self.tab_editors.get(&id))
                 .map(|editors| &editors.request),
-            "repeater-response" => self
+            EditorSlot::RepeaterResponse => self
                 .workspace
                 .active
                 .and_then(|id| self.tab_editors.get(&id))
                 .map(|editors| &editors.response),
-            "ws-repeater-draft" => self
+            EditorSlot::WsRepeaterDraft => self
                 .workspace
                 .active_websocket_tab
                 .and_then(|id| self.websocket_repeater.editors.get(&id))
                 .map(|editors| &editors.draft),
-            "ws-repeater-history" => self
+            EditorSlot::WsRepeaterHistory => self
                 .workspace
                 .active_websocket_tab
                 .and_then(|id| self.websocket_repeater.editors.get(&id))
                 .map(|editors| &editors.history),
-            _ => None,
         }
     }
 
     #[inline(never)]
     pub(in crate::workbench) fn render_repeater_provenance_menu(
         &self,
-        id: &'static str,
+        slot: EditorSlot,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let is_resp = match id {
-            "repeater-request" => false,
-            "repeater-response" => true,
+        let is_resp = match slot {
+            EditorSlot::RepeaterRequest => false,
+            EditorSlot::RepeaterResponse => true,
             _ => return None,
         };
         let tab_id = self.workspace.active?;
@@ -1121,13 +1157,14 @@ impl Workbench {
 fn populate_message_actions_menu(
     menu: PopupMenu,
     menu_owner: gpui_kit::WeakEntity<Workbench>,
-    id: &'static str,
+    slot: EditorSlot,
     unavailable: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> PopupMenu {
+    let id = slot.id();
     menu_owner.update(cx, |this, cx| {
-        this.focus_message_editor_by_id(id, window, cx);
+        this.focus_message_editor_by_id(slot, window, cx);
     }).expect("消息菜单所属工作台必须存在");
     let o1 = menu_owner.clone();
     let o2 = menu_owner.clone();
@@ -1223,7 +1260,7 @@ fn populate_message_actions_menu(
             ))
         },
     );
-    let is_resp_side = id.ends_with("response") || id == "response";
+    let is_resp_side = slot.is_response();
     let req_browser_orig_owner = req_browser_owner.clone();
     let req_browser_curr_owner = req_browser_owner.clone();
     let req_browser_submenu = PopupMenu::build(
@@ -1370,7 +1407,7 @@ fn populate_message_actions_menu(
                         .disabled(unavailable)
                         .on_click(move |_, window, cx| {
                             let _ = o10.update(cx, |this, cx| {
-                                this.focus_message_editor_by_id(id, window, cx);
+                                this.focus_message_editor_by_id(slot, window, cx);
                                 this.copy_converted_selection_action(
                                     &editing::CopyConvertedSelection(
                                         editing::ConvertKind::UrlDecode,
@@ -1386,7 +1423,7 @@ fn populate_message_actions_menu(
                         .disabled(unavailable)
                         .on_click(move |_, window, cx| {
                             let _ = o11.update(cx, |this, cx| {
-                                this.focus_message_editor_by_id(id, window, cx);
+                                this.focus_message_editor_by_id(slot, window, cx);
                                 this.copy_converted_selection_action(
                                     &editing::CopyConvertedSelection(
                                         editing::ConvertKind::Base64Decode,
@@ -1402,7 +1439,7 @@ fn populate_message_actions_menu(
                         .disabled(unavailable)
                         .on_click(move |_, window, cx| {
                             let _ = o12.update(cx, |this, cx| {
-                                this.focus_message_editor_by_id(id, window, cx);
+                                this.focus_message_editor_by_id(slot, window, cx);
                                 this.open_selection_in_cyberchef(
                                     window, cx,
                                 );
@@ -1649,7 +1686,7 @@ fn populate_message_actions_menu(
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
                 copy_owner.update(cx, |this, cx| {
-                    this.copy_selected_editor_text(id, window, cx);
+                    this.copy_selected_editor_text(slot, window, cx);
                 }).expect("消息菜单所属工作台必须存在");
             }),
     )
@@ -1660,7 +1697,7 @@ fn populate_message_actions_menu(
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
                 let _ = o8.update(cx, |this, cx| {
-                    this.focus_message_editor_by_id(id, window, cx);
+                    this.focus_message_editor_by_id(slot, window, cx);
                     this.copy_prettified(window, cx);
                 });
             }),
@@ -1672,7 +1709,7 @@ fn populate_message_actions_menu(
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
                 let _ = o9.update(cx, |this, cx| {
-                    this.save_selected_text_to_file(id, window, cx);
+                    this.save_selected_text_to_file(slot, window, cx);
                 });
             }),
     )

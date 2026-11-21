@@ -54,14 +54,14 @@ fn archived_binary_fragments_are_lazy_readonly_and_reject_late_or_mismatched_rea
             messages.detail.as_ref().unwrap().bytes.len(),
             FRAGMENT_BYTES
         );
-        assert_eq!(messages.payload.view, MessageView::Hex);
+        assert_eq!(messages.payload.view(), MessageView::Hex);
         assert!(messages.detail_error.is_none());
     });
     click(&fixture, "ext-message-raw", cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert_eq!(
-            view.ext_import.messages.as_ref().unwrap().payload.view,
+            view.ext_import.messages.as_ref().unwrap().payload.view(),
             MessageView::Hex
         );
         assert_eq!(

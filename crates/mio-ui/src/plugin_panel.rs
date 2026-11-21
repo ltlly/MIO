@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -16,9 +16,8 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AppContext, Bounds, Context, DispatchPhase, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, ScrollHandle,
-    ScrollStrategy, Subscription, Task, TestSupportExt, UniformListScrollHandle, Window,
-    accesskit::Role, canvas, div, img, prelude::*, px, relative, rgb, uniform_list,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, ScrollHandle, ScrollStrategy, Subscription, Task, TestSupportExt, UniformListScrollHandle, Window,
+    accesskit::Role, canvas, div, prelude::*, px, relative, uniform_list,
 };
 use mio_core::panel::{
     self, Axis, EditorFormat, EditorSnapshot, Empty, KeyEvent, Node, PanelSnapshot, PointerEvent,
@@ -81,57 +80,313 @@ impl Document {
 
 pub(in crate::plugin_panel) const MAX_UI_OVERLAY_HISTORY: usize = 128;
 
-pub(in crate::plugin_panel) fn push_overlay<V>(
-    map: &mut HashMap<u64, Vec<(V, u64)>>,
-    node_id: u64,
-    value: V,
-    seq: u64,
-) {
-    let history = map.entry(node_id).or_default();
-    if history.len() >= MAX_UI_OVERLAY_HISTORY {
-        history.remove(0);
-    }
-    history.push((value, seq));
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::plugin_panel) enum ControlOverlay {
+    Tab(u64),
+    Split(f32),
+    Checkbox(bool),
+    Select(u32),
 }
 
-pub(in crate::plugin_panel) fn latest_overlay<V: Copy>(
-    map: &HashMap<u64, Vec<(V, u64)>>,
-    node_id: u64,
-) -> Option<V> {
-    map.get(&node_id)
-        .and_then(|history| history.last())
-        .map(|&(value, _)| value)
-}
-
-pub(in crate::plugin_panel) fn remove_overlay_for_seq<V>(
-    map: &mut HashMap<u64, Vec<(V, u64)>>,
-    node_id: u64,
-    failed_seq: Option<u64>,
-) {
-    match failed_seq {
-        None => {
-            map.remove(&node_id);
+fn overlay_matches_nodes(old_node: &Node, new_node: &Node, overlay: ControlOverlay) -> bool {
+    match (overlay, &old_node.kind, &new_node.kind) {
+        (
+            ControlOverlay::Tab(tab_id),
+            Some(node::Kind::Tabs(old_t)),
+            Some(node::Kind::Tabs(new_t)),
+        ) => old_t
+            .tabs
+            .iter()
+            .find_map(|t| {
+                t.content
+                    .as_ref()
+                    .is_some_and(|c| c.id == tab_id)
+                    .then_some(t.title.as_str())
+            })
+            .is_some_and(|old_title| {
+                new_t.tabs.iter().any(|t| {
+                    t.content.as_ref().is_some_and(|c| c.id == tab_id) && t.title == old_title
+                })
+            }),
+        (
+            ControlOverlay::Split(_),
+            Some(node::Kind::Split(old_s)),
+            Some(node::Kind::Split(new_s)),
+        ) => old_s.axis == new_s.axis,
+        (
+            ControlOverlay::Checkbox(_),
+            Some(node::Kind::Checkbox(old_c)),
+            Some(node::Kind::Checkbox(new_c)),
+        ) => new_c.enabled && old_c.label == new_c.label,
+        (
+            ControlOverlay::Select(idx),
+            Some(node::Kind::Select(old_s)),
+            Some(node::Kind::Select(new_s)),
+        ) => {
+            new_s.enabled
+                && old_s.label == new_s.label
+                && new_s
+                    .options
+                    .get(idx as usize)
+                    .is_some_and(|opt| old_s.options.get(idx as usize) == Some(opt))
         }
-        Some(target_seq) => {
-            if let Some(history) = map.get_mut(&node_id) {
-                history.retain(|&(_, seq)| seq != target_seq);
-                if history.is_empty() {
-                    map.remove(&node_id);
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+pub(in crate::plugin_panel) struct OverlayStore {
+    entries: HashMap<u64, VecDeque<(ControlOverlay, u64)>>,
+}
+
+impl OverlayStore {
+    #[cfg(test)]
+    pub(in crate::plugin_panel) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(in crate::plugin_panel) fn push(&mut self, node_id: u64, value: ControlOverlay, seq: u64) {
+        let history = self.entries.entry(node_id).or_default();
+        if history.len() >= MAX_UI_OVERLAY_HISTORY {
+            history.pop_front();
+        }
+        history.push_back((value, seq));
+    }
+
+    fn latest(&self, node_id: u64) -> Option<ControlOverlay> {
+        self.entries
+            .get(&node_id)
+            .and_then(|history| history.back())
+            .map(|&(value, _)| value)
+    }
+
+    pub(in crate::plugin_panel) fn latest_tab(&self, node_id: u64) -> Option<u64> {
+        match self.latest(node_id) {
+            Some(ControlOverlay::Tab(tab_id)) => Some(tab_id),
+            _ => None,
+        }
+    }
+
+    pub(in crate::plugin_panel) fn latest_split(&self, node_id: u64) -> Option<f32> {
+        match self.latest(node_id) {
+            Some(ControlOverlay::Split(fraction)) => Some(fraction),
+            _ => None,
+        }
+    }
+
+    pub(in crate::plugin_panel) fn latest_checkbox(&self, node_id: u64) -> Option<bool> {
+        match self.latest(node_id) {
+            Some(ControlOverlay::Checkbox(checked)) => Some(checked),
+            _ => None,
+        }
+    }
+
+    pub(in crate::plugin_panel) fn latest_select(&self, node_id: u64) -> Option<u32> {
+        match self.latest(node_id) {
+            Some(ControlOverlay::Select(idx)) => Some(idx),
+            _ => None,
+        }
+    }
+
+    pub(in crate::plugin_panel) fn remove_for_seq(
+        &mut self,
+        node_id: u64,
+        failed_seq: Option<u64>,
+    ) {
+        match failed_seq {
+            None => {
+                self.entries.remove(&node_id);
+            }
+            Some(target_seq) => {
+                if let Some(history) = self.entries.get_mut(&node_id) {
+                    history.retain(|&(_, seq)| seq != target_seq);
+                    if history.is_empty() {
+                        self.entries.remove(&node_id);
+                    }
                 }
             }
         }
     }
+
+    pub(in crate::plugin_panel) fn prune(&mut self, sync_cutoff: u64, rejected_ui_seqs: &[u64]) {
+        self.entries.retain(|_, history| {
+            history.retain(|&(_, seq)| seq > sync_cutoff && !rejected_ui_seqs.contains(&seq));
+            !history.is_empty()
+        });
+    }
+
+    pub(in crate::plugin_panel) fn retain_semantic(
+        &mut self,
+        sync_cutoff: u64,
+        rejected_ui_seqs: &[u64],
+        old_root: Option<&Node>,
+        new_root: Option<&Node>,
+    ) {
+        self.entries.retain(|&node_id, history| {
+            let Some((old_node, new_node)) = old_root
+                .and_then(|r| r.find(node_id))
+                .zip(new_root.and_then(|r| r.find(node_id)))
+            else {
+                return false;
+            };
+            history.retain(|&(overlay, seq)| {
+                seq > sync_cutoff
+                    && !rejected_ui_seqs.contains(&seq)
+                    && overlay_matches_nodes(old_node, new_node, overlay)
+            });
+            !history.is_empty()
+        });
+    }
+
+    #[cfg(test)]
+    pub(in crate::plugin_panel) fn contains_key(&self, node_id: u64) -> bool {
+        self.entries.contains_key(&node_id)
+    }
+
+    #[cfg(test)]
+    pub(in crate::plugin_panel) fn entries_for(&self, node_id: u64) -> Vec<(ControlOverlay, u64)> {
+        self.entries
+            .get(&node_id)
+            .map(|history| history.iter().copied().collect())
+            .unwrap_or_default()
+    }
 }
 
-pub(in crate::plugin_panel) fn prune_overlays<V>(
-    map: &mut HashMap<u64, Vec<(V, u64)>>,
-    sync_cutoff: u64,
-    rejected_ui_seqs: &[u64],
-) {
-    map.retain(|_, history| {
-        history.retain(|&(_, seq)| seq > sync_cutoff && !rejected_ui_seqs.contains(&seq));
-        !history.is_empty()
-    });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingViewport {
+    revision: u64,
+    offset: u64,
+    seq: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoadingViewport {
+    revision: u64,
+    offset: u64,
+    seq: u64,
+}
+
+pub(in crate::plugin_panel) struct TableViewportTracker {
+    next_revision: u64,
+    confirmed_revision: u64,
+    pending: VecDeque<PendingViewport>,
+    loading: Option<LoadingViewport>,
+}
+
+impl TableViewportTracker {
+    pub(in crate::plugin_panel) fn new(initial_revision: u64) -> Self {
+        Self {
+            next_revision: initial_revision,
+            confirmed_revision: initial_revision,
+            pending: VecDeque::new(),
+            loading: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::plugin_panel) fn next_revision(&self) -> u64 {
+        self.next_revision
+    }
+
+    pub(in crate::plugin_panel) fn active_revision(&self) -> u64 {
+        self.pending
+            .back()
+            .map_or(self.confirmed_revision, |p| p.revision)
+    }
+
+    #[cfg(test)]
+    pub(in crate::plugin_panel) fn active_seq(&self) -> u64 {
+        self.pending.back().map_or(0, |p| p.seq)
+    }
+
+    pub(in crate::plugin_panel) fn requested_offset(&self) -> Option<u64> {
+        self.pending
+            .back()
+            .map(|p| p.offset)
+            .or_else(|| self.loading.map(|l| l.offset))
+    }
+
+    pub(in crate::plugin_panel) fn request_page(&mut self, offset: u64, seq: u64) -> Option<u64> {
+        let revision = self.next_revision.checked_add(1)?;
+        self.next_revision = revision;
+        if self.pending.len() >= MAX_UI_OVERLAY_HISTORY {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(PendingViewport {
+            revision,
+            offset,
+            seq,
+        });
+        self.loading = None;
+        Some(revision)
+    }
+
+    pub(in crate::plugin_panel) fn fail_request(
+        &mut self,
+        failed_seq: Option<u64>,
+        fallback_confirmed: Option<u64>,
+    ) {
+        if let Some(target_seq) = failed_seq {
+            let before_len = self.pending.len();
+            self.pending.retain(|p| p.seq != target_seq);
+            if self.pending.len() != before_len
+                || self.loading.is_some_and(|l| l.seq == target_seq)
+            {
+                self.loading = None;
+            }
+        } else {
+            self.pending.clear();
+            self.loading = None;
+            if let Some(vp_rev) = fallback_confirmed {
+                self.confirmed_revision = vp_rev;
+            }
+        }
+    }
+
+    pub(in crate::plugin_panel) fn reconcile(
+        &mut self,
+        table: &panel::VirtualTable,
+        newer_revision: bool,
+        sync_cutoff: u64,
+        rejected_ui_seqs: &[u64],
+    ) {
+        let prev_target = self
+            .pending
+            .back()
+            .copied()
+            .map(|p| (p.revision, p.offset, p.seq, false))
+            .or_else(|| self.loading.map(|l| (l.revision, l.offset, l.seq, true)));
+        self.next_revision = self.next_revision.max(table.viewport_revision);
+        self.confirmed_revision = table.viewport_revision;
+        self.pending.retain(|p| {
+            p.revision > table.viewport_revision
+                && (p.offset == 0 || p.offset < table.total_rows)
+                && p.seq > sync_cutoff
+                && !rejected_ui_seqs.contains(&p.seq)
+        });
+        if !self.pending.is_empty() {
+            self.loading = None;
+        } else if let Some((req_rev, req_offset, req_seq, already_loading)) = prev_target {
+            let target_arrived = table.offset == req_offset;
+            let out_of_range = req_offset > 0 && req_offset >= table.total_rows;
+            let rejected = req_seq != 0 && rejected_ui_seqs.contains(&req_seq);
+            let worker_published_loading = already_loading || newer_revision;
+            if worker_published_loading
+                && table.viewport_revision == req_rev
+                && !target_arrived
+                && !out_of_range
+                && !rejected
+            {
+                self.loading = Some(LoadingViewport {
+                    revision: req_rev,
+                    offset: req_offset,
+                    seq: req_seq,
+                });
+            } else {
+                self.loading = None;
+            }
+        }
+    }
 }
 
 pub(in crate::plugin_panel) struct Table {
@@ -142,35 +397,30 @@ pub(in crate::plugin_panel) struct Table {
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     horizontal: ScrollHandle,
-    next_viewport_revision: u64,
-    confirmed_viewport_revision: u64,
-    pending_viewports: Vec<(u64, u64, u64)>,
-    requested_offset: Option<u64>,
-    requested_viewport: Option<(u64, u64, bool)>,
+    viewport: TableViewportTracker,
     _subscription: Subscription,
     _focus_subscriptions: Vec<Subscription>,
 }
 
 impl Table {
     pub(in crate::plugin_panel) fn active_viewport_revision(&self) -> u64 {
-        self.pending_viewports
-            .last()
-            .map(|&(rev, _, _)| rev)
-            .unwrap_or(self.confirmed_viewport_revision)
+        self.viewport.active_revision()
+    }
+
+    pub(in crate::plugin_panel) fn requested_offset(&self) -> Option<u64> {
+        self.viewport.requested_offset()
     }
 
     #[cfg(test)]
     pub(in crate::plugin_panel) fn active_viewport_seq(&self) -> u64 {
-        self.pending_viewports
-            .last()
-            .map(|&(_, _, seq)| seq)
-            .unwrap_or(0)
+        self.viewport.active_seq()
     }
 }
 
 pub(in crate::plugin_panel) struct Drawing {
     model: panel::Canvas,
-    image: Option<Arc<RenderImage>>,
+    prepared: Option<Arc<canvas::PreparedCanvas>>,
+    images: Arc<Vec<Arc<RenderImage>>>,
     error: Option<String>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     focus: HashMap<u64, CanvasFocus>,
@@ -202,10 +452,7 @@ pub(crate) struct NativePanel {
     tables: HashMap<u64, Table>,
     drawings: HashMap<u64, Drawing>,
     geometry: HashMap<u64, Rc<Cell<Bounds<Pixels>>>>,
-    tabs: HashMap<u64, Vec<(u64, u64)>>,
-    splits: HashMap<u64, Vec<(f32, u64)>>,
-    checkboxes: HashMap<u64, Vec<(bool, u64)>>,
-    selects: HashMap<u64, Vec<(u32, u64)>>,
+    overlays: OverlayStore,
     next_ui_seq: u64,
     focused_document: Option<u64>,
     capture: Option<Capture>,
@@ -231,10 +478,7 @@ impl NativePanel {
             tables: HashMap::new(),
             drawings: HashMap::new(),
             geometry: HashMap::new(),
-            tabs: HashMap::new(),
-            splits: HashMap::new(),
-            checkboxes: HashMap::new(),
-            selects: HashMap::new(),
+            overlays: OverlayStore::default(),
             next_ui_seq: 0,
             focused_document: None,
             capture: None,
@@ -253,12 +497,7 @@ impl NativePanel {
     }
 
     pub(crate) fn commit_snapshot(&self) -> Arc<PanelSnapshot> {
-        if self.tabs.is_empty()
-            && self.splits.is_empty()
-            && self.checkboxes.is_empty()
-            && self.selects.is_empty()
-            && self.tables.is_empty()
-        {
+        if self.overlays.entries.is_empty() && self.tables.is_empty() {
             return self.snapshot.clone();
         }
         let mut snapshot = (*self.snapshot).clone();
@@ -276,7 +515,7 @@ impl NativePanel {
                 }
             }
             Some(node::Kind::Split(s)) => {
-                if let Some(fraction) = latest_overlay(&self.splits, node.id) {
+                if let Some(fraction) = self.overlays.latest_split(node.id) {
                     s.fraction = fraction;
                 }
                 if let Some(first) = s.first.as_deref_mut() {
@@ -287,7 +526,7 @@ impl NativePanel {
                 }
             }
             Some(node::Kind::Tabs(t)) => {
-                if let Some(active) = latest_overlay(&self.tabs, node.id) {
+                if let Some(active) = self.overlays.latest_tab(node.id) {
                     t.active = active;
                 }
                 for tab in &mut t.tabs {
@@ -302,12 +541,12 @@ impl NativePanel {
                 }
             }
             Some(node::Kind::Checkbox(c)) => {
-                if let Some(checked) = latest_overlay(&self.checkboxes, node.id) {
+                if let Some(checked) = self.overlays.latest_checkbox(node.id) {
                     c.checked = checked;
                 }
             }
             Some(node::Kind::Select(s)) => {
-                if let Some(selected) = latest_overlay(&self.selects, node.id) {
+                if let Some(selected) = self.overlays.latest_select(node.id) {
                     s.selected_index = selected;
                 }
             }
@@ -468,7 +707,7 @@ impl NativePanel {
                 self.visible_all_documents(split.second.as_ref().unwrap(), output);
             }
             node::Kind::Tabs(tabs) => {
-                let active = latest_overlay(&self.tabs, node.id).unwrap_or(tabs.active);
+                let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);
                 if let Some(child) = tabs
                     .tabs
                     .iter()
@@ -497,7 +736,7 @@ impl NativePanel {
                 self.visible_documents(split.second.as_ref().unwrap(), output);
             }
             node::Kind::Tabs(tabs) => {
-                let active = latest_overlay(&self.tabs, node.id).unwrap_or(tabs.active);
+                let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);
                 if let Some(child) = tabs
                     .tabs
                     .iter()
@@ -549,44 +788,20 @@ impl NativePanel {
         cx: &mut Context<Self>,
     ) {
         if let Some(id) = node {
+            let fallback_confirmed = self
+                .snapshot
+                .root
+                .as_ref()
+                .and_then(|root| root.find(id))
+                .and_then(|n| n.kind.as_ref())
+                .and_then(|kind| match kind {
+                    node::Kind::VirtualTable(model) => Some(model.viewport_revision),
+                    _ => None,
+                });
             if let Some(table) = self.tables.get_mut(&id) {
-                if let Some(target_seq) = failed_seq {
-                    let before_len = table.pending_viewports.len();
-                    table
-                        .pending_viewports
-                        .retain(|&(_, _, seq)| seq != target_seq);
-                    if table.pending_viewports.len() != before_len
-                        || table
-                            .requested_viewport
-                            .is_some_and(|(_, seq, _)| seq == target_seq)
-                    {
-                        if let Some(&(rev, off, seq)) = table.pending_viewports.last() {
-                            table.requested_offset = Some(off);
-                            table.requested_viewport = Some((rev, seq, false));
-                        } else {
-                            table.requested_offset = None;
-                            table.requested_viewport = None;
-                        }
-                    }
-                } else {
-                    table.pending_viewports.clear();
-                    table.requested_offset = None;
-                    table.requested_viewport = None;
-                    if let Some(node::Kind::VirtualTable(model)) = self
-                        .snapshot
-                        .root
-                        .as_ref()
-                        .and_then(|root| root.find(id))
-                        .and_then(|n| n.kind.as_ref())
-                    {
-                        table.confirmed_viewport_revision = model.viewport_revision;
-                    }
-                }
+                table.viewport.fail_request(failed_seq, fallback_confirmed);
             }
-            remove_overlay_for_seq(&mut self.tabs, id, failed_seq);
-            remove_overlay_for_seq(&mut self.splits, id, failed_seq);
-            remove_overlay_for_seq(&mut self.checkboxes, id, failed_seq);
-            remove_overlay_for_seq(&mut self.selects, id, failed_seq);
+            self.overlays.remove_for_seq(id, failed_seq);
         }
         self.error = Some(message.to_owned());
         cx.notify();
@@ -698,9 +913,9 @@ pub(in crate::plugin_panel) fn contains(rect: &panel::Rect, x: f32, y: f32) -> b
 pub(in crate::plugin_panel) fn tone(value: i32) -> gpui_kit::Hsla {
     match panel::Tone::try_from(value).expect("validated panel tone") {
         panel::Tone::Foreground => theme::foreground(),
-        panel::Tone::Muted => rgb(0x6b6b6b).into(),
+        panel::Tone::Muted => theme::muted_foreground(),
         panel::Tone::Accent => theme::accent(),
-        panel::Tone::Error => rgb(0xb42318).into(),
+        panel::Tone::Error => theme::danger_fg(),
         panel::Tone::Background => theme::background(),
         panel::Tone::Border => theme::border(),
         panel::Tone::Selection => theme::selected(),

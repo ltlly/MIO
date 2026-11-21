@@ -460,7 +460,7 @@ fn read_message_editor_selection(
     cx: &mut App,
 ) -> Result<(u64, u64, Vec<u8>), String> {
     let state = editor.state();
-    editing::snapshot(state, window, cx).map_err(str::to_owned)?;
+    editing::snapshot(&state, window, cx).map_err(str::to_owned)?;
     let range = state.read(cx).selected_range();
     if range.is_empty() {
         return Ok((0, 0, vec![]));
@@ -469,7 +469,7 @@ fn read_message_editor_selection(
     if selected.is_empty() {
         return Ok((0, 0, vec![]));
     }
-    if editor.view == MessageView::Hex && !editor.pretty_active {
+    if editor.view() == MessageView::Hex && !editor.pretty_active() {
         let full = state.read(cx).value();
         let before_digits = full[..range.start]
             .bytes()

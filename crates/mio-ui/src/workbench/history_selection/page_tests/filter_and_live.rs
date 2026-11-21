@@ -48,7 +48,7 @@ fn failed_filter_keeps_offpage_selection_and_success_prunes_only_excluded_ids(
             view.history.read(cx).delegate().selection_anchor,
             Some(rows[1].id())
         );
-        assert!(view.history_request.view == MessageView::Hex);
+        assert!(view.history_request.view() == MessageView::Hex);
         assert_eq!(
             view.history_request.hex.read(cx).value().as_ref(),
             editing::hex_encode(REQUEST)
@@ -85,7 +85,7 @@ fn failed_filter_keeps_offpage_selection_and_success_prunes_only_excluded_ids(
             view.history.read(cx).delegate().selection_anchor,
             Some(ids[1])
         );
-        assert!(view.history_request.view == MessageView::Hex);
+        assert!(view.history_request.view() == MessageView::Hex);
         assert_eq!(
             view.history_request.hex.read(cx).value().as_ref(),
             editing::hex_encode(REQUEST)

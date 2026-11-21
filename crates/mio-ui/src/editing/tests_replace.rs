@@ -25,7 +25,7 @@ impl Render for ReplaceHarness {
             .flex_col()
             .child(
                 div().flex_1().min_h_0().child(
-                    Editor::new(self.editor.state())
+                    Editor::new(&self.editor.state())
                         .readonly(false)
                         .size_full()
                         .aria_label("replace-test-editor"),
@@ -182,7 +182,7 @@ fn message_editor_replace_bar_supports_confirm_regex_case_undo_ime_and_payload_m
         let initial = b"GET /?token=Alpha&token=beta HTTP/1.1\r\nHost: h\r\n\r\ntoken=GAMMA";
         harness.update(cx, |h, cx| {
             h.editor.load(initial, window, cx);
-            if h.editor.pretty_active {
+            if h.editor.pretty_active() {
                 h.editor.switch(MessageView::Raw, window, cx).unwrap();
             }
             h.editor.toggle_regex(window, cx).unwrap();
@@ -228,7 +228,7 @@ fn message_editor_replace_bar_supports_confirm_regex_case_undo_ime_and_payload_m
             assert!(h.editor.raw.read(cx).value().contains("k=Alpha&k=beta"));
 
             h.editor.load(b"\x00\xff\x41\x42", window, cx);
-            assert_eq!(h.editor.view, MessageView::Hex);
+            assert_eq!(h.editor.view(), MessageView::Hex);
             h.editor.toggle_regex(window, cx).unwrap();
             set_search_and_replace(&mut h.editor, "41 42", "zz 42", window, cx);
             h.editor.update_search(None, window, cx).unwrap();
@@ -310,7 +310,7 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
         harness.update(cx, |h, cx| {
             h.editor.load(xml, window, cx);
             h.editor.switch_pretty(window, cx).unwrap();
-            assert!(h.editor.pretty_active);
+            assert!(h.editor.pretty_active());
             let pretty = h.editor.state().read(cx).value().to_string();
             assert!(pretty.contains("\n  <name>alice</name>"));
             assert_eq!(h.editor.bytes(window, cx).unwrap(), xml);
@@ -320,12 +320,12 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
             h.editor.load(broken_xml, window, cx);
             let err = h.editor.switch_pretty(window, cx).unwrap_err();
             assert!(err.contains("XML 解析失败"), "unexpected error: {err}");
-            assert!(!h.editor.pretty_active);
+            assert!(!h.editor.pretty_active());
             assert_eq!(h.editor.bytes(window, cx).unwrap(), broken_xml);
 
             h.editor.load(html, window, cx);
             h.editor.switch_pretty(window, cx).unwrap();
-            assert!(h.editor.pretty_active);
+            assert!(h.editor.pretty_active());
             let pretty = h.editor.state().read(cx).value().to_string();
             assert!(pretty.contains("<!DOCTYPE html>"));
             assert!(pretty.contains("\n      <p>Hi</p>"));
@@ -387,7 +387,7 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
             h.editor.load(broken_html, window, cx);
             let err = h.editor.switch_pretty(window, cx).unwrap_err();
             assert!(err.contains("HTML 解析失败"), "unexpected error: {err}");
-            assert!(!h.editor.pretty_active);
+            assert!(!h.editor.pretty_active());
             assert_eq!(h.editor.bytes(window, cx).unwrap(), broken_html);
 
             let req = b"GET /items?token=alpha HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\ntoken=alpha";
@@ -398,7 +398,7 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
             assert!(h.editor.replace_open);
 
             h.editor.toggle_hide_headers(window, cx).unwrap();
-            assert!(h.editor.hide_headers);
+            assert!(h.editor.hide_headers());
             assert!(!h.editor.replace_open);
             assert!(h.editor.toggle_replace(false, window, cx).is_err());
             assert!(h.editor.replace_current(false, window, cx).is_err());
@@ -410,8 +410,7 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
                     .is_err()
             );
             h.editor
-                .header_preview
-                .as_ref()
+                .header_preview()
                 .unwrap()
                 .update(cx, |state, cx| {
                     state.set_selected_range(0..3, cx);
@@ -425,7 +424,7 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
             assert_eq!(h.editor.bytes(window, cx).unwrap(), req);
 
             h.editor.toggle_hide_headers(window, cx).unwrap();
-            assert!(!h.editor.hide_headers);
+            assert!(!h.editor.hide_headers());
             h.editor.toggle_non_printable(window, cx).unwrap();
             assert!(h.editor.toggle_replace(false, window, cx).is_err());
             assert!(h.editor.replace_current(false, window, cx).is_err());

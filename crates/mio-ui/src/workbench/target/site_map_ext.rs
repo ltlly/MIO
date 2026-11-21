@@ -194,8 +194,9 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn render_target_provenance_menu(&self, id: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let response = match id { "target-request" => false, "target-response" => true, _ => return None };
+    pub(in crate::workbench) fn render_target_provenance_menu(&self, slot: super::wb_editors::EditorSlot, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let response = match slot { super::wb_editors::EditorSlot::TargetRequest => false, super::wb_editors::EditorSlot::TargetResponse => true, _ => return None };
+        let id = slot.id();
         let detail = self.target_pane.selected_explicit_detail.as_ref()?;
         let original = if response { detail.original_response_raw.as_ref() } else { detail.original_request_raw.as_ref() }?;
         let current = if response { detail.response_raw.as_ref()? } else { &detail.request_raw };

@@ -293,10 +293,10 @@ impl Workbench {
             _ => None,
         };
         if let Some(editor) = editor {
-            editing::snapshot(editor.state(), window, cx).map_err(str::to_owned)?;
+            editing::snapshot(&editor.state(), window, cx).map_err(str::to_owned)?;
             let selected = editor.state().read(cx).selected_value();
             if !selected.is_empty() {
-                if editor.view == MessageView::Hex && !editor.pretty_active {
+                if editor.view() == MessageView::Hex && !editor.pretty_active() {
                     let bytes = editing::hex_decode(&selected)?;
                     return Ok(Some(
                         String::from_utf8(bytes.clone())

@@ -41,20 +41,21 @@ impl Workbench {
                 .into_any_element();
         }
 
-        let (editor, prefix, title, aria) = match slot {
+        let (editor, editor_slot, title, aria) = match slot {
             AuditEditorSlot::IssueRequest => (
                 &self.audit_dashboard.issue_request_editor,
-                "dashboard-issue-request",
+                super::wb_editors::EditorSlot::DashboardIssueRequest,
                 "关联请求报文（只读）",
                 "漏洞关联请求报文",
             ),
             AuditEditorSlot::IssueResponse | AuditEditorSlot::ScanRequest => (
                 &self.audit_dashboard.issue_response_editor,
-                "dashboard-issue-response",
+                super::wb_editors::EditorSlot::DashboardIssueResponse,
                 "关联响应报文（只读）",
                 "漏洞关联响应报文",
             ),
         };
+        let prefix = editor_slot.id();
         let is_response = !matches!(slot, AuditEditorSlot::IssueRequest);
 
         div()
@@ -62,7 +63,7 @@ impl Workbench {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.message_header(prefix, title, editor.view, cx))
+            .child(self.message_header(editor_slot, title, editor.view(), cx))
             .child(
                 div()
                     .id(SharedString::from(format!("{prefix}-editor")))
@@ -71,12 +72,12 @@ impl Workbench {
                     .min_h_0()
                     .bg(theme::surface())
                     .child(if is_response {
-                        self.render_response_editor_body(prefix, editor, cx)
+                        self.render_response_editor_body(editor_slot, editor, cx)
                     } else {
-                        editing::message_editor(editor.state())
+                        editing::message_editor(editor)
                             .readonly(true)
                             .size_full()
-                            .context_menu(self.request_context_menu(editor.state().clone(), true))
+                            .context_menu(self.request_context_menu(editor.state(), true))
                             .aria_label(aria)
                             .into_any_element()
                     }),
@@ -150,11 +151,11 @@ impl Workbench {
                     .min_h_0()
                     .bg(theme::surface())
                     .child(
-                        editing::message_editor(pane.scan_request_editor.state())
+                        editing::message_editor(&pane.scan_request_editor)
                             .readonly(readonly || pane.scan_request_editor.is_readonly_preview())
                             .size_full()
                             .context_menu(self.request_context_menu(
-                                pane.scan_request_editor.state().clone(),
+                                pane.scan_request_editor.state(),
                                 readonly,
                             ))
                             .aria_label("扫描向导种子请求编辑器"),
@@ -385,7 +386,6 @@ impl AuditDashboardPane {
         for editor in [
             &self.scan_request_editor.raw,
             &self.scan_request_editor.hex,
-            &self.scan_request_editor.pretty,
         ] {
             editing::snapshot(editor, window, cx)?;
         }

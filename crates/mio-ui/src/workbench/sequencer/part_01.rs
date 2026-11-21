@@ -135,7 +135,7 @@ impl SequencerPane {
             sample_selection_seqs[1].clone(),
             cx,
         ));
-        for editor in [&request.raw, &request.hex, &request.pretty, &manual_editor] {
+        for editor in [&request.raw, &request.hex, &manual_editor] {
             let mut composing = false;
             subscriptions.push(cx.observe_in(editor, window, move |_, input, window, cx| {
                 let marked = input.update(cx, |state, cx| {
@@ -298,7 +298,6 @@ impl SequencerPane {
         for editor in [
             &self.request.raw,
             &self.request.hex,
-            &self.request.pretty,
             &self.manual_editor,
         ] {
             editing::snapshot(editor, window, cx)?;

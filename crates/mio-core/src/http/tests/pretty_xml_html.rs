@@ -4,8 +4,8 @@ use std::ops::Range;
 use flate2::{Compression, write::GzEncoder};
 
 use crate::{
-    decompress_gzip_bytes, expand_search_replace_all, expand_search_replace_one,
-    format_pretty_message,
+    PrettyMessage, decompress_gzip_bytes, expand_search_replace_all, expand_search_replace_one,
+    format_pretty_message, format_pretty_message_with_line_map,
 };
 
 #[test]
@@ -146,4 +146,83 @@ fn search_replace_and_gzip_helpers_handle_captures_limits_and_binary() {
     assert!(decompress_gzip_bytes(b"plain", 1024).is_err());
     assert!(decompress_gzip_bytes(&compressed[..compressed.len() - 4], 1024).is_err());
     assert!(decompress_gzip_bytes(&compressed, 5).is_err());
+}
+
+#[test]
+fn pretty_line_map_tracks_exact_original_lines_across_json_xml_html_and_chunked() {
+    let single_line_json =
+        b"POST /api HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"a\":1,\"b\":[true,false]}";
+    let PrettyMessage { text, line_numbers } =
+        format_pretty_message_with_line_map(single_line_json).unwrap();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let map = line_numbers.expect("synthetic pretty lines must produce line mapping");
+    assert_eq!(map.len(), lines.len());
+    assert_eq!(map, vec![1, 2, 3, 4, 0, 0, 0, 0, 0, 0]);
+
+    let multiline_json = concat!(
+        "POST /api HTTP/1.1\r\n",
+        "Content-Type: application/json\r\n\r\n",
+        "{\r\n",
+        "  \"a\": [1, 2],\r\n",
+        "  \"b\": \"a\",\r\n",
+        "  \"a\": {\"x\": 9},\r\n",
+        "  \"empty\": {}\r\n",
+        "}"
+    );
+    let PrettyMessage { text, line_numbers } =
+        format_pretty_message_with_line_map(multiline_json.as_bytes()).unwrap();
+    let val: serde_json::Value =
+        serde_json::from_str(multiline_json.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "POST /api HTTP/1.1\nContent-Type: application/json\n\n{}",
+            serde_json::to_string_pretty(&val).unwrap()
+        )
+    );
+    let map = line_numbers.unwrap();
+    assert_eq!(map.len(), text.split('\n').count());
+    assert_eq!(map, vec![1, 2, 3, 4, 7, 0, 0, 0, 8, 9]);
+
+    let already_pretty = "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\n  \"ok\": true\n}";
+    let res = format_pretty_message_with_line_map(already_pretty.as_bytes()).unwrap();
+    assert_eq!(res.text, already_pretty);
+    assert_eq!(res.line_numbers, None);
+
+    let chunked_with_trailer = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: application/json\r\n",
+        "Transfer-Encoding: chunked\r\n\r\n",
+        "1b\r\n",
+        "{\"api\":\"demo\",\"ret\":[\"OK\"]}\r\n",
+        "0\r\n",
+        "X-Checksum: abc\r\n\r\n"
+    );
+    let res = format_pretty_message_with_line_map(chunked_with_trailer.as_bytes()).unwrap();
+    let map = res.line_numbers.unwrap();
+    assert_eq!(map.len(), res.text.split('\n').count());
+    assert_eq!(map, vec![1, 2, 3, 4, 6, 0, 0, 0, 0, 0, 8, 9]);
+
+    let multiline_html = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/html\r\n\r\n",
+        "<!DOCTYPE html><html>\r\n",
+        "<head><style>body{color:red;\r\nmargin:0;}</style><title>Hi</title></head>\r\n",
+        "<body><!-- c1\r\nc2 --><script>\r\nconst x=1;\r\nconst y=2;\r\n</script></body></html>"
+    );
+    let res = format_pretty_message_with_line_map(multiline_html.as_bytes()).unwrap();
+    let map = res.line_numbers.unwrap();
+    assert_eq!(map.len(), res.text.split('\n').count());
+    assert_eq!(map[..4], [1, 2, 3, 4]);
+    for expected_orig in [5, 6, 7, 8, 9, 10, 11] {
+        assert!(
+            map.contains(&expected_orig),
+            "expected orig line {expected_orig} in map {map:?} for:\n{}",
+            res.text
+        );
+    }
+
+    let plain_http = b"POST /login HTTP/1.1\r\nHost: example.com\r\n\r\nuser=alice";
+    let res = format_pretty_message_with_line_map(plain_http).unwrap();
+    assert_eq!(res.line_numbers, None);
 }

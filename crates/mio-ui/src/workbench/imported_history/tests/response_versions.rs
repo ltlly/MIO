@@ -346,8 +346,8 @@ fn notes_only_history_refresh_keeps_loaded_hex_views_focus_and_editor_revisions(
             window.press(crate::kbd!("a"), cx);
             let view = f.view.read(cx);
             assert!(response.focus_handle(cx).is_focused(window));
-            assert_eq!(view.history_request.view, MessageView::Hex);
-            assert_eq!(view.history_response.view, MessageView::Hex);
+            assert_eq!(view.history_request.view(), MessageView::Hex);
+            assert_eq!(view.history_response.view(), MessageView::Hex);
             (
                 view.history_request.hex.read(cx).document_revision(),
                 response.read(cx).document_revision(),
@@ -381,8 +381,8 @@ fn notes_only_history_refresh_keeps_loaded_hex_views_focus_and_editor_revisions(
             window.render_frame(cx);
             f.view.update(cx, |view, cx| {
                 assert_eq!(view.selected_history, Some(selected.id()));
-                assert_eq!(view.history_request.view, MessageView::Hex);
-                assert_eq!(view.history_response.view, MessageView::Hex);
+                assert_eq!(view.history_request.view(), MessageView::Hex);
+                assert_eq!(view.history_response.view(), MessageView::Hex);
                 assert_eq!(
                     view.history_request.hex.read(cx).document_revision(),
                     request_revision

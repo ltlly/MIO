@@ -94,12 +94,6 @@ impl ExtImport {
         }
     }
 
-    pub(super) fn is_message_pretty(&self) -> bool {
-        self.messages
-            .as_ref()
-            .is_some_and(|messages| messages.payload.pretty_active)
-    }
-
     pub(super) fn visible_message_editor(&mut self) -> Option<&mut MessageEditor> {
         if !self.browser_visible {
             return None;

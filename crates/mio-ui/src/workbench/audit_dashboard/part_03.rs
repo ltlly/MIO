@@ -723,8 +723,8 @@ impl Workbench {
         }
         let pane = &self.audit_dashboard;
         let can_operate = self.audit_can_operate();
-        let pretty = pane.scan_request_editor.pretty_active;
-        let view = pane.scan_request_editor.view;
+        let pretty = pane.scan_request_editor.pretty_active();
+        let view = pane.scan_request_editor.view();
         let readonly = !can_operate || pane.scan_request_editor.is_readonly_preview();
 
         Some(

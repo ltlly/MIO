@@ -161,7 +161,7 @@ fn websocket_row_click_reads_only_latest_binary_payload_and_keeps_it_readonly(
         let state = &fixture.view.read(cx).websocket;
         assert_eq!(state.detail.as_deref(), Some(&second_record));
         assert!(state.detail_error.is_none());
-        assert_eq!(state.payload.view, MessageView::Hex);
+        assert_eq!(state.payload.view(), MessageView::Hex);
     });
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
@@ -173,7 +173,7 @@ fn websocket_row_click_reads_only_latest_binary_payload_and_keeps_it_readonly(
         assert_eq!(editor.read(cx).value().as_ref(), "00 ff 01");
         window.click("websocket-payload-raw", cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.websocket.payload.view, MessageView::Hex);
+        assert_eq!(view.websocket.payload.view(), MessageView::Hex);
         assert!(view.error.as_ref().unwrap().contains("非 UTF-8"));
     })
     .unwrap();

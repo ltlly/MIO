@@ -229,11 +229,16 @@ impl Workbench {
                         .child(diagnostic.clone()),
                 );
             }
-            view.child(self.message_header("ext-message", "归档原消息", messages.payload.view, cx))
+            view.child(self.message_header(
+                crate::workbench::wb_editors::EditorSlot::ExtMessage,
+                "归档原消息",
+                messages.payload.view(),
+                cx,
+            ))
                 .child(
                     div().flex_1().min_h_0().child(
                         self.render_inspector_dock(
-                            editing::message_editor(messages.payload.state())
+                            editing::message_editor(&messages.payload)
                                 .readonly(true)
                                 .size_full()
                                 .aria_label("外部归档消息片段")
@@ -246,7 +251,12 @@ impl Workbench {
                     "ext-message",
                     cx,
                     |this, action, window, cx| {
-                        this.handle_message_search_action("ext-message", action, window, cx);
+                        this.handle_message_search_action(
+                            crate::workbench::wb_editors::EditorSlot::ExtMessage,
+                            action,
+                            window,
+                            cx,
+                        );
                     },
                 ))
                 .into_any_element()

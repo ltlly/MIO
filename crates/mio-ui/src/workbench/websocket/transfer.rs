@@ -333,10 +333,10 @@ impl Workbench {
     ) -> Result<(Vec<u8>, Option<String>), String> {
         let editor = &self.websocket.payload;
         if editor.has_focus(window, cx) {
-            editing::snapshot(editor.state(), window, cx).map_err(str::to_owned)?;
+            editing::snapshot(&editor.state(), window, cx).map_err(str::to_owned)?;
             let selected = editor.state().read(cx).selected_value();
             if !selected.is_empty() {
-                if editor.view == MessageView::Hex && !editor.pretty_active {
+                if editor.view() == MessageView::Hex && !editor.pretty_active() {
                     let bytes = editing::hex_decode(&selected)?;
                     let text = String::from_utf8(bytes.clone()).ok();
                     return Ok((bytes, text));

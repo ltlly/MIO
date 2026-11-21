@@ -1,24 +1,35 @@
-use super::MAX_PRETTY_BYTES;
+use super::{MAX_PRETTY_BYTES, PrettyLineBuilder, SourceLineMap};
 
 const MAX_MARKUP_DEPTH: usize = 256;
 const MAX_MARKUP_NODES: u32 = 65_536;
 
 #[derive(Debug)]
 enum MarkupToken<'a> {
-    Standalone(&'a str),
+    Standalone {
+        raw: &'a str,
+        offset: usize,
+    },
     Open {
         raw: &'a str,
+        offset: usize,
     },
     Close {
         raw: &'a str,
+        offset: usize,
     },
     ImplicitClose,
     RawBlock {
         open: &'a str,
+        open_offset: usize,
         inner: &'a str,
+        inner_offset: usize,
         close: &'a str,
+        close_offset: usize,
     },
-    Text(&'a str),
+    Text {
+        raw: &'a str,
+        offset: usize,
+    },
 }
 
 pub(super) fn looks_like_html_document(trimmed: &str) -> bool {
@@ -198,32 +209,50 @@ fn find_raw_close_tag(rest: &str, tag_lower: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn format_css_block_lines(css: &str, base_depth: usize, lines: &mut Vec<String>) {
+fn format_css_block_lines(
+    css: &str,
+    base_depth: usize,
+    css_base_offset: usize,
+    line_map: &SourceLineMap,
+    out: &mut PrettyLineBuilder,
+) {
     let mut depth = base_depth;
     let mut current = String::new();
+    let mut current_start_offset: Option<usize> = None;
     let mut quote: Option<char> = None;
     let mut in_comment = false;
-    let mut chars = css.chars().peekable();
-    let push_line = |buf: &mut String, d: usize, out: &mut Vec<String>| {
+    let mut chars = css.char_indices().peekable();
+    let push_line = |buf: &mut String,
+                     start_offset: &mut Option<usize>,
+                     d: usize,
+                     out: &mut PrettyLineBuilder| {
         let trimmed = buf.trim();
         if !trimmed.is_empty() {
-            out.push(format!("{}{trimmed}", "  ".repeat(d)));
+            let line_no = start_offset.map(|off| line_map.line_at(css_base_offset + off));
+            out.push_line(&format!("{}{trimmed}", "  ".repeat(d)), line_no);
         }
         buf.clear();
+        *start_offset = None;
     };
-    while let Some(ch) = chars.next() {
+    while let Some((byte_idx, ch)) = chars.next() {
         if in_comment {
+            if current_start_offset.is_none() {
+                current_start_offset = Some(byte_idx);
+            }
             current.push(ch);
-            if ch == '*' && chars.peek() == Some(&'/') {
-                current.push(chars.next().unwrap());
+            if ch == '*' && chars.peek().is_some_and(|&(_, next)| next == '/') {
+                current.push(chars.next().unwrap().1);
                 in_comment = false;
             }
             continue;
         }
         if let Some(q) = quote {
+            if current_start_offset.is_none() {
+                current_start_offset = Some(byte_idx);
+            }
             current.push(ch);
             if ch == '\\' {
-                if let Some(next) = chars.next() {
+                if let Some((_, next)) = chars.next() {
                     current.push(next);
                 }
             } else if ch == q {
@@ -232,131 +261,236 @@ fn format_css_block_lines(css: &str, base_depth: usize, lines: &mut Vec<String>)
             continue;
         }
         match ch {
-            '/' if chars.peek() == Some(&'*') => {
+            '/' if chars.peek().is_some_and(|&(_, next)| next == '*') => {
+                if current_start_offset.is_none() {
+                    current_start_offset = Some(byte_idx);
+                }
                 current.push(ch);
-                current.push(chars.next().unwrap());
+                current.push(chars.next().unwrap().1);
                 in_comment = true;
             }
             '"' | '\'' => {
+                if current_start_offset.is_none() {
+                    current_start_offset = Some(byte_idx);
+                }
                 quote = Some(ch);
                 current.push(ch);
             }
             '{' => {
+                if current_start_offset.is_none() {
+                    current_start_offset = Some(byte_idx);
+                }
                 current.push('{');
-                push_line(&mut current, depth, lines);
+                push_line(&mut current, &mut current_start_offset, depth, out);
                 depth += 1;
             }
             ';' => {
+                if current_start_offset.is_none() {
+                    current_start_offset = Some(byte_idx);
+                }
                 current.push(';');
-                push_line(&mut current, depth, lines);
+                push_line(&mut current, &mut current_start_offset, depth, out);
             }
             '}' => {
-                push_line(&mut current, depth, lines);
+                push_line(&mut current, &mut current_start_offset, depth, out);
                 depth = depth.saturating_sub(1);
-                lines.push(format!("{}}}", "  ".repeat(depth)));
+                out.push_line(
+                    &format!("{}}}", "  ".repeat(depth)),
+                    Some(line_map.line_at(css_base_offset + byte_idx)),
+                );
             }
             '\r' | '\n' => {
                 if !current.ends_with(' ') && !current.is_empty() {
                     current.push(' ');
                 }
             }
-            _ => current.push(ch),
+            _ => {
+                if current_start_offset.is_none() && !ch.is_whitespace() {
+                    current_start_offset = Some(byte_idx);
+                }
+                current.push(ch);
+            }
         }
     }
-    push_line(&mut current, depth, lines);
+    push_line(&mut current, &mut current_start_offset, depth, out);
 }
 
-fn render_tokens(tokens: &[MarkupToken<'_>]) -> String {
-    let mut lines: Vec<String> = Vec::with_capacity(tokens.len());
+fn push_prefixed_source_lines(
+    indent: &str,
+    raw_slice: &str,
+    slice_offset: usize,
+    line_map: &SourceLineMap,
+    out: &mut PrettyLineBuilder,
+) {
+    let mut part_offset = 0usize;
+    for (idx, part) in raw_slice.split('\n').enumerate() {
+        let orig_line = line_map.line_at(slice_offset + part_offset);
+        if idx == 0 {
+            out.push_line(&format!("{indent}{part}"), Some(orig_line));
+        } else {
+            out.push_line(part, Some(orig_line));
+        }
+        part_offset += part.len() + 1;
+    }
+}
+
+fn render_tokens(
+    tokens: &[MarkupToken<'_>],
+    line_map: &SourceLineMap,
+    out: &mut PrettyLineBuilder,
+) {
     let mut depth = 0usize;
     let mut idx = 0;
     while idx < tokens.len() {
         let indent = "  ".repeat(depth);
         match &tokens[idx] {
-            MarkupToken::Standalone(raw) => {
-                lines.push(format!("{indent}{}", raw.trim()));
+            MarkupToken::Standalone { raw, offset } => {
+                let trim_lead = raw.len() - raw.trim_start().len();
+                let trimmed = raw.trim();
+                push_prefixed_source_lines(
+                    &indent,
+                    trimmed,
+                    offset + trim_lead,
+                    line_map,
+                    out,
+                );
                 idx += 1;
             }
-            MarkupToken::Open { raw } => {
+            MarkupToken::Open { raw, offset } => {
                 if let (
-                    Some(MarkupToken::Text(text)),
-                    Some(MarkupToken::Close { raw: close_raw }),
+                    Some(MarkupToken::Text { raw: text, .. }),
+                    Some(MarkupToken::Close { raw: close_raw, .. }),
                 ) = (tokens.get(idx + 1), tokens.get(idx + 2))
                 {
                     let trimmed = text.trim();
                     if !trimmed.contains('\n') && !trimmed.contains('\r') {
-                        lines.push(format!("{indent}{raw}{trimmed}{close_raw}"));
+                        out.push_multiline_from_base(
+                            &format!("{indent}{raw}{trimmed}{close_raw}"),
+                            line_map.line_at(*offset),
+                        );
                         idx += 3;
                         continue;
                     }
                 }
-                if let Some(MarkupToken::Close { raw: close_raw }) = tokens.get(idx + 1) {
-                    lines.push(format!("{indent}{raw}{close_raw}"));
+                if let Some(MarkupToken::Close { raw: close_raw, .. }) = tokens.get(idx + 1) {
+                    out.push_multiline_from_base(
+                        &format!("{indent}{raw}{close_raw}"),
+                        line_map.line_at(*offset),
+                    );
                     idx += 2;
                     continue;
                 }
-                lines.push(format!("{indent}{raw}"));
+                push_prefixed_source_lines(&indent, raw, *offset, line_map, out);
                 depth += 1;
                 idx += 1;
             }
-            MarkupToken::Close { raw } => {
+            MarkupToken::Close { raw, offset } => {
                 depth = depth.saturating_sub(1);
                 let close_indent = "  ".repeat(depth);
-                lines.push(format!("{close_indent}{raw}"));
+                push_prefixed_source_lines(&close_indent, raw, *offset, line_map, out);
                 idx += 1;
             }
             MarkupToken::ImplicitClose => {
                 depth = depth.saturating_sub(1);
                 idx += 1;
             }
-            MarkupToken::RawBlock { open, inner, close } => {
+            MarkupToken::RawBlock {
+                open,
+                open_offset,
+                inner,
+                inner_offset,
+                close,
+                close_offset,
+            } => {
                 let trimmed = inner.trim();
                 let tag_after_lt = open.get(1..).map(|s| s.to_ascii_lowercase());
                 let is_style = tag_after_lt.as_deref().is_some_and(|s| s.starts_with("style"));
                 let is_title = tag_after_lt.as_deref().is_some_and(|s| s.starts_with("title"));
                 if trimmed.is_empty() {
-                    lines.push(format!("{indent}{open}{close}"));
+                    out.push_multiline_from_base(
+                        &format!("{indent}{open}{close}"),
+                        line_map.line_at(*open_offset),
+                    );
                 } else if is_style && trimmed.contains('{') && trimmed.contains('}') {
-                    lines.push(format!("{indent}{open}"));
-                    format_css_block_lines(trimmed, depth + 1, &mut lines);
-                    lines.push(format!("{indent}{close}"));
+                    push_prefixed_source_lines(&indent, open, *open_offset, line_map, out);
+                    let inner_lead = inner.len() - inner.trim_start().len();
+                    format_css_block_lines(
+                        trimmed,
+                        depth + 1,
+                        inner_offset + inner_lead,
+                        line_map,
+                        out,
+                    );
+                    push_prefixed_source_lines(&indent, close, *close_offset, line_map, out);
                 } else if is_title {
-                    lines.push(format!("{indent}{open}"));
+                    push_prefixed_source_lines(&indent, open, *open_offset, line_map, out);
                     let child_indent = "  ".repeat(depth + 1);
-                    for line in trimmed.replace("\r\n", "\n").lines() {
-                        let t = line.trim();
+                    let inner_lead = inner.len() - inner.trim_start().len();
+                    let mut rel_offset = 0usize;
+                    for raw_line in trimmed.split('\n') {
+                        let t = raw_line.strip_suffix('\r').unwrap_or(raw_line).trim();
                         if !t.is_empty() {
-                            lines.push(format!("{child_indent}{t}"));
+                            let line_no = line_map.line_at(inner_offset + inner_lead + rel_offset);
+                            out.push_line(&format!("{child_indent}{t}"), Some(line_no));
+                        }
+                        rel_offset += raw_line.len() + 1;
+                    }
+                    push_prefixed_source_lines(&indent, close, *close_offset, line_map, out);
+                } else if !trimmed.contains('\n') && !trimmed.contains('\r') {
+                    out.push_multiline_from_base(
+                        &format!("{indent}{open}{trimmed}{close}"),
+                        line_map.line_at(*open_offset),
+                    );
+                } else {
+                    push_prefixed_source_lines(&indent, open, *open_offset, line_map, out);
+                    let normalized = inner.replace("\r\n", "\n");
+                    let leading_trimmed = normalized.trim_start_matches('\n');
+                    let skipped_newlines = normalized.len() - leading_trimmed.len();
+                    let block = leading_trimmed.trim_end_matches('\n');
+                    let mut raw_lines = inner.split('\n').skip(skipped_newlines);
+                    let inner_rel_start: usize = inner
+                        .split('\n')
+                        .take(skipped_newlines)
+                        .map(|s| s.len() + 1)
+                        .sum();
+                    let mut inner_rel = inner_rel_start;
+                    for block_line in block.split('\n') {
+                        let orig_line = line_map.line_at(*inner_offset + inner_rel);
+                        out.push_line(block_line, Some(orig_line));
+                        if let Some(raw_s) = raw_lines.next() {
+                            inner_rel += raw_s.len() + 1;
                         }
                     }
-                    lines.push(format!("{indent}{close}"));
-                } else if !trimmed.contains('\n') && !trimmed.contains('\r') {
-                    lines.push(format!("{indent}{open}{trimmed}{close}"));
-                } else {
-                    lines.push(format!("{indent}{open}"));
-                    lines.push(inner.replace("\r\n", "\n").trim_matches('\n').to_owned());
-                    lines.push(format!("{indent}{close}"));
+                    push_prefixed_source_lines(&indent, close, *close_offset, line_map, out);
                 }
                 idx += 1;
             }
-            MarkupToken::Text(text) => {
-                let normalized = text.replace("\r\n", "\n");
-                for line in normalized.lines() {
-                    let trimmed = line.trim();
+            MarkupToken::Text { raw, offset } => {
+                let mut rel_offset = 0usize;
+                for line in raw.split('\n') {
+                    let trimmed = line.strip_suffix('\r').unwrap_or(line).trim();
                     if !trimmed.is_empty() {
-                        lines.push(format!("{indent}{trimmed}"));
+                        out.push_line(
+                            &format!("{indent}{trimmed}"),
+                            Some(line_map.line_at(*offset + rel_offset)),
+                        );
                     }
+                    rel_offset += line.len() + 1;
                 }
                 idx += 1;
             }
         }
     }
-    lines.join("\n")
 }
 
-fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToken<'a>>, String> {
+fn tokenize_markup<'a>(
+    input: &'a str,
+    base_offset: usize,
+    html_mode: bool,
+) -> Result<Vec<MarkupToken<'a>>, String> {
     let kind_label = if html_mode { "HTML" } else { "XML" };
-    let mut rest = input.trim_start_matches('\u{feff}').trim();
+    let mut rest = input;
+    let mut cursor = base_offset;
     let mut tokens = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     let mut saw_element_or_decl = false;
@@ -375,8 +509,12 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                     "{kind_label} 解析失败，无法切换到 Pretty 视图：注释未闭合；原始字节未改变。"
                 ));
             };
-            tokens.push(MarkupToken::Standalone(&rest[..end]));
+            tokens.push(MarkupToken::Standalone {
+                raw: &rest[..end],
+                offset: cursor,
+            });
             saw_element_or_decl = true;
+            cursor += end;
             rest = &rest[end..];
         } else if rest.starts_with("<![CDATA[") {
             let Some(end) = rest[9..].find("]]>").map(|pos| pos + 12) else {
@@ -384,8 +522,12 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                     "{kind_label} 解析失败，无法切换到 Pretty 视图：CDATA 未闭合；原始字节未改变。"
                 ));
             };
-            tokens.push(MarkupToken::Standalone(&rest[..end]));
+            tokens.push(MarkupToken::Standalone {
+                raw: &rest[..end],
+                offset: cursor,
+            });
             saw_element_or_decl = true;
+            cursor += end;
             rest = &rest[end..];
         } else if rest.starts_with("<?") {
             let Some(end) = rest[2..].find("?>").map(|pos| pos + 4) else {
@@ -393,13 +535,21 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                     "{kind_label} 解析失败，无法切换到 Pretty 视图：处理指令未闭合；原始字节未改变。"
                 ));
             };
-            tokens.push(MarkupToken::Standalone(&rest[..end]));
+            tokens.push(MarkupToken::Standalone {
+                raw: &rest[..end],
+                offset: cursor,
+            });
             saw_element_or_decl = true;
+            cursor += end;
             rest = &rest[end..];
         } else if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!doctype") {
             let end = scan_doctype_end(rest, kind_label)?;
-            tokens.push(MarkupToken::Standalone(&rest[..end]));
+            tokens.push(MarkupToken::Standalone {
+                raw: &rest[..end],
+                offset: cursor,
+            });
             saw_element_or_decl = true;
+            cursor += end;
             rest = &rest[end..];
         } else if rest.starts_with("</") {
             let Some(gt) = rest[2..].find('>').map(|pos| pos + 2) else {
@@ -428,10 +578,13 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                     "{kind_label} 解析失败，无法切换到 Pretty 视图：结束标签 </{name}> 与未闭合标签 <{opened}> 不匹配；原始字节未改变。"
                 ));
             }
+            let end = gt + 1;
             tokens.push(MarkupToken::Close {
-                raw: &rest[..gt + 1],
+                raw: &rest[..end],
+                offset: cursor,
             });
-            rest = &rest[gt + 1..];
+            cursor += end;
+            rest = &rest[end..];
         } else if rest.starts_with('<') {
             let (end, self_closing) = scan_tag_end(rest, kind_label, html_mode)?;
             let inside = rest[1..end - 1].trim();
@@ -443,10 +596,15 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                 ));
             }
             let open_raw = &rest[..end];
+            let open_offset = cursor;
             saw_element_or_decl = true;
+            cursor += end;
             rest = &rest[end..];
             if self_closing || (html_mode && is_html_void_tag(name)) {
-                tokens.push(MarkupToken::Standalone(open_raw));
+                tokens.push(MarkupToken::Standalone {
+                    raw: open_raw,
+                    offset: open_offset,
+                });
             } else if html_mode && is_html_raw_text_tag(name) {
                 let lower = name.to_ascii_lowercase();
                 let Some((close_start, close_end)) = find_raw_close_tag(rest, &lower) else {
@@ -456,9 +614,13 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                 };
                 tokens.push(MarkupToken::RawBlock {
                     open: open_raw,
+                    open_offset,
                     inner: &rest[..close_start],
+                    inner_offset: cursor,
                     close: &rest[close_start..close_end],
+                    close_offset: cursor + close_start,
                 });
+                cursor += close_end;
                 rest = &rest[close_end..];
             } else {
                 let lower = if html_mode {
@@ -482,14 +644,21 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
                     ));
                 }
                 stack.push(lower);
-                tokens.push(MarkupToken::Open { raw: open_raw });
+                tokens.push(MarkupToken::Open {
+                    raw: open_raw,
+                    offset: open_offset,
+                });
             }
         } else {
             let end = rest.find('<').unwrap_or(rest.len());
             let chunk = &rest[..end];
             if !chunk.trim().is_empty() {
-                tokens.push(MarkupToken::Text(chunk));
+                tokens.push(MarkupToken::Text {
+                    raw: chunk,
+                    offset: cursor,
+                });
             }
+            cursor += end;
             rest = &rest[end..];
         }
     }
@@ -513,11 +682,22 @@ fn tokenize_markup<'a>(input: &'a str, html_mode: bool) -> Result<Vec<MarkupToke
     Ok(tokens)
 }
 
-pub(super) fn format_pretty_xml(input: &str) -> Result<String, String> {
+fn clean_markup_slice(input: &str) -> (&str, usize) {
+    let without_bom = input.trim_start_matches('\u{feff}');
+    let leading_trimmed = without_bom.trim_start();
+    let start_offset = input.len() - leading_trimmed.len();
+    (leading_trimmed.trim_end(), start_offset)
+}
+
+pub(super) fn format_pretty_xml_with_lines(
+    input: &str,
+    line_map: &SourceLineMap,
+    out: &mut PrettyLineBuilder,
+) -> Result<(), String> {
     if input.len() > MAX_PRETTY_BYTES {
         return Err("XML 正文超过 2 MiB 美化限额；原始字节未改变。".into());
     }
-    let clean = input.trim_start_matches('\u{feff}').trim();
+    let (clean, start_offset) = clean_markup_slice(input);
     roxmltree::Document::parse_with_options(
         clean,
         roxmltree::ParsingOptions {
@@ -527,15 +707,21 @@ pub(super) fn format_pretty_xml(input: &str) -> Result<String, String> {
         },
     )
     .map_err(|error| format!("XML 解析失败，无法切换到 Pretty 视图：{error}；原始字节未改变。"))?;
-    let tokens = tokenize_markup(clean, false)?;
-    Ok(render_tokens(&tokens))
+    let tokens = tokenize_markup(clean, start_offset, false)?;
+    render_tokens(&tokens, line_map, out);
+    Ok(())
 }
 
-pub(super) fn format_pretty_html(input: &str) -> Result<String, String> {
+pub(super) fn format_pretty_html_with_lines(
+    input: &str,
+    line_map: &SourceLineMap,
+    out: &mut PrettyLineBuilder,
+) -> Result<(), String> {
     if input.len() > MAX_PRETTY_BYTES {
         return Err("HTML 正文超过 2 MiB 美化限额；原始字节未改变。".into());
     }
-    let clean = input.trim_start_matches('\u{feff}').trim();
-    let tokens = tokenize_markup(clean, true)?;
-    Ok(render_tokens(&tokens))
+    let (clean, start_offset) = clean_markup_slice(input);
+    let tokens = tokenize_markup(clean, start_offset, true)?;
+    render_tokens(&tokens, line_map, out);
+    Ok(())
 }

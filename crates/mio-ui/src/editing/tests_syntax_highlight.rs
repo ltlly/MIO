@@ -92,7 +92,6 @@ fn http_request_json_body_and_payload_markers_produce_valid_utf8_runs() {
     );
     assert_eq!(TokenKind::Method.style(false).color, Some(rgb(0x141414).into()));
     assert_eq!(TokenKind::HeaderName.style(false).color, Some(rgb(0x030075).into()));
-    assert_eq!(TokenKind::QueryKey.style(false).color, Some(rgb(0x141414).into()));
     assert_eq!(TokenKind::QueryValue.style(false).color, Some(rgb(0xa31616).into()));
     assert_eq!(TokenKind::JsonKey.style(false).color, Some(rgb(0x030075).into()));
     assert_eq!(TokenKind::JsonString.style(false).color, Some(rgb(0x008000).into()));
@@ -407,7 +406,7 @@ fn selection_seq_and_selected_bytes_track_raw_pretty_and_hex(cx: &mut TestAppCon
     cx.update_window(window, |_, window, cx| {
         probe.update(cx, |probe, cx| {
             assert_eq!(probe.0.raw.read(cx).language_name().as_ref(), "http");
-            assert_eq!(probe.0.pretty.read(cx).language_name().as_ref(), "http");
+            assert_eq!(probe.0.raw.read(cx).language_name().as_ref(), "http");
             assert_eq!(probe.0.hex.read(cx).language_name().as_ref(), "plaintext");
             assert_eq!(probe.0.selection_seq(), 0);
             assert!(probe.0.selected_bytes(cx).is_none());
@@ -459,7 +458,7 @@ impl Render for LayoutProbe {
             .id("editor-pane")
             .test_support()
             .size_full()
-            .child(message_editor(self.0.state()).size_full())
+            .child(message_editor(&self.0).size_full())
     }
 }
 

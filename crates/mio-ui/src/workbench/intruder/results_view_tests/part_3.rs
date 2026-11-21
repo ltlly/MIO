@@ -394,7 +394,7 @@ fn production_row_clicks_lazy_read_latest_body_and_readonly_type_preserves_binar
         window.input("cannot edit captured request", cx);
         fixture.view.update(cx, |view, cx| {
             let result = &view.intruder.results.views[&started.summary.id];
-            assert_eq!(result.request.view, MessageView::Hex);
+            assert_eq!(result.request.view(), MessageView::Hex);
             assert_eq!(
                 result.request.bytes(window, cx).unwrap(),
                 request_to_raw(&binary.request)
@@ -422,7 +422,7 @@ fn production_row_clicks_lazy_read_latest_body_and_readonly_type_preserves_binar
     click(started.window, "intruder-result-raw", cx);
     cx.read(|cx| {
         let result = &fixture.view.read(cx).intruder.results.views[&started.summary.id];
-        assert_eq!(result.response.view, MessageView::Hex);
+        assert_eq!(result.response.view(), MessageView::Hex);
         assert!(result.detail_error.as_ref().unwrap().contains("非 UTF-8"));
         assert_eq!(result.detail.as_deref(), Some(&binary));
     });

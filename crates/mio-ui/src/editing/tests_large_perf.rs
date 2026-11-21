@@ -27,7 +27,7 @@ impl Render for LargePerfHarness {
             .flex_col()
             .child(
                 div().flex_1().min_h_0().child(
-                    Editor::new(self.editor.state())
+                    Editor::new(&self.editor.state())
                         .readonly(true)
                         .size_full()
                         .bordered(false)
@@ -148,7 +148,7 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let load_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.load(&multiline_512k, window, cx);
-            if h.editor.pretty_active {
+            if h.editor.pretty_active() {
                 h.editor.switch(MessageView::Raw, window, cx).unwrap();
             }
         });
@@ -191,7 +191,7 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let pretty_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.switch_pretty(window, cx).unwrap();
-            assert!(h.editor.pretty_active);
+            assert!(h.editor.pretty_active());
         });
         window.render_frame(cx);
         let pretty_ms = pretty_start.elapsed().as_millis();
@@ -203,8 +203,8 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let hex_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.switch(MessageView::Hex, window, cx).unwrap();
-            assert!(!h.editor.pretty_active);
-            assert_eq!(h.editor.view, MessageView::Hex);
+            assert!(!h.editor.pretty_active());
+            assert_eq!(h.editor.view(), MessageView::Hex);
         });
         window.render_frame(cx);
         let hex_ms = hex_start.elapsed().as_millis();
@@ -216,7 +216,7 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let raw_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.switch(MessageView::Raw, window, cx).unwrap();
-            assert_eq!(h.editor.view, MessageView::Raw);
+            assert_eq!(h.editor.view(), MessageView::Raw);
             assert_eq!(h.editor.bytes(window, cx).unwrap(), multiline_512k);
         });
         window.render_frame(cx);
@@ -232,7 +232,7 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let load_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.load(&single_line_64k, window, cx);
-            if h.editor.pretty_active {
+            if h.editor.pretty_active() {
                 h.editor.switch(MessageView::Raw, window, cx).unwrap();
             }
         });
@@ -268,7 +268,7 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         let pretty_start = Instant::now();
         harness.update(cx, |h, cx| {
             h.editor.switch_pretty(window, cx).unwrap();
-            assert!(h.editor.pretty_active);
+            assert!(h.editor.pretty_active());
             assert!(
                 h.editor
                     .state()
@@ -305,8 +305,8 @@ fn large_512k_multiline_and_64k_single_line_json_render_switch_and_search_stay_b
         window.render_frame(cx);
         harness.update(cx, |h, cx| {
             h.editor.switch(MessageView::Raw, window, cx).unwrap();
-            assert!(!h.editor.pretty_active);
-            assert_eq!(h.editor.view, MessageView::Raw);
+            assert!(!h.editor.pretty_active());
+            assert_eq!(h.editor.view(), MessageView::Raw);
             assert_eq!(h.editor.bytes(window, cx).unwrap(), single_line_64k);
         });
         window.render_frame(cx);
@@ -330,10 +330,10 @@ fn readonly_editor_converts_selection_to_clipboard_without_mutating_source(
     cx.update_window(window, |_, window, cx| {
         let state = harness.update(cx, |h, cx| {
             h.editor.load(raw_response.as_bytes(), window, cx);
-            if h.editor.pretty_active {
+            if h.editor.pretty_active() {
                 h.editor.switch(MessageView::Raw, window, cx).unwrap();
             }
-            h.editor.state().clone()
+            h.editor.state()
         });
         window.render_frame(cx);
         let rev_before = state.read(cx).document_revision();
