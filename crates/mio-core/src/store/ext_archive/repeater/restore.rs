@@ -235,7 +235,7 @@ fn select(connection: &Connection, item: &ExtItem, schema: (u16, u16)) -> Result
     let Some(text) = decoded["mapping"]["value"].as_str().filter(|text| {
         !text.is_empty()
             && text.len() <= 4096
-            && text.encode_utf16().count() <= crate::ext_archive::messages::MAX_REPEATER_TITLE_UNITS
+            && text.encode_utf16().count() <= crate::ext_archive::MAX_REPEATER_TITLE_UNITS
     }) else {
         return Ok(Selection::Skip("源标签标题未映射"));
     };

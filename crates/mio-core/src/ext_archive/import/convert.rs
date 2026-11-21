@@ -1,8 +1,14 @@
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::fs::OpenOptions;
+
+use anyhow::Context;
+
 use super::*;
 use crate::{
     ExtImportPhase, ExtImportReport, ExtJobOutcome, Uuid,
     ext_archive::direct_import,
-    store::{ProjectStore, check_new_project_path, check_outside_owned_directory},
+    store::{ProjectStore, check_new_project_path},
 };
 
 pub(crate) fn inspect(
@@ -80,7 +86,8 @@ pub(crate) fn inspect(
         identity,
         #[cfg(windows)]
         win_file_id,
-        snapshot: None,
+        #[cfg(test)]
+        released: None,
     })
 }
 
@@ -113,10 +120,7 @@ pub(crate) fn convert(
             "外部归档转换目标必须是新的 .mio 文件"
         );
         check_new_project_path(&destination)?;
-        if let Some(snapshot) = &inspection.snapshot {
-            check_outside_owned_directory(&destination, snapshot.path())?;
-        }
-        stage = Some(PrivateDirectory::new(
+        stage = Some(create_stage_dir(
             parent(&destination),
             ".mio-ext-import-",
         )?);
@@ -152,9 +156,6 @@ pub(crate) fn convert(
         inspection.check_source()?;
         check_cancel(cancel)?;
         check_new_project_path(&destination)?;
-        if let Some(snapshot) = &inspection.snapshot {
-            check_outside_owned_directory(&destination, snapshot.path())?;
-        }
         fs::hard_link(&staged_path, &destination)
             .context("不能原子发布新项目；已有文件不会被覆盖")?;
         published = Some(destination.clone());
@@ -166,36 +167,31 @@ pub(crate) fn convert(
         progress(ExtImportPhase::Publish, 1, Some(1));
         Ok((report, total_bytes))
     })();
-    let stage_cleanup = stage.map(PrivateDirectory::close).transpose();
-    let source_cleanup = inspection.release();
-    let mut cleanup = CleanupFailure::default();
-    for error in [stage_cleanup.as_ref().err(), source_cleanup.as_ref().err()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(pending) = error.downcast_ref::<CleanupFailure>() {
-            cleanup.directories.extend(pending.directories.clone());
-        }
-    }
+    inspection.release();
+    let stage_cleanup = stage.map(close_stage_dir).transpose();
+    let cleanup = stage_cleanup
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<CleanupFailure>())
+        .cloned();
     let result = result.map_err(|error| {
         if cancel.is_cancelled()
             && matches!(error.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::OperationInterrupted)
         {
             Cancelled.into()
-        } else { error }
+        } else {
+            error
+        }
     });
-    let result = match (result, stage_cleanup, source_cleanup) {
-        (result, Ok(_), Ok(())) => result,
-        (result, stage, source) => Err(anyhow::anyhow!(
-            "转换结果：{}；临时输出清理：{}；源快照清理：{}",
+    let result = match (result, stage_cleanup) {
+        (result, Ok(_)) => result,
+        (result, Err(stage_error)) => Err(anyhow::anyhow!(
+            "转换结果：{}；临时输出清理：{}",
             result
                 .as_ref()
                 .err()
                 .map_or("已完成".into(), |error| format!("{error:#}")),
-            stage.err().map_or("完成".into(), |error| error.to_string()),
-            source
-                .err()
-                .map_or("完成".into(), |error| format!("{error:#}")),
+            stage_error,
         )),
     };
     let outcome = match result {
@@ -206,5 +202,5 @@ pub(crate) fn convert(
         },
         Err(error) => failed(error, published),
     };
-    (outcome, (!cleanup.is_empty()).then_some(cleanup))
+    (outcome, cleanup)
 }

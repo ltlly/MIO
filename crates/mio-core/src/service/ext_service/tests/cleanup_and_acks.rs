@@ -26,7 +26,7 @@ async fn a_full_ui_queue_cannot_block_joined_ext_cleanup_or_drop_its_terminal_ac
         CancellationToken::new(),
         true,
         move |_, _| {
-            inspection.release().unwrap();
+            inspection.release();
             cleaned.send(()).unwrap();
             Output::Finished(ExtJobOutcome::Released { inspection_id }, None)
         },
@@ -62,21 +62,41 @@ async fn a_full_ui_queue_cannot_block_joined_ext_cleanup_or_drop_its_terminal_ac
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_snapshot_cleanup_cannot_make_stop_report_success() {
+async fn a_failed_stage_cleanup_cannot_make_stop_report_success() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
-    let (path, _) = fixture(directory.path(), 72);
-    let inspection = inspected_with_snapshot(path);
+    let (path, _) = fixture(directory.path(), 4096);
+    let inspection = import::inspect(path, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
     let inspection_id = inspection.info.id;
+    let destination = directory.path().join("failed.mio");
     let (events, mut receiver) = mpsc::channel(8);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
-    state.ext_archive.inspection = Some((state.project, inspection));
     let original = std::fs::metadata(directory.path()).unwrap().permissions();
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    state
-        .release_ext(state.project, Uuid::new_v4(), inspection_id)
-        .await;
+    let dir_path = directory.path().to_path_buf();
+    let (locked, ready) = oneshot::channel();
+    let mut locked = Some(locked);
+    state.ext_archive.start(
+        state.project,
+        Uuid::new_v4(),
+        CancellationToken::new(),
+        true,
+        move |cancel, _| {
+            let (outcome, cleanup) =
+                import::convert(inspection, destination, cancel, &mut |phase, completed, _| {
+                    if phase == ExtImportPhase::Archive && completed != 0 {
+                        std::fs::set_permissions(&dir_path, std::fs::Permissions::from_mode(0o500))
+                            .unwrap();
+                        cancel.cancel();
+                        if let Some(tx) = locked.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                });
+            Output::Finished(outcome, cleanup)
+        },
+    );
+    ready.await.unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(1), state.stop_ext()).await;
     std::fs::set_permissions(directory.path(), original).unwrap();
     let stopped = stopped.expect("permission failure is immediate, not a slow-cleanup test");
@@ -97,7 +117,7 @@ async fn a_failed_snapshot_cleanup_cannot_make_stop_report_success() {
     assert_eq!(
         std::fs::read_dir(directory.path()).unwrap().count(),
         2,
-        "the inaccessible parent prevented removal of the private snapshot directory"
+        "the inaccessible parent prevented removal of the staging directory"
     );
     assert!(state.ext_archive.cleanup.is_some());
     let saved_directory = tempfile::tempdir().unwrap();
@@ -276,7 +296,7 @@ async fn timed_out_stop_retains_the_worker_and_global_shutdown_still_joins_clean
         .start(state.project, job_id, cancel.clone(), true, move |_, _| {
             started.send(()).unwrap();
             let _ = gate.blocking_recv();
-            inspection.release().unwrap();
+            inspection.release();
             cleaned.send(()).unwrap();
             Output::Finished(ExtJobOutcome::Released { inspection_id }, None)
         });
@@ -343,8 +363,9 @@ async fn unsaved_traffic_cannot_hide_ext_cleanup_failure_behind_a_quiesced_ack()
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
-    let (path, _) = fixture(directory.path(), 72);
-    let inspection = inspected_with_snapshot(path);
+    let (path, _) = fixture(directory.path(), 4096);
+    let inspection = import::inspect(path, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
+    let destination = directory.path().join("failed.mio");
     let (events, mut receiver) = mpsc::channel(16);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let record = FlowRecord {
@@ -372,9 +393,31 @@ async fn unsaved_traffic_cannot_hide_ext_cleanup_failure_behind_a_quiesced_ack()
     state.store.reject_writes(true);
     assert!(state.persist(&record).is_err());
     assert_eq!(state.unsaved_count(), 1);
-    state.ext_archive.inspection = Some((state.project, inspection));
     let original = std::fs::metadata(directory.path()).unwrap().permissions();
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let dir_path = directory.path().to_path_buf();
+    let (locked, ready) = oneshot::channel();
+    let mut locked = Some(locked);
+    state.ext_archive.start(
+        state.project,
+        Uuid::new_v4(),
+        CancellationToken::new(),
+        true,
+        move |cancel, _| {
+            let (outcome, cleanup) =
+                import::convert(inspection, destination, cancel, &mut |phase, completed, _| {
+                    if phase == ExtImportPhase::Archive && completed != 0 {
+                        std::fs::set_permissions(&dir_path, std::fs::Permissions::from_mode(0o500))
+                            .unwrap();
+                        cancel.cancel();
+                        if let Some(tx) = locked.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                });
+            Output::Finished(outcome, cleanup)
+        },
+    );
+    ready.await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         state.command(Command::Quiesce {

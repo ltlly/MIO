@@ -50,37 +50,6 @@ fn conversion_persists_report_and_survives_save_save_as_and_reopen() {
 }
 
 #[test]
-fn conversion_rejects_destination_inside_its_source_snapshot() {
-    let directory = tempfile::tempdir().unwrap();
-    let (source, bytes) = fixture(directory.path(), 72);
-    let inspection = inspected_with_snapshot(source.clone());
-    let snapshot = inspection.snapshot.as_ref().unwrap().path().to_owned();
-    let destination = snapshot.join("converted.mio");
-    let (outcome, cleanup) = convert(
-        inspection,
-        destination.clone(),
-        &CancellationToken::new(),
-        &mut |_, _, _| {},
-    );
-
-    assert!(cleanup.is_none());
-    assert!(!snapshot.exists());
-    assert_eq!(fs::read(source).unwrap(), bytes);
-    assert_eq!(directory_names(directory.path()), vec!["synthetic.archive"]);
-    assert!(
-        matches!(
-            outcome,
-            ExtJobOutcome::Failed {
-                created_path: None,
-                ..
-            }
-        ),
-        "a destination owned by snapshot cleanup must be rejected before publication: {outcome:?}; destination_exists={}",
-        destination.exists()
-    );
-}
-
-#[test]
 fn multi_schema_compatibility_and_special_files_do_not_leave_inspection_resources() {
     let directory = tempfile::tempdir().unwrap();
     let (path, mut bytes) = fixture(directory.path(), 72);
@@ -91,7 +60,7 @@ fn multi_schema_compatibility_and_special_files_do_not_leave_inspection_resource
         (inspection.info.report.schema_floor, inspection.info.report.schema_revision),
         (226, 226)
     );
-    inspection.release().unwrap();
+    inspection.release();
     #[cfg(unix)]
     assert!(
         inspect(

@@ -18,8 +18,7 @@ pub(super) enum Output {
 
 impl Output {
     fn failed(error: anyhow::Error) -> Self {
-        let cleanup = error.downcast_ref::<CleanupFailure>().cloned();
-        Self::Finished(import::failed(error, None), cleanup)
+        Self::Finished(import::failed(error, None), None)
     }
 }
 
@@ -177,9 +176,9 @@ impl ExtState {
             job_id,
             CancellationToken::new(),
             acknowledge,
-            move |_, _| match inspection.release() {
-                Ok(()) => Output::Finished(outcome, None),
-                Err(error) => Output::failed(error),
+            move |_, _| {
+                inspection.release();
+                Output::Finished(outcome, None)
             },
         );
     }

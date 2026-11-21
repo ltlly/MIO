@@ -1,5 +1,5 @@
 use super::*;
-use crate::ext_archive::import::tests::{fixture, inspected_with_snapshot};
+use crate::ext_archive::import::tests::fixture;
 
 mod cleanup_and_acks;
 mod intruder_backpressure;
@@ -73,17 +73,13 @@ async fn inspection_release_is_acknowledged_after_snapshot_cleanup_and_cannot_be
 }
 
 #[tokio::test]
-async fn save_as_rejects_destination_inside_retained_ext_snapshot() {
+async fn save_as_rejects_while_ext_inspection_is_retained() {
     let directory = tempfile::tempdir().unwrap();
     let (source, bytes) = fixture(directory.path(), 72);
-    let inspection = inspected_with_snapshot(source.clone());
+    let inspection =
+        import::inspect(source.clone(), &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
     let inspection_id = inspection.info.id;
-    let snapshot = std::fs::read_dir(directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| path.is_dir())
-        .unwrap();
-    let destination = snapshot.join("current.mio");
+    let destination = directory.path().join("current.mio");
     let (events, mut receiver) = mpsc::channel(32);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let original_id = state.store.id;
@@ -121,12 +117,11 @@ async fn save_as_rejects_destination_inside_retained_ext_snapshot() {
         matches!(released.as_slice(), [(id, ExtJobOutcome::Released { inspection_id: actual })]
         if *id == release && *actual == inspection_id)
     );
-    assert!(!snapshot.exists());
     assert!(!destination.exists());
     assert_eq!(std::fs::read(source).unwrap(), bytes);
     assert!(
         saved.is_err() && path_after_save.is_none() && !destination_created && !saved_ack,
-        "Save As into snapshot cleanup ownership must be rejected without switching or acknowledging success: saved={saved:?}, path={path_after_save:?}, destination_created={destination_created}, saved_ack={saved_ack}"
+        "Save As while an inspection is retained must be rejected without switching or acknowledging success: saved={saved:?}, path={path_after_save:?}, destination_created={destination_created}, saved_ack={saved_ack}"
     );
     assert_eq!(current_id, original_id);
     assert_eq!(current_workspace.unwrap(), workspace);
@@ -145,14 +140,10 @@ async fn explicit_new_project_rejects_owned_destination_before_publication() {
         let before = std::fs::read(&original).unwrap();
         let destination = if ext_owned {
             let (source, _) = fixture(directory.path(), 72);
-            let inspection = inspected_with_snapshot(source);
-            let snapshot = std::fs::read_dir(directory.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| path.is_dir())
-                .unwrap();
+            let inspection =
+                import::inspect(source, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
             state.ext_archive.inspection = Some((project, inspection));
-            snapshot.join("created.mio")
+            directory.path().join("created.mio")
         } else {
             original.parent().unwrap().join("created.mio")
         };
@@ -232,13 +223,9 @@ async fn open_project_rejects_owned_sources_including_directory_and_file_aliases
             }
             "ext_archive" => {
                 let (source, _) = fixture(directory.path(), 72);
-                let inspection = inspected_with_snapshot(source);
-                let snapshot = std::fs::read_dir(directory.path())
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .find(|path| path.is_dir())
-                    .unwrap();
-                let source = snapshot.join("existing.mio");
+                let inspection =
+                    import::inspect(source, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
+                let source = directory.path().join("existing.mio");
                 ProjectStore::create(Some(&source))
                     .unwrap()
                     .close()
@@ -350,7 +337,7 @@ async fn save_waits_for_active_ext_cleanup_and_succeeds_after_join() {
         move |_, _| {
             started.send(()).unwrap();
             let _ = gate.blocking_recv();
-            inspection.release().unwrap();
+            inspection.release();
             Output::Finished(ExtJobOutcome::Released { inspection_id }, None)
         },
     );

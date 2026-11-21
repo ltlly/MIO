@@ -317,7 +317,7 @@ fn current_title_229(
         .filter(|title| {
             !title.is_empty()
                 && title.len() <= 4096
-                && title.encode_utf16().count() <= crate::ext_archive::messages::MAX_REPEATER_TITLE_UNITS
+                && title.encode_utf16().count() <= crate::ext_archive::MAX_REPEATER_TITLE_UNITS
         })
         .map(str::to_owned))
 }

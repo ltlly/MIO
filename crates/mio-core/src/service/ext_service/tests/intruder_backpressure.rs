@@ -15,12 +15,10 @@ async fn cancelled_inspection_is_reclaimed_during_history_reply_wait_without_ove
     tokio::time::timeout(Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let (source, _) = fixture(directory.path(), 72);
-        let inspection = inspected_with_snapshot(source);
-        let snapshot = std::fs::read_dir(directory.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_dir())
-            .unwrap();
+        let mut inspection =
+            import::inspect(source, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
+        let (tx, mut released_rx) = oneshot::channel();
+        inspection.released = Some(tx);
         let (events, mut received) = mpsc::channel(2);
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         let project = state.project;
@@ -56,13 +54,18 @@ async fn cancelled_inspection_is_reclaimed_during_history_reply_wait_without_ove
             .unwrap();
             job_cancel.cancel();
             let reclaimed = tokio::time::timeout(Duration::from_secs(1), async {
-                while snapshot.exists() {
+                loop {
+                    match released_rx.try_recv() {
+                        Ok(()) => break true,
+                        Err(oneshot::error::TryRecvError::Closed) => break false,
+                        Err(oneshot::error::TryRecvError::Empty) => {}
+                    }
                     assert!(poll_once(command.as_mut()).await.is_pending());
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .is_ok();
+            .unwrap_or(false);
             assert_eq!(received.len(), received.max_capacity());
             assert!(matches!(received.try_recv(), Ok(Event::Stopped)));
             let completed = tokio::time::timeout(Duration::from_secs(1), command.as_mut()).await;
@@ -97,7 +100,6 @@ async fn cancelled_inspection_is_reclaimed_during_history_reply_wait_without_ove
             }
         }
         state.stop_ext().await.unwrap();
-        assert!(!snapshot.exists());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert!(state.ext_archive.can_quiesce());
         assert!(
@@ -129,12 +131,10 @@ async fn cancelled_finished_inspection_is_reclaimed_while_intruder_reply_is_bloc
     tokio::time::timeout(Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let (source, _) = fixture(directory.path(), 72);
-        let inspection = inspected_with_snapshot(source);
-        let snapshot = std::fs::read_dir(directory.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_dir())
-            .unwrap();
+        let mut inspection =
+            import::inspect(source, &CancellationToken::new(), &mut |_, _, _| {}).unwrap();
+        let (tx, mut released_rx) = oneshot::channel();
+        inspection.released = Some(tx);
         let (events, mut received) = mpsc::channel(2);
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         let project = state.project;
@@ -185,7 +185,7 @@ async fn cancelled_finished_inspection_is_reclaimed_while_intruder_reply_is_bloc
         .is_ok();
         job_cancel.cancel();
 
-        // Only joining the Inspected output can start release of this owned snapshot.
+        // Only joining the Inspected output can start release of this retained inspection.
         let reclaimed_without_drain = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if ended.is_some() {
@@ -195,8 +195,10 @@ async fn cancelled_finished_inspection_is_reclaimed_while_intruder_reply_is_bloc
                     ended = Some(result);
                     break false;
                 }
-                if !snapshot.exists() {
-                    break true;
+                match released_rx.try_recv() {
+                    Ok(()) => break true,
+                    Err(oneshot::error::TryRecvError::Closed) => break false,
+                    Err(oneshot::error::TryRecvError::Empty) => {}
                 }
                 tokio::task::yield_now().await;
             }
@@ -256,16 +258,12 @@ async fn cancelled_finished_inspection_is_reclaimed_while_intruder_reply_is_bloc
         );
         stopped.unwrap();
         assert!(
-            !snapshot.exists(),
-            "cleanup must finish even on the red path"
-        );
-        assert!(
             reclaimed_without_drain,
             "Intruder reply backpressure must not suppress External join and inspection release"
         );
         assert!(
             remained_full,
-            "snapshot reclamation did not rely on UI consumption"
+            "inspection release did not rely on UI consumption"
         );
         assert!(delivered);
         assert_eq!(

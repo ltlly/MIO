@@ -19,6 +19,7 @@ use source::ExtSource;
 
 const MAX_LIVE_NOTE_BYTES: usize = 64 * 1024;
 const MAX_TITLE_BYTES: usize = 4096;
+pub(crate) const MAX_REPEATER_TITLE_UNITS: usize = 4096;
 const MAX_WORK_TABS: usize = 512;
 const MAX_WORK_GROUPS: usize = 512;
 const MAX_DRAFT_TOTAL_BYTES: usize = 64 * 1024 * 1024;

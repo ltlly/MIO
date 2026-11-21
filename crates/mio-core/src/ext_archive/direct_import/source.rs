@@ -6,8 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 
-const HEADER_SIZE: u64 = 72;
-const MAGIC: [u8; 4] = [0x66, 0x85, 0x82, 0x80];
+use crate::ext_archive::{HEADER_SIZE, MAGIC};
 const COMPATIBILITY: u32 = 0x8052_7974;
 const MAX_FORWARD_DEPTH: usize = 32;
 const BLOCK_BYTES: usize = 64 * 1024;
