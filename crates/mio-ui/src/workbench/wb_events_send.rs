@@ -234,17 +234,17 @@ impl Workbench {
                         && c.sha256_fingerprint == cert.sha256_fingerprint
                 }) {
                     if self.observed_server_certs.len() >= 512 {
-                        self.observed_server_certs.remove(0);
+                        self.observed_server_certs.pop_front();
                     }
-                    self.observed_server_certs.push(cert);
+                    self.observed_server_certs.push_back(cert);
                 }
             }
             Event::SessionTraceRecorded { project, entry } if self.project == Some(project) => {
                 if !self.session_tracer_paused {
                     if self.session_traces.len() >= 500 {
-                        self.session_traces.remove(0);
+                        self.session_traces.pop_front();
                     }
-                    self.session_traces.push(entry);
+                    self.session_traces.push_back(entry);
                 }
             }
             Event::TlsPassThroughAutoAdded {

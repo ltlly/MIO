@@ -166,190 +166,56 @@ fn extract_comments_from_response(url: &str, raw: &[u8]) -> Vec<TargetEngagement
 
 fn extract_scripts_from_response(url: &str, raw: &[u8]) -> Vec<TargetEngagementEntry> {
     let body = String::from_utf8_lossy(split_http_body(raw));
-    let mut entries = Vec::new();
-    let mut seen = HashSet::new();
-    let base = url::Url::parse(url).ok();
-    let document = scraper::Html::parse_document(&body);
-    if let Ok(selector) = scraper::Selector::parse("script") {
-        for (idx, el) in document.select(&selector).enumerate() {
-            if let Some(src) = el.value().attr("src") {
-                let resolved = base
-                    .as_ref()
-                    .and_then(|b| b.join(src).ok())
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|| src.to_owned());
-                if seen.insert(format!("SRC:{resolved}")) {
-                    entries.push(TargetEngagementEntry {
-                        kind: "外部脚本".into(),
-                        location: url.to_owned(),
-                        detail: resolved,
-                    });
-                }
+    mio_core::html_extract::extract_scripts_from_html(url, &body)
+        .into_iter()
+        .map(|script| TargetEngagementEntry {
+            kind: if script.is_external {
+                "外部脚本".into()
             } else {
-                let inline = el
-                    .text()
-                    .collect::<String>()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if !inline.is_empty() {
-                    let snippet: String = inline.chars().take(160).collect();
-                    if seen.insert(format!("INLINE:{snippet}")) {
-                        entries.push(TargetEngagementEntry {
-                            kind: format!("内联脚本 #{}", idx + 1),
-                            location: url.to_owned(),
-                            detail: snippet,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    entries
+                format!("内联脚本 #{}", script.index + 1)
+            },
+            location: url.to_owned(),
+            detail: script.detail,
+        })
+        .collect()
 }
 
 fn build_multi_item_ext_xml(
     items: &[(String, String, Option<u16>, String, Vec<u8>, Vec<u8>, String)],
 ) -> Result<String, String> {
-    use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event as XmlEvent};
-
     let now = crate::history::local_time(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
     );
-    let mut writer = quick_xml::Writer::new(Vec::new());
-    writer
-        .write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        .map_err(|e| e.to_string())?;
-    let mut root = BytesStart::new("items");
-    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
-    root.push_attribute(("exportTime", now.as_str()));
-    writer
-        .write_event(XmlEvent::Start(root))
-        .map_err(|e| e.to_string())?;
-
-    for (url, method, status, time_str, req_bytes, resp_bytes, comment) in items {
-        let Ok(parsed) = url::Url::parse(url) else {
-            continue;
-        };
-        if !matches!(parsed.scheme(), "http" | "https") {
-            continue;
-        }
-        let Some(host) = parsed.host_str() else {
-            continue;
-        };
-        let port = parsed.port_or_known_default().unwrap_or(80);
-        let mut path = parsed.path().to_owned();
-        if let Some(q) = parsed.query() {
-            path.push('?');
-            path.push_str(q);
-        }
-        let extension = parsed
-            .path_segments()
-            .and_then(Iterator::last)
-            .and_then(|seg| seg.rsplit_once('.').map(|(_, ext)| ext))
-            .unwrap_or("");
-        writer
-            .write_event(XmlEvent::Start(BytesStart::new("item")))
-            .map_err(|e| e.to_string())?;
-        for (tag, val) in [
-            ("time", time_str.clone()),
-            ("url", url.clone()),
-            ("host", host.to_owned()),
-            ("port", port.to_string()),
-            ("protocol", parsed.scheme().to_owned()),
-            ("method", method.clone()),
-            ("path", path),
-            ("extension", extension.to_owned()),
-        ] {
-            writer
-                .create_element(tag)
-                .write_text_content(BytesText::new(&val))
-                .map_err(|e| e.to_string())?;
-        }
-        writer
-            .create_element("request")
-            .with_attribute(("base64", "true"))
-            .write_text_content(BytesText::new(&BASE64_STANDARD.encode(req_bytes)))
-            .map_err(|e| e.to_string())?;
-        writer
-            .create_element("status")
-            .write_text_content(BytesText::new(
-                &status.map(|s| s.to_string()).unwrap_or_default(),
-            ))
-            .map_err(|e| e.to_string())?;
-        writer
-            .create_element("responselength")
-            .write_text_content(BytesText::new(&resp_bytes.len().to_string()))
-            .map_err(|e| e.to_string())?;
-        writer
-            .create_element("response")
-            .with_attribute(("base64", "true"))
-            .write_text_content(BytesText::new(&BASE64_STANDARD.encode(resp_bytes)))
-            .map_err(|e| e.to_string())?;
-        writer
-            .create_element("comment")
-            .write_text_content(BytesText::new(comment))
-            .map_err(|e| e.to_string())?;
-        writer
-            .write_event(XmlEvent::End(BytesEnd::new("item")))
-            .map_err(|e| e.to_string())?;
-    }
-
-    writer
-        .write_event(XmlEvent::End(BytesEnd::new("items")))
-        .map_err(|e| e.to_string())?;
-    let xml = String::from_utf8(writer.into_inner()).map_err(|e| e.to_string())?;
-    roxmltree::Document::parse(&xml).map_err(|e| format!("XML 导出内容无效：{e}"))?;
-    Ok(xml)
+    let export_items: Vec<mio_core::export_xml::XmlHttpExportItem<'_>> = items
+        .iter()
+        .map(
+            |(url, method, status, time_str, req_bytes, resp_bytes, comment)| {
+                mio_core::export_xml::XmlHttpExportItem {
+                    url,
+                    method,
+                    status: *status,
+                    time_str,
+                    request_bytes: req_bytes,
+                    response_bytes: resp_bytes,
+                    comment,
+                }
+            },
+        )
+        .collect();
+    Ok(mio_core::export_xml::build_http_items_xml(
+        &now,
+        &export_items,
+    ))
 }
 
 fn parse_external_site_map_file(text: &str) -> Result<BTreeMap<String, String>, String> {
     let trimmed = text.trim();
     let mut map = BTreeMap::new();
     if trimmed.starts_with('<') {
-        let doc = roxmltree::Document::parse(trimmed)
-            .map_err(|e| format!("无法解析 MIO XML 站点地图文件：{e}"))?;
-        for item in doc.descendants().filter(|n| n.has_tag_name("item")) {
-            let path = item
-                .children()
-                .find(|c| c.has_tag_name("path"))
-                .and_then(|c| c.text())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .or_else(|| {
-                    item.children()
-                        .find(|c| c.has_tag_name("url"))
-                        .and_then(|c| c.text())
-                        .map(http_history_path_and_query)
-                });
-            let Some(path) = path else {
-                continue;
-            };
-            let method = item
-                .children()
-                .find(|c| c.has_tag_name("method"))
-                .and_then(|c| c.text())
-                .unwrap_or("GET")
-                .trim();
-            let status = item
-                .children()
-                .find(|c| c.has_tag_name("status"))
-                .and_then(|c| c.text())
-                .unwrap_or("-")
-                .trim();
-            let len = item
-                .children()
-                .find(|c| c.has_tag_name("responselength"))
-                .and_then(|c| c.text())
-                .unwrap_or("0")
-                .trim();
-            map.insert(path, format!("{method} · status={status} · len={len}"));
-        }
-        return Ok(map);
+        return mio_core::export_xml::parse_xml_site_map_entries(trimmed);
     }
     if trimmed.starts_with('[') || trimmed.starts_with('{') {
         let val: serde_json::Value = serde_json::from_str(trimmed)
@@ -644,7 +510,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension(if as_html { "html" } else { "json" });
                             }
-                            match std::fs::write(&path, &payload) {
+                            match mio_core::ui_files::write_export_file(&path, &payload) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(
@@ -1474,7 +1340,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension(default_ext);
                             }
-                            match std::fs::write(&path, &payload) {
+                            match mio_core::ui_files::write_export_file(&path, &payload) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status =
@@ -1931,18 +1797,10 @@ impl Workbench {
             cx,
         ) {
             let body = String::from_utf8_lossy(split_http_body(&raw));
-            let doc = scraper::Html::parse_document(&body);
-            if let Ok(sel) = scraper::Selector::parse("form") {
-                forms_count += doc.select(&sel).count();
-            }
-            if let Ok(sel) = scraper::Selector::parse("input[name], select[name], textarea[name]") {
-                for el in doc.select(&sel) {
-                    if let Some(name) = el.value().attr("name")
-                        && !name.trim().is_empty()
-                    {
-                        param_names.insert(name.trim().to_owned());
-                    }
-                }
+            let stats = mio_core::html_extract::extract_html_form_stats(&body);
+            forms_count += stats.form_count;
+            for name in stats.param_names {
+                param_names.insert(name);
             }
         }
 
@@ -2282,7 +2140,7 @@ impl Workbench {
                         let Some(path) = paths.into_iter().next() else {
                             return;
                         };
-                        match std::fs::read(&path) {
+                        match mio_core::ui_files::read_file_bytes(&path) {
                             Ok(bytes) if bytes.len() > MAX_COMPARE_FILE_BYTES => {
                                 view.fail("站点地图对比文件超过 4 MB 上限。", cx);
                             }

@@ -1,12 +1,10 @@
 use super::*;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     button::{ButtonRounded, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
-use std::collections::HashSet;
 
 fn editor_raw_bytes_snapshot(editor: &MessageEditor, cx: &App) -> Vec<u8> {
     editor.bytes_lossless(cx)
@@ -1056,53 +1054,29 @@ impl Workbench {
                 return;
             }
         };
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let prompt = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some("item.xml"),
+            false,
+            "项目已切换，本次文件导出未写入磁盘。",
+            "无法选择保存路径",
             window,
             cx,
-            &self.default_directory(),
-            Some("item.xml"),
+            move |view, mut path, _, cx| {
+                if path.extension().is_none() {
+                    path.set_extension("xml");
+                }
+                match mio_core::ui_files::write_export_file(&path, &payload) {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!("已导出当前条目到文件：{}", path.display());
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("写入导出文件失败：{err}"), cx);
+                    }
+                }
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件导出未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension("xml");
-                            }
-                            match std::fs::write(&path, &payload) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status =
-                                        format!("已导出当前条目到文件：{}", path.display());
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("写入导出文件失败：{err}"), cx);
-                                }
-                            }
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择保存路径：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     pub(crate) fn save_selected_history_item_to_file(
@@ -1139,55 +1113,29 @@ impl Workbench {
         } else {
             "history-item.har"
         };
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let prompt = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some(suggested_name),
+            false,
+            "项目已切换，本次文件导出未写入磁盘。",
+            "无法选择保存路径",
             window,
             cx,
-            &self.default_directory(),
-            Some(suggested_name),
+            move |view, mut path, _, cx| {
+                if path.extension().is_none() {
+                    path.set_extension(if as_xml { "xml" } else { "har" });
+                }
+                match mio_core::ui_files::write_export_file(&path, &payload) {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!("已导出选中历史记录到文件：{}", path.display());
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("写入导出文件失败：{err}"), cx);
+                    }
+                }
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件导出未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension(if as_xml { "xml" } else { "har" });
-                            }
-                            match std::fs::write(&path, &payload) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已导出选中历史记录到文件：{}",
-                                        path.display()
-                                    );
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("写入导出文件失败：{err}"), cx);
-                                }
-                            }
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择保存路径：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     fn history_entry_url(&self, id: HistoryEntryId, cx: &App) -> Option<String> {
@@ -1882,105 +1830,7 @@ pub(crate) fn extract_response_links_list(
     base_url: &str,
     raw_response: &[u8],
 ) -> Result<Vec<String>, String> {
-    let base = url::Url::parse(base_url)
-        .map_err(|error| format!("响应链接基准 URL 无效：{error}"))?;
-    if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
-        return Err("响应链接基准 URL 必须包含 HTTP 主机。".into());
-    }
-    let response = parse_response(raw_response, HttpVersion::Http11)
-        .map_err(|error| format!("响应链接提取失败：{error}"))?;
-    let mut seen = HashSet::new();
-    let mut links = Vec::new();
-    for header in &response.headers {
-        if header.name.eq_ignore_ascii_case("location") {
-            let value = std::str::from_utf8(&header.value)
-                .map_err(|error| format!("Location 标头文本无效：{error}"))?;
-            append_response_link(&base, value, &mut seen, &mut links)?;
-        }
-    }
-    let content_type = response.headers.iter()
-        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
-        .map(|header| std::str::from_utf8(&header.value)
-            .map_err(|error| format!("Content-Type 标头文本无效：{error}")))
-        .transpose()?.unwrap_or("").to_ascii_lowercase();
-    if content_type.starts_with("image/") || content_type.starts_with("audio/")
-        || content_type.starts_with("video/") || content_type.contains("octet-stream")
-    {
-        return Ok(links);
-    }
-    let body = std::str::from_utf8(&response.body)
-        .map_err(|error| format!("响应正文文本无效：{error}"))?;
-    if content_type.contains("json") {
-        let value: serde_json::Value = serde_json::from_str(body)
-            .map_err(|error| format!("响应 JSON 无效：{error}"))?;
-        let mut pending = vec![&value];
-        while let Some(value) = pending.pop() {
-            match value {
-                serde_json::Value::String(value) if value.starts_with("http://")
-                    || value.starts_with("https://") || value.starts_with('/') => {
-                    append_response_link(&base, value, &mut seen, &mut links)?;
-                }
-                serde_json::Value::Array(values) => pending.extend(values.iter().rev()),
-                serde_json::Value::Object(values) => pending.extend(values.values().rev()),
-                _ => {}
-            }
-        }
-    } else {
-        let document = scraper::Html::parse_document(body);
-        let mut document_base = base.clone();
-        let base_selector = scraper::Selector::parse("base[href]")
-            .expect("静态 HTML base 选择器必须有效");
-        if let Some(element) = document.select(&base_selector).next() {
-            let href = element.value().attr("href").expect("base 元素必须具有 href");
-            document_base = base.join(href)
-                .map_err(|error| format!("HTML base URL 无效：{error}"))?;
-        }
-        let selector = scraper::Selector::parse(
-            "a[href], area[href], link[href], script[src], img[src], iframe[src], source[src], form[action]",
-        ).expect("静态 HTML 链接选择器必须有效");
-        for element in document.select(&selector) {
-            let reference = element.value().attr("href")
-                .or_else(|| element.value().attr("src"))
-                .or_else(|| element.value().attr("action"))
-                .expect("链接元素必须具有引用属性");
-            append_response_link(&document_base, reference, &mut seen, &mut links)?;
-        }
-        for candidate in body.split(|character: char| character.is_whitespace()
-            || matches!(character, '"' | '\'' | '<' | '>' | '(' | ')' | '{' | '}' | '`'))
-        {
-            if candidate.starts_with("http://") || candidate.starts_with("https://") {
-                append_response_link(&base, candidate.trim_end_matches(['.', ',', ';']),
-                    &mut seen, &mut links)?;
-            }
-        }
-    }
-    Ok(links)
-}
-
-fn append_response_link(
-    base: &url::Url,
-    reference: &str,
-    seen: &mut HashSet<String>,
-    links: &mut Vec<String>,
-) -> Result<(), String> {
-    let reference = reference.trim();
-    if reference.is_empty() || reference.starts_with('#') {
-        return Ok(());
-    }
-    let mut resolved = base.join(reference)
-        .map_err(|error| format!("响应链接 {reference:?} 无效：{error}"))?;
-    if !matches!(resolved.scheme(), "http" | "https") {
-        return Ok(());
-    }
-    if resolved.host_str().is_none() {
-        return Err(format!("响应链接 {reference:?} 缺少主机。"));
-    }
-    resolved.set_fragment(None);
-    let value = resolved.to_string();
-    if seen.insert(value.clone()) {
-        links.push(value);
-    }
-    Ok(())
+    mio_core::html_extract::extract_response_links(base_url, raw_response)
 }
 
 pub(crate) fn build_ext_items_xml(
@@ -1992,63 +1842,15 @@ pub(crate) fn build_ext_items_xml(
     response_bytes: &[u8],
     comment: &str,
 ) -> Result<String, String> {
-    let parsed = url::Url::parse(url)
-        .map_err(|error| format!("导出 URL 无效：{error}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("XML 导出 URL 必须使用 HTTP 协议。".into());
-    }
-    let host = parsed.host_str().ok_or("XML 导出 URL 缺少主机。")?;
-    let port = parsed.port_or_known_default().ok_or("XML 导出 URL 缺少端口。")?;
-    let mut path = parsed.path().to_owned();
-    if let Some(query) = parsed.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    let extension = parsed.path_segments().and_then(Iterator::last)
-        .and_then(|segment| segment.rsplit_once('.').map(|(_, extension)| extension))
-        .unwrap_or("");
-    use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event as XmlEvent};
-    let mut writer = quick_xml::Writer::new(Vec::new());
-    writer.write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        .map_err(|error| error.to_string())?;
-    let mut root = BytesStart::new("items");
-    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
-    let export_time = quick_xml::escape::escape(time_str);
-    root.push_attribute(("exportTime", export_time.as_ref()));
-    writer.write_event(XmlEvent::Start(root)).map_err(|error| error.to_string())?;
-    writer.write_event(XmlEvent::Start(BytesStart::new("item")))
-        .map_err(|error| error.to_string())?;
-    for (name, value) in [
-        ("time", time_str.to_owned()), ("url", url.to_owned()),
-        ("host", host.to_owned()), ("port", port.to_string()),
-        ("protocol", parsed.scheme().to_owned()), ("method", method.to_owned()),
-        ("path", path), ("extension", extension.to_owned()),
-    ] {
-        writer.create_element(name).write_text_content(BytesText::new(&value))
-            .map_err(|error| error.to_string())?;
-    }
-    writer.create_element("request").with_attribute(("base64", "true"))
-        .write_text_content(BytesText::new(&BASE64_STANDARD.encode(request_bytes)))
-        .map_err(|error| error.to_string())?;
-    writer.create_element("status")
-        .write_text_content(BytesText::new(&status.map(|value| value.to_string()).unwrap_or_default()))
-        .map_err(|error| error.to_string())?;
-    writer.create_element("responselength")
-        .write_text_content(BytesText::new(&response_bytes.len().to_string()))
-        .map_err(|error| error.to_string())?;
-    writer.create_element("response").with_attribute(("base64", "true"))
-        .write_text_content(BytesText::new(&BASE64_STANDARD.encode(response_bytes)))
-        .map_err(|error| error.to_string())?;
-    writer.create_element("comment").write_text_content(BytesText::new(comment))
-        .map_err(|error| error.to_string())?;
-    writer.write_event(XmlEvent::End(BytesEnd::new("item")))
-        .map_err(|error| error.to_string())?;
-    writer.write_event(XmlEvent::End(BytesEnd::new("items")))
-        .map_err(|error| error.to_string())?;
-    let xml = String::from_utf8(writer.into_inner()).map_err(|error| error.to_string())?;
-    roxmltree::Document::parse(&xml)
-        .map_err(|error| format!("XML 导出内容无效：{error}"))?;
-    Ok(xml)
+    mio_core::export_xml::build_http_item_xml(&mio_core::export_xml::XmlHttpExportItem {
+        url,
+        method,
+        status,
+        time_str,
+        request_bytes,
+        response_bytes,
+        comment,
+    })
 }
 
 #[cfg(test)]
@@ -2321,6 +2123,42 @@ mod history_and_intercept_tests {
                     .any(|r| r.prefix == "https://ws.example.com")
             );
             assert_eq!(view.extra_tools.comparer_items.len(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn toggle_intercept_response_does_not_mutate_ui_state_when_enqueue_fails(
+        cx: &mut TestAppContext,
+    ) {
+        let mut f = fixture(cx, Vec::new(), 64);
+        drain(&mut f.commands);
+        let rec = record("https://example.invalid/login", "");
+        let flow_id = rec.summary.id;
+        f.events
+            .try_send(Event::InterceptPending {
+                project: f.project,
+                stage: InterceptStage::Request,
+                response_head_only: false,
+                record: Box::new(rec),
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        drop(f.commands);
+        cx.update_window(f.window, |_, _, cx| {
+            f.view.update(cx, |view, cx| {
+                view.selected_intercept = Some(flow_id);
+                view.toggle_intercept_response_for_selected(cx);
+            });
+        })
+        .unwrap();
+
+        cx.read(|cx| {
+            let view = f.view.read(cx);
+            assert!(!view.annotated_live_flows.contains(&flow_id));
+            assert!(!view.intercept_responses);
+            assert!(!view.workspace.proxy_interception.response.enabled);
+            assert!(view.error.is_some());
         });
     }
 }

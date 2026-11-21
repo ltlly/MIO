@@ -1,11 +1,10 @@
 use super::*;
 
 mod menu_actions;
-mod request_codec;
 
-pub(crate) use request_codec::BodyEncodingTarget;
+pub(crate) use mio_core::BodyEncodingTarget;
 #[cfg(test)]
-pub(crate) use request_codec::{
+pub(crate) use mio_core::{
     change_http_body_encoding_bytes, set_http_request_method_bytes,
     toggle_http_request_method_bytes,
 };

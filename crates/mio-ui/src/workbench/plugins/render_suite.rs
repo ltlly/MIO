@@ -251,7 +251,7 @@ impl Workbench {
                                 path.set_extension(if use_md { "md" } else { "json" });
                             }
                             let bytes = if use_md { &md_payload } else { &json_payload };
-                            match std::fs::write(&path, bytes) {
+                            match mio_core::ui_files::write_export_file(&path, bytes) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

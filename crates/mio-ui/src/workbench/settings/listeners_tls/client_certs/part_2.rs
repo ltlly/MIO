@@ -1,62 +1,21 @@
+use gpui_kit::component::select::Select;
+
 use super::*;
 
 impl Settings {
     pub(in crate::workbench::settings) fn render_client_tls_card(
         &self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let weak = cx.weak_entity();
-        let list_ui = window.use_keyed_state("settings-client-cert-list-ui", cx, |window, cx| {
-            let table = cx.new(|tcx| {
-                TableState::new(ClientCertTable { owner: weak }, window, tcx)
-                    .sortable(false)
-                    .col_selectable(false)
-            });
-            let format_select = cx.new(|scx| {
-                SelectState::new(vec!["PEM", "PKCS#12"], Some(IndexPath::new(0)), window, scx)
-            });
-            ClientCertListUi {
-                table,
-                selected: None,
-                format_select,
-            }
-        });
-        let (table, format_select, selected_idx) = {
-            let ui = list_ui.read(cx);
-            (ui.table.clone(), ui.format_select.clone(), ui.selected)
-        };
+        let table = &self.listeners_tls.client_cert_table;
+        let format_select = &self.listeners_tls.client_cert_format_select;
+        let selected_idx = self.listeners_tls.client_cert_selected;
+        let cert_count = self.state.client_certificates.len();
         let selected_from_table = table.read(cx).selected_row();
         let active_selected = selected_from_table
             .or(selected_idx)
-            .filter(|&row| row < self.state.client_certificates.len());
-        let cert_count = self.state.client_certificates.len();
-        let table_refresh = table.clone();
-        cx.defer(move |cx| {
-            table_refresh.update(cx, |state, cx| {
-                if state.selected_row().is_some_and(|row| row >= cert_count) {
-                    state.clear_selection(cx);
-                }
-                state.refresh(cx);
-            });
-        });
-        let format_value = format_select.read(cx).selected_value().copied();
-        if let Some(fmt_str) = format_value {
-            let desired = if fmt_str == "PKCS#12" {
-                ClientCertificateFormat::Pkcs12
-            } else {
-                ClientCertificateFormat::Pem
-            };
-            if self.listeners_tls.client_cert_format != desired {
-                let entity = cx.entity();
-                cx.defer(move |cx| {
-                    entity.update(cx, |this, cx| {
-                        this.listeners_tls.client_cert_format = desired;
-                        cx.notify();
-                    });
-                });
-            }
-        }
+            .filter(|&row| row < cert_count);
         let enabled = self.state.enabled;
         let project = self.state.project;
         let is_pem = self.listeners_tls.client_cert_format == ClientCertificateFormat::Pem;
@@ -66,10 +25,7 @@ impl Settings {
         let can_move_down = active_selected.is_some_and(|row| row + 1 < cert_count);
 
         let table_up = table.clone();
-        let list_up = list_ui.clone();
         let table_down = table.clone();
-        let list_down = list_ui.clone();
-        let list_rm = list_ui.clone();
         let table_rm = table.clone();
 
         let side_buttons = div()
@@ -107,7 +63,7 @@ impl Settings {
                     if matches!(res, Ok(Ok(()))) {
                         let remaining = this.state.client_certificates.len().saturating_sub(1);
                         let next_sel = (remaining > 0).then(|| index.min(remaining - 1));
-                        list_rm.update(cx, |ui, _| ui.selected = next_sel);
+                        this.listeners_tls.client_cert_selected = next_sel;
                         table_rm.update(cx, |state, cx| {
                             if let Some(row) = next_sel {
                                 state.set_selected_row(row, cx);
@@ -137,7 +93,7 @@ impl Settings {
                             view.move_client_certificate_rule(project, index, target, cx)
                         });
                         if matches!(res, Ok(Ok(()))) {
-                            list_up.update(cx, |ui, _| ui.selected = Some(target));
+                            this.listeners_tls.client_cert_selected = Some(target);
                             table_up.update(cx, |state, cx| state.set_selected_row(target, cx));
                         }
                         this.listeners_tls.client_cert_error = match res {
@@ -165,7 +121,7 @@ impl Settings {
                         view.move_client_certificate_rule(project, index, target, cx)
                     });
                     if matches!(res, Ok(Ok(()))) {
-                        list_down.update(cx, |ui, _| ui.selected = Some(target));
+                        this.listeners_tls.client_cert_selected = Some(target);
                         table_down.update(cx, |state, cx| state.set_selected_row(target, cx));
                     }
                     this.listeners_tls.client_cert_error = match res {
@@ -183,7 +139,7 @@ impl Settings {
             .h(px(132.))
             .flex_shrink_0()
             .child(side_buttons)
-            .child(mio_table_frame(&table, "Client TLS certificates"));
+            .child(mio_table_frame(table, "Client TLS certificates"));
 
         let mut content = div()
             .pl(px(30.))
@@ -216,7 +172,7 @@ impl Settings {
                                     .child("证书格式"),
                             )
                             .child(
-                                Select::new(&format_select)
+                                Select::new(format_select)
                                     .id("settings-client-cert-format-select")
                                     .small()
                                     .w(theme::scaled_px(220.).max(px(220.)))

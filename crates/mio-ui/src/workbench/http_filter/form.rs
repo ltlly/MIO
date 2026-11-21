@@ -1,19 +1,11 @@
 use super::*;
-use anyhow::{Context as _, Result as AnyResult, ensure};
+use anyhow::{Result as AnyResult, ensure};
 use gpui_kit::HighlightStyle;
 use gpui_kit::base::input::{
     FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, InputHighlighterFactory, Rope,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fs::{self, DirBuilder, File, OpenOptions},
-    io::{Read, Write},
-    ops::Range,
-    path::Path,
-    rc::Rc,
-};
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::{ops::Range, path::Path, rc::Rc};
 
 const MAX_LIBRARY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_HIGHLIGHT_SCRIPT_BYTES: usize = 64 * 1024;
@@ -132,54 +124,12 @@ fn validate_library(library: &ScriptLibrary) -> AnyResult<()> {
     Ok(())
 }
 
-fn library_parent(path: &Path) -> AnyResult<PathBuf> {
-    ensure!(path.is_absolute() && !path.components().any(|part|
-        matches!(part, std::path::Component::ParentDir)), "脚本库路径须为绝对路径");
-    let parent = path.parent().context("脚本库路径缺少父目录")?;
-    for ancestor in parent.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) => ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "脚本库目录不得经过符号链接或特殊文件"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(parent.to_owned())
-}
-
-fn checked_library_file(file: &File) -> AnyResult<fs::Metadata> {
-    let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "脚本库须为普通文件");
-    #[cfg(unix)]
-    ensure!(metadata.nlink() == 1 && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o002 == 0
-        && (metadata.mode() & 0o020 == 0 || metadata.gid() == unsafe { libc::getegid() }),
-        "脚本库文件须由当前用户拥有且其他用户不可写入");
-    Ok(metadata)
-}
-
 pub(super) fn read_library(path: &Path) -> AnyResult<ScriptLibrary> {
-    library_parent(path)?;
-    #[cfg(not(unix))]
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
-            "脚本库须为普通文件"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ScriptLibrary::default()),
-        Err(error) => return Err(error.into()),
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ScriptLibrary::default()),
-        Err(error) => return Err(error.into()),
+    let Some(bytes) =
+        mio_core::ui_files::read_owned_file_bounded(path, MAX_LIBRARY_BYTES, "脚本库")?
+    else {
+        return Ok(ScriptLibrary::default());
     };
-    ensure!(checked_library_file(&file)?.len() <= MAX_LIBRARY_BYTES, "脚本库超过 4 MiB");
-    let mut bytes = Vec::new();
-    file.take(MAX_LIBRARY_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_LIBRARY_BYTES, "脚本库超过 4 MiB");
     let library: ScriptLibrary = serde_json::from_slice(&bytes)?;
     validate_library(&library)?;
     Ok(library)
@@ -190,68 +140,36 @@ pub(super) fn write_library(
     expected: &ScriptLibrary,
     script: LibraryScript,
 ) -> AnyResult<ScriptLibrary> {
-    let parent = library_parent(path)?;
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(&parent)?;
-    library_parent(path)?;
-    #[cfg(unix)]
-    let directory = OpenOptions::new().read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&parent)?;
-    #[cfg(unix)]
-    let directory_identity = directory.metadata()?;
-    #[cfg(unix)]
-    ensure!(directory_identity.uid() == unsafe { libc::geteuid() }
-        && directory_identity.mode() & 0o002 == 0
-        && (directory_identity.mode() & 0o020 == 0 || directory_identity.gid() == unsafe { libc::getegid() }),
-        "脚本库目录须由当前用户拥有且其他用户不可写入");
-    let lock_path = path.with_file_name("http-filter-scripts.lock");
-    #[cfg(not(unix))]
-    match fs::symlink_metadata(&lock_path) {
-        Ok(metadata) => ensure!(metadata.is_file() && !metadata.file_type().is_symlink(), "脚本库锁文件无效"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let mut lock_options = OpenOptions::new();
-    lock_options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    lock_options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let lock = lock_options.open(&lock_path)?;
-    let lock_identity = checked_library_file(&lock)?;
-    lock.try_lock().map_err(|error| anyhow::anyhow!("脚本库保存锁不可用：{error}"))?;
-    let current = read_library(path)?;
-    ensure!(&current == expected, "脚本库已发生变化，请重新加载脚本库");
-    let mut next = current.clone();
-    if let Some(existing) = next.scripts.iter_mut().find(|entry| entry.name == script.name) {
-        *existing = script;
-    } else {
-        next.scripts.push(script);
-    }
-    validate_library(&next)?;
-    let bytes = serde_json::to_vec(&next)?;
-    ensure!(bytes.len() as u64 <= MAX_LIBRARY_BYTES, "脚本库超过 4 MiB");
-    let mut temporary = tempfile::NamedTempFile::new_in(&parent)?;
-    temporary.write_all(&bytes)?;
-    temporary.as_file().sync_all()?;
-    library_parent(path)?;
-    let visible_lock = fs::symlink_metadata(&lock_path)?;
-    #[cfg(unix)]
-    {
-        let visible_directory = fs::symlink_metadata(&parent)?;
-        ensure!(visible_directory.dev() == directory_identity.dev() && visible_directory.ino() == directory_identity.ino(),
-            "脚本库目录已发生变化");
-        ensure!(visible_lock.dev() == lock_identity.dev() && visible_lock.ino() == lock_identity.ino(),
-            "脚本库锁文件已发生变化");
-    }
-    #[cfg(not(unix))]
-    ensure!(visible_lock.is_file() && visible_lock.len() == lock_identity.len(), "脚本库锁文件已发生变化");
-    ensure!(read_library(path)? == current, "脚本库已发生变化，请重新加载脚本库");
-    temporary.persist(path).map_err(|error| error.error)?;
-    #[cfg(unix)]
-    directory.sync_all()?;
-    Ok(next)
+    let mut saved = None;
+    mio_core::ui_files::locked_cas_update_owned_file(
+        path,
+        "http-filter-scripts.lock",
+        MAX_LIBRARY_BYTES,
+        "脚本库",
+        |before| {
+            let current = match before {
+                Some(bytes) => {
+                    let lib: ScriptLibrary = serde_json::from_slice(&bytes)?;
+                    validate_library(&lib)?;
+                    lib
+                }
+                None => ScriptLibrary::default(),
+            };
+            ensure!(&current == expected, "脚本库已发生变化，请重新加载脚本库");
+            let mut next = current;
+            if let Some(existing) = next.scripts.iter_mut().find(|entry| entry.name == script.name) {
+                *existing = script;
+            } else {
+                next.scripts.push(script);
+            }
+            validate_library(&next)?;
+            let bytes = serde_json::to_vec(&next)?;
+            ensure!(bytes.len() as u64 <= MAX_LIBRARY_BYTES, "脚本库超过 4 MiB");
+            saved = Some(next);
+            Ok(bytes)
+        },
+    )?;
+    Ok(saved.expect("CAS transform must produce updated library"))
 }
 
 impl FilterWindow {

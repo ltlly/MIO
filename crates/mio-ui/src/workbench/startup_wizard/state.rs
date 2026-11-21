@@ -51,12 +51,7 @@ impl RecentProjectsDelegate {
         }
         self.missing_paths = rows
             .iter()
-            .filter(|entry| {
-                matches!(
-                    std::fs::metadata(&entry.path),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound
-                )
-            })
+            .filter(|entry| !mio_core::ui_files::file_exists_or_accessible(&entry.path))
             .map(|entry| entry.path.clone())
             .collect();
         self.rows = rows;

@@ -968,7 +968,7 @@ impl Workbench {
                             if dest.extension().is_none() {
                                 dest.set_extension("html");
                             }
-                            match std::fs::write(&dest, html.as_bytes()) {
+                            match mio_core::ui_files::write_export_file(&dest, html.as_bytes()) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status =
@@ -1707,6 +1707,92 @@ impl Workbench {
     ) -> AnyElement {
         let builtin_selected = |tool: Tool| active_suite.is_none() && self.tool == tool;
         let suite_tabs = self.extensions.top_suite_tabs(cx);
+        let builtin_tabs: [(&'static str, &'static str, Tool, f32, &'static str); 12] = [
+            (
+                "tool-dashboard",
+                "Dashboard",
+                Tool::Dashboard,
+                87.,
+                "监控扫描与攻击任务进度，查看实时被动与主动安全问题活动",
+            ),
+            (
+                "tool-target",
+                "Target",
+                Tool::Target,
+                59.,
+                "查看目标站点地图 (Site map)、管理目标范围 (Scope) 与漏洞定义库",
+            ),
+            (
+                "tool-proxy",
+                "Proxy",
+                Tool::Proxy,
+                56.,
+                "拦截与修改实时流量，浏览 HTTP 与 WebSocket 历史记录",
+            ),
+            (
+                "tool-intruder",
+                "Intruder",
+                Tool::Intruder,
+                67.,
+                "配置载荷位置 (§) 与字典规则，执行自动化参数模糊测试与枚举攻击",
+            ),
+            (
+                "tool-repeater",
+                "Repeater",
+                Tool::Repeater,
+                76.,
+                "手动编辑并重放单条 HTTP/1.1、HTTP/2 与 WebSocket 消息",
+            ),
+            (
+                "tool-collaborator",
+                "Collaborator",
+                Tool::Collaborator,
+                93.,
+                "生成带外 (OAST) 载荷并监听带外 HTTP 与 DNS 回调交互",
+            ),
+            (
+                "tool-sequencer",
+                "Sequencer",
+                Tool::Sequencer,
+                85.,
+                "采集会话令牌样本并执行 FIPS 140-2 与信息熵随机性统计分析",
+            ),
+            (
+                "tool-decoder",
+                "Decoder",
+                Tool::Decoder,
+                72.,
+                "对文本与字节数据执行多级编码、解码与密码学哈希转换",
+            ),
+            (
+                "tool-comparer",
+                "Comparer",
+                Tool::Comparer,
+                80.,
+                "按分词 (Words) 或字节 (Bytes) 粒度可视化对比两段报文差异",
+            ),
+            (
+                "tool-logger",
+                "Logger",
+                Tool::Logger,
+                62.,
+                "统一记录并检索流经所有工具模块的 HTTP 请求与响应日志",
+            ),
+            (
+                "tool-organiser",
+                "Organizer",
+                Tool::Organiser,
+                78.,
+                "归档待跟进的关键报文，管理研判状态、颜色高亮与审计备注",
+            ),
+            (
+                "tool-extensions",
+                "Extensions",
+                Tool::Extensions,
+                87.,
+                "加载并管理本地 Native 扩展，控制宿主 API 权限",
+            ),
+        ];
         let mut inner = div()
             .id("tool-tabs-scroll")
             .flex()
@@ -1714,300 +1800,20 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .overflow_x_scroll()
-            .track_scroll(scroll_handle)
-            .child(
-                tool_tab_with_icon(
-                    "tool-dashboard",
-                    "Dashboard",
-                    None,
-                    builtin_selected(Tool::Dashboard),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(87.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "监控扫描与攻击任务进度，查看实时被动与主动安全问题活动",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.extensions.active_top_suite_tab = None;
-                    this.open_dashboard(cx);
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-target",
-                    "Target",
-                    None,
-                    builtin_selected(Tool::Target),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(59.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "查看目标站点地图 (Site map)、管理目标范围 (Scope) 与漏洞定义库",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Target;
-                    this.refresh_target_site_map(0, window, cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-proxy",
-                    "Proxy",
-                    None,
-                    builtin_selected(Tool::Proxy),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(56.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "拦截与修改实时流量，浏览 HTTP 与 WebSocket 历史记录",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Proxy;
-                    this.refresh_websocket_history(window, cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-intruder",
-                    "Intruder",
-                    None,
-                    builtin_selected(Tool::Intruder),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(67.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "配置载荷位置 (§) 与字典规则，执行自动化参数模糊测试与枚举攻击",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Intruder;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-repeater",
-                    "Repeater",
-                    None,
-                    builtin_selected(Tool::Repeater),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(76.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "手动编辑并重放单条 HTTP/1.1、HTTP/2 与 WebSocket 消息",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Repeater;
-                    this.refresh_archive_response(window, cx);
-                    this.refresh_repeater_history(window, cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-collaborator",
-                    "Collaborator",
-                    None,
-                    builtin_selected(Tool::Collaborator),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(93.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "生成带外 (OAST) 载荷并监听带外 HTTP 与 DNS 回调交互",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Collaborator;
-                    this.activate_collaborator(cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-sequencer",
-                    "Sequencer",
-                    None,
-                    builtin_selected(Tool::Sequencer),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(85.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "采集会话令牌样本并执行 FIPS 140-2 与信息熵随机性统计分析",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Sequencer;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-decoder",
-                    "Decoder",
-                    None,
-                    builtin_selected(Tool::Decoder),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(72.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "对文本与字节数据执行多级编码、解码与密码学哈希转换",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Decoder;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-comparer",
-                    "Comparer",
-                    None,
-                    builtin_selected(Tool::Comparer),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(80.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "按分词 (Words) 或字节 (Bytes) 粒度可视化对比两段报文差异",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Comparer;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-logger",
-                    "Logger",
-                    None,
-                    builtin_selected(Tool::Logger),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(62.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "统一记录并检索流经所有工具模块的 HTTP 请求与响应日志",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Logger;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-organiser",
-                    "Organizer",
-                    None,
-                    builtin_selected(Tool::Organiser),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(78.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "归档待跟进的关键报文，管理研判状态、颜色高亮与审计备注",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Organiser;
-                    this.sync_organiser_table(window, cx);
-                    this.reload_selected_organiser_detail(window, cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool_tab_with_icon(
-                    "tool-extensions",
-                    "Extensions",
-                    None,
-                    builtin_selected(Tool::Extensions),
-                    window,
-                    cx,
-                )
-                .w(theme::scaled_px(87.))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(
-                        "加载并管理本地 Native 扩展，控制宿主 API 权限",
-                    )
-                    .build(window, cx)
-                })
-                .disabled(self.ext_import.visible)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Extensions;
-                    cx.notify();
-                })),
+            .track_scroll(scroll_handle);
+        for (id, label, tool, width, tip) in builtin_tabs {
+            inner = inner.child(
+                tool_tab_with_icon(id, label, None, builtin_selected(tool), window, cx)
+                    .w(theme::scaled_px(width))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                    })
+                    .disabled(self.ext_import.visible)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_tool(tool, window, cx);
+                    })),
             );
+        }
         for (suite_ix, (instance_id, label)) in suite_tabs.into_iter().enumerate() {
             let tab_id = SharedString::from(format!("tool-plugin-{instance_id}"));
             let scroll_for_suite = scroll_handle.clone();
@@ -2054,12 +1860,9 @@ impl Workbench {
                     .build(window, cx)
                 })
                 .disabled(self.ext_import.visible)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.cancel_plugin_interactions(cx);
-                    this.extensions.active_top_suite_tab = None;
-                    this.tool = Tool::Discover;
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_tool(Tool::Discover, window, cx);
                     scroll_for_discover.scroll_to_item(0);
-                    cx.notify();
                 })),
             )
             .into_any_element()

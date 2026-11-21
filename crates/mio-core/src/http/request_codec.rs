@@ -1,7 +1,11 @@
-use super::*;
+use futures_util::{FutureExt, stream};
+
+use super::inspector::json_body::build_json_object_from_pairs;
+use super::raw_head::{ParsedRawRequest, parse_raw_request_for_codec};
+use mio_plugin_api::{Header, HttpVersion};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BodyEncodingTarget {
+pub enum BodyEncodingTarget {
     Toggle,
     FormUrlEncoded,
     MultipartFormData,
@@ -15,59 +19,18 @@ enum DetectedBodyEncoding {
     ApplicationJson,
 }
 
-struct ParsedHttpRequest<'a> {
-    method: &'a str,
-    target: &'a str,
-    version: &'static str,
-    headers: Vec<httparse::Header<'a>>,
-    body: &'a [u8],
-}
-
-fn parse_http_request_parts(raw: &[u8]) -> Result<ParsedHttpRequest<'_>, String> {
-    let mut storage = vec![httparse::EMPTY_HEADER; 4096];
-    let mut request = httparse::Request::new(&mut storage);
-    let status = request
-        .parse(raw)
-        .map_err(|error| format!("HTTP 请求解析失败：{error}"))?;
-    let offset = match status {
-        httparse::Status::Complete(pos) => pos,
-        httparse::Status::Partial => return Err("HTTP 请求头未完整结束。".into()),
-    };
-    let method = request.method.ok_or("HTTP 请求缺少方法。")?;
-    let target = request.path.ok_or("HTTP 请求缺少路径。")?;
-    let version = match request.version {
-        Some(0) => "HTTP/1.0",
-        Some(1) => "HTTP/1.1",
-        _ => return Err("HTTP 请求版本无效。".into()),
-    };
-    let headers = request.headers.to_vec();
-    if headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("transfer-encoding")
-            || header.name.eq_ignore_ascii_case("content-encoding")
-    }) {
-        return Err("请求使用传输编码或压缩编码，请先完成解包。".into());
-    }
-    Ok(ParsedHttpRequest {
-        method,
-        target,
-        version,
-        headers,
-        body: &raw[offset..],
-    })
-}
-
 fn percent_encode_component(input: &[u8]) -> String {
     form_urlencoded::byte_serialize(input)
         .collect::<String>()
         .replace('+', "%20")
 }
 
-fn parsed_content_type(parsed: &ParsedHttpRequest<'_>) -> Option<mime::Mime> {
+fn parsed_content_type(parsed: &ParsedRawRequest<'_>) -> Option<rama::http::mime::Mime> {
     parsed.headers.iter().find_map(|h| {
         if h.name.eq_ignore_ascii_case("content-type") {
-            std::str::from_utf8(h.value)
+            std::str::from_utf8(&h.value)
                 .ok()
-                .and_then(|s| s.trim().parse::<mime::Mime>().ok())
+                .and_then(|s| s.trim().parse::<rama::http::mime::Mime>().ok())
         } else {
             None
         }
@@ -109,26 +72,24 @@ fn flatten_json_value(value: &serde_json::Value, prefix: &str, out: &mut Vec<(St
 }
 
 fn extract_multipart_pairs(body: &[u8], boundary: &str) -> Option<Vec<(String, String)>> {
-    let body_owned = body.to_vec();
-    let boundary_owned = boundary.to_owned();
-    futures::executor::block_on(async move {
-        let stream = futures::stream::once(async move {
-            Ok::<Vec<u8>, std::convert::Infallible>(body_owned)
-        });
-        let mut multipart = multer::Multipart::new(stream, boundary_owned);
+    let bytes = multer::bytes::Bytes::copy_from_slice(body);
+    let body_stream = stream::iter([Ok::<_, std::convert::Infallible>(bytes)]);
+    let mut multipart = multer::Multipart::new(body_stream, boundary);
+    let analysis = async {
         let mut pairs = Vec::new();
         while let Ok(Some(field)) = multipart.next_field().await {
             let name = field.name().unwrap_or("").to_owned();
-            if let Ok(bytes) = field.bytes().await {
-                let val = String::from_utf8_lossy(&bytes).into_owned();
+            if let Ok(field_bytes) = field.bytes().await {
+                let val = String::from_utf8_lossy(&field_bytes).into_owned();
                 pairs.push((name, val));
             }
         }
-        Some(pairs)
-    })
+        pairs
+    };
+    analysis.now_or_never()
 }
 
-fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedHttpRequest<'_>) -> Vec<(String, String)> {
+fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedRawRequest<'_>) -> Vec<(String, String)> {
     let trimmed_body = parsed.body.trim_ascii();
     if trimmed_body.is_empty() {
         return Vec::new();
@@ -141,7 +102,7 @@ fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedHttpRequest<'_>) -> Vec
                 .collect();
         }
         if essence.eq_ignore_ascii_case("multipart/form-data")
-            && let Some(boundary) = ct.get_param(mime::BOUNDARY)
+            && let Some(boundary) = ct.get_param(rama::http::mime::BOUNDARY)
             && let Some(pairs) = extract_multipart_pairs(parsed.body, boundary.as_str())
         {
             return pairs;
@@ -155,13 +116,16 @@ fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedHttpRequest<'_>) -> Vec
         }
     }
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(trimmed_body)
-        && matches!(val, serde_json::Value::Object(_) | serde_json::Value::Array(_))
+        && matches!(
+            val,
+            serde_json::Value::Object(_) | serde_json::Value::Array(_)
+        )
     {
         let mut out = Vec::new();
         flatten_json_value(&val, "", &mut out);
         return out;
     }
-    let inspected = mio_core::inspect_http_messages(raw, None);
+    let inspected = super::inspect_http_messages(raw, None);
     if !inspected.body_params.is_empty() {
         return inspected
             .body_params
@@ -172,7 +136,7 @@ fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedHttpRequest<'_>) -> Vec
     form_urlencoded::parse(trimmed_body).into_owned().collect()
 }
 
-fn detect_current_body_encoding(parsed: &ParsedHttpRequest<'_>) -> DetectedBodyEncoding {
+fn detect_current_body_encoding(parsed: &ParsedRawRequest<'_>) -> DetectedBodyEncoding {
     if let Some(ct) = parsed_content_type(parsed) {
         let essence = ct.essence_str();
         if essence.eq_ignore_ascii_case("multipart/form-data") {
@@ -197,14 +161,12 @@ fn detect_current_body_encoding(parsed: &ParsedHttpRequest<'_>) -> DetectedBodyE
     }
 }
 
-fn format_header_line(h: &httparse::Header<'_>) -> String {
-    format!("{}: {}", h.name, String::from_utf8_lossy(h.value).trim())
+fn format_header_line(h: &Header) -> String {
+    format!("{}: {}", h.name, String::from_utf8_lossy(&h.value).trim())
 }
 
-pub(crate) fn toggle_http_request_method_bytes(
-    raw: &[u8],
-) -> Result<(Vec<u8>, &'static str), String> {
-    let parsed = parse_http_request_parts(raw)?;
+pub fn toggle_http_request_method_bytes(raw: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+    let parsed = parse_raw_request_for_codec(raw)?;
     if parsed.method.eq_ignore_ascii_case("GET") || parsed.method.eq_ignore_ascii_case("OPTIONS") {
         set_http_request_method_bytes(raw, "POST")
     } else {
@@ -212,11 +174,11 @@ pub(crate) fn toggle_http_request_method_bytes(
     }
 }
 
-pub(crate) fn set_http_request_method_bytes(
+pub fn set_http_request_method_bytes(
     raw: &[u8],
     desired_method: &'static str,
 ) -> Result<(Vec<u8>, &'static str), String> {
-    let parsed = parse_http_request_parts(raw)?;
+    let parsed = parse_raw_request_for_codec(raw)?;
     if desired_method.eq_ignore_ascii_case("GET") || desired_method.eq_ignore_ascii_case("OPTIONS")
     {
         let pairs = extract_request_body_pairs(raw, &parsed);
@@ -330,11 +292,11 @@ pub(crate) fn set_http_request_method_bytes(
     Ok((out, desired_method))
 }
 
-pub(crate) fn change_http_body_encoding_bytes(
+pub fn change_http_body_encoding_bytes(
     raw: &[u8],
     target: BodyEncodingTarget,
 ) -> Result<(Vec<u8>, &'static str), String> {
-    let parsed = parse_http_request_parts(raw)?;
+    let parsed = parse_raw_request_for_codec(raw)?;
     let current = detect_current_body_encoding(&parsed);
     let desired = match target {
         BodyEncodingTarget::Toggle => match current {
@@ -387,36 +349,11 @@ pub(crate) fn change_http_body_encoding_bytes(
             )
         }
         DetectedBodyEncoding::ApplicationJson => {
-            let seed =
-                b"POST / HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
-                    .to_vec();
-            let mut built = seed;
-            let mut used_inspector = !pairs.is_empty();
-            for (k, v) in &pairs {
-                let mut_res = mio_core::apply_inspector_mutation(
-                    &built,
-                    mio_core::InspectorMutation::Add {
-                        section: mio_core::InspectorSection::BodyParams,
-                        name: k.clone(),
-                        value: v.clone(),
-                    },
-                );
-                match mut_res {
-                    Ok(updated) => built = updated,
-                    Err(_) => {
-                        used_inspector = false;
-                        break;
-                    }
-                }
-            }
             let json_bytes = if pairs.is_empty() {
                 b"{}".to_vec()
-            } else if used_inspector {
-                parse_http_request_parts(&built)
-                    .map(|p| p.body.to_vec())
-                    .unwrap_or_else(|_| build_flat_json_object(&pairs))
             } else {
-                build_flat_json_object(&pairs)
+                build_json_object_from_pairs(&pairs)
+                    .unwrap_or_else(|_| build_flat_json_object(&pairs))
             };
             (
                 "application/json".to_owned(),
@@ -485,12 +422,15 @@ fn build_flat_json_object(pairs: &[(String, String)]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::Object(map)).unwrap_or_else(|_| b"{}".to_vec())
 }
 
-pub(super) fn parse_clipboard_url_as_request(clipboard: &str) -> Result<(String, Vec<u8>), String> {
+pub fn parse_clipboard_url_as_request(clipboard: &str) -> Result<(String, Vec<u8>), String> {
     let trimmed = clipboard.trim();
     if trimmed.is_empty() {
         return Err("剪贴板中没有可用的 URL 文本。".into());
     }
-    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
         return Err("剪贴板内容包含空白或控制字符，不是有效的 HTTP(S) URL。".into());
     }
     let Some((raw_scheme, after_scheme)) = trimmed.split_once("://") else {
@@ -526,7 +466,89 @@ pub(super) fn parse_clipboard_url_as_request(clipboard: &str) -> Result<(String,
     };
     let origin = format!("{scheme}://{authority}");
     let raw = format!("GET {path_and_query} HTTP/1.1\r\nHost: {authority}\r\n\r\n").into_bytes();
-    mio_core::parse_request(&raw, &origin, HttpVersion::Http11)
+    super::parse_request(&raw, &origin, HttpVersion::Http11)
         .map_err(|error| format!("剪贴板 URL 无效：{error}"))?;
     Ok((origin, raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_encoding_roundtrip_and_method_conversion() {
+        let form_req = concat!(
+            "POST /submit?src=web HTTP/1.1\r\n",
+            "Host: example.com\r\n",
+            "Content-Type: application/x-www-form-urlencoded\r\n",
+            "Content-Length: 27\r\n\r\n",
+            "user=alice&role=admin%20ops"
+        )
+        .as_bytes();
+
+        let (mp_raw, mp_label) =
+            change_http_body_encoding_bytes(form_req, BodyEncodingTarget::Toggle).unwrap();
+        assert_eq!(mp_label, "multipart/form-data");
+        let mp_str = std::str::from_utf8(&mp_raw).unwrap();
+        assert!(mp_str.contains("Content-Type: multipart/form-data; boundary="));
+        assert!(mp_str.contains("name=\"user\"\r\n\r\nalice\r\n"));
+        assert!(mp_str.contains("name=\"role\"\r\n\r\nadmin ops\r\n"));
+
+        let (json_raw, json_label) =
+            change_http_body_encoding_bytes(&mp_raw, BodyEncodingTarget::Toggle).unwrap();
+        assert_eq!(json_label, "application/json");
+        let json_str = std::str::from_utf8(&json_raw).unwrap();
+        assert!(json_str.contains("Content-Type: application/json\r\n"));
+        assert!(json_str.contains("\"user\":\"alice\""));
+        assert!(json_str.contains("\"role\":\"admin ops\""));
+
+        let (back_form, form_label) =
+            change_http_body_encoding_bytes(&json_raw, BodyEncodingTarget::Toggle).unwrap();
+        assert_eq!(form_label, "application/x-www-form-urlencoded");
+        assert!(std::str::from_utf8(&back_form)
+            .unwrap()
+            .contains("user=alice&role=admin%20ops"));
+
+        let dotted_form = b"POST /nested HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser.name=bob&flags[0]=true&count=3";
+        let (nested_json, _) =
+            change_http_body_encoding_bytes(dotted_form, BodyEncodingTarget::ApplicationJson)
+                .unwrap();
+        let nested_body = std::str::from_utf8(&nested_json)
+            .unwrap()
+            .split_once("\r\n\r\n")
+            .unwrap()
+            .1;
+        let parsed: serde_json::Value = serde_json::from_str(nested_body).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"user": {"name": "bob"}, "flags": [true], "count": 3})
+        );
+
+        let (get_from_mp, _) = set_http_request_method_bytes(&mp_raw, "GET").unwrap();
+        assert!(std::str::from_utf8(&get_from_mp)
+            .unwrap()
+            .starts_with("GET /submit?src=web&user=alice&role=admin%20ops HTTP/1.1\r\n"));
+
+        for method in ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+            let (converted, m) = set_http_request_method_bytes(&get_from_mp, method).unwrap();
+            assert_eq!(m, method);
+            assert!(std::str::from_utf8(&converted)
+                .unwrap()
+                .starts_with(&format!("{method} ")));
+        }
+    }
+
+    #[test]
+    fn parse_clipboard_url_validates_and_builds_get_request() {
+        let (origin, raw) =
+            parse_clipboard_url_as_request("https://example.invalid:8443/v1/items?q=1#frag")
+                .unwrap();
+        assert_eq!(origin, "https://example.invalid:8443");
+        assert_eq!(
+            std::str::from_utf8(&raw).unwrap(),
+            "GET /v1/items?q=1 HTTP/1.1\r\nHost: example.invalid:8443\r\n\r\n"
+        );
+        assert!(parse_clipboard_url_as_request("ftp://example.invalid/").is_err());
+        assert!(parse_clipboard_url_as_request("http://user:pass@example.invalid/").is_err());
+    }
 }

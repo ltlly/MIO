@@ -27,7 +27,7 @@ impl Workbench {
         let listener_input =
             cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1:8080"));
         let history_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("按 URL 或方法筛选"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let history_subscription =
             cx.subscribe_in(&history, window, |this, _, event, window, cx| match event {
                 TableEvent::SelectRow(row) | TableEvent::DoubleClickedRow(row) => {
@@ -223,8 +223,8 @@ impl Workbench {
             proxy_page: ProxyPage::Intercept,
             proxy_address: None,
             proxy_listeners_bound: Vec::new(),
-            observed_server_certs: Vec::new(),
-            session_traces: Vec::new(),
+            observed_server_certs: std::collections::VecDeque::new(),
+            session_traces: std::collections::VecDeque::new(),
             session_tracer_paused: false,
             last_ca_fingerprint: None,
             mio_ai_context: None,
@@ -366,8 +366,13 @@ impl Workbench {
         if self.workspace.proxy_interception == settings {
             return true;
         }
-        self.workspace.proxy_interception = settings;
+        let prev_interception = std::mem::replace(&mut self.workspace.proxy_interception, settings);
+        let prev_dirty = self.workspace_dirty;
         let saved = self.save_workspace(cx);
+        if !saved {
+            self.workspace.proxy_interception = prev_interception;
+            self.workspace_dirty = prev_dirty;
+        }
         cx.notify();
         saved
     }

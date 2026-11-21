@@ -106,12 +106,46 @@ pub(crate) fn highlight_background(color: u8) -> Option<gpui_kit::Hsla> {
 }
 
 pub(crate) fn highlight_foreground(color: u8) -> gpui_kit::Hsla {
-    gpui_kit::rgb(if matches!(color, 1 | 6) {
+    gpui_kit::rgb(if matches!(color, 1 | 6 | 8) {
         0xffffff
     } else {
-        0x000000
+        0x111111
     })
     .into()
+}
+
+const HISTORY_SORT_COLUMNS: [(&str, HttpHistorySortColumn); 18] = [
+    ("number", HttpHistorySortColumn::Number),
+    ("host", HttpHistorySortColumn::Host),
+    ("method", HttpHistorySortColumn::Method),
+    ("url", HttpHistorySortColumn::Url),
+    ("params", HttpHistorySortColumn::Params),
+    ("edited", HttpHistorySortColumn::Edited),
+    ("status", HttpHistorySortColumn::Status),
+    ("length", HttpHistorySortColumn::Length),
+    ("mime", HttpHistorySortColumn::MimeType),
+    ("extension", HttpHistorySortColumn::Extension),
+    ("title", HttpHistorySortColumn::Title),
+    ("notes", HttpHistorySortColumn::Notes),
+    ("tls", HttpHistorySortColumn::Tls),
+    ("ip", HttpHistorySortColumn::Ip),
+    ("cookies", HttpHistorySortColumn::Cookies),
+    ("time", HttpHistorySortColumn::Time),
+    ("listener_port", HttpHistorySortColumn::ListenerPort),
+    ("start_response_timer", HttpHistorySortColumn::StartResponseTimer),
+];
+
+pub(super) fn sort_column_key(column: HttpHistorySortColumn) -> &'static str {
+    HISTORY_SORT_COLUMNS
+        .iter()
+        .find_map(|&(key, sort_col)| (sort_col == column).then_some(key))
+        .unwrap_or("number")
+}
+
+pub(super) fn sort_column_from_key(key: &str) -> Option<HttpHistorySortColumn> {
+    HISTORY_SORT_COLUMNS
+        .iter()
+        .find_map(|&(col_key, sort_col)| (col_key == key).then_some(sort_col))
 }
 
 fn selected_highlight_background(color: u8, lead: bool) -> gpui_kit::Hsla {
@@ -229,26 +263,7 @@ impl HistoryDelegate {
     }
 
     pub(crate) fn apply_sort(&mut self, sort: HttpHistorySort) {
-        let key = match sort.column {
-            HttpHistorySortColumn::Number => "number",
-            HttpHistorySortColumn::Host => "host",
-            HttpHistorySortColumn::Method => "method",
-            HttpHistorySortColumn::Url => "url",
-            HttpHistorySortColumn::Params => "params",
-            HttpHistorySortColumn::Edited => "edited",
-            HttpHistorySortColumn::Status => "status",
-            HttpHistorySortColumn::Length => "length",
-            HttpHistorySortColumn::MimeType => "mime",
-            HttpHistorySortColumn::Extension => "extension",
-            HttpHistorySortColumn::Title => "title",
-            HttpHistorySortColumn::Notes => "notes",
-            HttpHistorySortColumn::Tls => "tls",
-            HttpHistorySortColumn::Ip => "ip",
-            HttpHistorySortColumn::Cookies => "cookies",
-            HttpHistorySortColumn::Time => "time",
-            HttpHistorySortColumn::ListenerPort => "listener_port",
-            HttpHistorySortColumn::StartResponseTimer => "start_response_timer",
-        };
+        let key = sort_column_key(sort.column);
         for column in &mut self.columns {
             if column.sort.is_some() {
                 column.sort = Some(if column.key.as_ref() != key {
@@ -302,173 +317,91 @@ impl HistoryDelegate {
             return String::new();
         };
         let meta = self.row_metadata.get(&entry.id());
-        if let HistoryRow::ExtProxy(row) = entry {
-            let ExtHistoryRow {
-                item,
-                request,
-                edited_request,
-                response,
-                edited_response,
-                origin,
-                ..
-            } = row.as_ref();
-            let ext_path_and_query = || {
-                request
-                    .as_ref()
-                    .and_then(|request| request.request_target.as_deref())
-                    .map(http_history_path_and_query)
-                    .unwrap_or_default()
-            };
-            let origin_str = origin
-                .as_deref()
-                .or_else(|| {
-                    request
-                        .as_ref()
-                        .and_then(|r| r.request_target.as_deref())
-                        .filter(|t| t.contains("://"))
-                })
-                .unwrap_or("");
-            let method = request
-                .as_ref()
-                .and_then(|request| request.method.as_deref())
-                .unwrap_or("");
-            return match self.columns[column].key.as_ref() {
-                "number" => item.index.saturating_add(1).to_string(),
-                "host" => format_ext_host_origin(origin_str),
-                "method" => method.to_owned(),
-                "url" => ext_path_and_query(),
-                "params" => {
-                    if let Some(m) = meta {
-                        m.params_cell_text().into()
-                    } else if url_has_non_empty_query(&ext_path_and_query()) {
-                        "✓".into()
-                    } else {
-                        String::new()
-                    }
-                }
-                "edited" => {
-                    let is_edited = meta.map_or_else(
-                        || edited_request.is_some() || edited_response.is_some(),
-                        |m| m.edited || m.has_original_request || m.has_original_response,
-                    );
-                    if is_edited {
-                        "✓".into()
-                    } else {
-                        String::new()
-                    }
-                }
-                "status" => response
-                    .as_ref()
-                    .and_then(|response| response.status)
-                    .map(|status| status.to_string())
-                    .unwrap_or_default(),
-                "length" => meta
-                    .and_then(|m| m.response_length)
-                    .or_else(|| response.as_ref().map(|r| r.raw_bytes))
-                    .map(|len| len.to_string())
-                    .unwrap_or_default(),
-                "mime" => meta
-                    .map(|m| format_history_mime_display(&m.mime_type))
-                    .unwrap_or_default(),
-                "extension" => extract_path_extension(&ext_path_and_query()),
-                "title" => meta
-                    .map(|m| {
-                        if !m.title.is_empty() || m.title_error.is_none() {
-                            m.title.clone()
-                        } else {
-                            "标题读取失败".into()
-                        }
+        let (number, origin_str, method, edited_fallback, status, length_fallback) = match entry {
+            HistoryRow::ExtProxy(row_data) => {
+                let ExtHistoryRow {
+                    item,
+                    request,
+                    edited_request,
+                    response,
+                    edited_response,
+                    origin,
+                    ..
+                } = row_data.as_ref();
+                let origin_str = origin
+                    .as_deref()
+                    .or_else(|| {
+                        request
+                            .as_ref()
+                            .and_then(|r| r.request_target.as_deref())
+                            .filter(|t| t.contains("://"))
                     })
-                    .unwrap_or_default(),
-                "time" => row.time_error.as_ref().map_or_else(
-                    || row.time_unix_ms.map(local_time).unwrap_or_default(),
-                    |_| "时间读取失败".into(),
-                ),
-                "notes" => row.notes_error.as_ref().map_or_else(
-                    || {
-                        row.notes_preview
-                            .replace("\r\n", " ")
-                            .replace(['\r', '\n', '\t'], " ")
-                    },
-                    |_| "备注读取失败".into(),
-                ),
-                "tls" => {
-                    if origin_str
-                        .split_once("://")
-                        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
-                    {
-                        "✓".into()
-                    } else {
-                        String::new()
-                    }
-                }
-                "ip" => meta
-                    .map(|m| m.remote_ip.as_str())
-                    .filter(|ip| !ip.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| extract_ip_literal(origin_str)),
-                "cookies" => meta
-                    .map(|m| {
-                        if !m.cookies.is_empty() || m.cookies_error.is_none() {
-                            m.cookies.clone()
-                        } else {
-                            "Cookie 解析失败".into()
-                        }
-                    })
-                    .unwrap_or_default(),
-                "listener_port" => meta
-                    .and_then(|m| m.listener_port)
-                    .map(|port| port.to_string())
-                    .unwrap_or_default(),
-                "start_response_timer" => meta
-                    .and_then(|m| m.response_received_ms)
-                    .map(|ms| ms.to_string())
-                    .unwrap_or_default(),
-                _ => unreachable!("columns are constructed together with their renderers"),
-            };
-        }
-        let HistoryRow::Live(flow) = entry else {
-            unreachable!()
+                    .unwrap_or("");
+                let method = request
+                    .as_ref()
+                    .and_then(|r| r.method.as_deref())
+                    .unwrap_or("");
+                (
+                    item.index.saturating_add(1),
+                    origin_str,
+                    method,
+                    edited_request.is_some() || edited_response.is_some(),
+                    response.as_ref().and_then(|r| r.status),
+                    response.as_ref().map(|r| r.raw_bytes),
+                )
+            }
+            HistoryRow::Live(flow) => (
+                self.live_numbers
+                    .get(&flow.id)
+                    .copied()
+                    .unwrap_or((self.offset + row + 1) as u64),
+                flow.url.as_str(),
+                flow.method.as_str(),
+                false,
+                flow.status,
+                flow.status.is_some().then_some(flow.response_bytes),
+            ),
         };
+        let path_and_query = || match entry {
+            HistoryRow::ExtProxy(row_data) => row_data
+                .request
+                .as_ref()
+                .and_then(|r| r.request_target.as_deref())
+                .map(http_history_path_and_query)
+                .unwrap_or_default(),
+            HistoryRow::Live(flow) => http_history_path_and_query(&flow.url),
+        };
+        let clean_notes = |text: &str| text.replace("\r\n", " ").replace(['\r', '\n', '\t'], " ");
         match self.columns[column].key.as_ref() {
-            "number" => self
-                .live_numbers
-                .get(&flow.id)
-                .copied()
-                .unwrap_or((self.offset + row + 1) as u64)
-                .to_string(),
-            "host" => format_ext_host_origin(&flow.url),
-            "method" => flow.method.clone(),
-            "url" => http_history_path_and_query(&flow.url),
+            "number" => number.to_string(),
+            "host" => format_ext_host_origin(origin_str),
+            "method" => method.to_owned(),
+            "url" => path_and_query(),
             "params" => {
                 if let Some(m) = meta {
                     m.params_cell_text().into()
-                } else if url_has_non_empty_query(&http_history_path_and_query(&flow.url)) {
+                } else if url_has_non_empty_query(&path_and_query()) {
                     "✓".into()
                 } else {
                     String::new()
                 }
             }
             "edited" => {
-                if meta.is_some_and(|m| m.edited || m.has_original_request || m.has_original_response) {
-                    "✓".into()
-                } else {
-                    String::new()
-                }
+                let is_edited = meta.map_or(edited_fallback, |m| {
+                    m.edited || m.has_original_request || m.has_original_response
+                });
+                if is_edited { "✓".into() } else { String::new() }
             }
-            "status" => flow
-                .status
-                .map(|status| status.to_string())
-                .unwrap_or_default(),
+            "status" => status.map(|s| s.to_string()).unwrap_or_default(),
             "length" => meta
                 .and_then(|m| m.response_length)
-                .or_else(|| flow.status.is_some().then_some(flow.response_bytes))
+                .or(length_fallback)
                 .map(|len| len.to_string())
                 .unwrap_or_default(),
             "mime" => meta
                 .map(|m| format_history_mime_display(&m.mime_type))
                 .unwrap_or_default(),
-            "extension" => extract_path_extension(&http_history_path_and_query(&flow.url)),
+            "extension" => extract_path_extension(&path_and_query()),
             "title" => meta
                 .map(|m| {
                     if !m.title.is_empty() || m.title_error.is_none() {
@@ -478,22 +411,33 @@ impl HistoryDelegate {
                     }
                 })
                 .unwrap_or_default(),
-            "time" => {
-                if meta.is_some_and(|m| !m.time_known) {
-                    String::new()
-                } else {
-                    local_time(flow.started_unix_ms)
+            "time" => match entry {
+                HistoryRow::ExtProxy(row_data) => row_data.time_error.as_ref().map_or_else(
+                    || row_data.time_unix_ms.map(local_time).unwrap_or_default(),
+                    |_| "时间读取失败".into(),
+                ),
+                HistoryRow::Live(flow) => {
+                    if meta.is_some_and(|m| !m.time_known) {
+                        String::new()
+                    } else {
+                        local_time(flow.started_unix_ms)
+                    }
                 }
-            }
-            "notes" => self
-                .live_notes
-                .borrow()
-                .get(&flow.id)
-                .map(|(_, text)| text.replace("\r\n", " ").replace(['\r', '\n', '\t'], " "))
-                .unwrap_or_default(),
+            },
+            "notes" => match entry {
+                HistoryRow::ExtProxy(row_data) => row_data
+                    .notes_error
+                    .as_ref()
+                    .map_or_else(|| clean_notes(&row_data.notes_preview), |_| "备注读取失败".into()),
+                HistoryRow::Live(flow) => self
+                    .live_notes
+                    .borrow()
+                    .get(&flow.id)
+                    .map(|(_, text)| clean_notes(text))
+                    .unwrap_or_default(),
+            },
             "tls" => {
-                if flow
-                    .url
+                if origin_str
                     .split_once("://")
                     .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
                 {
@@ -506,7 +450,7 @@ impl HistoryDelegate {
                 .map(|m| m.remote_ip.as_str())
                 .filter(|ip| !ip.is_empty())
                 .map(str::to_owned)
-                .unwrap_or_else(|| extract_ip_literal(&flow.url)),
+                .unwrap_or_else(|| extract_ip_literal(origin_str)),
             "cookies" => meta
                 .map(|m| {
                     if !m.cookies.is_empty() || m.cookies_error.is_none() {

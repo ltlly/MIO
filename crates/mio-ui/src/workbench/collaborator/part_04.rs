@@ -517,7 +517,7 @@ impl Workbench {
                     return;
                 }
                 match result {
-                    Ok(Ok(Some(path))) => match std::fs::write(&path, json.as_bytes()) {
+                    Ok(Ok(Some(path))) => match mio_core::ui_files::write_export_file(&path, json.as_bytes()) {
                         Ok(()) => {
                             view.collaborator_pane.error = None;
                             let msg = format!("已保存 Collaborator 交互详情到 {}。", path.display());

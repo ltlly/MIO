@@ -286,6 +286,18 @@ fn remove_json_path(current: &mut Value, segs: &[PathSeg]) -> Result<(), String>
     }
 }
 
+pub(in crate::http) fn build_json_object_from_pairs(
+    pairs: &[(String, String)],
+) -> Result<Vec<u8>, String> {
+    let mut root = Value::Object(Map::new());
+    for (name, value) in pairs {
+        let segs = parse_json_path(name)?;
+        let val = parse_json_leaf_input(value);
+        set_json_path(&mut root, &segs, val)?;
+    }
+    serde_json::to_vec(&root).map_err(|err| format!("JSON 序列化失败：{err}"))
+}
+
 pub(super) fn mutate_json_body(
     original_body: &[u8],
     mutation: InspectorMutation,

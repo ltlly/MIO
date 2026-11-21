@@ -551,39 +551,32 @@ fn tokenize_headers_block(
     out: &mut Vec<(Range<usize>, TokenKind)>,
 ) -> usize {
     let rest = &text[start_cursor..];
-    let mut headers = [httparse::EMPTY_HEADER; 512];
     if badges.is_empty()
-        && let Ok(httparse::Status::Complete((rel_end, parsed))) =
-        httparse::parse_headers(rest.as_bytes(), &mut headers)
+        && let Some((rel_end, spans)) = mio_core::parse_http_header_spans(rest.as_bytes())
     {
-        for header in parsed {
-            if header.name.is_empty() {
-                continue;
-            }
-            let name_range = line_offset(text, header.name);
+        for span in spans {
+            let name_range = start_cursor + span.name.start..start_cursor + span.name.end;
+            let name = &text[name_range.clone()];
             out.push((name_range.clone(), TokenKind::HeaderName));
             let after_name = &text[name_range.end..];
             if let Some(colon_rel) = after_name.find(':') {
                 let colon_pos = name_range.end + colon_rel;
                 out.push((colon_pos..colon_pos + 1, TokenKind::HeaderSep));
             }
-            if !header.value.is_empty() {
-                let val_start = header.value.as_ptr() as usize - text.as_ptr() as usize;
-                let val_end = val_start + header.value.len();
-                let kind = if header.name.eq_ignore_ascii_case("cookie")
-                    || header.name.eq_ignore_ascii_case("set-cookie")
-                    || header.name.eq_ignore_ascii_case("authorization")
-                    || header.name.eq_ignore_ascii_case("proxy-authorization")
+            if !span.value.is_empty() {
+                let val_range = start_cursor + span.value.start..start_cursor + span.value.end;
+                let kind = if name.eq_ignore_ascii_case("cookie")
+                    || name.eq_ignore_ascii_case("set-cookie")
+                    || name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("proxy-authorization")
                 {
                     TokenKind::SensitiveHeaderValue
                 } else {
                     TokenKind::HeaderValue
                 };
-                out.push((val_start..val_end, kind));
-                if header.name.eq_ignore_ascii_case("content-type")
-                    && let Ok(val_str) = std::str::from_utf8(header.value)
-                {
-                    *content_type = val_str.to_ascii_lowercase();
+                out.push((val_range.clone(), kind));
+                if name.eq_ignore_ascii_case("content-type") {
+                    *content_type = text[val_range].to_ascii_lowercase();
                 }
             }
         }

@@ -1190,7 +1190,7 @@ impl Workbench {
                                 }
                                 xml_payload.clone()
                             };
-                            match std::fs::write(&path, &bytes) {
+                            match mio_core::ui_files::write_export_file(&path, &bytes) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

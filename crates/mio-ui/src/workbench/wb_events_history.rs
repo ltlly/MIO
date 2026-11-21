@@ -6,7 +6,7 @@ impl Workbench {
         event: Event,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<ControlFlow<()>, Box<Event>> {
+    ) -> ControlFlow<()> {
         match event {
             Event::SiteMapEntryAdded { project, operation_id, workspace_revision, result } => {
                 self.on_site_map_entry_added(project, operation_id, workspace_revision, result, window, cx);
@@ -32,7 +32,7 @@ impl Workbench {
                         cx,
                     )
                 {
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 self.on_archive_response(event, window, cx);
             }
@@ -54,7 +54,7 @@ impl Workbench {
                         cx,
                     )
                 {
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 if !self.on_imported_history(event.clone(), window, cx) {
                     self.on_ext_event(event, window, cx);
@@ -329,7 +329,7 @@ impl Workbench {
                             table.refresh(cx);
                         });
                         cx.notify();
-                        return Ok(ControlFlow::Break(()));
+                        return ControlFlow::Break(());
                     }
                     self.history_shift_page_received(&query, &result, window, cx);
                     let sort = self.http_filter.sort;
@@ -338,7 +338,7 @@ impl Workbench {
                         table.refresh(cx);
                     });
                     cx.notify();
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 let applied = match result {
                     Ok(result) => {
@@ -396,8 +396,8 @@ impl Workbench {
                     table.refresh(cx);
                 });
             }
-            event => return Err(Box::new(event)),
+            _ => {}
         }
-        Ok(ControlFlow::Continue(()))
+        ControlFlow::Continue(())
     }
 }

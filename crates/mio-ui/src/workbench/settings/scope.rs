@@ -231,6 +231,84 @@ struct SimpleScopeTablesState {
     oos_custom: Entity<TableState<SimpleScopeTable>>,
 }
 
+pub(super) struct ScopeUi {
+    simple_tables: SimpleScopeTablesState,
+    adv_state: Entity<SettingsAdvScopeState>,
+}
+
+fn refresh_table_with_len<D: gpui_kit::component::table::TableDelegate + 'static>(
+    table: &Entity<TableState<D>>,
+    len: usize,
+    cx: &mut Context<Settings>,
+) {
+    table.update(cx, |state, cx| {
+        if state.selected_row().is_some_and(|row| row >= len) {
+            state.clear_selection(cx);
+        }
+        state.refresh(cx);
+        cx.notify();
+    });
+}
+
+impl ScopeUi {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Settings>) -> Self {
+        let weak = cx.weak_entity();
+        let make_simple = |kind: ScopeRuleList, window: &mut Window, cx: &mut Context<Settings>| {
+            let owner = weak.clone();
+            cx.new(|tcx| {
+                TableState::new(SimpleScopeTable { owner, kind }, window, tcx)
+                    .sortable(false)
+                    .col_selectable(false)
+            })
+        };
+        let simple_tables = SimpleScopeTablesState {
+            include: make_simple(ScopeRuleList::Include, window, cx),
+            exclude: make_simple(ScopeRuleList::Exclude, window, cx),
+            oos_custom: make_simple(ScopeRuleList::OutOfScopeCustom, window, cx),
+        };
+        let adv_state = cx.new(|cx| SettingsAdvScopeState::new(weak, window, cx));
+        let protocol_select = adv_state.read(cx).protocol_select.clone();
+        let adv_for_sub = adv_state.clone();
+        cx.subscribe_in(
+            &protocol_select,
+            window,
+            move |_, _, event: &gpui_kit::component::select::SelectEvent<Vec<&'static str>>, _, cx| {
+                if let gpui_kit::component::select::SelectEvent::Confirm(Some(value)) = event {
+                    let proto = match *value {
+                        "HTTP" => mio_core::ScopeProtocol::Http,
+                        "HTTPS" => mio_core::ScopeProtocol::Https,
+                        _ => mio_core::ScopeProtocol::Any,
+                    };
+                    adv_for_sub.update(cx, |st, _| st.protocol = proto);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        Self {
+            simple_tables,
+            adv_state,
+        }
+    }
+
+    pub(super) fn reset_editing(&self, cx: &mut Context<Settings>) {
+        self.adv_state.update(cx, |st, _| st.editing = [None, None]);
+    }
+
+    pub(super) fn refresh_tables(&self, scope: &TargetScope, cx: &mut Context<Settings>) {
+        refresh_table_with_len(&self.simple_tables.include, scope.include.len(), cx);
+        refresh_table_with_len(&self.simple_tables.exclude, scope.exclude.len(), cx);
+        refresh_table_with_len(
+            &self.simple_tables.oos_custom,
+            scope.out_of_scope_custom_rules.len(),
+            cx,
+        );
+        let [adv_inc, adv_exc] = self.adv_state.read(cx).tables.clone();
+        refresh_table_with_len(&adv_inc, scope.advanced_include.len(), cx);
+        refresh_table_with_len(&adv_exc, scope.advanced_exclude.len(), cx);
+    }
+}
+
 impl Workbench {
     pub(in crate::workbench) fn add_scope_rule(
         &mut self,
@@ -535,7 +613,7 @@ impl Settings {
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await
                 && let Some(path) = paths.into_iter().next()
-                && let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(text) = mio_core::ui_files::read_file_to_string(&path)
             {
                 let _ = this.update_in(cx, |this, _, cx| {
                     for line in text.lines() {
@@ -588,57 +666,6 @@ impl Settings {
             input.update(cx, |state, cx| state.set_value("", window, cx));
             cx.notify();
         }
-    }
-
-    fn simple_scope_tables(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SimpleScopeTablesState> {
-        let weak = cx.weak_entity();
-        window.use_keyed_state("settings-simple-scope-tables", cx, |window, cx| {
-            let inc = cx.new(|tcx| {
-                TableState::new(
-                    SimpleScopeTable {
-                        owner: weak.clone(),
-                        kind: ScopeRuleList::Include,
-                    },
-                    window,
-                    tcx,
-                )
-                .sortable(false)
-                .col_selectable(false)
-            });
-            let exc = cx.new(|tcx| {
-                TableState::new(
-                    SimpleScopeTable {
-                        owner: weak.clone(),
-                        kind: ScopeRuleList::Exclude,
-                    },
-                    window,
-                    tcx,
-                )
-                .sortable(false)
-                .col_selectable(false)
-            });
-            let oos_custom = cx.new(|tcx| {
-                TableState::new(
-                    SimpleScopeTable {
-                        owner: weak,
-                        kind: ScopeRuleList::OutOfScopeCustom,
-                    },
-                    window,
-                    tcx,
-                )
-                .sortable(false)
-                .col_selectable(false)
-            });
-            SimpleScopeTablesState {
-                include: inc,
-                exclude: exc,
-                oos_custom,
-            }
-        })
     }
 
     fn submit_oos_custom_scope_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -734,32 +761,7 @@ impl Settings {
             };
             let result: Result<Vec<String>, String> = cx
                 .background_executor()
-                .spawn(async move {
-                    let meta = std::fs::metadata(&path)
-                        .map_err(|err| format!("读取文件元数据失败：{err}"))?;
-                    if !meta.is_file() {
-                        return Err("所选路径不是普通文件。".into());
-                    }
-                    if meta.len() > 256 * 1024 {
-                        return Err("规则文件超过 256 KiB 上限，未导入。".into());
-                    }
-                    let text = std::fs::read_to_string(&path)
-                        .map_err(|err| format!("读取 UTF-8 规则文件失败：{err}"))?;
-                    let entries: Vec<String> = text
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| {
-                            !line.is_empty()
-                                && line.len() <= 2048
-                                && !line.chars().any(char::is_control)
-                        })
-                        .map(str::to_owned)
-                        .collect();
-                    if entries.is_empty() {
-                        return Err("文件中未找到有效的 URL 前缀规则。".into());
-                    }
-                    Ok(entries)
-                })
+                .spawn(async move { mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048) })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
                 match result {
@@ -809,11 +811,7 @@ impl Settings {
         let enabled = self.state.enabled;
         let project = self.state.project;
         let advanced = self.state.scope.advanced_mode;
-        let weak = cx.weak_entity();
-        let adv_state = window.use_keyed_state("settings-adv-scope-state", cx, |window, cx| {
-            SettingsAdvScopeState::new(weak, window, cx)
-        });
-        let adv_reset = adv_state.clone();
+        let adv_reset = self.scope_ui.adv_state.clone();
         let header = settings_section_heading_plain("目标范围", project_scope_badge());
         let desc_row = settings_desc_row_with_action(
             settings_gear_icon_button(
@@ -947,9 +945,7 @@ impl Settings {
                                 .w_full()
                                 .pl(px(22.))
                                 .pt(px(6.))
-                                .child(self.render_oos_custom_scope_card(
-                                    enabled, project, window, cx,
-                                )),
+                                .child(self.render_oos_custom_scope_card(enabled, project, cx)),
                         )
                     }),
             );
@@ -967,7 +963,11 @@ impl Settings {
                 .child(
                     div()
                         .pl(px(31.))
-                        .child(self.render_settings_advanced_scope(enabled, &adv_state, cx)),
+                        .child(self.render_settings_advanced_scope(
+                            enabled,
+                            &self.scope_ui.adv_state,
+                            cx,
+                        )),
                 )
                 .child(out_of_scope_section)
         } else {
@@ -986,8 +986,8 @@ impl Settings {
                         .flex()
                         .flex_col()
                         .gap(px(14.))
-                        .child(self.render_simple_scope_card(true, enabled, project, window, cx))
-                        .child(self.render_simple_scope_card(false, enabled, project, window, cx)),
+                        .child(self.render_simple_scope_card(true, enabled, project, cx))
+                        .child(self.render_simple_scope_card(false, enabled, project, cx)),
                 )
                 .child(out_of_scope_section)
         };
@@ -999,22 +999,10 @@ impl Settings {
         &self,
         enabled: bool,
         project: Option<ProjectKey>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tables_state = self.simple_scope_tables(window, cx);
-        let table = tables_state.read(cx).oos_custom.clone();
+        let table = &self.scope_ui.simple_tables.oos_custom;
         let rules = &self.state.scope.out_of_scope_custom_rules;
-        let count = rules.len();
-        let table_refresh = table.clone();
-        cx.defer(move |cx| {
-            table_refresh.update(cx, |state, cx| {
-                if state.selected_row().is_some_and(|row| row >= count) {
-                    state.clear_selection(cx);
-                }
-                state.refresh(cx);
-            });
-        });
         let selected_row = table
             .read(cx)
             .selected_row()
@@ -1139,7 +1127,7 @@ impl Settings {
                     .child(side_buttons)
                     .child(
                         settings_table_frame(
-                            DataTable::new(&table)
+                            DataTable::new(table)
                                 .with_size(px(22.))
                                 .header_row_height(px(24.))
                                 .bordered(false)
@@ -1219,14 +1207,12 @@ impl Settings {
         include: bool,
         enabled: bool,
         project: Option<ProjectKey>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tables_state = self.simple_scope_tables(window, cx);
         let table = if include {
-            tables_state.read(cx).include.clone()
+            &self.scope_ui.simple_tables.include
         } else {
-            tables_state.read(cx).exclude.clone()
+            &self.scope_ui.simple_tables.exclude
         };
         let side = usize::from(!include);
         let (title, input_id, aria, add_id, add_lbl, edit_pfx, rm_pfx, paste_id, load_id) =
@@ -1236,16 +1222,6 @@ impl Settings {
         } else {
             (&self.scope_exclude_input, &self.state.scope.exclude)
         };
-        let count = rules.len();
-        let table_refresh = table.clone();
-        cx.defer(move |cx| {
-            table_refresh.update(cx, |state, cx| {
-                if state.selected_row().is_some_and(|row| row >= count) {
-                    state.clear_selection(cx);
-                }
-                state.refresh(cx);
-            });
-        });
         let selected_row = table
             .read(cx)
             .selected_row()
@@ -1352,7 +1328,7 @@ impl Settings {
                     .child(side_buttons)
                     .child(
                         settings_table_frame(
-                            DataTable::new(&table)
+                            DataTable::new(table)
                                 .with_size(px(22.))
                                 .header_row_height(px(24.))
                                 .bordered(false)

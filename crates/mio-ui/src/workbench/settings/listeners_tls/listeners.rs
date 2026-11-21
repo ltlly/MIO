@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, io::Read, net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path};
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::assets::IconName;
@@ -14,33 +14,12 @@ use super::*;
 use crate::CloseSettings;
 
 fn read_bounded_pem_text(path: &Path, label: &str) -> Result<String, String> {
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts
-        .open(path)
-        .map_err(|error| format!("无法读取{label}：{error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取{label}信息：{error}"))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CLIENT_CERT_BYTES as u64 {
-        return Err(format!(
-            "{label}必须是非空且不超过 {MAX_CLIENT_CERT_BYTES} 字节的普通文件。"
-        ));
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_CLIENT_CERT_BYTES as u64 + 1)
-        .read_to_end(&mut raw)
-        .map_err(|error| format!("无法完整读取{label}：{error}"))?;
-    if raw.is_empty() || raw.len() > MAX_CLIENT_CERT_BYTES {
-        return Err(format!(
-            "{label}必须是非空且不超过 {MAX_CLIENT_CERT_BYTES} 字节的普通文件。"
-        ));
-    }
+    let raw = mio_core::ui_files::read_regular_file_bounded(
+        path,
+        MAX_CLIENT_CERT_BYTES as u64,
+        false,
+        label,
+    )?;
     let text = String::from_utf8(raw).map_err(|_| format!("{label}必须是有效 UTF-8 PEM 文本。"))?;
     if text.contains('\0') {
         return Err(format!("{label}包含非法 NUL 字节。"));

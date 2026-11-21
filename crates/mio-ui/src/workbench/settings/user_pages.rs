@@ -61,6 +61,13 @@ pub(super) fn hotkey_key_to_index(key: &str) -> usize {
     }
 }
 
+pub(super) fn charset_to_index(charset: &str) -> usize {
+    CHARSET_OPTIONS
+        .iter()
+        .position(|opt| opt.eq_ignore_ascii_case(charset.trim()))
+        .unwrap_or(0)
+}
+
 pub(super) struct UserPagesUi {
     pub(super) ui_font_size_select: Entity<SelectState<Vec<&'static str>>>,
     pub(super) scale_factor_select: Entity<SelectState<Vec<&'static str>>>,
@@ -148,11 +155,18 @@ impl UserPagesUi {
         let charset_select = cx.new(|scx| {
             SelectState::new(
                 CHARSET_OPTIONS.to_vec(),
-                Some(IndexPath::new(0)),
+                Some(IndexPath::new(charset_to_index(&editor.specific_charset))),
                 window,
                 scx,
             )
         });
+        cx.subscribe_in(&charset_select, window, |this, _, event, window, cx| {
+            let SelectEvent::Confirm(Some(value)) = event else {
+                return;
+            };
+            this.set_user_editor_specific_charset((*value).to_owned(), window, cx);
+        })
+        .detach();
 
         let send_hotkey_select = cx.new(|scx| {
             SelectState::new(
@@ -552,6 +566,18 @@ impl Settings {
         {
             self.user_pages.send_hotkey_select.update(cx, |s, cx| {
                 s.set_selected_index(Some(hotkey_idx), window, cx)
+            });
+        }
+        let charset_idx = IndexPath::new(charset_to_index(&editor.specific_charset));
+        if self
+            .user_pages
+            .charset_select
+            .read(cx)
+            .selected_index(cx)
+            != Some(charset_idx)
+        {
+            self.user_pages.charset_select.update(cx, |s, cx| {
+                s.set_selected_index(Some(charset_idx), window, cx)
             });
         }
 

@@ -4,22 +4,10 @@ use gpui_kit::component::{
     Icon, IndexPath,
     menu::{DropdownMenu, PopupMenuItem},
     scroll::{Scrollbar, ScrollbarMode},
-    select::{Select, SelectEvent},
+    select::Select,
 };
 
 use super::*;
-
-struct CharsetSelectSync {
-    last_synced: String,
-    _sub: Subscription,
-}
-
-fn charset_to_index(charset: &str) -> usize {
-    CHARSET_OPTIONS
-        .iter()
-        .position(|opt| opt.eq_ignore_ascii_case(charset.trim()))
-        .unwrap_or(0)
-}
 
 pub(super) fn uniform_editor_button(
     id: impl Into<gpui_kit::ElementId>,
@@ -663,49 +651,6 @@ impl Settings {
         let enabled = self.user_settings_enabled();
         let editor = &self.state.preferences.message_editor;
         let charset_mode = editor.charset_mode;
-
-        let charset_select = self.user_pages.charset_select.clone();
-        let settings_weak = cx.weak_entity();
-        let charset_sync = window.use_keyed_state(
-            "settings-user-editor-charset-sync",
-            cx,
-            |window, cx| {
-                let _sub = cx.subscribe_in(
-                    &charset_select,
-                    window,
-                    move |_: &mut CharsetSelectSync, _, event, window, cx| {
-                        let SelectEvent::Confirm(Some(value)) = event else {
-                            return;
-                        };
-                        let chosen = (*value).to_owned();
-                        let _ = settings_weak.update(cx, |this, cx| {
-                            this.set_user_editor_specific_charset(chosen, window, cx);
-                        });
-                    },
-                );
-                CharsetSelectSync {
-                    last_synced: String::new(),
-                    _sub,
-                }
-            },
-        );
-        if charset_sync.read(cx).last_synced != editor.specific_charset {
-            let desired = editor.specific_charset.clone();
-            let idx = IndexPath::new(charset_to_index(&desired));
-            let cs = charset_select.clone();
-            let sync_handle = charset_sync.clone();
-            let win_handle = window.window_handle();
-            cx.defer(move |cx| {
-                sync_handle.update(cx, |s, _| s.last_synced = desired);
-                let _ = win_handle.update(cx, |_, window, cx| {
-                    cs.update(cx, |s, cx| {
-                        if s.selected_index(cx) != Some(idx) {
-                            s.set_selected_index(Some(idx), window, cx);
-                        }
-                    });
-                });
-            });
-        }
 
         // Section 1: Character sets
         let e_cs0 = cx.entity();

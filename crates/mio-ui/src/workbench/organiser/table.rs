@@ -8,14 +8,6 @@ pub(in crate::workbench) const HIGHLIGHT_NAMES: [&str; 10] = [
     "无", "红色", "橙色", "黄色", "绿色", "青色", "蓝色", "粉色", "品红", "灰色",
 ];
 
-pub(super) fn high_contrast_highlight_fg(color: u8) -> gpui_kit::Hsla {
-    gpui_kit::rgb(match color {
-        1 | 6 | 8 => 0xffffff,
-        _ => 0x111111,
-    })
-    .into()
-}
-
 fn organiser_status_color(status: u16, hl_color: Option<u8>) -> gpui_kit::Hsla {
     if let Some(c) = hl_color {
         if matches!(c, 1 | 6 | 8) {
@@ -362,7 +354,7 @@ impl TableDelegate for OrganiserTableDelegate {
                     crate::history::highlight_background(color),
                     |this, background| {
                         this.bg(background)
-                            .text_color(high_contrast_highlight_fg(color))
+                            .text_color(crate::history::highlight_foreground(color))
                     },
                 )
             })
@@ -372,7 +364,7 @@ impl TableDelegate for OrganiserTableDelegate {
                     .text_color(if color == 0 {
                         theme::foreground()
                     } else {
-                        high_contrast_highlight_fg(color)
+                        crate::history::highlight_foreground(color)
                     })
             })
     }

@@ -6,7 +6,7 @@ impl Workbench {
         event: Event,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<ControlFlow<()>, Box<Event>> {
+    ) -> ControlFlow<()> {
         match event {
             ref event @ Event::FlowDetail {
                 project,
@@ -333,8 +333,8 @@ impl Workbench {
             } if self.project == Some(project) => {
                 self.resolve_intercept(message_id, window, cx);
             }
-            event => return Err(Box::new(event)),
+            _ => {}
         }
-        Ok(ControlFlow::Continue(()))
+        ControlFlow::Continue(())
     }
 }

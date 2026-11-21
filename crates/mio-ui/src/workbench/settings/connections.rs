@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, io::Read, path::Path};
+use std::path::Path;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::base::{CheckboxState, Switch as BaseSwitch};
@@ -519,26 +519,12 @@ impl TableDelegate for ConnectionsTable {
 }
 
 fn read_bypass_list_file(path: &Path) -> Result<Vec<String>, String> {
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts
-        .open(path)
-        .map_err(|error| format!("无法读取绕过列表文件：{error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取绕过列表文件信息：{error}"))?;
-    if !metadata.is_file() || metadata.len() > MAX_BYPASS_FILE_BYTES {
-        return Err("绕过列表文件必须是大小不超过 128 KiB 的普通文本文件。".into());
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_BYPASS_FILE_BYTES + 1)
-        .read_to_end(&mut raw)
-        .map_err(|error| format!("无法完整读取绕过列表文件：{error}"))?;
+    let raw = mio_core::ui_files::read_regular_file_bounded(
+        path,
+        MAX_BYPASS_FILE_BYTES,
+        true,
+        "绕过列表文件",
+    )?;
     let text = String::from_utf8(raw)
         .map_err(|_| "绕过列表文件必须为 UTF-8 编码文本。".to_owned())?;
     Ok(text

@@ -505,45 +505,39 @@ fn custom_actions_library_path() -> AnyResult<Option<PathBuf>> {
 }
 
 fn read_custom_action_library_from_path(path: &Path) -> AnyResult<Vec<CustomActionScriptEntry>> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            ensure!(
-                bytes.len() <= 4 * 1024 * 1024,
-                "自定义动作脚本库文件超过 4 MiB 上限"
-            );
-            let parsed: CustomActionLibraryFile =
-                serde_json::from_slice(&bytes).context("解析 Custom actions 脚本库失败")?;
-            ensure!(parsed.version == 1, "Custom actions 脚本库版本不受支持");
-            ensure!(
-                parsed.scripts.len() <= 128,
-                "Custom actions 脚本库数量超过 128 上限"
-            );
-            Ok(parsed.scripts)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(err).context("读取 Custom actions 脚本库失败"),
-    }
+    let Some(bytes) = mio_core::ui_files::read_bounded_optional_file(
+        path,
+        4 * 1024 * 1024,
+        "自定义动作脚本库",
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let parsed: CustomActionLibraryFile =
+        serde_json::from_slice(&bytes).context("解析 Custom actions 脚本库失败")?;
+    ensure!(parsed.version == 1, "Custom actions 脚本库版本不受支持");
+    ensure!(
+        parsed.scripts.len() <= 128,
+        "Custom actions 脚本库数量超过 128 上限"
+    );
+    Ok(parsed.scripts)
 }
 
 fn write_custom_action_library_to_path(
     path: &Path,
     scripts: &[CustomActionScriptEntry],
 ) -> AnyResult<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("创建 Custom actions 脚本库目录失败")?;
-    }
     let payload = serde_json::to_vec_pretty(&CustomActionLibraryFile {
         version: 1,
         scripts: scripts.to_vec(),
     })
     .context("序列化 Custom actions 脚本库失败")?;
-    let tmp_path = path.with_file_name(format!("repeater-custom-actions.{}.tmp", Uuid::new_v4()));
-    std::fs::write(&tmp_path, &payload).context("写入 Custom actions 临时文件失败")?;
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err).context("保存 Custom actions 脚本库失败");
-    }
-    Ok(())
+    mio_core::ui_files::atomic_write_bounded_file(
+        path,
+        &payload,
+        4 * 1024 * 1024,
+        "Custom actions 脚本库",
+    )
 }
 
 fn save_custom_action_to_path(
@@ -1697,7 +1691,7 @@ impl Workbench {
                                 .and_then(|e| e.to_str())
                                 .is_some_and(|e| e.eq_ignore_ascii_case("json"));
                             let bytes = if is_json { &json_payload } else { &xml_payload };
-                            match std::fs::write(&dest, bytes) {
+                            match mio_core::ui_files::write_export_file(&dest, bytes) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

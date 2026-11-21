@@ -599,3 +599,113 @@ fn number_column_fits_four_digit_lead_row_with_highlight_combo_and_supports_five
         })
         .unwrap();
 }
+
+#[test]
+fn highlight_foreground_and_sort_column_mapping_are_consistent() {
+    assert_eq!(highlight_foreground(8), gpui_kit::rgb(0xffffff).into());
+    assert_eq!(highlight_foreground(1), gpui_kit::rgb(0xffffff).into());
+    assert_eq!(highlight_foreground(6), gpui_kit::rgb(0xffffff).into());
+    for color in [0, 2, 3, 4, 5, 7, 9] {
+        assert_eq!(highlight_foreground(color), gpui_kit::rgb(0x111111).into());
+    }
+
+    for (key, sort_col) in HISTORY_SORT_COLUMNS {
+        assert_eq!(sort_column_key(sort_col), key);
+        assert_eq!(sort_column_from_key(key), Some(sort_col));
+    }
+    assert_eq!(sort_column_from_key("unknown"), None);
+}
+
+#[test]
+fn history_cell_handles_ext_proxy_and_live_uniformly() {
+    let source_id = Uuid::new_v4();
+    let item_id = Uuid::new_v4();
+    let ext = HistoryRow::ExtProxy(Box::new(ExtHistoryRow {
+        item: ExtItemSummary {
+            id: item_id,
+            source_id,
+            collection: "c".into(),
+            index: 4,
+            object_address: None,
+            state: "mapped".into(),
+            message_count: 2,
+        },
+        request: Some(mio_core::ExtMessageSummary {
+            id: Uuid::new_v4(),
+            source_id,
+            item_id,
+            collection: "c".into(),
+            item_index: 4,
+            role: "request".into(),
+            field_id: 0,
+            raw_offset: 0,
+            raw_bytes: 64,
+            body_offset: None,
+            declared_version: None,
+            method: Some("POST".into()),
+            request_target: Some("/api/items?a=1".into()),
+            status: None,
+            diagnostic: None,
+        }),
+        edited_request: None,
+        response: Some(mio_core::ExtMessageSummary {
+            id: Uuid::new_v4(),
+            source_id,
+            item_id,
+            collection: "c".into(),
+            item_index: 4,
+            role: "response".into(),
+            field_id: 1,
+            raw_offset: 64,
+            raw_bytes: 128,
+            body_offset: None,
+            declared_version: None,
+            method: None,
+            request_target: None,
+            status: Some(201),
+            diagnostic: None,
+        }),
+        edited_response: None,
+        origin: Some("https://example.invalid:443".into()),
+        time_unix_ms: Some(0),
+        time_error: None,
+        notes_revision: 1,
+        notes_preview: "line1\r\nline2".into(),
+        notes_error: None,
+        highlight: None,
+        highlight_error: None,
+    }));
+    let live_id = Uuid::new_v4();
+    let live = HistoryRow::Live(mio_core::FlowSummary {
+        id: live_id,
+        revision: 1,
+        source: TrafficSource::Proxy,
+        method: "POST".into(),
+        url: "https://example.invalid:443/api/items?a=1".into(),
+        status: Some(201),
+        state: mio_core::FlowState::Complete,
+        request_bytes: 64,
+        response_bytes: 128,
+        started_unix_ms: 0,
+        elapsed_ms: 10,
+    });
+    let mut delegate = HistoryDelegate {
+        rows: vec![ext, live],
+        ..Default::default()
+    };
+    delegate.live_numbers.insert(live_id, 5);
+    delegate
+        .live_notes
+        .borrow_mut()
+        .insert(live_id, (1, "line1\r\nline2".into()));
+
+    for col in 0..delegate.columns.len() {
+        assert_eq!(
+            delegate.cell(0, col),
+            delegate.cell(1, col),
+            "column {} ({}) should match across ExtProxy and Live",
+            col,
+            delegate.columns[col].key
+        );
+    }
+}

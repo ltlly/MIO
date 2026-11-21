@@ -34,6 +34,134 @@ impl Workbench {
         true
     }
 
+    pub(in crate::workbench) fn spawn_new_path_picker_raw(
+        &mut self,
+        suggested_name: Option<&str>,
+        allow_test_override: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_result: impl FnOnce(
+            &mut Self,
+            Result<anyhow::Result<Option<PathBuf>>, ()>,
+            &mut Window,
+            &mut Context<Self>,
+        ) + 'static,
+    ) {
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        #[cfg(not(test))]
+        let rx = {
+            let _ = allow_test_override;
+            crate::native_terminate::prompt_for_new_path(
+                window,
+                cx,
+                &self.default_directory(),
+                suggested_name,
+            )
+        };
+        #[cfg(test)]
+        let rx = if allow_test_override && let Some(path) = self.save_picker_override.take() {
+            path
+        } else {
+            crate::native_terminate::prompt_for_new_path(
+                window,
+                cx,
+                &self.default_directory(),
+                suggested_name,
+            )
+        };
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.map_err(|_| ());
+            let _ = owner.update(cx, |_, window, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) {
+                        return;
+                    }
+                    on_result(view, result, window, cx);
+                })
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::workbench) fn spawn_save_path_picker(
+        &mut self,
+        suggested_name: Option<&str>,
+        allow_test_override: bool,
+        project_switched_error: &'static str,
+        select_error_prefix: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_selected: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let project = self.project;
+        self.spawn_new_path_picker_raw(
+            suggested_name,
+            allow_test_override,
+            window,
+            cx,
+            move |view, result, window, cx| {
+                if !view.backend_available() {
+                    return;
+                }
+                if view.project != project {
+                    view.fail(project_switched_error, cx);
+                    return;
+                }
+                match result {
+                    Ok(Ok(Some(path))) => on_selected(view, path, window, cx),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => view.fail(format!("{select_error_prefix}：{error}"), cx),
+                    Err(()) => view.fail("文件选择器已意外关闭。", cx),
+                }
+            },
+        );
+    }
+
+    pub(in crate::workbench) fn spawn_open_path_picker(
+        &mut self,
+        options: PathPromptOptions,
+        project_switched_error: &'static str,
+        select_error_prefix: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_selected: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let project = self.project;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let paths = crate::native_terminate::prompt_for_paths(window, cx, options);
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let _ = owner.update(cx, |_, window, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                        return;
+                    }
+                    if view.project != project {
+                        view.fail(project_switched_error, cx);
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(paths))) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                on_selected(view, path, window, cx);
+                            }
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => view.fail(format!("{select_error_prefix}：{error}"), cx),
+                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::workbench) fn choose_open(
         &mut self,
         window: &mut Window,
@@ -50,46 +178,21 @@ impl Workbench {
             );
             return;
         }
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let paths = crate::native_terminate::prompt_for_paths(
-            window,
-            cx,
+        self.spawn_open_path_picker(
             PathPromptOptions {
                 files: true,
                 directories: false,
                 multiple: false,
                 prompt: Some("打开 MIO 项目".into()),
             },
+            "项目已切换，本次文件选择未应用到新项目。",
+            "无法选择项目",
+            window,
+            cx,
+            |view, path, window, cx| {
+                view.request_transition(AfterSave::OpenProject(path), window, cx);
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = paths.await;
-            let _ = owner.update(cx, |_, window, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(paths))) => {
-                            if let Some(path) = paths.into_iter().next() {
-                                view.request_transition(AfterSave::OpenProject(path), window, cx);
-                            }
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择项目：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     pub(in crate::workbench) fn save_project(
@@ -159,85 +262,59 @@ impl Workbench {
         }
         // Save As can escape an unwritable source; it must not require another source write.
         self.choosing_save_as = true;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
         let for_transition = self.after_save.is_some();
         let attempt = self.quit_attempt;
         let result_close = self.intruder_close_save_operation();
-        #[cfg(not(test))]
-        let path = crate::native_terminate::prompt_for_new_path(
+        self.spawn_new_path_picker_raw(
+            Some("Untitled.mio"),
+            true,
             window,
             cx,
-            &self.default_directory(),
-            Some("Untitled.mio"),
-        );
-        #[cfg(test)]
-        let path = if let Some(path) = self.save_picker_override.take() {
-            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
-        } else {
-            let path = crate::native_terminate::prompt_for_new_path(
-                window,
-                cx,
-                &self.default_directory(),
-                Some("Untitled.mio"),
-            );
-            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
-        };
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = path.await;
-            let _ = owner.update(cx, |_, window, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) {
-                        return;
-                    }
-                    view.choosing_save_as = false;
-                    if !view.intruder_close_save_is_current(result_close) {
+            move |view, result, window, cx| {
+                view.choosing_save_as = false;
+                if !view.intruder_close_save_is_current(result_close) {
+                    view.cancel_save_as(cx);
+                    view.fail(
+                        "结果关闭等待已结束；本次路径未用于保存，当前结果仍保留。",
+                        cx,
+                    );
+                    return;
+                }
+                if view.project != Some(project) {
+                    view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
+                    return;
+                }
+                if for_transition
+                    && (view.after_save.is_none() || !view.quit_answer_is_current(attempt, cx))
+                {
+                    return;
+                }
+                match result {
+                    Ok(Ok(Some(path))) => match view.capture_drafts(window, cx) {
+                        Ok(changed) => {
+                            view.workspace_dirty |= changed;
+                            view.pending_project_save = Some(Some(path));
+                            view.flush_project_save(window, cx);
+                        }
+                        Err(error) => {
+                            view.cancel_save_as(cx);
+                            view.fail(error, cx);
+                        }
+                    },
+                    Ok(Ok(None)) => {
                         view.cancel_save_as(cx);
-                        view.fail(
-                            "结果关闭等待已结束；本次路径未用于保存，当前结果仍保留。",
-                            cx,
-                        );
-                        return;
                     }
-                    if view.project != Some(project) {
-                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
-                        return;
+                    Ok(Err(error)) => {
+                        view.cancel_save_as(cx);
+                        view.fail(format!("无法选择保存位置：{error}"), cx);
                     }
-                    if for_transition
-                        && (view.after_save.is_none() || !view.quit_answer_is_current(attempt, cx))
-                    {
-                        return;
+                    Err(()) => {
+                        view.cancel_save_as(cx);
+                        view.fail("文件选择器已意外关闭。", cx);
                     }
-                    match result {
-                        Ok(Ok(Some(path))) => match view.capture_drafts(window, cx) {
-                            Ok(changed) => {
-                                view.workspace_dirty |= changed;
-                                view.pending_project_save = Some(Some(path));
-                                view.flush_project_save(window, cx);
-                            }
-                            Err(error) => {
-                                view.cancel_save_as(cx);
-                                view.fail(error, cx);
-                            }
-                        },
-                        Ok(Ok(None)) => {
-                            view.cancel_save_as(cx);
-                        }
-                        Ok(Err(error)) => {
-                            view.cancel_save_as(cx);
-                            view.fail(format!("无法选择保存位置：{error}"), cx);
-                        }
-                        Err(_) => {
-                            view.cancel_save_as(cx);
-                            view.fail("文件选择器已意外关闭。", cx);
-                        }
-                    }
-                })
-            });
-        })
-        .detach();
+                }
+            },
+        );
     }
 
     pub(in crate::workbench) fn cancel_save_as(&mut self, cx: &mut Context<Self>) {
@@ -276,100 +353,42 @@ impl Workbench {
             .and_then(|p| p.file_stem())
             .map(|stem| format!("{}-slim.mio", stem.to_string_lossy()))
             .unwrap_or_else(|| "Untitled-slim.mio".into());
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        #[cfg(not(test))]
-        let path = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some(&default_name),
+            true,
+            "项目已切换，本次文件选择未应用到新项目。",
+            "无法选择瘦身保存位置",
             window,
             cx,
-            &self.default_directory(),
-            Some(&default_name),
+            move |view, path, _, cx| {
+                view.status = format!("正在执行瘦身另存为：{}…", path.display());
+                view.enqueue(
+                    Command::SlimSaveProjectAs {
+                        project,
+                        path,
+                        options: mio_core::SlimSaveOptions::default(),
+                        cancel: CancellationToken::new(),
+                    },
+                    cx,
+                );
+            },
         );
-        #[cfg(test)]
-        let path = if let Some(path) = self.save_picker_override.take() {
-            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
-        } else {
-            let path = crate::native_terminate::prompt_for_new_path(
-                window,
-                cx,
-                &self.default_directory(),
-                Some(&default_name),
-            );
-            cx.spawn(async move |_, _| path.await.map_err(|_| ()))
-        };
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = path.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != Some(project) {
-                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(path))) => {
-                            view.status = format!("正在执行瘦身另存为：{}…", path.display());
-                            view.enqueue(
-                                Command::SlimSaveProjectAs {
-                                    project,
-                                    path,
-                                    options: mio_core::SlimSaveOptions::default(),
-                                    cancel: CancellationToken::new(),
-                                },
-                                cx,
-                            );
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择瘦身保存位置：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     pub(in crate::workbench) fn export_ca(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.backend_available() || self.transition.is_some() || self.file_picker_pending() {
             return;
         }
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let path = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some("mio-ca.cer"),
+            false,
+            "项目已切换，本次文件选择未应用到新项目。",
+            "无法导出 CA",
             window,
             cx,
-            &self.default_directory(),
-            Some("mio-ca.cer"),
+            |view, path, _, cx| {
+                view.enqueue(Command::ExportCa { path }, cx);
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = path.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件选择未应用到新项目。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(path))) => {
-                            view.enqueue(Command::ExportCa { path }, cx);
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法导出 CA：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 }

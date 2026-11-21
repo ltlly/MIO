@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::rc::Rc;
 
 use gpui_kit::{Global, RenderOnce};
@@ -97,35 +96,32 @@ fn payload_lines(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 fn read_payload_file(path: &std::path::Path) -> Result<Vec<Vec<u8>>, String> {
     #[cfg(test)]
     unit_tests::before_payload_open();
-    #[cfg(not(unix))]
-    if let Ok(meta) = std::fs::symlink_metadata(path)
-        && (!meta.is_file() || meta.len() > MAX_PAYLOAD_BYTES as u64)
-    {
-        return Err("请选择不超过 32 MiB 的普通 payload 文件；列表未改变。".into());
-    }
-    // Nonblocking open lets the same fd reject a replacement FIFO before reading.
-    let mut opts = std::fs::File::options();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts
-        .open(path)
-        .map_err(|error| format!("无法打开 payload 文件：{error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取 payload 文件：{error}"))?;
-    #[cfg(test)]
-    unit_tests::after_payload_metadata();
-    if !metadata.is_file() || metadata.len() > MAX_PAYLOAD_BYTES as u64 {
-        return Err("请选择不超过 32 MiB 的普通 payload 文件；列表未改变。".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_PAYLOAD_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取 payload 文件：{error}"))?;
+    let bytes = mio_core::ui_files::read_regular_file_bounded_with_hook(
+        path,
+        MAX_PAYLOAD_BYTES as u64,
+        true,
+        || {
+            #[cfg(test)]
+            unit_tests::after_payload_metadata();
+        },
+    )
+    .map_err(|err| match err {
+        mio_core::ui_files::RegularFileReadError::Open(error) => {
+            format!("无法打开 payload 文件：{error}")
+        }
+        mio_core::ui_files::RegularFileReadError::Metadata(error) => {
+            format!("无法读取 payload 文件：{error}")
+        }
+        mio_core::ui_files::RegularFileReadError::InvalidOrTooLarge => {
+            "请选择不超过 32 MiB 的普通 payload 文件；列表未改变。".into()
+        }
+        mio_core::ui_files::RegularFileReadError::TooLargeAfterRead => {
+            "Payload 文件超过 32 MiB 限额；未截断或加载任何条目。".into()
+        }
+        mio_core::ui_files::RegularFileReadError::Read(error) => {
+            format!("无法读取 payload 文件：{error}")
+        }
+    })?;
     payload_lines(&bytes)
 }
 

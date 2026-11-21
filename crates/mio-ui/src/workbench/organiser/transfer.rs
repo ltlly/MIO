@@ -541,7 +541,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension("xml");
                             }
-                            match std::fs::write(&path, &xml_payload) {
+                            match mio_core::ui_files::write_export_file(&path, &xml_payload) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

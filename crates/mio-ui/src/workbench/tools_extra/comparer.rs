@@ -181,7 +181,7 @@ impl Workbench {
                     Ok(Ok(Some(paths))) => {
                         if let Some(path) = paths.into_iter().next() {
                             let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("文件").to_owned();
-                            match std::fs::read(&path) {
+                            match mio_core::ui_files::read_file_bytes(&path) {
                                 Ok(bytes) => view.add_comparer_item(&label, bytes, window, cx),
                                 Err(error) => view.fail(format!("读取对比文件失败：{error}"), cx),
                             }

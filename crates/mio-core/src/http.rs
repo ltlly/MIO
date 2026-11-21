@@ -18,6 +18,7 @@ pub use compression::{
 pub(crate) use compression::{UnpackError, unpack_request, unpack_response};
 mod editor_replace;
 mod extra_conditions;
+pub mod html_extract;
 pub(crate) use extra_conditions::infer_history_display_mime_type;
 
 pub(crate) const MAX_HEAD: usize = 128 * 1024;
@@ -32,6 +33,8 @@ mod parse;
 mod parse_message;
 mod pretty;
 mod proxy_transforms;
+pub mod raw_head;
+pub mod request_codec;
 mod response_len;
 mod to_raw;
 
@@ -82,6 +85,15 @@ pub fn is_chunked_headers(fields: &[Header]) -> bool {
 pub use proxy_transforms::{
     build_ssl_pass_through_matcher, build_websocket_transform,
     build_websocket_transform_with_scope, validate_ssl_and_ws_rules,
+};
+pub use raw_head::{
+    HttpHeaderSpan, ParsedHttpResponseHead, extract_content_type_essence_and_charset,
+    extract_http_header_charset, filter_http_headers_bytes, find_http_body_offset,
+    parse_http_head_info, parse_http_header_spans, parse_http_response_parts,
+};
+pub use request_codec::{
+    BodyEncodingTarget, change_http_body_encoding_bytes, parse_clipboard_url_as_request,
+    set_http_request_method_bytes, toggle_http_request_method_bytes,
 };
 pub use response_len::intruder_response_len;
 #[cfg(test)]

@@ -210,28 +210,7 @@ pub(super) fn tls_certificate_names(certificates: &[Vec<u8>]) -> Vec<String> {
 }
 
 fn read_ca_certificate(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    use std::{fs::OpenOptions, io::Read};
-
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts
-        .open(path)
-        .map_err(|error| format!("无法读取 CA 证书：{error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取 CA 证书信息：{error}"))?;
-    if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return Err("CA 证书必须是非空且不超过 64 KiB 的普通文件。".into());
-    }
-    let mut raw = Vec::new();
-    file.take(64 * 1024 + 1)
-        .read_to_end(&mut raw)
-        .map_err(|error| format!("无法完整读取 CA 证书：{error}"))?;
+    let raw = mio_core::ui_files::read_regular_file_bounded(path, 64 * 1024, true, "CA 证书")?;
     let der = mio_core::UpstreamTlsSettings::parse_pem_or_der_cert(&raw)
         .map_err(|error| error.to_string())?;
     mio_core::UpstreamTlsSettings::certificate_display_name(&der)

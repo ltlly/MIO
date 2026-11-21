@@ -427,8 +427,6 @@ fn construct_mysql_char(bytes: &[u8]) -> String {
     format!("CHAR({formatted})")
 }
 
-const MAX_HTTP_HEADER_SLOTS: usize = 4096;
-
 pub(crate) const DEFAULT_HIDDEN_REQUEST_HEADERS: &[&str] = &[
     "accept",
     "accept-encoding",
@@ -493,176 +491,25 @@ pub(crate) fn validate_http_header_names(names: &[String]) -> Result<Vec<String>
     Ok(names.to_vec())
 }
 
-fn header_matches_filter(name: &str, rules: Option<&[String]>, default_rules: &[&str]) -> bool {
-    match rules {
-        Some(custom) => custom
-            .iter()
-            .any(|rule| name.eq_ignore_ascii_case(rule)),
-        None => default_rules
-            .iter()
-            .any(|rule| name.eq_ignore_ascii_case(rule)),
-    }
-}
-
-fn slice_offset(base: &[u8], sub: &[u8]) -> usize {
-    sub.as_ptr() as usize - base.as_ptr() as usize
-}
-
-fn first_line_end(raw: &[u8], limit: usize) -> Option<(usize, &'static [u8])> {
-    let head = &raw[..limit.min(raw.len())];
-    let newline = head.iter().position(|&b| b == b'\n')?;
-    if newline > 0 && head[newline - 1] == b'\r' {
-        Some((newline + 1, b"\r\n"))
-    } else {
-        Some((newline + 1, b"\n"))
-    }
-}
-
-fn rebuild_filtered_head(
-    raw: &[u8],
-    parsed_input: &[u8],
-    added_start_line_bytes: usize,
-    body_offset: usize,
-    headers: &[httparse::Header<'_>],
-    rules: Option<&[String]>,
-    default_rules: &[&str],
-) -> (Vec<u8>, Vec<usize>) {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut line_numbers = Vec::new();
-    let mut retained_start = 0;
-    let mut current_line = 1usize;
-    for header in headers {
-        if !header_matches_filter(header.name, rules, default_rules) {
-            continue;
-        }
-        let name_start = slice_offset(parsed_input, header.name.as_bytes()) - added_start_line_bytes;
-        let value_end = slice_offset(parsed_input, header.value) + header.value.len()
-            - added_start_line_bytes;
-        let line_start = raw[..name_start]
-            .iter()
-            .rposition(|&byte| byte == b'\n')
-            .expect("httparse header must follow a complete start line")
-            + 1;
-        let line_end = value_end
-            + raw[value_end..body_offset]
-                .iter()
-                .position(|&byte| byte == b'\n')
-                .expect("httparse complete header must end with a newline")
-            + 1;
-        let retained_slice = &raw[retained_start..line_start];
-        let retained_lines = retained_slice.iter().filter(|&&byte| byte == b'\n').count();
-        line_numbers.extend(current_line..current_line + retained_lines);
-        current_line += retained_lines;
-        out.extend_from_slice(retained_slice);
-        let skipped_lines = raw[line_start..line_end]
-            .iter()
-            .filter(|&&byte| byte == b'\n')
-            .count();
-        current_line += skipped_lines;
-        retained_start = line_end;
-    }
-    let tail = &raw[retained_start..];
-    let tail_newlines = tail.iter().filter(|&&byte| byte == b'\n').count();
-    line_numbers.extend(current_line..=current_line + tail_newlines);
-    out.extend_from_slice(tail);
-    (out, line_numbers)
-}
-
-fn normalize_http2_start_line(line: &[u8]) -> Option<(Vec<u8>, bool)> {
-    if let Some(rest) = line.strip_prefix(b"HTTP/2.0 ") {
-        let mut normalized = Vec::with_capacity(line.len());
-        normalized.extend_from_slice(b"HTTP/1.1 ");
-        normalized.extend_from_slice(rest);
-        return Some((normalized, true));
-    }
-    if let Some(rest) = line.strip_prefix(b"HTTP/2 ") {
-        let mut normalized = Vec::with_capacity(line.len() + 2);
-        normalized.extend_from_slice(b"HTTP/1.1 ");
-        normalized.extend_from_slice(rest);
-        return Some((normalized, true));
-    }
-    if let Some(prefix) = line.strip_suffix(b" HTTP/2.0") {
-        let mut normalized = Vec::with_capacity(line.len());
-        normalized.extend_from_slice(prefix);
-        normalized.extend_from_slice(b" HTTP/1.1");
-        return Some((normalized, false));
-    }
-    if let Some(prefix) = line.strip_suffix(b" HTTP/2") {
-        let mut normalized = Vec::with_capacity(line.len() + 2);
-        normalized.extend_from_slice(prefix);
-        normalized.extend_from_slice(b" HTTP/1.1");
-        return Some((normalized, false));
-    }
-    None
-}
-
 pub(crate) fn filter_http_headers_bytes(
     raw: &[u8],
     custom_headers: Option<&[String]>,
 ) -> Result<(Vec<u8>, Vec<usize>), String> {
-    if raw.is_empty() {
-        return Ok((Vec::new(), vec![1]));
-    }
-    let (start_end, eol) = first_line_end(raw, raw.len())
-        .ok_or_else(|| "消息不包含可解析的 HTTP 起始行与标头块。".to_owned())?;
-    let line_without_eol = &raw[..start_end - eol.len()];
-    let normalized = normalize_http2_start_line(line_without_eol).map(|(mut line, _)| {
-        line.extend_from_slice(&raw[start_end - eol.len()..]);
-        line
-    });
-    let parsed_input = normalized.as_deref().unwrap_or(raw);
-    let added_start_line_bytes = parsed_input.len() - raw.len();
-    let mut headers = vec![httparse::EMPTY_HEADER; MAX_HTTP_HEADER_SLOTS];
-    let mut config = httparse::ParserConfig::default();
-    config
-        .allow_multiple_spaces_in_request_line_delimiters(true)
-        .allow_multiple_spaces_in_response_status_delimiters(true)
-        .allow_space_before_first_header_name(true)
-        .allow_obsolete_multiline_headers_in_responses(true);
-    let (body_offset, parsed_headers, defaults, global_custom) = if raw.starts_with(b"HTTP/") {
-        let mut response = httparse::Response::new(&mut headers);
-        let status = config
-            .parse_response(&mut response, parsed_input)
-            .map_err(|error| format!("HTTP 响应解析失败（{error}），无法隐藏指定标头。"))?;
-        let httparse::Status::Complete(offset) = status else {
-            return Err("HTTP 响应标头未以空行完整结束，无法隐藏指定标头。".into());
-        };
-        (
-            offset,
-            response.headers,
-            DEFAULT_HIDDEN_RESPONSE_HEADERS,
-            custom_headers
-                .is_none()
-                .then(crate::theme::hidden_response_headers)
-                .flatten(),
-        )
+    let global_custom = if custom_headers.is_none() {
+        if raw.starts_with(b"HTTP/") {
+            crate::theme::hidden_response_headers()
+        } else {
+            crate::theme::hidden_request_headers()
+        }
     } else {
-        let mut request = httparse::Request::new(&mut headers);
-        let status = config
-            .parse_request(&mut request, parsed_input)
-            .map_err(|error| format!("HTTP 请求解析失败（{error}），无法隐藏指定标头。"))?;
-        let httparse::Status::Complete(offset) = status else {
-            return Err("HTTP 请求标头未以空行完整结束，无法隐藏指定标头。".into());
-        };
-        (
-            offset,
-            request.headers,
-            DEFAULT_HIDDEN_REQUEST_HEADERS,
-            custom_headers
-                .is_none()
-                .then(crate::theme::hidden_request_headers)
-                .flatten(),
-        )
+        None
     };
-    Ok(rebuild_filtered_head(
+    mio_core::filter_http_headers_bytes(
         raw,
-        parsed_input,
-        added_start_line_bytes,
-        body_offset - added_start_line_bytes,
-        parsed_headers,
         custom_headers.or(global_custom.as_deref()),
-        defaults,
-    ))
+        DEFAULT_HIDDEN_REQUEST_HEADERS,
+        DEFAULT_HIDDEN_RESPONSE_HEADERS,
+    )
 }
 
 pub(crate) fn format_non_printable_preview_with_badges(
@@ -860,100 +707,18 @@ pub(crate) struct RenderedHttpResponse {
     pub summary: RenderedBodySummary,
 }
 
-fn parse_http_response_parts(
-    raw: &[u8],
-) -> (
-    String,
-    Option<u16>,
-    Option<String>,
-    Option<String>,
-    Vec<u8>,
-) {
-    match mio_core::parse_response(raw, mio_core::HttpVersion::Http11) {
-        Ok(resp) => {
-            let version = match resp.version {
-                mio_core::HttpVersion::Http10 => "HTTP/1.0",
-                mio_core::HttpVersion::Http2 => "HTTP/2",
-                mio_core::HttpVersion::Http11 => "HTTP/1.1",
-            };
-            let mut ct = None;
-            let mut loc = None;
-            for header in &resp.headers {
-                if header.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
-                    ct = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
-                } else if header.name.eq_ignore_ascii_case("location") && loc.is_none() {
-                    loc = Some(String::from_utf8_lossy(&header.value).trim().to_owned());
-                }
-            }
-            (
-                format!("{version} {}", resp.status),
-                Some(resp.status),
-                ct,
-                loc,
-                resp.body,
-            )
-        }
-        Err(_) => {
-            let mut headers_buf = vec![httparse::EMPTY_HEADER; 2048];
-            let mut parsed = httparse::Response::new(&mut headers_buf);
-            match parsed.parse(raw) {
-                Ok(httparse::Status::Complete(offset)) => {
-                    let ver = match parsed.version {
-                        Some(0) => "HTTP/1.0",
-                        _ => "HTTP/1.1",
-                    };
-                    let code = parsed.code;
-                    let reason = parsed.reason.unwrap_or("").trim();
-                    let status_line = match (code, reason.is_empty()) {
-                        (Some(c), false) => format!("{ver} {c} {reason}"),
-                        (Some(c), true) => format!("{ver} {c}"),
-                        _ => ver.to_owned(),
-                    };
-                    let mut ct = None;
-                    let mut loc = None;
-                    for h in parsed.headers.iter() {
-                        if h.name.eq_ignore_ascii_case("content-type") && ct.is_none() {
-                            ct = Some(String::from_utf8_lossy(h.value).trim().to_owned());
-                        } else if h.name.eq_ignore_ascii_case("location") && loc.is_none() {
-                            loc = Some(String::from_utf8_lossy(h.value).trim().to_owned());
-                        }
-                    }
-                    (status_line, code, ct, loc, raw[offset..].to_vec())
-                }
-                _ => (
-                    "无标准 HTTP 状态行".to_owned(),
-                    None,
-                    None,
-                    None,
-                    raw.to_vec(),
-                ),
-            }
-        }
-    }
-}
-
 pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
-    let (status_line, status_code, content_type, location, body) = parse_http_response_parts(raw);
-    let parsed_mime = content_type
+    let mio_core::ParsedHttpResponseHead {
+        status_line,
+        status_code,
+        content_type,
+        location,
+        body,
+    } = mio_core::parse_http_response_parts(raw);
+    let (mime_essence, header_charset) = content_type
         .as_deref()
-        .and_then(|ct| ct.parse::<mime::Mime>().ok());
-    let mime_essence = parsed_mime
-        .as_ref()
-        .map(|m| m.essence_str().to_owned())
+        .map(mio_core::extract_content_type_essence_and_charset)
         .unwrap_or_default();
-    let header_charset = parsed_mime
-        .as_ref()
-        .and_then(|m| m.get_param(mime::CHARSET).map(|v| v.as_str().to_owned()))
-        .or_else(|| {
-            content_type.as_deref().and_then(|ct| {
-                ct.split(';').skip(1).find_map(|part| {
-                    let (k, v) = part.trim().split_once('=')?;
-                    k.trim()
-                        .eq_ignore_ascii_case("charset")
-                        .then(|| v.trim().trim_matches(|c| c == '"' || c == '\'').to_owned())
-                })
-            })
-        });
     let body_slice = body.as_slice();
     let decoded_body_text = header_charset
         .as_deref()
@@ -1024,12 +789,12 @@ pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
 pub(crate) fn extract_http_response_body_and_content_type(
     raw: &[u8],
 ) -> (Vec<u8>, Option<String>) {
-    let (_, _, content_type, _, body) = parse_http_response_parts(raw);
-    (body, content_type)
+    let parsed = mio_core::parse_http_response_parts(raw);
+    (parsed.body, parsed.content_type)
 }
 
 pub(crate) fn extract_http_response_body(raw: &[u8]) -> Vec<u8> {
-    parse_http_response_parts(raw).4
+    mio_core::parse_http_response_parts(raw).body
 }
 
 fn looks_like_html_bytes(body: &[u8]) -> bool {
@@ -1077,229 +842,43 @@ fn detect_image_metadata(
             && String::from_utf8_lossy(&trimmed[..trimmed.len().min(512)]).contains("<svg"))
     {
         let text = String::from_utf8_lossy(trimmed);
-        let (width, height) = parse_svg_dimensions(&text);
+        let (width, height) = mio_core::html_extract::parse_svg_dimensions(&text);
         return Some(("SVG", "image/svg+xml", width, height));
     }
     None
 }
 
-fn parse_svg_dimensions(svg_text: &str) -> (Option<u32>, Option<u32>) {
-    let parse_dim_val = |raw: &str| -> Option<u32> {
-        let digits: String = raw
-            .trim()
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        digits.parse::<u32>().ok()
-    };
-    if let Ok(doc) = roxmltree::Document::parse(svg_text) {
-        let root = doc.root_element();
-        if root.has_tag_name("svg") {
-            let w = root.attribute("width").and_then(parse_dim_val);
-            let h = root.attribute("height").and_then(parse_dim_val);
-            return (w, h);
-        }
-    }
-    let html_doc = scraper::Html::parse_fragment(svg_text);
-    if let Ok(sel) = scraper::Selector::parse("svg")
-        && let Some(svg_el) = html_doc.select(&sel).next()
-    {
-        let w = svg_el.value().attr("width").and_then(parse_dim_val);
-        let h = svg_el.value().attr("height").and_then(parse_dim_val);
-        return (w, h);
-    }
-    (None, None)
-}
-
-fn normalize_visible_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn extract_html_render_summary(html: &str) -> RenderedBodySummary {
-    use scraper::{Html, Selector};
-
-    let document = Html::parse_document(html);
-    let title = Selector::parse("title")
-        .ok()
-        .and_then(|sel| document.select(&sel).next())
-        .map(|el| normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" ")))
-        .filter(|s| !s.is_empty());
-
-    let mut headings = Vec::new();
-    if let Ok(h_sel) = Selector::parse("h1, h2, h3, h4, h5, h6") {
-        for el in document.select(&h_sel).take(64) {
-            let name = el.value().name();
-            let level = name.as_bytes().get(1).map(|b| b - b'0').unwrap_or(1);
-            let text = normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" "));
-            if !text.is_empty() {
-                headings.push((level, text));
-            }
-        }
-    }
-
-    let mut paragraphs = Vec::new();
-    if let Ok(p_sel) = Selector::parse("p, li, blockquote, pre, td, th") {
-        for el in document.select(&p_sel) {
-            if paragraphs.len() >= 120 {
-                break;
-            }
-            let text = normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" "));
-            if !text.is_empty() && !paragraphs.contains(&text) {
-                paragraphs.push(text);
-            }
-        }
-    }
-    if paragraphs.is_empty()
-        && let Ok(body_sel) = Selector::parse("body")
-        && let Some(body_el) = document.select(&body_sel).next()
-    {
-        let text = collect_visible_element_text(body_el);
-        if !text.is_empty() {
-            paragraphs.push(text);
-        }
-    }
-
-    let mut links = Vec::new();
-    if let Ok(a_sel) = Selector::parse("a[href]") {
-        for el in document.select(&a_sel).take(200) {
-            if let Some(href) = el.value().attr("href") {
-                let text = normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" "));
-                links.push(RenderedResponseLink {
-                    href: href.to_owned(),
-                    text,
-                });
-            }
-        }
-    }
-
-    let mut forms = Vec::new();
-    let ctrl_sel = Selector::parse("input, select, textarea, button").ok();
-    if let Ok(form_sel) = Selector::parse("form") {
-        for form_el in document.select(&form_sel).take(64) {
-            let action = form_el.value().attr("action").unwrap_or("/").to_owned();
-            let method = form_el
-                .value()
-                .attr("method")
-                .map(|m| m.trim().to_ascii_uppercase())
-                .filter(|m| !m.is_empty())
-                .unwrap_or_else(|| "GET".into());
-            let mut inputs = Vec::new();
-            if let Some(ref c_sel) = ctrl_sel {
-                for ctrl_el in form_el.select(c_sel).take(128) {
-                    inputs.push(extract_form_control(ctrl_el));
-                }
-            }
-            forms.push(RenderedResponseForm {
-                action,
-                method,
-                inputs,
-            });
-        }
-    }
-    if forms.is_empty()
-        && let Some(ref c_sel) = ctrl_sel
-    {
-        let standalone: Vec<RenderedResponseFormInput> = document
-            .select(c_sel)
-            .take(128)
-            .map(extract_form_control)
-            .filter(|c| !c.name.is_empty())
-            .collect();
-        if !standalone.is_empty() {
-            forms.push(RenderedResponseForm {
-                action: "(独立表单控件)".into(),
-                method: "GET".into(),
-                inputs: standalone,
-            });
-        }
-    }
-
-    let mut scripts = Vec::new();
-    if let Ok(s_sel) = Selector::parse("script[src]") {
-        for el in document.select(&s_sel).take(128) {
-            if let Some(src) = el.value().attr("src") {
-                let trimmed = src.trim();
-                if !trimmed.is_empty() {
-                    scripts.push(trimmed.to_owned());
-                }
-            }
-        }
-    }
-
+    let summary = mio_core::html_extract::extract_html_summary(html);
     RenderedBodySummary::Html {
-        title,
-        headings,
-        paragraphs,
-        links,
-        forms,
-        scripts,
-    }
-}
-
-fn extract_form_control(el: scraper::ElementRef<'_>) -> RenderedResponseFormInput {
-    let tag_name = el.value().name();
-    let name = el
-        .value()
-        .attr("name")
-        .or_else(|| el.value().attr("id"))
-        .unwrap_or("")
-        .to_owned();
-    let input_type = el
-        .value()
-        .attr("type")
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            if tag_name == "input" {
-                "text".into()
-            } else {
-                tag_name.to_owned()
-            }
-        });
-    let value = el
-        .value()
-        .attr("value")
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            if tag_name == "textarea" {
-                el.text().collect::<String>()
-            } else {
-                String::new()
-            }
-        });
-    RenderedResponseFormInput {
-        name,
-        input_type,
-        value,
-    }
-}
-
-fn collect_visible_element_text(root: scraper::ElementRef<'_>) -> String {
-    let mut parts = Vec::new();
-    collect_visible_nodes(root, &mut parts);
-    normalize_visible_whitespace(&parts.join(" "))
-}
-
-fn collect_visible_nodes(el: scraper::ElementRef<'_>, out: &mut Vec<String>) {
-    if matches!(
-        el.value().name(),
-        "script" | "style" | "noscript" | "template"
-    ) {
-        return;
-    }
-    for child in el.children() {
-        match child.value() {
-            scraper::Node::Text(t) => {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() {
-                    out.push(trimmed.to_owned());
-                }
-            }
-            scraper::Node::Element(_) => {
-                if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    collect_visible_nodes(child_el, out);
-                }
-            }
-            _ => {}
-        }
+        title: summary.title,
+        headings: summary.headings,
+        paragraphs: summary.paragraphs,
+        links: summary
+            .links
+            .into_iter()
+            .map(|l| RenderedResponseLink {
+                href: l.href,
+                text: l.text,
+            })
+            .collect(),
+        forms: summary
+            .forms
+            .into_iter()
+            .map(|f| RenderedResponseForm {
+                action: f.action,
+                method: f.method,
+                inputs: f
+                    .inputs
+                    .into_iter()
+                    .map(|i| RenderedResponseFormInput {
+                        name: i.name,
+                        input_type: i.input_type,
+                        value: i.value,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        scripts: summary.scripts,
     }
 }

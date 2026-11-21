@@ -18,14 +18,6 @@ fn row_highlight_color(delegate: &HistoryDelegate, row: usize) -> Option<u8> {
         .filter(|color| (1..=9).contains(color))
 }
 
-fn high_contrast_highlight_fg(color: u8) -> gpui_kit::Hsla {
-    gpui_kit::rgb(match color {
-        1 | 6 | 8 => 0xffffff,
-        _ => 0x111111,
-    })
-    .into()
-}
-
 const HIGHLIGHT_COMBO_NAMES: [&str; 10] = [
     "NONE", "RED", "ORANGE", "YELLOW", "GREEN", "CYAN", "BLUE", "PINK", "MAGENTA", "GRAY",
 ];
@@ -137,26 +129,8 @@ impl TableDelegate for HistoryDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let column = match self.columns[col].key.as_ref() {
-            "number" => HttpHistorySortColumn::Number,
-            "host" => HttpHistorySortColumn::Host,
-            "method" => HttpHistorySortColumn::Method,
-            "url" => HttpHistorySortColumn::Url,
-            "params" => HttpHistorySortColumn::Params,
-            "edited" => HttpHistorySortColumn::Edited,
-            "status" => HttpHistorySortColumn::Status,
-            "length" => HttpHistorySortColumn::Length,
-            "mime" => HttpHistorySortColumn::MimeType,
-            "extension" => HttpHistorySortColumn::Extension,
-            "title" => HttpHistorySortColumn::Title,
-            "notes" => HttpHistorySortColumn::Notes,
-            "tls" => HttpHistorySortColumn::Tls,
-            "ip" => HttpHistorySortColumn::Ip,
-            "cookies" => HttpHistorySortColumn::Cookies,
-            "time" => HttpHistorySortColumn::Time,
-            "listener_port" => HttpHistorySortColumn::ListenerPort,
-            "start_response_timer" => HttpHistorySortColumn::StartResponseTimer,
-            _ => return,
+        let Some(column) = super::sort_column_from_key(self.columns[col].key.as_ref()) else {
+            return;
         };
         let next_sort = HttpHistorySort {
             column,
@@ -304,7 +278,7 @@ impl TableDelegate for HistoryDelegate {
             .when_some(hl_color, |this, color| {
                 this.when_some(highlight_background(color), |this, background| {
                     this.bg(background)
-                        .text_color(high_contrast_highlight_fg(color))
+                        .text_color(highlight_foreground(color))
                 })
             })
             .when(selected, |this| {
@@ -317,7 +291,7 @@ impl TableDelegate for HistoryDelegate {
                 let fg = if color == 0 {
                     crate::theme::foreground()
                 } else {
-                    high_contrast_highlight_fg(color)
+                    highlight_foreground(color)
                 };
                 this.bg(bg).text_color(fg)
             })
@@ -335,7 +309,7 @@ impl TableDelegate for HistoryDelegate {
         let hl_color = row_highlight_color(self, row);
         let text = crate::theme::truncate_cell_preview(&self.cell(row, column));
         let fg = match hl_color {
-            Some(color) => high_contrast_highlight_fg(color),
+            Some(color) => highlight_foreground(color),
             None => crate::theme::foreground(),
         };
         let entry_id = self.rows.get(row).map(HistoryRow::id);

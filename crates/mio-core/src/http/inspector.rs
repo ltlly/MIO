@@ -1,6 +1,6 @@
 use super::*;
 
-mod json_body;
+pub(in crate::http) mod json_body;
 mod multipart_body;
 mod selection_codec;
 mod wire_helpers;

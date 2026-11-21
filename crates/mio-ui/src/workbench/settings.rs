@@ -83,8 +83,8 @@ struct SettingsState {
     repeater_settings: mio_core::RepeaterSettings,
     tasks_auto_start: bool,
     scheduled_tasks: Vec<mio_core::ScheduledTask>,
-    observed_server_certs: Vec<mio_core::ObservedServerCert>,
-    session_traces: Vec<mio_core::SessionTraceEntry>,
+    observed_server_certs: std::collections::VecDeque<mio_core::ObservedServerCert>,
+    session_traces: std::collections::VecDeque<mio_core::SessionTraceEntry>,
     session_tracer_paused: bool,
     last_ca_fingerprint: Option<String>,
     follow_redirects: RepeaterRedirectMode,
@@ -212,7 +212,7 @@ impl SettingsState {
                 .clone_from(&view.observed_server_certs);
         }
         if self.session_traces.len() != view.session_traces.len()
-            || self.session_traces.last().map(|e| e.id) != view.session_traces.last().map(|e| e.id)
+            || self.session_traces.back().map(|e| e.id) != view.session_traces.back().map(|e| e.id)
         {
             self.session_traces.clone_from(&view.session_traces);
         }
@@ -307,6 +307,7 @@ struct Settings {
     tls_table: Entity<TableState<CertificateTable>>,
     tls_import: Option<mio_core::Uuid>,
     tls_error: Option<String>,
+    scope_ui: Box<scope::ScopeUi>,
     scope_include_input: Entity<InputState>,
     scope_exclude_input: Entity<InputState>,
     page: SettingsPage,

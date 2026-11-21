@@ -187,7 +187,7 @@ impl IntruderResultsWindow {
                                 let cnt = tsv.lines().count().saturating_sub(1);
                                 (tsv, cnt)
                             };
-                            match std::fs::write(&path, payload.as_bytes()) {
+                            match mio_core::ui_files::write_export_file(&path, payload.as_bytes()) {
                                 Ok(()) => {
                                     wb.error = None;
                                     wb.status = format!(

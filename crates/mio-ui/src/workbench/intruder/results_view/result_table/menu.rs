@@ -33,29 +33,6 @@ pub(in crate::workbench::intruder::results_view) enum RowOp {
 }
 
 fn serialize_intruder_result_ext_xml(record: &mio_core::FlowRecord) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event as XmlEvent};
-
-    let url = record.request.url.as_str();
-    let parsed = url::Url::parse(url).map_err(|_| "XML 导出 URL 无效。".to_owned())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("XML 导出 URL 必须使用 HTTP 协议。".into());
-    }
-    let host = parsed.host_str().ok_or("XML 导出 URL 缺少主机。")?;
-    let port = parsed
-        .port_or_known_default()
-        .ok_or("XML 导出 URL 缺少端口。")?;
-    let mut path = parsed.path().to_owned();
-    if let Some(query) = parsed.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    let extension = parsed
-        .path_segments()
-        .and_then(Iterator::last)
-        .and_then(|segment| segment.rsplit_once('.').map(|(_, ext)| ext))
-        .unwrap_or("");
     let time_str = crate::history::local_time(record.summary.started_unix_ms);
     let request_bytes = request_to_raw(&record.request);
     let response_bytes = record
@@ -63,71 +40,17 @@ fn serialize_intruder_result_ext_xml(record: &mio_core::FlowRecord) -> Result<Ve
         .as_ref()
         .map(response_to_raw)
         .unwrap_or_default();
-    let status = record
-        .response
-        .as_ref()
-        .map(|resp| resp.status.to_string())
-        .unwrap_or_default();
-    let mut writer = quick_xml::Writer::new(Vec::new());
-    writer
-        .write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        .map_err(|error| error.to_string())?;
-    let mut root = BytesStart::new("items");
-    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
-    let export_time = quick_xml::escape::escape(&time_str);
-    root.push_attribute(("exportTime", export_time.as_ref()));
-    writer
-        .write_event(XmlEvent::Start(root))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_event(XmlEvent::Start(BytesStart::new("item")))
-        .map_err(|error| error.to_string())?;
-    for (name, value) in [
-        ("time", time_str),
-        ("url", url.to_owned()),
-        ("host", host.to_owned()),
-        ("port", port.to_string()),
-        ("protocol", parsed.scheme().to_owned()),
-        ("method", record.request.method.clone()),
-        ("path", path),
-        ("extension", extension.to_owned()),
-    ] {
-        writer
-            .create_element(name)
-            .write_text_content(BytesText::new(&value))
-            .map_err(|error| error.to_string())?;
-    }
-    writer
-        .create_element("request")
-        .with_attribute(("base64", "true"))
-        .write_text_content(BytesText::new(&BASE64_STANDARD.encode(&request_bytes)))
-        .map_err(|error| error.to_string())?;
-    writer
-        .create_element("status")
-        .write_text_content(BytesText::new(&status))
-        .map_err(|error| error.to_string())?;
-    writer
-        .create_element("responselength")
-        .write_text_content(BytesText::new(&response_bytes.len().to_string()))
-        .map_err(|error| error.to_string())?;
-    writer
-        .create_element("response")
-        .with_attribute(("base64", "true"))
-        .write_text_content(BytesText::new(&BASE64_STANDARD.encode(&response_bytes)))
-        .map_err(|error| error.to_string())?;
-    writer
-        .create_element("comment")
-        .write_text_content(BytesText::new(""))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_event(XmlEvent::End(BytesEnd::new("item")))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_event(XmlEvent::End(BytesEnd::new("items")))
-        .map_err(|error| error.to_string())?;
-    let xml = String::from_utf8(writer.into_inner()).map_err(|error| error.to_string())?;
-    roxmltree::Document::parse(&xml).map_err(|error| format!("XML 导出内容无效：{error}"))?;
-    Ok(xml.into_bytes())
+    let status = record.response.as_ref().map(|resp| resp.status);
+    mio_core::export_xml::build_http_item_xml(&mio_core::export_xml::XmlHttpExportItem {
+        url: record.request.url.as_str(),
+        method: &record.request.method,
+        status,
+        time_str: &time_str,
+        request_bytes: &request_bytes,
+        response_bytes: &response_bytes,
+        comment: "",
+    })
+    .map(String::into_bytes)
 }
 
 fn origin_of(url: &str) -> String {
@@ -750,7 +673,7 @@ fn exec_row_op(
                             if path.extension().is_none() {
                                 path.set_extension("xml");
                             }
-                            match std::fs::write(&path, &payload) {
+                            match mio_core::ui_files::write_export_file(&path, &payload) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status =

@@ -2,13 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{
-    request_codec::{
-        BodyEncodingTarget, change_http_body_encoding_bytes, parse_clipboard_url_as_request,
-        set_http_request_method_bytes, toggle_http_request_method_bytes,
-    },
-    *,
+use mio_core::{
+    BodyEncodingTarget, change_http_body_encoding_bytes, parse_clipboard_url_as_request,
+    set_http_request_method_bytes, toggle_http_request_method_bytes,
 };
+
+use super::*;
 
 static NEXT_COLLAB_INSERT_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -97,22 +96,27 @@ impl Workbench {
         }
     }
 
-    pub(in crate::workbench) fn change_request_method(
+    fn apply_request_method_change(
         &mut self,
+        desired_method: Option<&'static str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.transition.is_some() || self.project.is_none() || !self.backend_available() {
             return;
         }
+        let transform = |raw: &[u8]| match desired_method {
+            Some(method) => set_http_request_method_bytes(raw, method),
+            None => toggle_http_request_method_bytes(raw),
+        };
         let outcome = match self.tool {
             Tool::Repeater => self.rewrite_repeater_request(window, cx, |raw| {
-                let (next_raw, method) = toggle_http_request_method_bytes(raw)?;
+                let (next_raw, method) = transform(raw)?;
                 Ok((None, next_raw, format!("已将请求方法切换为 {method}。")))
             }),
             Tool::Proxy if self.proxy_page == ProxyPage::Intercept => self
                 .rewrite_intercept_http_request(window, cx, |raw| {
-                    let (next_raw, method) = toggle_http_request_method_bytes(raw)?;
+                    let (next_raw, method) = transform(raw)?;
                     Ok((next_raw, format!("已将请求方法切换为 {method}。")))
                 }),
             Tool::Intruder => {
@@ -121,7 +125,7 @@ impl Workbench {
                     return;
                 };
                 self.read_intruder_clean_request_bytes(id, window, cx)
-                    .and_then(|raw| toggle_http_request_method_bytes(&raw))
+                    .and_then(|raw| transform(&raw))
                     .and_then(|(next_raw, method)| {
                         self.apply_intruder_request_rewrite(id, None, next_raw, window, cx)?;
                         Ok(format!("已将请求方法切换为 {method}。"))
@@ -139,47 +143,21 @@ impl Workbench {
         }
     }
 
+    pub(in crate::workbench) fn change_request_method(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_request_method_change(None, window, cx);
+    }
+
     pub(in crate::workbench) fn set_request_method_to(
         &mut self,
         desired_method: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.transition.is_some() || self.project.is_none() || !self.backend_available() {
-            return;
-        }
-        let outcome = match self.tool {
-            Tool::Repeater => self.rewrite_repeater_request(window, cx, |raw| {
-                let (next_raw, method) = set_http_request_method_bytes(raw, desired_method)?;
-                Ok((None, next_raw, format!("已将请求方法切换为 {method}。")))
-            }),
-            Tool::Proxy if self.proxy_page == ProxyPage::Intercept => self
-                .rewrite_intercept_http_request(window, cx, |raw| {
-                    let (next_raw, method) = set_http_request_method_bytes(raw, desired_method)?;
-                    Ok((next_raw, format!("已将请求方法切换为 {method}。")))
-                }),
-            Tool::Intruder => {
-                let Some(id) = self.workspace.intruder.active else {
-                    self.fail("没有活动的 Intruder 请求。", cx);
-                    return;
-                };
-                self.read_intruder_clean_request_bytes(id, window, cx)
-                    .and_then(|raw| set_http_request_method_bytes(&raw, desired_method))
-                    .and_then(|(next_raw, method)| {
-                        self.apply_intruder_request_rewrite(id, None, next_raw, window, cx)?;
-                        Ok(format!("已将请求方法切换为 {method}。"))
-                    })
-            }
-            _ => Err("当前消息为只读或不支持切换 HTTP 请求方法。".into()),
-        };
-        match outcome {
-            Ok(status) => {
-                self.error = None;
-                self.status = status;
-                cx.notify();
-            }
-            Err(error) => self.fail(error, cx),
-        }
+        self.apply_request_method_change(Some(desired_method), window, cx);
     }
 
     pub(in crate::workbench) fn change_request_body_encoding(
@@ -586,51 +564,28 @@ impl Workbench {
                 return;
             }
         };
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let path = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some("selection.txt"),
+            false,
+            "项目已切换，本次文件保存操作已取消。",
+            "无法选择保存路径",
             window,
             cx,
-            &self.default_directory(),
-            Some("selection.txt"),
+            move |view, dest, _, cx| match mio_core::ui_files::write_export_file(&dest, &bytes) {
+                Ok(()) => {
+                    view.error = None;
+                    view.status = format!(
+                        "已将选中文本（{} 字节）保存到文件：{}",
+                        bytes.len(),
+                        dest.display()
+                    );
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.fail(format!("写入文件失败：{error}"), cx);
+                }
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = path.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件保存操作已取消。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(dest))) => match std::fs::write(&dest, &bytes) {
-                            Ok(()) => {
-                                view.error = None;
-                                view.status = format!(
-                                    "已将选中文本（{} 字节）保存到文件：{}",
-                                    bytes.len(),
-                                    dest.display()
-                                );
-                                cx.notify();
-                            }
-                            Err(error) => {
-                                view.fail(format!("写入文件失败：{error}"), cx);
-                            }
-                        },
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择保存路径：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     pub(in crate::workbench) fn copy_to_file(
@@ -665,51 +620,28 @@ impl Workbench {
                 return;
             }
         };
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let path = crate::native_terminate::prompt_for_new_path(
+        self.spawn_save_path_picker(
+            Some(suggested_name),
+            false,
+            "项目已切换，本次文件保存操作已取消。",
+            "无法选择保存路径",
             window,
             cx,
-            &self.default_directory(),
-            Some(suggested_name),
+            move |view, dest, _, cx| match mio_core::ui_files::write_export_file(&dest, &bytes) {
+                Ok(()) => {
+                    view.error = None;
+                    view.status = format!(
+                        "已将 {} 字节保存到文件：{}",
+                        bytes.len(),
+                        dest.display()
+                    );
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.fail(format!("写入文件失败：{error}"), cx);
+                }
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = path.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次文件保存操作已取消。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(dest))) => match std::fs::write(&dest, &bytes) {
-                            Ok(()) => {
-                                view.error = None;
-                                view.status = format!(
-                                    "已将 {} 字节保存到文件：{}",
-                                    bytes.len(),
-                                    dest.display()
-                                );
-                                cx.notify();
-                            }
-                            Err(error) => {
-                                view.fail(format!("写入文件失败：{error}"), cx);
-                            }
-                        },
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择保存路径：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     fn extract_copy_to_file_bytes(
@@ -870,13 +802,7 @@ impl Workbench {
         {
             return;
         }
-        let project = self.project;
-        let picker = mio_core::Uuid::new_v4();
-        self.file_picker = Some(picker);
-        cx.notify();
-        let paths = crate::native_terminate::prompt_for_paths(
-            window,
-            cx,
+        self.spawn_open_path_picker(
             PathPromptOptions {
                 files: true,
                 directories: false,
@@ -890,73 +816,46 @@ impl Workbench {
                     .into(),
                 ),
             },
+            "项目已切换，本次从文件粘贴操作已取消。",
+            "无法选择文件",
+            window,
+            cx,
+            move |view, path, window, cx| {
+                const MAX_PASTE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+                let file_bytes = match mio_core::ui_files::read_regular_file_bounded(
+                    &path,
+                    MAX_PASTE_FILE_BYTES,
+                    true,
+                    "插入文件",
+                ) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        view.fail(err, cx);
+                        return;
+                    }
+                };
+                let insert_bytes = if base64_encode {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD
+                        .encode(&file_bytes)
+                        .into_bytes()
+                } else {
+                    file_bytes
+                };
+                match view.insert_bytes_into_editable_target(&insert_bytes, window, cx) {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!(
+                            "已从文件插入 {} 字节：{}",
+                            insert_bytes.len(),
+                            path.display()
+                        );
+                        cx.notify();
+                    }
+                    Err(err) => view.fail(err, cx),
+                }
+            },
         );
-        let owner = self.owner_window;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = paths.await;
-            let _ = owner.update(cx, |_, window, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次从文件粘贴操作已取消。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(paths))) => {
-                            let Some(path) = paths.into_iter().next() else {
-                                return;
-                            };
-                            const MAX_PASTE_FILE_BYTES: u64 = 8 * 1024 * 1024;
-                            match std::fs::metadata(&path) {
-                                Ok(meta) if meta.len() > MAX_PASTE_FILE_BYTES => {
-                                    view.fail("所选文件超过 8 MiB 安全插入上限。", cx);
-                                    return;
-                                }
-                                Err(err) => {
-                                    view.fail(format!("无法读取文件信息：{err}"), cx);
-                                    return;
-                                }
-                                _ => {}
-                            }
-                            let file_bytes = match std::fs::read(&path) {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    view.fail(format!("读取文件失败：{err}"), cx);
-                                    return;
-                                }
-                            };
-                            let insert_bytes = if base64_encode {
-                                use base64::Engine as _;
-                                base64::engine::general_purpose::STANDARD
-                                    .encode(&file_bytes)
-                                    .into_bytes()
-                            } else {
-                                file_bytes
-                            };
-                            match view.insert_bytes_into_editable_target(&insert_bytes, window, cx)
-                            {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已从文件插入 {} 字节：{}",
-                                        insert_bytes.len(),
-                                        path.display()
-                                    );
-                                    cx.notify();
-                                }
-                                Err(err) => view.fail(err, cx),
-                            }
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => view.fail(format!("无法选择文件：{err}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
-                    }
-                })
-            });
-        })
-        .detach();
     }
 
     pub(in crate::workbench) fn insert_collaborator_payload(

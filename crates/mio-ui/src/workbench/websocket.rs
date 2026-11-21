@@ -1499,7 +1499,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension("xml");
                             }
-                            match std::fs::write(&path, &xml_bytes) {
+                            match mio_core::ui_files::write_export_file(&path, &xml_bytes) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(
@@ -1531,57 +1531,16 @@ fn build_websocket_item_xml(
     notes: &str,
     payload: &[u8],
 ) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-    use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event as XmlEvent};
-
-    let mut writer = quick_xml::Writer::new(Vec::new());
-    writer
-        .write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        .map_err(|e| e.to_string())?;
-    let mut root = BytesStart::new("websocket-items");
-    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
-    writer
-        .write_event(XmlEvent::Start(root))
-        .map_err(|e| e.to_string())?;
-    writer
-        .write_event(XmlEvent::Start(BytesStart::new("item")))
-        .map_err(|e| e.to_string())?;
-    let kind_str = match kind {
-        mio_core::WebSocketKind::Text => "text",
-        mio_core::WebSocketKind::Binary => "binary",
-        _ => "message",
-    };
-    let dir_str = match direction {
-        WebSocketDirection::ClientToServer => "client_to_server",
-        WebSocketDirection::ServerToClient => "server_to_client",
-    };
     let time_str = local_time(observed_unix_ms);
-    for (name, value) in [
-        ("url", url.to_owned()),
-        ("direction", dir_str.to_owned()),
-        ("kind", kind_str.to_owned()),
-        ("time", time_str),
-        ("connection", connection_id.to_string()),
-        ("length", payload.len().to_string()),
-        ("notes", notes.to_owned()),
-    ] {
-        writer
-            .create_element(name)
-            .write_text_content(BytesText::new(&value))
-            .map_err(|e| e.to_string())?;
-    }
-    writer
-        .create_element("payload")
-        .with_attribute(("base64", "true"))
-        .write_text_content(BytesText::new(&BASE64_STANDARD.encode(payload)))
-        .map_err(|e| e.to_string())?;
-    writer
-        .write_event(XmlEvent::End(BytesEnd::new("item")))
-        .map_err(|e| e.to_string())?;
-    writer
-        .write_event(XmlEvent::End(BytesEnd::new("websocket-items")))
-        .map_err(|e| e.to_string())?;
-    String::from_utf8(writer.into_inner()).map_err(|e| e.to_string())
+    Ok(mio_core::export_xml::build_websocket_item_xml(
+        url,
+        direction,
+        kind,
+        &time_str,
+        connection_id,
+        notes,
+        payload,
+    ))
 }
 
 pub(in crate::workbench::websocket) fn websocket_url_in_scope(

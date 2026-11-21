@@ -391,9 +391,6 @@ fn http_filter_script_library_save_load_overwrite_and_corrupted_file_error(
     cx: &mut TestAppContext,
 ) {
     let (f, _) = boot(cx);
-    cx.read(|cx| {
-        assert!(f.view.read(cx).http_filter.search_placeholder_initialized.get());
-    });
     let (handle, dialog) = open(&f, cx);
     let qa_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/qa-macos");
     std::fs::create_dir_all(&qa_root).unwrap();

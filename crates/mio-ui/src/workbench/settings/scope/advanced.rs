@@ -193,10 +193,10 @@ fn adv_scope_cell(rule: &AdvancedScopeRule, column: usize) -> String {
 pub(super) struct SettingsAdvScopeState {
     pub(super) protocol: ScopeProtocol,
     pub(super) protocol_select: Entity<SelectState<Vec<&'static str>>>,
-    pub(super) tables: [Entity<TableState<AdvScopeTable>>; 2],
+    pub(in crate::workbench::settings) tables: [Entity<TableState<AdvScopeTable>>; 2],
     pub(super) include: [Entity<InputState>; 3],
     pub(super) exclude: [Entity<InputState>; 3],
-    pub(super) editing: [Option<Uuid>; 2],
+    pub(in crate::workbench::settings) editing: [Option<Uuid>; 2],
 }
 
 impl SettingsAdvScopeState {
@@ -457,16 +457,6 @@ impl Settings {
         } else {
             &self.state.scope.advanced_exclude
         };
-        let count = rules.len();
-        let table_refresh = table.clone();
-        cx.defer(move |cx| {
-            table_refresh.update(cx, |state, cx| {
-                if state.selected_row().is_some_and(|row| row >= count) {
-                    state.clear_selection(cx);
-                }
-                state.refresh(cx);
-            });
-        });
         let selected_row = table
             .read(cx)
             .selected_row()

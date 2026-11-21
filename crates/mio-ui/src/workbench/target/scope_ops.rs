@@ -317,7 +317,7 @@ impl Workbench {
                         let Some(path) = paths.into_iter().next() else {
                             return;
                         };
-                        match std::fs::read(&path) {
+                        match mio_core::ui_files::read_file_bytes(&path) {
                             Ok(bytes) if bytes.len() > MAX_SCOPE_LOAD_FILE_BYTES => {
                                 view.fail("范围文件超过 256 KB 上限，未导入。", cx);
                             }

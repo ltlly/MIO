@@ -145,6 +145,8 @@ impl Settings {
                 upstream_changed,
                 legacy_changed,
                 certificates_changed,
+                client_certs_changed,
+                scope_changed,
                 interception_changed,
                 sessions_changed,
                 user_prefs_changed,
@@ -169,6 +171,9 @@ impl Settings {
                 let upstream_changed =
                     project_changed || this.state.upstream_proxy != view.workspace.upstream_proxy;
                 let legacy_changed = this.state.upstream_tls != view.workspace.upstream_tls;
+                let client_certs_changed = project_changed
+                    || this.state.client_certificates != view.workspace.client_certificates;
+                let scope_changed = project_changed || this.state.scope != view.workspace.scope;
                 let interception_changed = project_changed
                     || this.state.proxy_interception != view.workspace.proxy_interception;
                 let sessions_changed =
@@ -196,6 +201,8 @@ impl Settings {
                     upstream_changed,
                     legacy_changed,
                     certificates_changed,
+                    client_certs_changed,
+                    scope_changed,
                     interception_changed,
                     sessions_changed,
                     user_prefs_changed,
@@ -218,6 +225,8 @@ impl Settings {
                 this.scope_oos_custom_editor_open = false;
                 this.scope_oos_custom_editing = None;
                 this.scope_oos_custom_subdomains = false;
+                this.listeners_tls.client_cert_selected = None;
+                this.scope_ui.reset_editing(cx);
             }
             if user_prefs_changed {
                 this.sync_user_pages_inputs(window, cx);
@@ -324,6 +333,13 @@ impl Settings {
                     cx.notify();
                 });
             }
+            if client_certs_changed {
+                let len = this.state.client_certificates.len();
+                this.listeners_tls.refresh_client_cert_table(len, cx);
+            }
+            if scope_changed {
+                this.scope_ui.refresh_tables(&this.state.scope, cx);
+            }
             if upstream_changed {
                 this.restore_upstream_draft(&this.state.upstream_proxy.clone(), window, cx);
                 this.sync_connections_ui(project_changed, window, cx);
@@ -381,12 +397,17 @@ impl Settings {
             });
         })
         .detach();
-        if page == SettingsPage::ProjectTasks {
-            let weak = cx.weak_entity();
-            cx.defer(move |cx| {
-                let _ = weak.update(cx, |this, cx| this.refresh_pool_page(cx));
+        let weak_init = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = weak_init.update(cx, |this, cx| {
+                let cert_len = this.state.client_certificates.len();
+                this.listeners_tls.refresh_client_cert_table(cert_len, cx);
+                this.scope_ui.refresh_tables(&this.state.scope, cx);
+                if page == SettingsPage::ProjectTasks {
+                    this.refresh_pool_page(cx);
+                }
             });
-        }
+        });
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索设置…"));
         let _ = search_input.focus_handle(cx).tab_stop(false);
         cx.subscribe_in(&search_input, window, |this, _, event, _, cx| {
@@ -518,6 +539,7 @@ impl Settings {
             }
         })
         .detach();
+        let scope_ui = boxed_with(|| scope::ScopeUi::new(window, cx));
         let scope_include_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("例如 http://127.0.0.1:9001"));
         let scope_exclude_input = cx
@@ -599,6 +621,7 @@ impl Settings {
             tls_table,
             tls_import: None,
             tls_error: None,
+            scope_ui,
             scope_include_input,
             scope_exclude_input,
             page,

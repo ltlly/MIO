@@ -364,21 +364,6 @@ impl Workbench {
             return;
         };
         let next_annotated = !self.annotated_live_flows.contains(&flow_id);
-        if !self.enqueue(
-            Command::SetLiveFlowAnnotated {
-                project,
-                flow_id,
-                annotated: next_annotated,
-            },
-            cx,
-        ) {
-            return;
-        }
-        if next_annotated {
-            self.annotated_live_flows.insert(flow_id);
-        } else {
-            self.annotated_live_flows.remove(&flow_id);
-        }
         if next_annotated {
             let mut settings = self.workspace.proxy_interception.clone();
             let mut changed = false;
@@ -410,11 +395,21 @@ impl Workbench {
                 }
                 changed = true;
             }
-            if changed {
-                let _ = self.set_proxy_interception(Some(project), settings, cx);
+            if changed && !self.set_proxy_interception(Some(project), settings, cx) {
+                return;
+            }
+            if !self.enqueue(
+                Command::SetLiveFlowAnnotated {
+                    project,
+                    flow_id,
+                    annotated: true,
+                },
+                cx,
+            ) {
+                return;
             }
             if !self.intercept_responses
-                && self.enqueue(
+                && !self.enqueue(
                     Command::SetIntercept {
                         project,
                         requests: self.intercept_requests,
@@ -423,10 +418,25 @@ impl Workbench {
                     cx,
                 )
             {
-                self.intercept_responses = true;
+                return;
             }
+            self.annotated_live_flows.insert(flow_id);
+            self.intercept_responses = true;
+            self.error = None;
             self.status = "已标记拦截此请求的响应。".into();
         } else {
+            if !self.enqueue(
+                Command::SetLiveFlowAnnotated {
+                    project,
+                    flow_id,
+                    annotated: false,
+                },
+                cx,
+            ) {
+                return;
+            }
+            self.annotated_live_flows.remove(&flow_id);
+            self.error = None;
             self.status = "已取消标记拦截此请求的响应。".into();
         }
         cx.notify();

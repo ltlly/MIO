@@ -40,12 +40,6 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
-        if !self.http_filter.search_placeholder_initialized.get() {
-            self.http_filter.search_placeholder_initialized.set(true);
-            self.history_filter.update(cx, |input, cx| {
-                input.set_placeholder("Search", window, cx);
-            });
-        }
         let loaded = if offset == 0 {
             self.history.read(cx).delegate().rows.len()
         } else {
@@ -368,12 +362,6 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if !self.http_filter.search_placeholder_initialized.get() {
-            self.http_filter.search_placeholder_initialized.set(true);
-            self.history_filter.update(cx, |input, cx| {
-                input.set_placeholder("Search", window, cx);
-            });
-        }
         let label = filter_summary(&self.http_filter.applied);
         let offset = self.history.read(cx).delegate().offset;
         let owner = cx.weak_entity();

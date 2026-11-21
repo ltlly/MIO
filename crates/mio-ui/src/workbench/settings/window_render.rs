@@ -1066,30 +1066,7 @@ impl Settings {
                             let result: Result<Vec<String>, String> = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    let meta = std::fs::metadata(&path)
-                                        .map_err(|err| format!("读取文件元数据失败：{err}"))?;
-                                    if !meta.is_file() {
-                                        return Err("所选路径不是普通文件。".into());
-                                    }
-                                    if meta.len() > 256 * 1024 {
-                                        return Err("规则文件超过 256 KiB 上限，未导入。".into());
-                                    }
-                                    let text = std::fs::read_to_string(&path)
-                                        .map_err(|err| format!("读取 UTF-8 规则文件失败：{err}"))?;
-                                    let entries: Vec<String> = text
-                                        .lines()
-                                        .map(str::trim)
-                                        .filter(|line| {
-                                            !line.is_empty()
-                                                && line.len() <= 2048
-                                                && !line.chars().any(char::is_control)
-                                        })
-                                        .map(str::to_owned)
-                                        .collect();
-                                    if entries.is_empty() {
-                                        return Err("文件中未找到有效的 URL 前缀规则。".into());
-                                    }
-                                    Ok(entries)
+                                    mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048)
                                 })
                                 .await;
                             let _ = this.update_in(cx, |this, _, cx| {

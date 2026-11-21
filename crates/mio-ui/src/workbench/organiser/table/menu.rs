@@ -419,7 +419,7 @@ pub(super) fn build_organiser_context_menu(
                         .text_color(if color == 0 {
                             theme::foreground()
                         } else {
-                            super::high_contrast_highlight_fg(color)
+                            crate::history::highlight_foreground(color)
                         })
                         .child(
                             div()

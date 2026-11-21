@@ -832,8 +832,9 @@ impl Workbench {
     }
 
     #[inline(never)]
-    fn render_intercept_forward_split(
+    fn render_intercept_decision_split(
         &self,
+        is_drop: bool,
         can_decide: bool,
         can_decide_any: bool,
         dark: bool,
@@ -841,49 +842,105 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let split_inner_h = btn_h - px(2.);
-        let (fwd_bg, fwd_hover, fwd_border, fwd_divider, fwd_fg): (
+        let (bg, hover, border, divider, fg, menu_bg, menu_hover, menu_fg): (
             gpui_kit::Hsla,
             gpui_kit::Hsla,
             gpui_kit::Hsla,
             gpui_kit::Hsla,
             gpui_kit::Hsla,
-        ) = if can_decide {
-            (
-                rgb(0xdb612f).into(),
-                rgb(0xc45122).into(),
-                rgb(0xdb612f).into(),
-                gpui_kit::Hsla::from(rgb(0xffffff)).opacity(0.28),
-                rgb(0xffffff).into(),
-            )
-        } else {
-            (
-                rgb(if dark { 0x303338 } else { 0xdfdfdf }).into(),
-                rgb(if dark { 0x303338 } else { 0xdfdfdf }).into(),
-                rgb(if dark { 0x43474e } else { 0xdfdfdf }).into(),
-                rgb(if dark { 0x43474e } else { 0xcfcfcf }).into(),
-                rgb(if dark { 0x7d828a } else { 0x666666 }).into(),
-            )
-        };
-        let (fwd_menu_bg, fwd_menu_hover, fwd_menu_fg) = if can_decide {
-            (fwd_bg, fwd_hover, fwd_fg)
-        } else if can_decide_any {
-            (
-                rgb(if dark { 0x33363a } else { 0xededed }).into(),
-                rgb(if dark { 0x3e4247 } else { 0xe2e2e2 }).into(),
-                if dark {
+            gpui_kit::Hsla,
+            gpui_kit::Hsla,
+            gpui_kit::Hsla,
+        ) = if is_drop {
+            if can_decide {
+                let b: gpui_kit::Hsla = rgb(if dark { 0x2b2d30 } else { 0xffffff }).into();
+                let h: gpui_kit::Hsla = rgb(if dark { 0x35383d } else { 0xf2f2f2 }).into();
+                let br: gpui_kit::Hsla = rgb(if dark { 0x4e535b } else { 0xd5d5d5 }).into();
+                let dv: gpui_kit::Hsla = rgb(if dark { 0x4e535b } else { 0xdfdfdf }).into();
+                let f: gpui_kit::Hsla = if dark {
                     theme::foreground()
                 } else {
                     rgb(0x2b2b2b).into()
-                },
+                };
+                let mf: gpui_kit::Hsla = if dark {
+                    theme::foreground()
+                } else {
+                    rgb(0x4b4b4b).into()
+                };
+                (b, h, br, dv, f, b, h, mf)
+            } else {
+                let b: gpui_kit::Hsla = rgb(if dark { 0x26282b } else { 0xffffff }).into();
+                let br: gpui_kit::Hsla = rgb(if dark { 0x3c3f41 } else { 0xdfdfdf }).into();
+                let f: gpui_kit::Hsla = rgb(if dark { 0x7d828a } else { 0x666666 }).into();
+                let mf: gpui_kit::Hsla = rgb(if dark { 0x6c7078 } else { 0x999999 }).into();
+                (b, b, br, br, f, b, b, mf)
+            }
+        } else {
+            let (b, h, br, dv, f): (
+                gpui_kit::Hsla,
+                gpui_kit::Hsla,
+                gpui_kit::Hsla,
+                gpui_kit::Hsla,
+                gpui_kit::Hsla,
+            ) = if can_decide {
+                (
+                    rgb(0xdb612f).into(),
+                    rgb(0xc45122).into(),
+                    rgb(0xdb612f).into(),
+                    gpui_kit::Hsla::from(rgb(0xffffff)).opacity(0.28),
+                    rgb(0xffffff).into(),
+                )
+            } else {
+                (
+                    rgb(if dark { 0x303338 } else { 0xdfdfdf }).into(),
+                    rgb(if dark { 0x303338 } else { 0xdfdfdf }).into(),
+                    rgb(if dark { 0x43474e } else { 0xdfdfdf }).into(),
+                    rgb(if dark { 0x43474e } else { 0xcfcfcf }).into(),
+                    rgb(if dark { 0x7d828a } else { 0x666666 }).into(),
+                )
+            };
+            let (mb, mh, mf) = if can_decide {
+                (b, h, f)
+            } else if can_decide_any {
+                (
+                    rgb(if dark { 0x33363a } else { 0xededed }).into(),
+                    rgb(if dark { 0x3e4247 } else { 0xe2e2e2 }).into(),
+                    if dark {
+                        theme::foreground()
+                    } else {
+                        rgb(0x2b2b2b).into()
+                    },
+                )
+            } else {
+                (b, b, rgb(if dark { 0x6c7078 } else { 0x888888 }).into())
+            };
+            (b, h, br, dv, f, mb, mh, mf)
+        };
+        let (btn_id, menu_id, label, tip, menu_label, menu_tip, one_label, all_label) = if is_drop
+        {
+            (
+                "intercept-drop",
+                "intercept-drop-menu",
+                "丢弃",
+                "丢弃当前挂起的拦截报文并终止本次传输，不向目标端发送数据",
+                "丢弃选项",
+                "更多丢弃选项与报文操作",
+                "丢弃当前报文 (Drop)",
+                "全部丢弃 (Drop all)",
             )
         } else {
             (
-                fwd_bg,
-                fwd_bg,
-                rgb(if dark { 0x6c7078 } else { 0x888888 }).into(),
+                "intercept-forward",
+                "intercept-forward-menu",
+                "转发",
+                "放行当前挂起的拦截报文并连同编辑器内所做修改继续传输",
+                "转发选项",
+                "更多转发选项（全部转发）",
+                "转发当前报文 (Forward)",
+                "全部转发 (Forward all)",
             )
         };
-        let fwd_menu_owner = cx.weak_entity();
+        let menu_owner = cx.weak_entity();
         div()
             .h(btn_h)
             .w(theme::scaled_px(180.))
@@ -892,10 +949,10 @@ impl Workbench {
             .flex_shrink_0()
             .rounded(px(3.))
             .border_1()
-            .border_color(fwd_border)
-            .bg(fwd_bg)
+            .border_color(border)
+            .bg(bg)
             .child(
-                Button::new("intercept-forward")
+                Button::new(btn_id)
                     .ghost()
                     .small()
                     .compact()
@@ -906,15 +963,15 @@ impl Workbench {
                     .rounded_tl(px(2.))
                     .rounded_bl(px(2.))
                     .border_0()
-                    .bg(fwd_bg)
-                    .text_color(fwd_fg)
-                    .when(can_decide, |b| {
-                        b.hover(move |s| s.bg(fwd_hover).text_color(fwd_fg))
-                    })
-                    .accessibility_label("转发")
-                    .tooltip("放行当前挂起的拦截报文并连同编辑器内所做修改继续传输")
+                    .bg(bg)
+                    .text_color(fg)
+                    .when(can_decide, |b| b.hover(move |s| s.bg(hover).text_color(fg)))
+                    .accessibility_label(label)
+                    .tooltip(tip)
                     .disabled(!can_decide)
-                    .on_click(cx.listener(|this, _, window, cx| this.decide(false, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.decide(is_drop, window, cx)
+                    }))
                     .child(
                         div()
                             .flex()
@@ -924,26 +981,28 @@ impl Workbench {
                             .font_family(theme::ui_font_family())
                             .text_size(theme::ui_font_size())
                             .font_weight(gpui_kit::FontWeight::BOLD)
-                            .text_color(fwd_fg)
-                            .child(
-                                Icon::new(IconName::ArrowRight)
-                                    .size(theme::scaled_px(13.))
-                                    .text_color(fwd_fg),
-                            )
-                            .child("转发"),
+                            .text_color(fg)
+                            .when(!is_drop, |d| {
+                                d.child(
+                                    Icon::new(IconName::ArrowRight)
+                                        .size(theme::scaled_px(13.))
+                                        .text_color(fg),
+                                )
+                            })
+                            .child(label),
                     ),
             )
-            .when(can_decide || can_decide_any, |split| {
+            .when(is_drop || can_decide || can_decide_any, |split| {
                 split.child(
                     div()
                         .w(px(1.))
                         .h(split_inner_h)
                         .flex_shrink_0()
-                        .bg(fwd_divider),
+                        .bg(divider),
                 )
             })
             .child(
-                Button::new("intercept-forward-menu")
+                Button::new(menu_id)
                     .ghost()
                     .small()
                     .compact()
@@ -955,182 +1014,21 @@ impl Workbench {
                     .rounded_tr(px(2.))
                     .rounded_br(px(2.))
                     .border_0()
-                    .bg(fwd_menu_bg)
-                    .text_color(fwd_menu_fg)
+                    .bg(menu_bg)
+                    .text_color(menu_fg)
                     .when(can_decide_any, |b| {
-                        b.hover(move |s| s.bg(fwd_menu_hover).text_color(fwd_menu_fg))
+                        b.hover(move |s| s.bg(menu_hover).text_color(menu_fg))
                     })
-                    .accessibility_label("转发选项")
-                    .tooltip("更多转发选项（全部转发）")
+                    .accessibility_label(menu_label)
+                    .tooltip(menu_tip)
                     .disabled(!can_decide_any)
                     .child(
                         Icon::new(IconName::ChevronDown)
                             .size(theme::scaled_px(13.))
-                            .text_color(fwd_menu_fg),
-                    )
-                    .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, cx| {
-                        let Some(entity) = fwd_menu_owner.upgrade() else {
-                            return menu;
-                        };
-                        let (menu_can_decide, menu_can_decide_any) = {
-                            let view = entity.read(cx);
-                            let base_ok = view.backend_available() && view.transition.is_none();
-                            let cur = view.selected_intercept.and_then(|id| {
-                                view.intercepts.iter().find(|p| p.id() == id)
-                            });
-                            (
-                                base_ok && cur.is_some_and(|p| !p.deciding),
-                                base_ok && view.intercepts.iter().any(|p| !p.deciding),
-                            )
-                        };
-                        let one_owner = fwd_menu_owner.clone();
-                        let all_owner = fwd_menu_owner.clone();
-                        menu.item(
-                            PopupMenuItem::new("转发当前报文 (Forward)")
-                                .disabled(!menu_can_decide)
-                                .on_click(move |_, window, cx| {
-                                    let _ = one_owner.update(cx, |view, cx| {
-                                        view.decide(false, window, cx);
-                                    });
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("全部转发 (Forward all)")
-                                .disabled(!menu_can_decide_any)
-                                .on_click(move |_, window, cx| {
-                                    let _ = all_owner.update(cx, |view, cx| {
-                                        view.decide_all(false, window, cx);
-                                    });
-                                }),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    #[inline(never)]
-    fn render_intercept_drop_split(
-        &self,
-        can_decide: bool,
-        can_decide_any: bool,
-        dark: bool,
-        btn_h: gpui_kit::Pixels,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let split_inner_h = btn_h - px(2.);
-        let (drop_bg, drop_hover, drop_border, drop_divider, drop_fg, drop_menu_fg): (
-            gpui_kit::Hsla,
-            gpui_kit::Hsla,
-            gpui_kit::Hsla,
-            gpui_kit::Hsla,
-            gpui_kit::Hsla,
-            gpui_kit::Hsla,
-        ) = if can_decide {
-            (
-                rgb(if dark { 0x2b2d30 } else { 0xffffff }).into(),
-                rgb(if dark { 0x35383d } else { 0xf2f2f2 }).into(),
-                rgb(if dark { 0x4e535b } else { 0xd5d5d5 }).into(),
-                rgb(if dark { 0x4e535b } else { 0xdfdfdf }).into(),
-                if dark {
-                    theme::foreground()
-                } else {
-                    rgb(0x2b2b2b).into()
-                },
-                if dark {
-                    theme::foreground()
-                } else {
-                    rgb(0x4b4b4b).into()
-                },
-            )
-        } else {
-            (
-                rgb(if dark { 0x26282b } else { 0xffffff }).into(),
-                rgb(if dark { 0x26282b } else { 0xffffff }).into(),
-                rgb(if dark { 0x3c3f41 } else { 0xdfdfdf }).into(),
-                rgb(if dark { 0x3c3f41 } else { 0xdfdfdf }).into(),
-                rgb(if dark { 0x7d828a } else { 0x666666 }).into(),
-                rgb(if dark { 0x6c7078 } else { 0x999999 }).into(),
-            )
-        };
-        let drop_menu_owner = cx.weak_entity();
-        div()
-            .h(btn_h)
-            .w(theme::scaled_px(180.))
-            .flex()
-            .items_center()
-            .flex_shrink_0()
-            .rounded(px(3.))
-            .border_1()
-            .border_color(drop_border)
-            .bg(drop_bg)
-            .child(
-                Button::new("intercept-drop")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .p_0()
-                    .flex_1()
-                    .h(split_inner_h)
-                    .rounded(ButtonRounded::None)
-                    .rounded_tl(px(2.))
-                    .rounded_bl(px(2.))
-                    .border_0()
-                    .bg(drop_bg)
-                    .text_color(drop_fg)
-                    .when(can_decide, |b| {
-                        b.hover(move |s| s.bg(drop_hover).text_color(drop_fg))
-                    })
-                    .accessibility_label("丢弃")
-                    .tooltip("丢弃当前挂起的拦截报文并终止本次传输，不向目标端发送数据")
-                    .disabled(!can_decide)
-                    .on_click(cx.listener(|this, _, window, cx| this.decide(true, window, cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .font_family(theme::ui_font_family())
-                            .text_size(theme::ui_font_size())
-                            .font_weight(gpui_kit::FontWeight::BOLD)
-                            .text_color(drop_fg)
-                            .child("丢弃"),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(1.))
-                    .h(split_inner_h)
-                    .flex_shrink_0()
-                    .bg(drop_divider),
-            )
-            .child(
-                Button::new("intercept-drop-menu")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .p_0()
-                    .min_w_0()
-                    .w(theme::scaled_px(28.))
-                    .h(split_inner_h)
-                    .rounded(ButtonRounded::None)
-                    .rounded_tr(px(2.))
-                    .rounded_br(px(2.))
-                    .border_0()
-                    .bg(drop_bg)
-                    .text_color(drop_menu_fg)
-                    .when(can_decide_any, |b| {
-                        b.hover(move |s| s.bg(drop_hover).text_color(drop_menu_fg))
-                    })
-                    .accessibility_label("丢弃选项")
-                    .tooltip("更多丢弃选项与报文操作")
-                    .disabled(!can_decide_any)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size(theme::scaled_px(13.))
-                            .text_color(drop_menu_fg),
+                            .text_color(menu_fg),
                     )
                     .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
-                        let Some(entity) = drop_menu_owner.upgrade() else {
+                        let Some(entity) = menu_owner.upgrade() else {
                             return menu;
                         };
                         let (menu_can_decide, menu_can_decide_any, menu_can_action) = {
@@ -1142,7 +1040,8 @@ impl Workbench {
                             let decide = base_ok && cur.is_some_and(|p| !p.deciding);
                             let decide_any =
                                 base_ok && view.intercepts.iter().any(|p| !p.deciding);
-                            let action = decide
+                            let action = is_drop
+                                && decide
                                 && view.project.is_some()
                                 && cur.is_some_and(|p| {
                                     p.is_http()
@@ -1150,29 +1049,29 @@ impl Workbench {
                                 });
                             (decide, decide_any, action)
                         };
-                        let one_owner = drop_menu_owner.clone();
-                        let all_owner = drop_menu_owner.clone();
+                        let one_owner = menu_owner.clone();
+                        let all_owner = menu_owner.clone();
                         let menu = menu
                             .item(
-                                PopupMenuItem::new("丢弃当前报文 (Drop)")
+                                PopupMenuItem::new(one_label)
                                     .disabled(!menu_can_decide)
                                     .on_click(move |_, window, cx| {
                                         let _ = one_owner.update(cx, |view, cx| {
-                                            view.decide(true, window, cx);
+                                            view.decide(is_drop, window, cx);
                                         });
                                     }),
                             )
                             .item(
-                                PopupMenuItem::new("全部丢弃 (Drop all)")
+                                PopupMenuItem::new(all_label)
                                     .disabled(!menu_can_decide_any)
                                     .on_click(move |_, window, cx| {
                                         let _ = all_owner.update(cx, |view, cx| {
-                                            view.decide_all(true, window, cx);
+                                            view.decide_all(is_drop, window, cx);
                                         });
                                     }),
                             );
                         if menu_can_action {
-                            let actions_owner = drop_menu_owner.clone();
+                            let actions_owner = menu_owner.clone();
                             let actions_submenu =
                                 PopupMenu::build(window, cx, move |sub, window, cx| {
                                     Workbench::build_intercept_action_menu(
@@ -1560,14 +1459,16 @@ impl Workbench {
                 btn_h,
                 cx,
             ))
-            .child(self.render_intercept_forward_split(
+            .child(self.render_intercept_decision_split(
+                false,
                 can_decide,
                 can_decide_any,
                 dark,
                 btn_h,
                 cx,
             ))
-            .child(self.render_intercept_drop_split(
+            .child(self.render_intercept_decision_split(
+                true,
                 can_decide,
                 can_decide_any,
                 dark,

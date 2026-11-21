@@ -103,28 +103,7 @@ impl MessageDisplayCharset {
 }
 
 fn extract_header_charset(bytes: &[u8]) -> Option<String> {
-    let (_, headers) = parse_http_head_info(bytes)?;
-    for header in headers {
-        if !header.name.eq_ignore_ascii_case("content-type") {
-            continue;
-        }
-        let value = std::str::from_utf8(&header.value).ok()?;
-        for part in value.split(';').skip(1) {
-            let trimmed = part.trim();
-            if let Some((key, raw_val)) = trimmed.split_once('=')
-                && key.trim().eq_ignore_ascii_case("charset")
-            {
-                let cleaned = raw_val
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .trim();
-                if !cleaned.is_empty() {
-                    return Some(cleaned.to_ascii_lowercase());
-                }
-            }
-        }
-    }
-    None
+    mio_core::extract_http_header_charset(bytes)
 }
 
 fn decode_latin1(bytes: &[u8]) -> String {
@@ -136,13 +115,6 @@ fn decode_ascii(bytes: &[u8]) -> String {
         .iter()
         .map(|&b| if b < 0x80 { char::from(b) } else { '\u{FFFD}' })
         .collect()
-}
-
-fn decode_named_charset(bytes: &[u8], charset_lower: &str) -> Option<String> {
-    match MessageDisplayCharset::from_label(charset_lower) {
-        Some(charset) => charset.decode(bytes),
-        None => std::str::from_utf8(bytes).ok().map(str::to_owned),
-    }
 }
 
 fn active_display_charset(original_wire_bytes: &[u8]) -> MessageDisplayCharset {
@@ -184,7 +156,7 @@ pub(super) fn decode_message_bytes_with_charset(bytes: &[u8]) -> (MessageDisplay
         _ => {
             let resolved =
                 MessageDisplayCharset::from_label(&specific).unwrap_or(MessageDisplayCharset::Utf8);
-            let decoded = decode_named_charset(bytes, &specific.trim().to_ascii_lowercase());
+            let decoded = resolved.decode(bytes);
             (resolved, decoded)
         }
     }
@@ -207,101 +179,13 @@ pub(super) fn encode_raw_text_bytes(
     }
 }
 
-fn parse_http_head_with_buf<'a>(
-    input: &'a [u8],
-    headers: &mut [httparse::Header<'a>],
-) -> Result<(usize, Vec<mio_core::Header>), httparse::Error> {
-    let mut config = httparse::ParserConfig::default();
-    config
-        .allow_multiple_spaces_in_request_line_delimiters(true)
-        .allow_multiple_spaces_in_response_status_delimiters(true)
-        .allow_space_before_first_header_name(true)
-        .allow_obsolete_multiline_headers_in_responses(true);
-    let (status, parsed_headers) = if input.starts_with(b"HTTP/") {
-        let mut resp = httparse::Response::new(headers);
-        let status = config.parse_response(&mut resp, input)?;
-        let list = resp
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    } else {
-        let mut req = httparse::Request::new(headers);
-        let status = config.parse_request(&mut req, input)?;
-        let list = req
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    };
-    match status {
-        httparse::Status::Complete(offset) => Ok((offset, parsed_headers)),
-        httparse::Status::Partial => Err(httparse::Error::HeaderValue),
-    }
-}
-
-pub(super) fn parse_http_head_info(bytes: &[u8]) -> Option<(usize, Vec<mio_core::Header>)> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let newline = bytes.iter().position(|&b| b == b'\n')?;
-    let eol_len = if newline > 0 && bytes[newline - 1] == b'\r' {
-        2
-    } else {
-        1
-    };
-    let first_line = &bytes[..newline + 1 - eol_len];
-    let normalized = if let Some(rest) = first_line.strip_prefix(b"HTTP/2.0 ") {
-        let mut v = b"HTTP/1.1 ".to_vec();
-        v.extend_from_slice(rest);
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(rest) = first_line.strip_prefix(b"HTTP/2 ") {
-        let mut v = b"HTTP/1.1 ".to_vec();
-        v.extend_from_slice(rest);
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(prefix) = first_line.strip_suffix(b" HTTP/2.0") {
-        let mut v = prefix.to_vec();
-        v.extend_from_slice(b" HTTP/1.1");
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(prefix) = first_line.strip_suffix(b" HTTP/2") {
-        let mut v = prefix.to_vec();
-        v.extend_from_slice(b" HTTP/1.1");
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else {
-        None
-    };
-    let input = normalized.as_deref().unwrap_or(bytes);
-    let added = input.len() - bytes.len();
-    let mut small_headers = [httparse::EMPTY_HEADER; 64];
-    match parse_http_head_with_buf(input, &mut small_headers) {
-        Ok((offset, list)) => Some((offset - added, list)),
-        Err(httparse::Error::TooManyHeaders) => {
-            let mut large_headers = vec![httparse::EMPTY_HEADER; 4096];
-            let (offset, list) = parse_http_head_with_buf(input, &mut large_headers).ok()?;
-            Some((offset - added, list))
-        }
-        Err(_) => None,
-    }
-}
-
 pub(super) fn serialize_pretty_edit(
     edited: &str,
     original_wire: &[u8],
     baseline: Option<&str>,
 ) -> Vec<u8> {
-    let Some((body_offset, edited_headers)) = parse_http_head_info(edited.as_bytes()) else {
+    let Some((body_offset, edited_headers)) = mio_core::parse_http_head_info(edited.as_bytes())
+    else {
         return edited.as_bytes().to_vec();
     };
     let head_part = &edited[..body_offset];
@@ -315,9 +199,9 @@ pub(super) fn serialize_pretty_edit(
     let mut out = Vec::with_capacity(normalized_head.len() + 4 + body_part.len());
     out.extend_from_slice(normalized_head.as_bytes());
     out.extend_from_slice(b"\r\n\r\n");
-    let orig_info = parse_http_head_info(original_wire);
+    let orig_info = mio_core::parse_http_head_info(original_wire);
     if let Some(base) = baseline
-        && let Some((base_body_offset, _)) = parse_http_head_info(base.as_bytes())
+        && let Some(base_body_offset) = mio_core::find_http_body_offset(base.as_bytes())
         && &base[base_body_offset..] == body_part
         && let Some((orig_body_offset, ref orig_headers)) = orig_info
         && mio_core::is_chunked_headers(&edited_headers) == mio_core::is_chunked_headers(orig_headers)

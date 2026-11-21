@@ -1,6 +1,6 @@
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use mio_core::{SessionTool, SessionTraceEntry};
+use mio_core::SessionTool;
 
 use super::*;
 
@@ -490,7 +490,7 @@ impl Settings {
                 ui.after_scroll.clone(),
             )
         };
-        let traces: &[SessionTraceEntry] = &self.state.session_traces;
+        let traces = &self.state.session_traces;
         let paused = self.state.session_tracer_paused;
         let selected_entry = selected_id.and_then(|id| traces.iter().find(|e| e.id == id));
 

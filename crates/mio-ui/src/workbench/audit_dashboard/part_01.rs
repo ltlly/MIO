@@ -1271,7 +1271,7 @@ impl Workbench {
                                 }
                                 _ => payload,
                             };
-                            match std::fs::write(&path, &final_bytes) {
+                            match mio_core::ui_files::write_export_file(&path, &final_bytes) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

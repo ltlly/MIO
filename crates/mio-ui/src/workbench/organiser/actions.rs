@@ -638,7 +638,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension("json");
                             }
-                            match std::fs::write(&path, &json_payload) {
+                            match mio_core::ui_files::write_export_file(&path, &json_payload) {
                                 Ok(()) => {
                                     view.error = None;
                                     view.status = format!(

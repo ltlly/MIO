@@ -1,6 +1,11 @@
 use gpui_kit::accesskit::Role;
 use gpui_kit::base::{Checkbox, CheckboxIndicator};
-use gpui_kit::component::{Icon, IconName, button::ButtonVariants, table::TableDelegate};
+use gpui_kit::component::{
+    Icon, IconName, IndexPath,
+    button::ButtonVariants,
+    select::{SelectEvent, SelectState},
+    table::TableDelegate,
+};
 use gpui_kit::{ClickEvent, FontWeight, Hsla, Pixels};
 use mio_core::ClientCertificateFormat;
 
@@ -19,6 +24,9 @@ pub(super) struct ListenersTlsUi {
     pub(super) listener_error: Option<String>,
     pub(super) client_cert_editor_visible: bool,
     pub(super) client_cert_format: ClientCertificateFormat,
+    client_cert_table: Entity<TableState<client_certs::ClientCertTable>>,
+    pub(super) client_cert_selected: Option<usize>,
+    client_cert_format_select: Entity<SelectState<Vec<&'static str>>>,
     pub(super) client_cert_host: Entity<InputState>,
     pub(super) client_cert_path: Entity<InputState>,
     pub(super) client_cert_key_path: Entity<InputState>,
@@ -95,6 +103,38 @@ impl ListenersTlsUi {
                 cx.notify();
             }
             _ => {}
+        })
+        .detach();
+        let client_cert_table = cx.new(|tcx| {
+            TableState::new(
+                client_certs::ClientCertTable { owner: weak },
+                window,
+                tcx,
+            )
+            .sortable(false)
+            .col_selectable(false)
+        });
+        cx.subscribe_in(&client_cert_table, window, |this, _, event, _, cx| {
+            if let TableEvent::SelectRow(row) = event {
+                this.listeners_tls.client_cert_selected =
+                    (*row < this.state.client_certificates.len()).then_some(*row);
+                cx.notify();
+            }
+        })
+        .detach();
+        let client_cert_format_select = cx.new(|scx| {
+            SelectState::new(vec!["PEM", "PKCS#12"], Some(IndexPath::new(0)), window, scx)
+        });
+        cx.subscribe_in(&client_cert_format_select, window, |this, _, event, _, cx| {
+            let SelectEvent::Confirm(Some(fmt_str)) = event else {
+                return;
+            };
+            this.listeners_tls.client_cert_format = if *fmt_str == "PKCS#12" {
+                ClientCertificateFormat::Pkcs12
+            } else {
+                ClientCertificateFormat::Pem
+            };
+            cx.notify();
         })
         .detach();
         let init_weak = cx.weak_entity();
@@ -179,6 +219,9 @@ impl ListenersTlsUi {
             listener_error: None,
             client_cert_editor_visible: false,
             client_cert_format: ClientCertificateFormat::Pem,
+            client_cert_table,
+            client_cert_selected: None,
+            client_cert_format_select,
             client_cert_host: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("api.example.com 或 *.example.com")
             }),
@@ -196,6 +239,26 @@ impl ListenersTlsUi {
             inspected_server_cert: None,
             server_cert_copied: None,
         }
+    }
+
+    pub(super) fn refresh_client_cert_table(
+        &mut self,
+        len: usize,
+        cx: &mut Context<Settings>,
+    ) {
+        if self.client_cert_selected.is_some_and(|idx| idx >= len) {
+            self.client_cert_selected = len.checked_sub(1);
+        }
+        let sel = self.client_cert_selected;
+        self.client_cert_table.update(cx, |table, cx| {
+            if let Some(row) = sel {
+                table.set_selected_row(row, cx);
+            } else {
+                table.clear_selection(cx);
+            }
+            table.refresh(cx);
+            cx.notify();
+        });
     }
 }
 

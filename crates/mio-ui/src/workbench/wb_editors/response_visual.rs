@@ -517,19 +517,17 @@ impl Workbench {
                     .and_then(|p| p.parent().map(|dir| dir.join("render-previews")))
             })
             .unwrap_or_else(|| PathBuf::from(".local/render-previews"));
-        if let Err(error) = std::fs::create_dir_all(&preview_dir) {
-            self.fail(format!("无法创建预览目录：{error}"), cx);
-            return;
-        }
-        let file_path = preview_dir.join(format!(
-            "mio-response-preview-{}.{ext}",
-            mio_core::Uuid::new_v4()
-        ));
-        if let Err(error) = std::fs::write(&file_path, body_bytes) {
-            self.fail(format!("写入响应预览文件失败：{error}"), cx);
-            return;
-        }
-        let abs_path = std::fs::canonicalize(&file_path).unwrap_or(file_path);
+        let abs_path = match mio_core::ui_files::write_response_preview_file(
+            &preview_dir,
+            ext,
+            body_bytes,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                self.fail(format!("写入响应预览文件失败：{error}"), cx);
+                return;
+            }
+        };
         let path_display = abs_path.to_string_lossy().replace('\\', "/");
         let file_url = if path_display.starts_with('/') {
             format!("file://{path_display}")

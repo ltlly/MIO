@@ -1,12 +1,8 @@
-use std::{fs::OpenOptions, io::Read, path::Path};
+use std::path::Path;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::base::{CheckboxState, Switch as BaseSwitch};
-use gpui_kit::component::{
-    IndexPath,
-    select::{Select, SelectState},
-    table::{Column, TableDelegate},
-};
+use gpui_kit::component::table::{Column, TableDelegate};
 use mio_core::{
     ClientCertificateFormat, ClientCertificateRule, MAX_CLIENT_CERT_BYTES,
     MAX_CLIENT_CERT_PASSWORD_BYTES,
@@ -15,7 +11,7 @@ use mio_core::{
 use super::*;
 
 pub(super) struct ClientCertTable {
-    owner: WeakEntity<Settings>,
+    pub(super) owner: WeakEntity<Settings>,
 }
 
 const CLIENT_CERT_COLUMNS: [(&str, f32); 8] = [
@@ -181,41 +177,13 @@ fn client_cert_cell(rule: &ClientCertificateRule, column: usize) -> String {
     }
 }
 
-pub(super) struct ClientCertListUi {
-    pub(super) table: Entity<TableState<ClientCertTable>>,
-    pub(super) selected: Option<usize>,
-    pub(super) format_select: Entity<SelectState<Vec<&'static str>>>,
-}
-
 fn read_bounded_cert_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts
-        .open(path)
-        .map_err(|error| format!("无法读取{label}：{error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取{label}信息：{error}"))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CLIENT_CERT_BYTES as u64 {
-        return Err(format!(
-            "{label}必须是非空且不超过 {MAX_CLIENT_CERT_BYTES} 字节的普通文件。"
-        ));
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_CLIENT_CERT_BYTES as u64 + 1)
-        .read_to_end(&mut raw)
-        .map_err(|error| format!("无法完整读取{label}：{error}"))?;
-    if raw.is_empty() || raw.len() > MAX_CLIENT_CERT_BYTES {
-        return Err(format!(
-            "{label}必须是非空且不超过 {MAX_CLIENT_CERT_BYTES} 字节的普通文件。"
-        ));
-    }
-    Ok(raw)
+    mio_core::ui_files::read_regular_file_bounded(
+        path,
+        MAX_CLIENT_CERT_BYTES as u64,
+        false,
+        label,
+    )
 }
 
 impl Workbench {

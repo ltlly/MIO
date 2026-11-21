@@ -16,11 +16,81 @@ impl Workbench {
         let prev_error = self.error.clone();
         let prev_storage_error = self.storage_error.clone();
         self.observe_footer_event_before_dispatch(&event, window, cx);
-        let flow = self
-            .on_project_workspace_event(event, window, cx)
-            .or_else(|event| self.on_tool_and_history_event(*event, window, cx))
-            .or_else(|event| self.on_traffic_and_intercept_event(*event, window, cx))
-            .unwrap_or_else(|event| self.on_send_and_system_event(*event, window, cx));
+        let flow = match event {
+            Event::UserPreferences { .. }
+            | Event::UserPreferencesSaved { .. }
+            | Event::ProjectOpened { .. }
+            | Event::ProjectSaved { .. }
+            | Event::ProjectSlimSaved { .. }
+            | Event::Quiesced { .. }
+            | Event::WorkspaceChanged { .. }
+            | Event::WorkspaceRejected { .. }
+            | Event::RepeaterOpened { .. } => self.on_project_workspace_event(event, window, cx),
+            Event::SiteMapEntryAdded { .. }
+            | Event::SiteMapEntryRead { .. }
+            | Event::ExtResponse { .. }
+            | Event::ExtMessage { .. }
+            | Event::SiteMapPage { .. }
+            | Event::GlobalSearchPage { .. }
+            | Event::Sequencer(_)
+            | Event::Audit(_)
+            | Event::Collaborator(_)
+            | Event::RepeaterHistoryPage { .. }
+            | Event::RepeaterHistorySelected { .. }
+            | Event::ExtJob { .. }
+            | Event::ExtProgress { .. }
+            | Event::ExtReport { .. }
+            | Event::ExtItems { .. }
+            | Event::ExtItem { .. }
+            | Event::ExtRepeaterOpened { .. }
+            | Event::ExtMessages { .. }
+            | Event::WebSocketHistoryChanged { .. }
+            | Event::WebSocketHistoryPage { .. }
+            | Event::WebSocketHistoryError { .. }
+            | Event::WebSocketDetail { .. }
+            | Event::WebSocketDetailError { .. }
+            | Event::WebSocketNotes { .. }
+            | Event::WebSocketNotesChanged { .. }
+            | Event::WebSocketRepeater(_)
+            | Event::IntruderPositions { .. }
+            | Event::IntruderStarted { .. }
+            | Event::IntruderDefaultPoolReady { .. }
+            | Event::IntruderResourcePools { .. }
+            | Event::IntruderResourcePoolChanged { .. }
+            | Event::IntruderPoolUsage { .. }
+            | Event::IntruderResourcePoolsUpdated { .. }
+            | Event::IntruderResourcePoolDeleted { .. }
+            | Event::IntruderRenamed { .. }
+            | Event::IntruderBaselineRequested { .. }
+            | Event::IntruderDiscarded { .. }
+            | Event::IntruderRetentionChanged { .. }
+            | Event::IntruderChanged { .. }
+            | Event::IntruderResults { .. }
+            | Event::IntruderResultView { .. }
+            | Event::IntruderResultNotes { .. }
+            | Event::IntruderResultHighlight { .. }
+            | Event::IntruderRuns { .. }
+            | Event::IntruderRunControl { .. }
+            | Event::IntruderSpec { .. }
+            | Event::HistoryChanged { .. }
+            | Event::HttpHistoryDeleted { .. }
+            | Event::HistoryPage { .. }
+            | Event::LoggerHistoryPage { .. }
+            | Event::HttpHistoryPage { .. } => self.on_tool_and_history_event(event, window, cx),
+            Event::FlowDetail { .. }
+            | Event::FlowDetailError { .. }
+            | Event::ProxyState { .. }
+            | Event::ProxyListeners { .. }
+            | Event::BrowserLaunched { .. }
+            | Event::LiveFlowAnnotated { .. }
+            | Event::InterceptPending { .. }
+            | Event::InterceptResolved { .. }
+            | Event::WebSocketInterceptPending { .. }
+            | Event::WebSocketInterceptResolved { .. } => {
+                self.on_traffic_and_intercept_event(event, window, cx)
+            }
+            _ => self.on_send_and_system_event(event, window, cx),
+        };
         self.observe_footer_state_after_dispatch(&prev_status, &prev_error, &prev_storage_error);
         if flow.is_break() {
             return;
@@ -44,7 +114,7 @@ impl Workbench {
         event: Event,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<ControlFlow<()>, Box<Event>> {
+    ) -> ControlFlow<()> {
         match event {
             Event::UserPreferences {
                 operation_id,
@@ -218,7 +288,7 @@ impl Workbench {
             } if self.project == Some(project) => {
                 let finishes_transition = match &self.transition {
                     Some(TransitionPhase::Saving(expected)) if expected == &path => true,
-                    Some(TransitionPhase::Saving(_)) => return Ok(ControlFlow::Break(())),
+                    Some(TransitionPhase::Saving(_)) => return ControlFlow::Break(()),
                     _ => false,
                 };
                 self.project_saves_in_flight = self.project_saves_in_flight.saturating_sub(1);
@@ -229,7 +299,7 @@ impl Workbench {
                 {
                     self.cancel_transition(cx);
                     self.fail(error, cx);
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 let submitted_http = self.project_http_notes_save.take().unwrap_or_default();
                 if let Err(error) =
@@ -237,7 +307,7 @@ impl Workbench {
                 {
                     self.cancel_transition(cx);
                     self.fail(error, cx);
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 let submitted_highlights =
                     self.project_http_highlights_save.take().unwrap_or_default();
@@ -248,7 +318,7 @@ impl Workbench {
                 ) {
                     self.cancel_transition(cx);
                     self.fail(error, cx);
-                    return Ok(ControlFlow::Break(()));
+                    return ControlFlow::Break(());
                 }
                 self.project_save_status =
                     format!("项目已保存（{} 字节，含 sidecar）", total_bytes);
@@ -268,7 +338,7 @@ impl Workbench {
                             {
                                 if (changed || self.workspace_dirty) && !self.save_workspace(cx) {
                                     self.cancel_transition(cx);
-                                    return Ok(ControlFlow::Break(()));
+                                    return ControlFlow::Break(());
                                 }
                                 self.pending_project_save = Some(None);
                                 self.flush_project_save(window, cx);
@@ -324,7 +394,7 @@ impl Workbench {
                     && !self.intruder_close_owns_workspace()
                 {
                     if !self.proxy_interception_workspace_acknowledged(&workspace, cx) {
-                        return Ok(ControlFlow::Break(()));
+                        return ControlFlow::Break(());
                     }
                     self.apply_workspace_ack(&workspace, window, cx);
                     self.advance_settings_pool_delete(cx);
@@ -487,8 +557,8 @@ impl Workbench {
                     }
                 }
             }
-            event => return Err(Box::new(event)),
+            _ => {}
         }
-        Ok(ControlFlow::Continue(()))
+        ControlFlow::Continue(())
     }
 }

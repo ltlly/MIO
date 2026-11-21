@@ -221,7 +221,7 @@ impl Workbench {
                 }) else {
                     return;
                 };
-                let content = match std::fs::read_to_string(&path) {
+                let content = match mio_core::ui_files::read_file_to_string(&path) {
                     Ok(text) => text,
                     Err(err) => { view.fail(format!("读取样本文件失败：{err}"), cx); return; }
                 };
@@ -363,7 +363,7 @@ impl Workbench {
                     return;
                 }
                 match result {
-                    Ok(Ok(Some(path))) => match std::fs::write(&path, &bytes) {
+                    Ok(Ok(Some(path))) => match mio_core::ui_files::write_export_file(&path, &bytes) {
                         Ok(()) => {
                             view.error = None;
                             let msg = format!("{done_prefix}到 {}。", path.display());

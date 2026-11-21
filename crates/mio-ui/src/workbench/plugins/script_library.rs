@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result as AnyResult, ensure};
 use gpui_kit::assets::IconName;
@@ -122,21 +118,11 @@ fn validate_stored_library(library: &StoredScriptPresetLibrary) -> AnyResult<()>
 }
 
 fn read_script_library_file(path: &Path) -> AnyResult<StoredScriptPresetLibrary> {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            ensure!(meta.is_file(), "脚本库路径不是普通文件");
-            ensure!(meta.len() <= MAX_SCRIPT_LIBRARY_BYTES, "脚本库文件超过 4 MiB 上限");
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StoredScriptPresetLibrary::default());
-        }
-        Err(err) => return Err(err.into()),
-    }
-    let bytes = fs::read(path).with_context(|| format!("读取脚本库失败：{}", path.display()))?;
-    ensure!(
-        bytes.len() as u64 <= MAX_SCRIPT_LIBRARY_BYTES,
-        "脚本库文件超过 4 MiB 上限"
-    );
+    let Some(bytes) =
+        mio_core::ui_files::read_bounded_optional_file(path, MAX_SCRIPT_LIBRARY_BYTES, "脚本库")?
+    else {
+        return Ok(StoredScriptPresetLibrary::default());
+    };
     let library: StoredScriptPresetLibrary = serde_json::from_slice(&bytes)
         .with_context(|| format!("解析脚本库 JSON 失败：{}", path.display()))?;
     validate_stored_library(&library)?;
@@ -149,17 +135,13 @@ fn write_script_library_file(path: &Path, scripts: &[ScriptLibraryItem]) -> AnyR
         scripts: scripts.to_vec(),
     };
     validate_stored_library(&library)?;
-    let parent = path.parent().context("脚本库路径缺少父目录")?;
-    fs::create_dir_all(parent)?;
     let bytes = serde_json::to_vec_pretty(&library)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_SCRIPT_LIBRARY_BYTES,
-        "脚本库文件超过 4 MiB 上限"
-    );
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(&bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|err| err.error)?;
+    mio_core::ui_files::atomic_write_bounded_file(
+        path,
+        &bytes,
+        MAX_SCRIPT_LIBRARY_BYTES,
+        "脚本库",
+    )?;
     Ok(())
 }
 
@@ -508,7 +490,7 @@ impl Workbench {
                         let Some(path) = paths.into_iter().next() else {
                             return;
                         };
-                        let imported = match fs::read(&path)
+                        let imported = match mio_core::ui_files::read_file_bytes(&path)
                             .map_err(anyhow::Error::from)
                             .and_then(|bytes| parse_imported_script_json(&bytes))
                         {
@@ -612,7 +594,7 @@ impl Workbench {
                             if path.extension().is_none() {
                                 path.set_extension("json");
                             }
-                            match fs::write(&path, &payload) {
+                            match mio_core::ui_files::write_export_file(&path, &payload) {
                                 Ok(()) => {
                                     view.extensions.script_library.feedback = Some((
                                         true,
