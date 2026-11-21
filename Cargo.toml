@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mio-app", "crates/mio-ui", "crates/mio-core", "crates/mio-proxy", "crates/mio-plugin-api", "crates/mio-plugin-sdk", "plugins/protocol-lab"]
+members = ["crates/mio-app", "crates/mio-cli", "crates/mio-ui", "crates/mio-core", "crates/mio-proxy", "crates/mio-plugin-api", "crates/mio-plugin-sdk", "plugins/protocol-lab"]
 exclude = ["vendor/gpui-base", "vendor/gpui-component", "vendor/gpui-pre-windows", "vendor/gpui-pre-linux"]
 resolver = "3"
 

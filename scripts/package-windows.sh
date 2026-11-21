@@ -42,10 +42,10 @@ fi
 if [[ "$rust_target" == *-msvc ]]; then
   export PATH="/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:$HOME/.cargo/bin:$PATH"
   export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
-  XWIN_CROSS_COMPILER="${XWIN_CROSS_COMPILER:-clang}" cargo xwin build --locked -p mio-app --bins --target "$rust_target" --target-dir "$target_dir" "${build_flags[@]}"
+  XWIN_CROSS_COMPILER="${XWIN_CROSS_COMPILER:-clang}" cargo xwin build --locked -p mio-app -p mio-cli --bins --target "$rust_target" --target-dir "$target_dir" "${build_flags[@]}"
   bin_dir="$target_dir/$rust_target/$build_profile"
 else
-  cargo zigbuild --locked -p mio-app --bins --target "$rust_target" "${build_flags[@]}"
+  cargo zigbuild --locked -p mio-app -p mio-cli --bins --target "$rust_target" "${build_flags[@]}"
   bin_dir="$project_root/target/$rust_target/$build_profile"
 fi
 

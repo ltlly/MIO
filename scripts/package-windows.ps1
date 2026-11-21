@@ -12,7 +12,7 @@ $SourceCommit = (git rev-parse HEAD).Trim()
 $SourceBranch = try { (git symbolic-ref --quiet --short HEAD).Trim() } catch { "detached" }
 $SourceDirty = [bool](git status --porcelain --untracked-files=normal)
 
-$CargoArgs = @("build", "--locked", "-p", "mio-app", "--bins")
+$CargoArgs = @("build", "--locked", "-p", "mio-app", "-p", "mio-cli", "--bins")
 if ($Profile -eq "release") {
     $CargoArgs += "--release"
 }

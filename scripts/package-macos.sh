@@ -27,7 +27,7 @@ if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
   source_dirty=true
 fi
 if [[ -n "$rust_target" ]]; then
-  MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}" cargo build --locked -p mio-app --bins --target "$rust_target" "${build_flags[@]}"
+  MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}" cargo build --locked -p mio-app -p mio-cli --bins --target "$rust_target" "${build_flags[@]}"
   bin_dir="$project_root/target/$rust_target/$build_profile"
   arch="${rust_target%%-*}"
   if [[ "$arch" == "aarch64" ]]; then
@@ -35,7 +35,7 @@ if [[ -n "$rust_target" ]]; then
   fi
   distribution_dir="$project_root/dist/macos-$arch"
 else
-  MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}" cargo build --locked -p mio-app --bins "${build_flags[@]}"
+  MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}" cargo build --locked -p mio-app -p mio-cli --bins "${build_flags[@]}"
   bin_dir="$project_root/target/$build_profile"
   arch="$(uname -m)"
   if [[ "$arch" == "aarch64" ]]; then

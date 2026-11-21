@@ -124,7 +124,7 @@ if [[ "$host_os" == "Linux" && -z "$target_spec" ]]; then
   require_static_libs "$static_lib_dir"
   link_dir="$(prepare_static_link_dir "$static_lib_dir" "$arch" "false")"
   export RUSTFLAGS="${RUSTFLAGS:-} -L native=$link_dir -C link-arg=-Wl,--start-group -C link-arg=$link_dir/libxkbcommon-x11.a -C link-arg=$link_dir/libxkbcommon.a -C link-arg=$link_dir/libxcb-xkb.a -C link-arg=$link_dir/libxcb.a -C link-arg=$link_dir/libXau.a -C link-arg=$link_dir/libXdmcp.a -C link-arg=$link_dir/libbsd.a -C link-arg=$link_dir/libmd.a -C link-arg=-Wl,--end-group"
-  RUST_FONTCONFIG_DLOPEN=1 cargo build --locked -p mio-app --bins "${build_flags[@]}"
+  RUST_FONTCONFIG_DLOPEN=1 cargo build --locked -p mio-app -p mio-cli --bins "${build_flags[@]}"
   bin_dir="$project_root/target/$build_profile"
 else
   if [[ -z "$target_spec" ]]; then
@@ -136,7 +136,7 @@ else
   require_static_libs "$static_lib_dir"
   link_dir="$(prepare_static_link_dir "$static_lib_dir" "$arch" "true")"
   export RUSTFLAGS="${RUSTFLAGS:-} -L native=$link_dir -C link-arg=-Wl,--start-group -C link-arg=$link_dir/libxkbcommon-x11.a -C link-arg=$link_dir/libxkbcommon.a -C link-arg=$link_dir/libxcb-xkb.a -C link-arg=$link_dir/libxcb.a -C link-arg=$link_dir/libXau.a -C link-arg=$link_dir/libXdmcp.a -C link-arg=$link_dir/libbsd.a -C link-arg=$link_dir/libmd.a -C link-arg=$link_dir/libisoc23_compat.a -C link-arg=-Wl,--end-group"
-  RUST_FONTCONFIG_DLOPEN=1 cargo zigbuild --locked -p mio-app --bins --target "$target_spec" "${build_flags[@]}"
+  RUST_FONTCONFIG_DLOPEN=1 cargo zigbuild --locked -p mio-app -p mio-cli --bins --target "$target_spec" "${build_flags[@]}"
   bin_dir="$project_root/target/$rust_target/$build_profile"
 fi
 

@@ -200,26 +200,3 @@ pub(super) fn render_human(payload: &AiIpcPayload, show_original: bool) {
         }
     }
 }
-
-pub(super) fn print_usage() {
-    println!(
-        "用法 (支持环境变量 MIO_IPC_SOCKET / MIO_SOCKET 指定默认 socket 路径):
-  mio-cli [--socket <path>] status [--json]
-  mio-cli [--socket <path>] flows list [--filter <str>] [--method <M>] [--status <code>] [--offset <n>] [--limit <n>] [--json]
-  mio-cli [--socket <path>] flows get <flow-id> [--original] [--json]
-  mio-cli [--socket <path>] ws list [--limit <n>] [--json]
-  mio-cli [--socket <path>] repeater open (--flow <flow-id> [--original] | --target <origin> --raw <raw-request>) [--title <title>] [--json]
-  mio-cli [--socket <path>] repeater send (--flow <flow-id> [--original] | --target <origin> --raw <raw-request>) [--set-header|--add-header <K:V>] [--remove-header <K>] [--body <str>] [--insecure] [--json]
-  mio-cli [--socket <path>] slim-save <dest-path> [--json]
-  mio-cli [--socket <path>] ca export <dest-path> [--pem|--der] [--json]
-  mio-cli [--socket <path>] proxy start [--listen <addr>] [--json]
-  mio-cli [--socket <path>] proxy stop [--json]
-  mio-cli [--socket <path>] proxy intercept [--requests on|off] [--responses on|off] [--json]
-  mio-cli [--socket <path>] proxy pending [--json]
-  mio-cli [--socket <path>] proxy decide <flow-id> --revision <rev> (--forward [--set-header|--add-header <K:V>] [--remove-header <K>] [--body <str>] [--status <code>] | --drop) [--json]
-  mio-cli [--socket <path>] workspace get [--json]
-  mio-cli [--socket <path>] workspace set <json-file> [--json]
-  mio-cli [--socket <path>] shutdown [--json]
-  mio-cli [--socket <path>] serve [--listen <addr>] [--export-ca <path>]"
-    );
-}
