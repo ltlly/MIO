@@ -135,8 +135,8 @@ impl Workbench {
         if let Some(cancel) = self.global_search.cancel.take() {
             cancel.cancel();
         }
-        let mut workspace = self.workspace.clone();
-        if let Ok(_) = self.capture_drafts(window, cx) { workspace = self.workspace.clone(); }
+        let mut workspace = (*self.workspace).clone();
+        if let Ok(_) = self.capture_drafts(window, cx) { workspace = (*self.workspace).clone(); }
         self.global_search.revision = self.global_search.revision.saturating_add(1);
         let query = GlobalSearchQuery { project, query_revision: self.global_search.revision, term,
             regex: self.global_search.regex, case_sensitive: self.global_search.case_sensitive,
@@ -2066,15 +2066,212 @@ impl Workbench {
     }
 
     #[inline(never)]
+    fn render_tool_tabs_update_badge(
+        &self,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let latest = match &self.update_status {
+            mio_core::UpdateStatus::Available(info) => info.latest_version.clone(),
+            _ => return None,
+        };
+        let label = format!("更新 v{latest}");
+        Some(
+            Button::new("suiteUpdateBadge")
+                .ghost()
+                .small()
+                .compact()
+                .rounded(ButtonRounded::Medium)
+                .tab_stop(false)
+                .h(px(22.))
+                .px(px(8.))
+                .bg(rgb(if dark { 0x263f2a } else { 0xe8f5e9 }))
+                .border_1()
+                .border_color(rgb(if dark { 0x3b6e44 } else { 0x81c784 }))
+                .text_color(rgb(if dark { 0x81c784 } else { 0x1b5e20 }))
+                .text_size(px(11.5))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .label(label)
+                .accessibility_label(format!("发现新版本 v{latest}"))
+                .tooltip(format!("发现 MIO 新版本 v{latest}；点击打开更新设置"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_settings_filtered(
+                        Some(super::settings::SettingsPage::UserMisc),
+                        Some(super::settings::SettingsScopeFilter::User),
+                        false,
+                        window,
+                        cx,
+                    );
+                }))
+                .into_any_element(),
+        )
+    }
+
+    #[inline(never)]
+    fn render_tool_tabs_browser_and_palette_actions(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> [AnyElement; 2] {
+        let open_browser = Button::new("suiteOpenBrowserButton")
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::None)
+            .tab_stop(false)
+            .w(px(28.))
+            .h(px(18.))
+            .p_0()
+            .border_0()
+            .bg(gpui_kit::transparent_black())
+            .child(
+                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Globe)
+                    .size(px(16.))
+                    .text_color(theme::foreground()),
+            )
+            .accessibility_label("Open browser")
+            .tooltip("启动已配置 Proxy 监听地址与 CA 信任的浏览器")
+            .disabled(
+                self.ext_import.visible
+                    || self.project.is_none()
+                    || !self.backend_available()
+                    || self.transition.is_some(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.open_configured_browser(cx);
+            }))
+            .into_any_element();
+        let command_palette = Button::new("suiteCommandPaletteButton")
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::None)
+            .tab_stop(false)
+            .w(px(27.))
+            .h(px(18.))
+            .p_0()
+            .border_0()
+            .bg(gpui_kit::transparent_black())
+            .child(
+                gpui_kit::component::Icon::default()
+                    .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.55\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 4.2L6.8 8L2.5 11.8\"/><path d=\"M8.5 12.2H13.5\"/></svg>")
+                    .size(px(15.))
+                    .text_color(theme::foreground()),
+            )
+            .accessibility_label("打开命令面板")
+            .tooltip("搜索并执行全部工作台命令 (⌘K)")
+            .on_click(cx.listener(|this, _, window, cx| this.open_command_palette(window, cx)))
+            .into_any_element();
+        [open_browser, command_palette]
+    }
+
+    #[inline(never)]
+    fn render_tool_tabs_search_and_settings_actions(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> [AnyElement; 2] {
+        let search = Button::new("suiteSearchButton")
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::None)
+            .tab_stop(false)
+            .w(px(28.))
+            .h(px(18.))
+            .p_0()
+            .border_0()
+            .bg(gpui_kit::transparent_black())
+            .child(
+                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Search)
+                    .size(px(15.))
+                    .text_color(theme::foreground()),
+            )
+            .accessibility_label("打开全局搜索")
+            .tooltip("搜索全部工具的 HTTP、WebSocket、备注与审计问题 (⌘⇧F)")
+            .on_click(cx.listener(|this, _, window, cx| this.open_global_search(window, cx)))
+            .into_any_element();
+        let settings = Button::new("settingsButton")
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::None)
+            .tab_stop(false)
+            .w(px(28.))
+            .h(px(18.))
+            .p_0()
+            .border_0()
+            .bg(gpui_kit::transparent_black())
+            .child(
+                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Settings)
+                    .size(px(16.))
+                    .text_color(theme::foreground()),
+            )
+            .accessibility_label("Open settings window")
+            .tooltip("打开全局与项目设置 (⌘,)")
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_settings(window, cx);
+            }))
+            .into_any_element();
+        [search, settings]
+    }
+
+    #[inline(never)]
+    fn render_tool_tabs_mio_ai_action(&self, dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("suiteMioAiButton")
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::Medium)
+            .tab_stop(false)
+            .w(px(120.))
+            .h(px(25.))
+            .px(px(10.))
+            .bg(rgb(if dark { 0x313438 } else { 0xf1f1f1 }))
+            .border_1()
+            .border_color(rgb(if dark { 0x624d43 } else { 0xe5b29a }))
+            .text_color(theme::foreground())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(
+                        gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Zap)
+                            .size(px(14.))
+                            .text_color(rgb(0xe86a33)),
+                    )
+                    .child(
+                        div()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_size(px(13.))
+                            .text_color(theme::foreground())
+                            .child("MioAT"),
+                    ),
+            )
+            .accessibility_label("MioAT")
+            .tooltip("打开 Agent IPC 控制中心与 Discover 导航页")
+            .disabled(self.ext_import.visible)
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.tool == Tool::Discover {
+                    this.mio_ai_panel_open = !this.mio_ai_panel_open;
+                    cx.notify();
+                } else {
+                    this.select_tool(Tool::Discover, window, cx);
+                }
+            }))
+            .into_any_element()
+    }
+
+    #[inline(never)]
     fn render_tool_tabs_right_actions(
         &self,
         dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let update_badge = match &self.update_status {
-            mio_core::UpdateStatus::Available(info) => Some(info.latest_version.clone()),
-            _ => None,
-        };
+        let update_badge = self.render_tool_tabs_update_badge(dark, cx);
+        let leading = self.render_tool_tabs_browser_and_palette_actions(cx);
+        let trailing = self.render_tool_tabs_search_and_settings_actions(cx);
+        let mio_ai = self.render_tool_tabs_mio_ai_action(dark, cx);
         div()
             .id("suiteTitleBarActionsPanel")
             .test_support()
@@ -2085,177 +2282,10 @@ impl Workbench {
             .flex()
             .items_center()
             .gap(px(2.))
-            .when_some(update_badge, |row, latest| {
-                let label = format!("更新 v{latest}");
-                row.child(
-                    Button::new("suiteUpdateBadge")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .rounded(ButtonRounded::Medium)
-                        .tab_stop(false)
-                        .h(px(22.))
-                        .px(px(8.))
-                        .bg(rgb(if dark { 0x263f2a } else { 0xe8f5e9 }))
-                        .border_1()
-                        .border_color(rgb(if dark { 0x3b6e44 } else { 0x81c784 }))
-                        .text_color(rgb(if dark { 0x81c784 } else { 0x1b5e20 }))
-                        .text_size(px(11.5))
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .label(label.clone())
-                        .accessibility_label(format!("发现新版本 v{latest}"))
-                        .tooltip(format!("发现 MIO 新版本 v{latest}；点击打开更新设置"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_settings_filtered(
-                                Some(super::settings::SettingsPage::UserMisc),
-                                Some(super::settings::SettingsScopeFilter::User),
-                                false,
-                                window,
-                                cx,
-                            );
-                        })),
-                )
-            })
-            .child(
-                Button::new("suiteOpenBrowserButton")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::None)
-                    .tab_stop(false)
-                    .w(px(28.))
-                    .h(px(18.))
-                    .p_0()
-                    .border_0()
-                    .bg(gpui_kit::transparent_black())
-                    .child(
-                        gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Globe)
-                            .size(px(16.))
-                            .text_color(theme::foreground()),
-                    )
-                    .accessibility_label("Open browser")
-                    .tooltip("启动已配置 Proxy 监听地址与 CA 信任的浏览器")
-                    .disabled(
-                        self.ext_import.visible
-                            || self.project.is_none()
-                            || !self.backend_available()
-                            || self.transition.is_some(),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_configured_browser(cx);
-                    })),
-            )
-            .child(
-                Button::new("suiteCommandPaletteButton")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::None)
-                    .tab_stop(false)
-                    .w(px(27.))
-                    .h(px(18.))
-                    .p_0()
-                    .border_0()
-                    .bg(gpui_kit::transparent_black())
-                    .child(
-                        gpui_kit::component::Icon::default()
-                            .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.55\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 4.2L6.8 8L2.5 11.8\"/><path d=\"M8.5 12.2H13.5\"/></svg>")
-                            .size(px(15.))
-                            .text_color(theme::foreground()),
-                    )
-                    .accessibility_label("打开命令面板")
-                    .tooltip("搜索并执行全部工作台命令 (⌘K)")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_command_palette(window, cx))),
-            )
-            .child(
-                Button::new("suiteSearchButton")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::None)
-                    .tab_stop(false)
-                    .w(px(28.))
-                    .h(px(18.))
-                    .p_0()
-                    .border_0()
-                    .bg(gpui_kit::transparent_black())
-                    .child(
-                        gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Search)
-                            .size(px(15.))
-                            .text_color(theme::foreground()),
-                    )
-                    .accessibility_label("打开全局搜索")
-                    .tooltip("搜索全部工具的 HTTP、WebSocket、备注与审计问题 (⌘⇧F)")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_global_search(window, cx))),
-            )
-            .child(
-                Button::new("settingsButton")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::None)
-                    .tab_stop(false)
-                    .w(px(28.))
-                    .h(px(18.))
-                    .p_0()
-                    .border_0()
-                    .bg(gpui_kit::transparent_black())
-                    .child(
-                        gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Settings)
-                            .size(px(16.))
-                            .text_color(theme::foreground()),
-                    )
-                    .accessibility_label("Open settings window")
-                    .tooltip("打开全局与项目设置 (⌘,)")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("suiteMioAiButton")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::Medium)
-                    .tab_stop(false)
-                    .w(px(120.))
-                    .h(px(25.))
-                    .px(px(10.))
-                    .bg(rgb(if dark { 0x313438 } else { 0xf1f1f1 }))
-                    .border_1()
-                    .border_color(rgb(if dark { 0x624d43 } else { 0xe5b29a }))
-                    .text_color(theme::foreground())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(6.))
-                            .child(
-                                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Zap)
-                                    .size(px(14.))
-                                    .text_color(rgb(0xe86a33)),
-                            )
-                            .child(
-                                div()
-                                    .font_weight(gpui_kit::FontWeight::BOLD)
-                                    .text_size(px(13.))
-                                    .text_color(theme::foreground())
-                                    .child("MioAT"),
-                            ),
-                    )
-                    .accessibility_label("MioAT")
-                    .tooltip("打开 Agent IPC 控制中心与 Discover 导航页")
-                    .disabled(self.ext_import.visible)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.tool == Tool::Discover {
-                            this.mio_ai_panel_open = !this.mio_ai_panel_open;
-                            cx.notify();
-                        } else {
-                            this.select_tool(Tool::Discover, window, cx);
-                        }
-                    })),
-            )
+            .children(update_badge)
+            .children(leading)
+            .children(trailing)
+            .child(mio_ai)
             .into_any_element()
     }
 }

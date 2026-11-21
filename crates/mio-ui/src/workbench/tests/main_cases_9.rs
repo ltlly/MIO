@@ -4,7 +4,7 @@ use super::*;
 fn old_workspace_rejection_does_not_clear_a_newer_save_before_transition(cx: &mut TestAppContext) {
     let mut fixture = fixture(cx, vec![tab("迟到的源保存错误")], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("tool-repeater", cx);
     })

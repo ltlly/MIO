@@ -198,7 +198,7 @@ fn discard_close_cancels_only_selected_token_before_full_queue_and_waits_for_rec
         Event::WorkspaceRejected {
             project: fixture.project,
             revision: discard.workspace.revision,
-            stored: workspace.clone(),
+            stored: (*workspace).clone(),
             message: "unrelated stale save rejection".into(),
         },
     ] {

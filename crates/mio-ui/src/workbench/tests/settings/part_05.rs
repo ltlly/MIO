@@ -13,7 +13,7 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
             (ParamName, "Param name", Matches, "Matches"),
             (ParamValue, "Param value", DoesNotMatch, "Does not match"),
         ] {
-            let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+            let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
             let id = if response {
                 original.proxy_interception.response.rules[0].id
             } else {
@@ -164,7 +164,7 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
             assert!(!cx.windows().contains(&dialog));
             cx.read(|cx| {
                 let view = fixture.view.read(cx);
-                assert_eq!(view.workspace, candidate);
+                assert_eq!(*view.workspace, candidate);
                 assert!(view.pending_workspace.is_none());
                 assert!(view.pending_proxy_interception.is_none());
             });
@@ -213,7 +213,7 @@ fn proxy_interception_rules_cookie_and_body_relation_choices_save_actual_input_a
                 ]
             };
             for (destination, (relationship, relationship_label)) in relations.iter().enumerate() {
-                let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+                let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
                 let id = if response {
                     original.proxy_interception.response.rules[0].id
                 } else {
@@ -358,7 +358,7 @@ fn proxy_interception_rules_cookie_and_body_relation_choices_save_actual_input_a
                 assert!(!cx.windows().contains(&dialog));
                 cx.read(|cx| {
                     let view = fixture.view.read(cx);
-                    assert_eq!(view.workspace, candidate);
+                    assert_eq!(*view.workspace, candidate);
                     assert!(view.pending_workspace.is_none());
                     assert!(view.pending_proxy_interception.is_none());
                 });

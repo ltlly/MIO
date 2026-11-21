@@ -167,7 +167,7 @@ impl Workbench {
                 let (record, _) = self
                     .extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .filter(|(record, _)| record.summary.id == flow_id)
                     .ok_or("Logger 请求详情尚未就绪。")?;
                 let editor_bytes = self.extra_tools.logger_request.bytes(window, cx)?;

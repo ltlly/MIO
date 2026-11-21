@@ -142,7 +142,7 @@ impl Workbench {
                         }
                         let saved_detach = view
                             .intruder_result_close
-                            .as_ref()
+                            .as_deref()
                             .is_some_and(ResultClose::saved_detach);
                         if saved_detach && !view.saved_intruder_result_confirmed(target.view_id) {
                             view.intruder_result_close = None;

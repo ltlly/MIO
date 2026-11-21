@@ -131,7 +131,7 @@ fn rejected_save_keeps_latest_draft_and_never_automatically_sends(cx: &mut TestA
     let id = first.id;
     let mut fixture = fixture(cx, vec![first], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let editor = cx.read(|cx| fixture.view.read(cx).tab_editors[&id].request.raw.clone());
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("tool-repeater", cx);
@@ -335,7 +335,7 @@ fn save_as_captures_late_changes_without_requiring_a_source_write(cx: &mut TestA
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert_eq!(view.project_path, Some(destination));
-        assert_eq!(view.workspace, saved);
+        assert_eq!(*view.workspace, saved);
         assert!(!view.workspace_dirty);
         assert!(view.pending_workspace.is_none());
     });
@@ -345,7 +345,7 @@ fn save_as_captures_late_changes_without_requiring_a_source_write(cx: &mut TestA
 fn save_as_recovers_after_an_already_queued_source_save_is_rejected(cx: &mut TestAppContext) {
     let mut fixture = fixture(cx, vec![tab("源项目不可写")], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("tool-repeater", cx);
     })

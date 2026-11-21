@@ -77,7 +77,7 @@ impl Workbench {
                 }
                 Tool::Logger => {
                     let id = self.extra_tools.logger_selected.ok_or("请先选择 Logger 流量。")?;
-                    let record = self.extra_tools.logger_loaded_detail.as_ref().filter(|(record, _)| record.summary.id == id).ok_or("Logger 流量详情尚未读取完成。")?;
+                    let record = self.extra_tools.logger_loaded_detail.as_deref().filter(|(record, _)| record.summary.id == id).ok_or("Logger 流量详情尚未读取完成。")?;
                     Ok(SiteMapEntryInput::History(HistoryTransferEntry::Live { flow_id: id, revision: record.0.summary.revision, original: false }))
                 }
                 Tool::Target => {

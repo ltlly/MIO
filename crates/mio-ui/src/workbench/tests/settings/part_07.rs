@@ -49,7 +49,7 @@ fn settings_rejection_preserves_latest_draft_and_save_as_recovers_from_auxiliary
     let id = first.id;
     let mut fixture = fixture(cx, vec![first], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let editor = cx.read(|cx| fixture.view.read(cx).tab_editors[&id].request.raw.clone());
     let settings = open_settings(&fixture, cx);
     toggle(settings, false, cx);

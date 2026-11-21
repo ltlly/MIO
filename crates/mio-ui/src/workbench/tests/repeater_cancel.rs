@@ -232,7 +232,7 @@ fn project_change_and_backend_disconnect_cancel_tokens_obtained_from_real_send_c
     let mut fixture = fixture(cx, vec![tab("项目归属")], 8);
     drain(&mut fixture.commands);
     let old = send(&mut fixture, cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     fixture.project.generation += 1;
     fixture
         .events

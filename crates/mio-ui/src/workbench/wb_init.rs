@@ -1,5 +1,15 @@
 use super::*;
 
+#[inline(never)]
+fn boxed_default<T: Default>() -> Box<T> {
+    Box::new(T::default())
+}
+
+#[inline(never)]
+fn boxed_with<T>(build: impl FnOnce() -> T) -> Box<T> {
+    Box::new(build())
+}
+
 impl Workbench {
     pub(crate) fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let owner = cx.weak_entity();
@@ -13,7 +23,7 @@ impl Workbench {
             .col_selectable(false)
             .select_on_modifier_click(false)
         });
-        let websocket = websocket::WebSocketHistory::new(window, cx);
+        let websocket = boxed_with(|| websocket::WebSocketHistory::new(window, cx));
         let listener_input =
             cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1:8080"));
         let history_filter =
@@ -188,8 +198,8 @@ impl Workbench {
             settings_window: None,
             tab_group_dialog: None,
             user_preferences: user_preferences::UserPreferencesUi::default(),
-            ext_import: ext_import::ExtImport::default(),
-            workspace: Workspace::default(),
+            ext_import: boxed_default(),
+            workspace: boxed_default(),
             workspace_dirty: false,
             pending_workspace: None,
             pending_proxy_interception: None,
@@ -201,8 +211,8 @@ impl Workbench {
             http_notes: http_notes::HttpNotes::new(window, cx),
             http_highlights: http_highlights::HttpHighlights::default(),
             project_http_highlights_save: None,
-            inspector: inspector::InspectorPane::new(window, cx),
-            extra_tools: tools_extra::ExtraTools::new(window, cx),
+            inspector: boxed_with(|| inspector::InspectorPane::new(window, cx)),
+            extra_tools: boxed_with(|| tools_extra::ExtraTools::new(window, cx)),
             project_save_status: String::new(),
             choosing_save_as: false,
             file_picker: None,
@@ -230,7 +240,7 @@ impl Workbench {
             intercept_responses: false,
             listener_input,
             history_filter,
-            http_filter: http_filter::HttpFilterState::default(),
+            http_filter: boxed_default(),
             history,
             websocket,
             query_revision: 0,
@@ -255,24 +265,24 @@ impl Workbench {
             history_response_original_view: false,
             message_pair_layouts: HashMap::new(),
             message_pair_combined_panes: HashMap::new(),
-            history_request: MessageEditor::new(window, cx),
-            history_response: MessageEditor::new(window, cx),
+            history_request: boxed_with(|| MessageEditor::new(window, cx)),
+            history_response: boxed_with(|| MessageEditor::new(window, cx)),
             intercepts: Vec::new(),
             selected_intercept: None,
             tab_editors: HashMap::new(),
             tab_editor_lru: Vec::new(),
             websocket_repeater: websocket_repeater::WebSocketRepeaterState::default(),
-            target_pane: target::TargetPane::new(window, cx),
-            sequencer_pane: sequencer::SequencerPane::new(window, cx),
-            audit_dashboard: audit_dashboard::AuditDashboardPane::new(window, cx),
+            target_pane: boxed_with(|| target::TargetPane::new(window, cx)),
+            sequencer_pane: boxed_with(|| sequencer::SequencerPane::new(window, cx)),
+            audit_dashboard: boxed_with(|| audit_dashboard::AuditDashboardPane::new(window, cx)),
             footer_drawer: FooterDrawerState::new(window, cx),
-            collaborator_pane: collaborator::CollaboratorPane::new(window, cx),
+            collaborator_pane: boxed_with(|| collaborator::CollaboratorPane::new(window, cx)),
             command_palette,
             command_palette_open: false,
             global_search,
-            intruder: intruder::Intruder::default(),
-            organiser: organiser::OrganiserUi::new(window, cx),
-            extensions: plugins::Extensions::new(window, cx),
+            intruder: boxed_default(),
+            organiser: boxed_with(|| organiser::OrganiserUi::new(window, cx)),
+            extensions: boxed_with(|| plugins::Extensions::new(window, cx)),
             sending: HashMap::new(),
             pending_sends: HashMap::new(),
             close_after_send: HashSet::new(),

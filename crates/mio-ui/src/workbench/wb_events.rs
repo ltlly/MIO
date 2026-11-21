@@ -113,7 +113,7 @@ impl Workbench {
                 self.project = Some(project);
                 self.ext_project_opened(path.as_ref(), cx);
                 self.project_path = path;
-                self.workspace = workspace;
+                *self.workspace = workspace;
                 self.listener_input.update(cx, |input, cx| {
                     input.set_value(
                         self.workspace.proxy_listener_or_default().to_string(),
@@ -343,7 +343,7 @@ impl Workbench {
                         .then(|| self.capture_drafts(window, cx));
                     match captured {
                         Some(Ok(false)) if !self.organiser.notes_dirty => {
-                            self.workspace = workspace.clone();
+                            *self.workspace = workspace.clone();
                             self.target_pane.advanced_mode_input =
                                 self.workspace.scope.advanced_mode;
                             self.target_pane.editing_simple_scope = [None, None];

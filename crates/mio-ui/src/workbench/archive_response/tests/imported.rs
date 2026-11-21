@@ -45,7 +45,7 @@ fn imported_repeater_workspace_restores_order_titles_and_selected_pairs_without_
     cx.read(|cx| {
         let view = f.view.read(cx);
         assert!(view.tool == Tool::Proxy);
-        assert_eq!(view.workspace, imported);
+        assert_eq!(*view.workspace, imported);
         assert!(!view.tab_editors.contains_key(&old_id));
         assert_eq!(
             view.tab_editors[&first.id].target.read(cx).value().as_ref(),
@@ -179,7 +179,7 @@ fn imported_active_second_tab_preserves_space_title_and_reads_the_selected_pair(
                 Some(true)
             );
             let view = f.view.read(cx);
-            assert_eq!(view.workspace, workspace);
+            assert_eq!(*view.workspace, workspace);
             assert_eq!(
                 view.tab_editors[&second.id]
                     .response

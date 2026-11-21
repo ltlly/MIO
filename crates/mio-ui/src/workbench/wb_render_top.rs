@@ -361,7 +361,6 @@ impl Workbench {
         cx.notify();
     }
 
-    #[inline(never)]
     fn current_footer_project_name(&self) -> Option<String> {
         self.workspace
             .project_name

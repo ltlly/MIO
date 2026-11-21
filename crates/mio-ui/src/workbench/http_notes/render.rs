@@ -382,6 +382,549 @@ impl Workbench {
     }
 
     #[inline(never)]
+    fn render_http_notes_title_bar(
+        &self,
+        detached: bool,
+        dock_left: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let inactive_bg: gpui_kit::Hsla =
+            rgb(if theme::is_dark() { 0x35383d } else { 0xdfdfdf }).into();
+        div()
+            .id("http-notes-title-bar")
+            .test_support()
+            .w_full()
+            .h(px(40.))
+            .min_h(px(40.))
+            .max_h(px(40.))
+            .px(px(10.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(theme::toolbar_surface())
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::foreground())
+                    .child("Notes"),
+            )
+            .child(div().flex_1())
+            .when(!detached, |bar| {
+                bar.child(
+                    div()
+                        .w(px(50.))
+                        .h(px(19.))
+                        .flex()
+                        .items_center()
+                        .gap_0()
+                        .child(
+                            Button::new("http-notes-dock-left")
+                                .ghost()
+                                .small()
+                                .rounded(ButtonRounded::None)
+                                .w(px(25.))
+                                .h(px(19.))
+                                .p_0()
+                                .bg(if dock_left {
+                                    rgb(0x26649d).into()
+                                } else {
+                                    inactive_bg
+                                })
+                                .text_color(if dock_left {
+                                    rgb(0xffffff).into()
+                                } else {
+                                    theme::foreground()
+                                })
+                                .icon(
+                                    gpui_kit::component::Icon::new(IconName::PanelLeft).size(px(13.)),
+                                )
+                                .accessibility_label("Dock on the left")
+                                .tooltip("Dock on the left")
+                                .selected(dock_left)
+                                .toggled(dock_left)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inspector.dock_left = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("http-notes-dock-right")
+                                .ghost()
+                                .small()
+                                .rounded(ButtonRounded::None)
+                                .w(px(25.))
+                                .h(px(19.))
+                                .p_0()
+                                .bg(if !dock_left {
+                                    rgb(0x26649d).into()
+                                } else {
+                                    inactive_bg
+                                })
+                                .text_color(if !dock_left {
+                                    rgb(0xffffff).into()
+                                } else {
+                                    theme::foreground()
+                                })
+                                .icon(
+                                    gpui_kit::component::Icon::new(IconName::PanelRight)
+                                        .size(px(13.)),
+                                )
+                                .accessibility_label("Dock on the right")
+                                .tooltip("Dock on the right")
+                                .selected(!dock_left)
+                                .toggled(!dock_left)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inspector.dock_left = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .child(
+                Button::new("http-notes-close")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(px(18.))
+                    .h(px(18.))
+                    .p_0()
+                    .icon(gpui_kit::component::Icon::new(IconName::Close).size(px(14.)))
+                    .accessibility_label("关闭备注")
+                    .tooltip("收起 HTTP 消息备注侧栏并自动保存草稿")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.leave_http_notes(window, cx) {
+                            if detached {
+                                window.remove_window();
+                                return;
+                            }
+                            let notes_focused =
+                                this.http_notes.editor.focus_handle(cx).is_focused(window);
+                            this.http_notes.open = false;
+                            if notes_focused {
+                                this.focus.focus(window, cx);
+                            }
+                            cx.notify();
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_http_notes_toolbar_leading(
+        &self,
+        ready: bool,
+        can_format: bool,
+        preview_mode: bool,
+        heading_current: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let heading_owner = cx.weak_entity();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .child(
+                Button::new("http-notes-preview-toggle")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("T")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/type.svg")
+                                    .expect("文本图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .selected(preview_mode)
+                    .toggled(preview_mode)
+                    .tooltip(if preview_mode {
+                        "切换回 Markdown 源码编辑模式 (Edit as plain text)"
+                    } else {
+                        "以富文本排版预览当前 Markdown 备注内容"
+                    })
+                    .disabled(!ready)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if !this.http_notes.preview_mode
+                            && let Err(error) = this.validate_http_notes_composition(window, cx)
+                        {
+                            this.http_notes.error = Some(error);
+                            cx.notify();
+                            return;
+                        }
+                        this.http_notes.preview_mode = !this.http_notes.preview_mode;
+                        cx.notify();
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
+            .child(
+                Button::new("http-notes-heading")
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(56.))
+                    .min_w(px(56.))
+                    .h(px(27.))
+                    .p(px(6.))
+                    .rounded(ButtonRounded::Small)
+                    .bg(theme::toolbar_surface())
+                    .border_1()
+                    .border_color(theme::control_border())
+                    .accessibility_label(heading_current)
+                    .tooltip("设置正文 Aa 或 H1 至 H6 标题级别")
+                    .disabled(!can_format)
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(theme::foreground())
+                                    .child(heading_current),
+                            )
+                            .child(
+                                gpui_kit::component::Icon::new(IconName::ChevronDown)
+                                    .size(px(12.))
+                                    .text_color(theme::foreground()),
+                            ),
+                    )
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (level, label) in
+                            ["Aa", "H1", "H2", "H3", "H4", "H5", "H6"].into_iter().enumerate()
+                        {
+                            let owner = heading_owner.clone();
+                            menu = menu.item(
+                                PopupMenuItem::element(move |_, _| {
+                                    div()
+                                        .id(SharedString::from(format!("http-notes-heading-{label}")))
+                                        .test_support()
+                                        .role(gpui_kit::accesskit::Role::MenuItem)
+                                        .aria_label(label)
+                                        .w_full()
+                                        .min_h(px(22.))
+                                        .child(label)
+                                })
+                                .on_click(move |_, window, cx| {
+                                    owner
+                                        .update(cx, |view, cx| {
+                                            view.apply_http_notes_markdown(
+                                                NoteMarkdownAction::HeadingLevel(level as u8),
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                        .expect("备注标题控件宿主有效");
+                                }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_http_notes_format_group(
+        &self,
+        can_format: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .child(
+                Button::new("http-notes-bold")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("B")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/bold.svg")
+                                    .expect("加粗图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .tooltip("为所选备注文本添加 Markdown 加粗格式 (**文本**)")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(NoteMarkdownAction::Bold, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("http-notes-italic")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("I")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/italic.svg")
+                                    .expect("斜体图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .tooltip("为所选备注文本添加 Markdown 斜体格式 (*文本*)")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(NoteMarkdownAction::Italic, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("http-notes-strikethrough")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("S")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/strikethrough.svg")
+                                    .expect("删除线图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .tooltip("为所选备注文本添加删除线格式 (~~文本~~)")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(
+                            NoteMarkdownAction::Strikethrough,
+                            window,
+                            cx,
+                        )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_http_notes_toolbar_trailing(
+        &self,
+        ready: bool,
+        can_format: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .child(
+                Button::new("http-notes-list")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("List")
+                    .child(gpui_kit::component::Icon::new(IconName::List).size(px(15.)))
+                    .tooltip("将所选备注行格式化为 Markdown 无序列表")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(NoteMarkdownAction::List, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("http-notes-numbered-list")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("Numbered list")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/list-ordered.svg")
+                                    .expect("有序列表图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .tooltip("将所选备注行格式化为 Markdown 有序列表")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(
+                            NoteMarkdownAction::NumberedList,
+                            window,
+                            cx,
+                        )
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
+            .child(
+                Button::new("http-notes-format-link")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(19.))
+                    .min_w(px(19.))
+                    .h(px(19.))
+                    .p_0()
+                    .accessibility_label("Link")
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(
+                                gpui_kit::assets::AllAssets::get("icons/link.svg")
+                                    .expect("链接图标存在")
+                                    .data
+                                    .as_ref(),
+                            )
+                            .size(px(15.)),
+                    )
+                    .tooltip("将所选备注文本格式化为超链接")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_http_notes_markdown(NoteMarkdownAction::Link, window, cx)
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
+            .child(
+                Button::new("http-notes-open-window")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .flex_shrink_0()
+                    .w(px(15.))
+                    .min_w(px(15.))
+                    .h(px(15.))
+                    .p_0()
+                    .accessibility_label("Open in new window")
+                    .child(
+                        gpui_kit::component::Icon::new(IconName::ExternalLink).size(px(15.)),
+                    )
+                    .tooltip("Open in new window")
+                    .disabled(!ready || self.transition.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_http_notes_window(window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_http_notes_body(
+        &self,
+        detached: bool,
+        ready: bool,
+        preview_mode: bool,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let notes = &self.http_notes;
+        div()
+            .flex_1()
+            .min_h_0()
+            .bg(theme::toolbar_surface())
+            .flex()
+            .flex_col()
+            .when_some(error, |this, error| {
+                this.child(
+                    div()
+                        .id("http-notes-error")
+                        .test_support()
+                        .role(gpui_kit::accesskit::Role::Alert)
+                        .aria_label(error.clone())
+                        .px(px(8.))
+                        .max_h(theme::scaled_px(54.))
+                        .overflow_y_scroll()
+                        .text_color(theme::danger_fg())
+                        .child(error)
+                        .child(
+                            button("http-notes-retry", "重试")
+                                .icon(IconName::RefreshCw)
+                                .tooltip("重新提交并同步当前 HTTP 消息备注")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if this.leave_http_notes(window, cx) {
+                                        this.http_notes.error = None;
+                                        this.send_http_notes(true, cx);
+                                        this.select_http_notes(window, cx);
+                                    }
+                                })),
+                        ),
+                )
+            })
+            .child(div().flex_1().min_h_0().bg(theme::toolbar_surface()).child(if ready {
+                if !detached && notes.detached_window.is_some() {
+                    div()
+                        .p(px(10.))
+                        .text_size(px(12.))
+                        .child("当前备注正在独立窗口中编辑。")
+                        .into_any_element()
+                } else if preview_mode {
+                    render_markdown_preview(notes.editor.read(cx).value().as_ref())
+                } else {
+                    Editor::new(&notes.editor)
+                        .readonly(!self.backend_available())
+                        .appearance(true)
+                        .size_full()
+                        .bordered(false)
+                        .rounded(px(0.))
+                        .bg(theme::toolbar_surface())
+                        .aria_label("HTTP 归档 Notes")
+                        .into_any_element()
+                }
+            } else {
+                div()
+                    .p(px(10.))
+                    .child(if notes.reading {
+                        "正在读取备注…"
+                    } else {
+                        "选择一条消息查看备注"
+                    })
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    #[inline(never)]
     fn render_http_notes_sidebar(&self, detached: bool, cx: &mut Context<Self>) -> AnyElement {
         let notes = &self.http_notes;
         let active = notes.active == self.selected_http_notes() && notes.active.is_some();
@@ -391,536 +934,88 @@ impl Workbench {
         let heading_source = notes.editor.read(cx).value();
         let heading_cursor = notes.editor.read(cx).cursor();
         let heading_current = heading_label(heading_source.as_ref(), heading_cursor);
-        let heading_owner = cx.weak_entity();
         let error = notes
             .active
             .and_then(|id| notes.drafts.get(&id))
             .and_then(|draft| draft.error.clone())
             .or_else(|| notes.error.clone());
         let dock_left = self.inspector.dock_left;
-        let inactive_bg: gpui_kit::Hsla =
-            rgb(if theme::is_dark() { 0x35383d } else { 0xdfdfdf }).into();
+        let title_bar = self.render_http_notes_title_bar(detached, dock_left, cx);
+        let toolbar_leading = self.render_http_notes_toolbar_leading(
+            ready,
+            can_format,
+            preview_mode,
+            heading_current,
+            cx,
+        );
+        let toolbar_format = self.render_http_notes_format_group(can_format, cx);
+        let toolbar_trailing = self.render_http_notes_toolbar_trailing(ready, can_format, cx);
+        let body = self.render_http_notes_body(detached, ready, preview_mode, error, cx);
+        let toolbar = div()
+            .id("http-notes-toolbar")
+            .test_support()
+            .w_full()
+            .h(px(38.))
+            .min_h(px(38.))
+            .max_h(px(38.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .flex_nowrap()
+            .gap(px(5.))
+            .px(px(9.))
+            .bg(theme::toolbar_surface())
+            .child(toolbar_leading)
+            .child(toolbar_format)
+            .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
+            .child(toolbar_trailing);
+
         div()
-                        .id("http-notes-sidebar")
-                        .test_support()
-                        .w_full()
-                        .when(!detached, |sidebar| sidebar.w(px(343.)))
-                        .flex_shrink_0()
-                        .h_full()
-                        .bg(theme::toolbar_surface())
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .id("http-notes-title-bar")
-                                .test_support()
-                                .w_full()
-                                .h(px(40.))
-                                .min_h(px(40.))
-                                .max_h(px(40.))
-                                .px(px(10.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .bg(theme::toolbar_surface())
-                                .border_b_1()
-                                .border_color(theme::border())
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .font_weight(gpui_kit::FontWeight::BOLD)
-                                        .text_color(theme::foreground())
-                                        .child("Notes"),
-                                )
-                                .child(div().flex_1())
-                                .when(!detached, |bar| bar.child(
-                                    div()
-                                        .w(px(50.))
-                                        .h(px(19.))
-                                        .flex()
-                                        .items_center()
-                                        .gap_0()
-                                        .child(
-                                            Button::new("http-notes-dock-left")
-                                                .ghost()
-                                                .small()
-                                                .rounded(ButtonRounded::None)
-                                                .w(px(25.))
-                                                .h(px(19.))
-                                                .p_0()
-                                                .bg(if dock_left { rgb(0x26649d).into() } else { inactive_bg })
-                                                .text_color(if dock_left { rgb(0xffffff).into() } else { theme::foreground() })
-                                                .icon(gpui_kit::component::Icon::new(IconName::PanelLeft).size(px(13.)))
-                                                .accessibility_label("Dock on the left")
-                                                .tooltip("Dock on the left")
-                                                .selected(dock_left)
-                                                .toggled(dock_left)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.inspector.dock_left = true;
-                                                    cx.notify();
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("http-notes-dock-right")
-                                                .ghost()
-                                                .small()
-                                                .rounded(ButtonRounded::None)
-                                                .w(px(25.))
-                                                .h(px(19.))
-                                                .p_0()
-                                                .bg(if !dock_left { rgb(0x26649d).into() } else { inactive_bg })
-                                                .text_color(if !dock_left { rgb(0xffffff).into() } else { theme::foreground() })
-                                                .icon(gpui_kit::component::Icon::new(IconName::PanelRight).size(px(13.)))
-                                                .accessibility_label("Dock on the right")
-                                                .tooltip("Dock on the right")
-                                                .selected(!dock_left)
-                                                .toggled(!dock_left)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.inspector.dock_left = false;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                ))
-                                .child(
-                                    Button::new("http-notes-close")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .w(px(18.))
-                                        .h(px(18.))
-                                        .p_0()
-                                        .icon(gpui_kit::component::Icon::new(IconName::Close).size(px(14.)))
-                                        .accessibility_label("关闭备注")
-                                        .tooltip("收起 HTTP 消息备注侧栏并自动保存草稿")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if this.leave_http_notes(window, cx) {
-                                                if detached {
-                                                    window.remove_window();
-                                                    return;
-                                                }
-                                                let notes_focused = this
-                                                    .http_notes
-                                                    .editor
-                                                    .focus_handle(cx)
-                                                    .is_focused(window);
-                                                this.http_notes.open = false;
-                                                if notes_focused {
-                                                    this.focus.focus(window, cx);
-                                                }
-                                                cx.notify();
-                                            }
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .flex_1()
-                                .min_h_0()
-                                .p(px(5.))
-                                .relative()
-                                .bg(theme::toolbar_surface())
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .id("http-notes-toolbar-bottom-rule")
-                                        .test_support()
-                                        .absolute()
-                                        .left_0()
-                                        .right_0()
-                                        .top(px(42.))
-                                        .h(px(1.))
-                                        .bg(theme::control_border()),
-                                )
-                                .child(
-                                    div()
-                                        .id("http-notes-body-frame")
-                                        .test_support()
-                                        .w_full()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .bg(theme::toolbar_surface())
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                            div()
-                                .id("http-notes-toolbar")
-                                .test_support()
-                                .w_full()
-                                .h(px(38.))
-                                .min_h(px(38.))
-                                .max_h(px(38.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .flex_nowrap()
-                                .gap(px(5.))
-                                .px(px(9.))
-                                .bg(theme::toolbar_surface())
-                                .child(
-                                    Button::new("http-notes-preview-toggle")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("T")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/type.svg")
-                                                        .expect("文本图标存在")
-                                                        .data
-                                                        .as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .selected(preview_mode)
-                                        .toggled(preview_mode)
-                                        .tooltip(if preview_mode {
-                                            "切换回 Markdown 源码编辑模式 (Edit as plain text)"
-                                        } else {
-                                            "以富文本排版预览当前 Markdown 备注内容"
-                                        })
-                                        .disabled(!ready)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if !this.http_notes.preview_mode
-                                                && let Err(error) =
-                                                    this.validate_http_notes_composition(window, cx)
-                                            {
-                                                this.http_notes.error = Some(error);
-                                                cx.notify();
-                                                return;
-                                            }
-                                            this.http_notes.preview_mode =
-                                                !this.http_notes.preview_mode;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
-                                .child(
-                                    Button::new("http-notes-heading")
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(56.))
-                                        .min_w(px(56.))
-                                        .h(px(27.))
-                                        .p(px(6.))
-                                        .rounded(ButtonRounded::Small)
-                                        .bg(theme::toolbar_surface())
-                                        .border_1()
-                                        .border_color(theme::control_border())
-                                        .accessibility_label(heading_current)
-                                        .tooltip("设置正文 Aa 或 H1 至 H6 标题级别")
-                                        .disabled(!can_format)
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(13.))
-                                                        .text_color(theme::foreground())
-                                                        .child(heading_current),
-                                                )
-                                                .child(
-                                                    gpui_kit::component::Icon::new(IconName::ChevronDown)
-                                                        .size(px(12.))
-                                                        .text_color(theme::foreground()),
-                                                ),
-                                        )
-                                        .dropdown_menu(move |mut menu, _, _| {
-                                            for (level, label) in ["Aa", "H1", "H2", "H3", "H4", "H5", "H6"].into_iter().enumerate() {
-                                                let owner = heading_owner.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::element(move |_, _| {
-                                                        div()
-                                                            .id(SharedString::from(format!("http-notes-heading-{label}")))
-                                                            .test_support()
-                                                            .role(gpui_kit::accesskit::Role::MenuItem)
-                                                            .aria_label(label)
-                                                            .w_full()
-                                                            .min_h(px(22.))
-                                                            .child(label)
-                                                    })
-                                                    .on_click(move |_, window, cx| {
-                                                        owner.update(cx, |view, cx| {
-                                                            view.apply_http_notes_markdown(NoteMarkdownAction::HeadingLevel(level as u8), window, cx);
-                                                        }).expect("备注标题控件宿主有效");
-                                                    }),
-                                                );
-                                            }
-                                            menu
-                                        }),
-                                )
-                                .child(
-                                    Button::new("http-notes-bold")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("B")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/bold.svg")
-                                                        .expect("加粗图标存在")
-                                                        .data
-                                                        .as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("为所选备注文本添加 Markdown 加粗格式 (**文本**)")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::Bold,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(
-                                    Button::new("http-notes-italic")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("I")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/italic.svg")
-                                                        .expect("斜体图标存在")
-                                                        .data
-                                                        .as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("为所选备注文本添加 Markdown 斜体格式 (*文本*)")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::Italic,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(
-                                    Button::new("http-notes-strikethrough")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("S")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/strikethrough.svg")
-                                                        .expect("删除线图标存在")
-                                                        .data
-                                                        .as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("为所选备注文本添加删除线格式 (~~文本~~)")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::Strikethrough,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
-                                .child(
-                                    Button::new("http-notes-list")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("List")
-                                        .child(
-                                            gpui_kit::component::Icon::new(IconName::List).size(px(15.)),
-                                        )
-                                        .tooltip("将所选备注行格式化为 Markdown 无序列表")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::List,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(
-                                    Button::new("http-notes-numbered-list")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("Numbered list")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/list-ordered.svg")
-                                                        .expect("有序列表图标存在")
-                                                        .data.as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("将所选备注行格式化为 Markdown 有序列表")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::NumberedList,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
-                                .child(
-                                    Button::new("http-notes-format-link")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(19.))
-                                        .min_w(px(19.))
-                                        .h(px(19.))
-                                        .p_0()
-                                        .accessibility_label("Link")
-                                        .child(
-                                            gpui_kit::component::Icon::default()
-                                                .data(
-                                                    gpui_kit::assets::AllAssets::get("icons/link.svg")
-                                                        .expect("链接图标存在")
-                                                        .data.as_ref(),
-                                                )
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("将所选备注文本格式化为超链接")
-                                        .disabled(!can_format)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_http_notes_markdown(
-                                                NoteMarkdownAction::Link,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(div().w(px(1.)).h(px(20.)).flex_shrink_0().bg(theme::control_border()))
-                                .child(
-                                    Button::new("http-notes-open-window")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .flex_shrink_0()
-                                        .w(px(15.))
-                                        .min_w(px(15.))
-                                        .h(px(15.))
-                                        .p_0()
-                                        .accessibility_label("Open in new window")
-                                        .child(
-                                            gpui_kit::component::Icon::new(IconName::ExternalLink)
-                                                .size(px(15.)),
-                                        )
-                                        .tooltip("Open in new window")
-                                        .disabled(!ready || self.transition.is_some())
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_http_notes_window(window, cx);
-                                        })),
-                                ),
-                        )
-                        .when_some(error, |this, error| {
-                            this.child(
-                                div()
-                                    .id("http-notes-error")
-                                    .test_support()
-                                    .role(gpui_kit::accesskit::Role::Alert)
-                                    .aria_label(error.clone())
-                                    .px(px(8.))
-                                    .max_h(theme::scaled_px(54.))
-                                    .overflow_y_scroll()
-                                    .text_color(theme::danger_fg())
-                                    .child(error)
-                                    .child(
-                                        button("http-notes-retry", "重试")
-                                            .icon(IconName::RefreshCw)
-                                            .tooltip("重新提交并同步当前 HTTP 消息备注")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.leave_http_notes(window, cx) {
-                                                    this.http_notes.error = None;
-                                                    this.send_http_notes(true, cx);
-                                                    this.select_http_notes(window, cx);
-                                                }
-                                            })),
-                                    ),
-                            )
-                        })
-                        .child(div().flex_1().min_h_0().bg(theme::toolbar_surface()).child(if ready {
-                            if !detached && notes.detached_window.is_some() {
-                                div()
-                                    .p(px(10.))
-                                    .text_size(px(12.))
-                                    .child("当前备注正在独立窗口中编辑。")
-                                    .into_any_element()
-                            } else if preview_mode {
-                                render_markdown_preview(notes.editor.read(cx).value().as_ref())
-                            } else {
-                                Editor::new(&notes.editor)
-                                    .readonly(!self.backend_available())
-                                    .appearance(true)
-                                    .size_full()
-                                    .bordered(false)
-                                    .rounded(px(0.))
-                                    .bg(theme::toolbar_surface())
-                                    .aria_label("HTTP 归档 Notes")
-                                    .into_any_element()
-                            }
-                        } else {
-                            div()
-                                .p(px(10.))
-                                .child(if notes.reading {
-                                    "正在读取备注…"
-                                } else {
-                                    "选择一条消息查看备注"
-                                })
-                                .into_any_element()
-                        })),
-                        ),
-                        )
+            .id("http-notes-sidebar")
+            .test_support()
+            .w_full()
+            .when(!detached, |sidebar| sidebar.w(px(343.)))
+            .flex_shrink_0()
+            .h_full()
+            .bg(theme::toolbar_surface())
+            .flex()
+            .flex_col()
+            .child(title_bar)
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .p(px(5.))
+                    .relative()
+                    .bg(theme::toolbar_surface())
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("http-notes-toolbar-bottom-rule")
+                            .test_support()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(42.))
+                            .h(px(1.))
+                            .bg(theme::control_border()),
+                    )
+                    .child(
+                        div()
+                            .id("http-notes-body-frame")
+                            .test_support()
+                            .w_full()
+                            .flex_1()
+                            .min_h_0()
+                            .bg(theme::toolbar_surface())
+                            .flex()
+                            .flex_col()
+                            .child(toolbar)
+                            .child(body),
+                    ),
+            )
             .into_any_element()
     }
 }

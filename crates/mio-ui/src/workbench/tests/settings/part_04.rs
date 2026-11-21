@@ -148,7 +148,7 @@ fn proxy_interception_rules_protocol_selects_https_without_condition_and_waits_f
         assert!(!cx.windows().contains(&dialog));
         cx.read(|cx| {
             let view = fixture.view.read(cx);
-            assert_eq!(view.workspace, candidate);
+            assert_eq!(*view.workspace, candidate);
             assert!(view.pending_workspace.is_none());
             assert!(view.pending_proxy_interception.is_none());
         });
@@ -269,6 +269,6 @@ fn proxy_interception_rules_listener_port_selects_last_type_and_saves_latest_reg
         assert!(cx.windows().contains(&dialog));
         acknowledge(&fixture, candidate.clone(), cx);
         assert!(!cx.windows().contains(&dialog));
-        cx.read(|cx| assert_eq!(fixture.view.read(cx).workspace, candidate));
+        cx.read(|cx| assert_eq!(*fixture.view.read(cx).workspace, candidate));
     }
 }

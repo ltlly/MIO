@@ -1303,12 +1303,143 @@ impl Settings {
         }
     }
 
-    pub(in crate::workbench) fn render_connections(
+    #[inline(never)]
+    fn render_connections_upstream_editor(
         &self,
-        _: &mut Window,
+        enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let enabled = self.state.enabled;
+        let selected_auth = self
+            .connections
+            .rule_auth
+            .read(cx)
+            .selected_value()
+            .copied()
+            .unwrap_or("None");
+        let auth = selected_auth != "None";
+        let is_ntlm = matches!(selected_auth, "NTLM v1" | "NTLM v2");
+        let mut editor = div()
+            .ml(px(30.))
+            .p(px(10.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::background())
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(connection_field(
+                "代理协议",
+                Select::new(&self.connections.rule_protocol)
+                    .id("settings-upstream-protocol")
+                    .small()
+                    .w(px(280.))
+                    .disabled(!enabled),
+            ))
+            .child(connection_field(
+                "认证类型",
+                Select::new(&self.connections.rule_auth)
+                    .id("settings-upstream-auth-type")
+                    .small()
+                    .w(px(280.))
+                    .disabled(!enabled),
+            ));
+        for (id, label, input, field_enabled) in [
+            (
+                "settings-upstream-destination",
+                "Destination host",
+                &self.connections.rule_destination,
+                true,
+            ),
+            (
+                "settings-upstream-rule-host",
+                "Proxy host",
+                &self.connections.rule_host,
+                true,
+            ),
+            (
+                "settings-upstream-rule-port",
+                "Proxy port",
+                &self.connections.rule_port,
+                true,
+            ),
+            (
+                "settings-upstream-rule-username",
+                "Username",
+                &self.connections.rule_username,
+                auth,
+            ),
+            (
+                "settings-upstream-rule-password",
+                "Password",
+                &self.connections.rule_password,
+                auth,
+            ),
+            (
+                "settings-upstream-rule-domain",
+                "Domain",
+                &self.connections.rule_domain,
+                auth || is_ntlm,
+            ),
+            (
+                "settings-upstream-rule-workstation",
+                "Workstation",
+                &self.connections.rule_workstation,
+                auth || is_ntlm,
+            ),
+            (
+                "settings-upstream-rule-description",
+                "Description",
+                &self.connections.rule_description,
+                true,
+            ),
+        ] {
+            editor = editor.child(connection_field(
+                label,
+                Input::new(input)
+                    .id(id)
+                    .aria_label(label)
+                    .small()
+                    .disabled(!enabled || !field_enabled),
+            ));
+        }
+        editor
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-upstream-rule-save",
+                            "保存",
+                            !enabled,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_upstream_rule(window, cx)
+                        })),
+                    )
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-upstream-rule-cancel",
+                            "取消",
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.connections.rule_editor_visible = false;
+                            this.connections.editing_rule = None;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_connections_upstream_section(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let rules = self.state.upstream_proxy.effective_rules();
         let selected = self
             .connections
@@ -1370,9 +1501,7 @@ impl Settings {
         }
 
         let upstream_override = self.state.upstream_proxy.override_project_only;
-        let mut body = div()
-            .px(px(22.))
-            .py(px(14.))
+        let mut section = div()
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -1399,153 +1528,152 @@ impl Settings {
                 144.,
                 "Upstream proxy servers",
             )));
-
         if self.connections.rule_editor_visible {
-            let selected_auth = self
-                .connections
-                .rule_auth
-                .read(cx)
-                .selected_value()
-                .copied()
-                .unwrap_or("None");
-            let auth = selected_auth != "None";
-            let is_ntlm = matches!(selected_auth, "NTLM v1" | "NTLM v2");
-            let mut editor = div()
-                .ml(px(30.))
-                .p(px(10.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::background())
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(connection_field(
-                    "代理协议",
-                    Select::new(&self.connections.rule_protocol)
-                        .id("settings-upstream-protocol")
-                        .small()
-                        .w(px(280.))
-                        .disabled(!enabled),
-                ))
-                .child(connection_field(
-                    "认证类型",
-                    Select::new(&self.connections.rule_auth)
-                        .id("settings-upstream-auth-type")
-                        .small()
-                        .w(px(280.))
-                        .disabled(!enabled),
-                ));
-            for (id, label, input, field_enabled) in [
-                (
-                    "settings-upstream-destination",
-                    "Destination host",
-                    &self.connections.rule_destination,
-                    true,
-                ),
-                (
-                    "settings-upstream-rule-host",
-                    "Proxy host",
-                    &self.connections.rule_host,
-                    true,
-                ),
-                (
-                    "settings-upstream-rule-port",
-                    "Proxy port",
-                    &self.connections.rule_port,
-                    true,
-                ),
-                (
-                    "settings-upstream-rule-username",
-                    "Username",
-                    &self.connections.rule_username,
-                    auth,
-                ),
-                (
-                    "settings-upstream-rule-password",
-                    "Password",
-                    &self.connections.rule_password,
-                    auth,
-                ),
-                (
-                    "settings-upstream-rule-domain",
-                    "Domain",
-                    &self.connections.rule_domain,
-                    auth || is_ntlm,
-                ),
-                (
-                    "settings-upstream-rule-workstation",
-                    "Workstation",
-                    &self.connections.rule_workstation,
-                    auth || is_ntlm,
-                ),
-                (
-                    "settings-upstream-rule-description",
-                    "Description",
-                    &self.connections.rule_description,
-                    true,
-                ),
-            ] {
-                editor = editor.child(connection_field(
-                    label,
-                    Input::new(input)
-                        .id(id)
-                        .aria_label(label)
-                        .small()
-                        .disabled(!enabled || !field_enabled),
-                ));
-            }
-            body = body.child(
-                editor.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            listeners_tls::mio_action_button(
-                                "settings-upstream-rule-save",
-                                "保存",
-                                !enabled,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_upstream_rule(window, cx)
-                            })),
-                        )
-                        .child(
-                            listeners_tls::mio_action_button(
-                                "settings-upstream-rule-cancel",
-                                "取消",
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.connections.rule_editor_visible = false;
-                                this.connections.editing_rule = None;
-                                cx.notify();
-                            })),
-                        ),
-                ),
-            );
+            section = section.child(self.render_connections_upstream_editor(enabled, cx));
         }
+        section.into_any_element()
+    }
 
-        // Section 2: SOCKS proxy
-        let socks = self.state.upstream_proxy.effective_socks();
-        let socks_summary = if !socks.host.trim().is_empty() && socks.port > 0 {
-            format!("已配置代理 {}:{}。", socks.host, socks.port)
-        } else {
-            "未配置代理。".into()
-        };
-
-        let mut bypass_actions = div()
-            .w(theme::scaled_px(88.).max(px(84.)))
-            .flex_shrink_0()
+    #[inline(never)]
+    fn render_connections_socks_editor(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        let dns_owner = cx.entity();
+        div()
+            .mt(px(2.))
+            .p(px(10.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::background())
             .flex()
             .flex_col()
-            .gap(px(6.));
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(connection_compact_field(
+                        "SOCKS 代理主机",
+                        120.,
+                        210.,
+                        Input::new(&self.upstream_host)
+                            .id("settings-upstream-host")
+                            .aria_label("SOCKS proxy host")
+                            .small()
+                            .disabled(!enabled),
+                    ))
+                    .child(connection_compact_field(
+                        "SOCKS 代理端口",
+                        120.,
+                        110.,
+                        Input::new(&self.upstream_port)
+                            .id("settings-upstream-port")
+                            .aria_label("SOCKS proxy port")
+                            .small()
+                            .disabled(!enabled),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(connection_compact_field(
+                        "用户名",
+                        120.,
+                        210.,
+                        Input::new(&self.upstream_username)
+                            .id("settings-upstream-username")
+                            .aria_label("Username")
+                            .small()
+                            .disabled(!enabled),
+                    ))
+                    .child(connection_compact_field(
+                        "密码",
+                        120.,
+                        210.,
+                        Input::new(&self.upstream_password)
+                            .id("settings-upstream-password")
+                            .aria_label("Password")
+                            .small()
+                            .disabled(!enabled),
+                    )),
+            )
+            .child(
+                listeners_tls::indexed_checkbox(
+                    "settings-socks-dns",
+                    "通过 SOCKS 代理执行 DNS 解析",
+                    self.connections.socks_dns_remote,
+                    enabled,
+                )
+                .on_change(move |value, _, _, cx| {
+                    dns_owner.update(cx, |this, cx| {
+                        this.connections.socks_dns_remote = value == CheckboxState::Checked;
+                        cx.notify();
+                    })
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-upstream-apply",
+                            "保存",
+                            !enabled,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_socks(window, cx)
+                        })),
+                    )
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-upstream-reset",
+                            "重置",
+                            !enabled,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let mut next = this.state.upstream_proxy.clone();
+                            next.socks = SocksProxySettings::default();
+                            next.protocol = UpstreamProxyProtocol::Direct;
+                            next.sync_legacy_summary();
+                            this.commit_connections(next.clone(), cx);
+                            this.restore_upstream_draft(&next, window, cx);
+                            this.connections.socks_editor_visible = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-socks-close",
+                            "收起",
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.connections.socks_editor_visible = false;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_connections_socks_bypass(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
         let has_bypass_sel = self
             .connections
             .selected_socks_bypass
             .is_some_and(|idx| idx < self.connections.socks_bypass_hosts.len());
         let has_bypass_items = !self.connections.socks_bypass_hosts.is_empty();
-        bypass_actions = bypass_actions
+        let bypass_actions = div()
+            .w(theme::scaled_px(88.).max(px(84.)))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
             .child(
                 listeners_tls::mio_action_button("settings-socks-bypass-paste", "粘贴", !enabled)
                     .w_full()
@@ -1632,159 +1760,16 @@ impl Settings {
             );
         }
 
-        let mut socks_details = div()
-            .pl(px(32.))
+        let bypass_empty = self
+            .connections
+            .socks_bypass_input
+            .read(cx)
+            .value()
+            .is_empty();
+        div()
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(
-                div()
-                    .id("settings-socks-summary")
-                    .test_support()
-                    .aria_label(socks_summary.clone())
-                    .text_color(theme::foreground())
-                    .child(socks_summary),
-            )
-            .child(
-                div().flex().child(
-                    listeners_tls::mio_action_button("settings-socks-configure", "配置", !enabled)
-                        .w(theme::scaled_px(96.).max(px(92.)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.connections.socks_editor_visible =
-                                !this.connections.socks_editor_visible;
-                            cx.notify();
-                        })),
-                ),
-            );
-
-        if self.connections.socks_editor_visible {
-            let dns_owner = cx.entity();
-            socks_details = socks_details.child(
-                div()
-                    .mt(px(2.))
-                    .p(px(10.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::background())
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(14.))
-                            .child(connection_compact_field(
-                                "SOCKS 代理主机",
-                                120.,
-                                210.,
-                                Input::new(&self.upstream_host)
-                                    .id("settings-upstream-host")
-                                    .aria_label("SOCKS proxy host")
-                                    .small()
-                                    .disabled(!enabled),
-                            ))
-                            .child(connection_compact_field(
-                                "SOCKS 代理端口",
-                                120.,
-                                110.,
-                                Input::new(&self.upstream_port)
-                                    .id("settings-upstream-port")
-                                    .aria_label("SOCKS proxy port")
-                                    .small()
-                                    .disabled(!enabled),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(14.))
-                            .child(connection_compact_field(
-                                "用户名",
-                                120.,
-                                210.,
-                                Input::new(&self.upstream_username)
-                                    .id("settings-upstream-username")
-                                    .aria_label("Username")
-                                    .small()
-                                    .disabled(!enabled),
-                            ))
-                            .child(connection_compact_field(
-                                "密码",
-                                120.,
-                                210.,
-                                Input::new(&self.upstream_password)
-                                    .id("settings-upstream-password")
-                                    .aria_label("Password")
-                                    .small()
-                                    .disabled(!enabled),
-                            )),
-                    )
-                    .child(
-                        listeners_tls::indexed_checkbox(
-                            "settings-socks-dns",
-                            "通过 SOCKS 代理执行 DNS 解析",
-                            self.connections.socks_dns_remote,
-                            enabled,
-                        )
-                        .on_change(move |value, _, _, cx| {
-                            dns_owner.update(cx, |this, cx| {
-                                this.connections.socks_dns_remote = value == CheckboxState::Checked;
-                                cx.notify();
-                            })
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                listeners_tls::mio_action_button(
-                                    "settings-upstream-apply",
-                                    "保存",
-                                    !enabled,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.save_socks(window, cx)
-                                })),
-                            )
-                            .child(
-                                listeners_tls::mio_action_button(
-                                    "settings-upstream-reset",
-                                    "重置",
-                                    !enabled,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let mut next = this.state.upstream_proxy.clone();
-                                    next.socks = SocksProxySettings::default();
-                                    next.protocol = UpstreamProxyProtocol::Direct;
-                                    next.sync_legacy_summary();
-                                    this.commit_connections(next.clone(), cx);
-                                    this.restore_upstream_draft(&next, window, cx);
-                                    this.connections.socks_editor_visible = false;
-                                    cx.notify();
-                                })),
-                            )
-                            .child(
-                                listeners_tls::mio_action_button(
-                                    "settings-socks-close",
-                                    "收起",
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.connections.socks_editor_visible = false;
-                                    cx.notify();
-                                })),
-                            ),
-                    ),
-            );
-        }
-
-        socks_details = socks_details
             .child(
                 div()
                     .mt(px(4.))
@@ -1816,13 +1801,7 @@ impl Settings {
                             this.add_socks_bypass_host(window, cx)
                         })),
                     )
-                    .child({
-                        let bypass_empty = self
-                            .connections
-                            .socks_bypass_input
-                            .read(cx)
-                            .value()
-                            .is_empty();
+                    .child(
                         div()
                             .relative()
                             .flex_1()
@@ -1851,37 +1830,59 @@ impl Settings {
                                         }))
                                         .child("输入新条目"),
                                 )
-                            })
-                    }),
-            );
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
 
-        let socks_section = div()
-            .pl(px(30.))
+    #[inline(never)]
+    fn render_connections_socks_section(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let socks = self.state.upstream_proxy.effective_socks();
+        let socks_summary = if !socks.host.trim().is_empty() && socks.port > 0 {
+            format!("已配置代理 {}:{}。", socks.host, socks.port)
+        } else {
+            "未配置代理。".into()
+        };
+        let socks_override = socks.override_project_only;
+
+        let mut socks_details = div()
+            .pl(px(32.))
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(sleek_mio_switch(
-                "settings-socks-enabled",
-                "使用 SOCKS 代理",
-                self.connections.socks_enabled,
-                enabled,
-                cx.listener(|this, checked: &bool, window, cx| {
-                    this.connections.socks_enabled = *checked;
-                    let configured = this.state.upstream_proxy.effective_socks();
-                    if *checked && configured.host.trim().is_empty() {
-                        this.connections.socks_editor_visible = true;
-                        cx.notify();
-                    } else if !configured.host.trim().is_empty() && configured.port > 0 {
-                        this.save_socks(window, cx);
-                    } else {
-                        cx.notify();
-                    }
-                }),
-            ))
-            .child(socks_details);
+            .child(
+                div()
+                    .id("settings-socks-summary")
+                    .test_support()
+                    .aria_label(socks_summary.clone())
+                    .text_color(theme::foreground())
+                    .child(socks_summary),
+            )
+            .child(
+                div().flex().child(
+                    listeners_tls::mio_action_button("settings-socks-configure", "配置", !enabled)
+                        .w(theme::scaled_px(96.).max(px(92.)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.connections.socks_editor_visible =
+                                !this.connections.socks_editor_visible;
+                            cx.notify();
+                        })),
+                ),
+            );
+        if self.connections.socks_editor_visible {
+            socks_details = socks_details.child(self.render_connections_socks_editor(enabled, cx));
+        }
+        socks_details = socks_details.child(self.render_connections_socks_bypass(enabled, cx));
 
-        let socks_override = socks.override_project_only;
-        body = body
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
             .child(connection_dual_section_header(
                 "settings-socks-heading",
                 "SOCKS 代理",
@@ -1903,7 +1904,41 @@ impl Settings {
                     this.commit_connections(next, cx);
                 }),
             ))
-            .child(socks_section)
+            .child(
+                div()
+                    .pl(px(30.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(sleek_mio_switch(
+                        "settings-socks-enabled",
+                        "使用 SOCKS 代理",
+                        self.connections.socks_enabled,
+                        enabled,
+                        cx.listener(|this, checked: &bool, window, cx| {
+                            this.connections.socks_enabled = *checked;
+                            let configured = this.state.upstream_proxy.effective_socks();
+                            if *checked && configured.host.trim().is_empty() {
+                                this.connections.socks_editor_visible = true;
+                                cx.notify();
+                            } else if !configured.host.trim().is_empty() && configured.port > 0 {
+                                this.save_socks(window, cx);
+                            } else {
+                                cx.notify();
+                            }
+                        }),
+                    ))
+                    .child(socks_details),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_connections_timeouts_section(&self, enabled: bool) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
             .child(connection_project_section_header(
                 "settings-timeouts-heading",
                 "超时",
@@ -1935,9 +1970,16 @@ impl Settings {
                             .small()
                             .disabled(!enabled),
                     )),
-            );
+            )
+            .into_any_element()
+    }
 
-        // Section 4: Hostname resolution
+    #[inline(never)]
+    fn render_connections_hostname_section(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut hostname_actions = div()
             .w(theme::scaled_px(88.).max(px(84.)))
             .flex_shrink_0()
@@ -1969,7 +2011,10 @@ impl Settings {
             );
         }
 
-        body = body
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
             .child(connection_project_section_header(
                 "settings-hostname-heading",
                 "主机名解析",
@@ -1983,7 +2028,7 @@ impl Settings {
             )));
 
         if self.connections.dns_editor_visible {
-            body = body.child(
+            section = section.child(
                 div()
                     .ml(px(30.))
                     .p(px(10.))
@@ -2038,7 +2083,109 @@ impl Settings {
             );
         }
 
-        // Section 5: Platform authentication
+        section.into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_connections_platform_auth_editor(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut plat_editor = div()
+            .ml(px(30.))
+            .p(px(10.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::background())
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(connection_field(
+                "Destination host",
+                Input::new(&self.connections.platform_destination)
+                    .id("settings-platform-auth-destination")
+                    .aria_label("Destination host")
+                    .small()
+                    .disabled(!enabled),
+            ))
+            .child(connection_field(
+                "Auth type",
+                Select::new(&self.connections.platform_auth_type)
+                    .id("settings-platform-auth-type")
+                    .small()
+                    .w(px(280.))
+                    .disabled(!enabled),
+            ));
+        for (id, label, input) in [
+            (
+                "settings-platform-auth-username",
+                "Username",
+                &self.connections.platform_username,
+            ),
+            (
+                "settings-platform-auth-password",
+                "Password",
+                &self.connections.platform_password,
+            ),
+            (
+                "settings-platform-auth-domain",
+                "Domain",
+                &self.connections.platform_domain,
+            ),
+            (
+                "settings-platform-auth-hostname",
+                "Hostname",
+                &self.connections.platform_hostname,
+            ),
+        ] {
+            plat_editor = plat_editor.child(connection_field(
+                label,
+                Input::new(input)
+                    .id(id)
+                    .aria_label(label)
+                    .small()
+                    .disabled(!enabled),
+            ));
+        }
+        plat_editor
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-platform-auth-save",
+                            "保存",
+                            !enabled,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_platform_auth_rule(window, cx)
+                        })),
+                    )
+                    .child(
+                        listeners_tls::mio_action_button(
+                            "settings-platform-auth-cancel",
+                            "取消",
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.connections.platform_editor_visible = false;
+                            this.connections.editing_platform_auth = None;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_connections_platform_auth_section(
+        &self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let plat_rules = self.state.upstream_proxy.platform_auth_rules();
         let plat_selected = self
             .connections
@@ -2106,7 +2253,10 @@ impl Settings {
             .platform_auth_override_project_only();
         let plat_enabled = self.state.upstream_proxy.platform_auth_enabled();
         let plat_prompt = self.state.upstream_proxy.platform_auth_prompt_on_failure();
-        body = body
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
             .child(connection_dual_section_header(
                 "settings-platform-auth-heading",
                 "平台认证",
@@ -2161,115 +2311,51 @@ impl Settings {
             );
 
         if self.connections.platform_editor_visible {
-            let mut plat_editor = div()
-                .ml(px(30.))
-                .p(px(10.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::background())
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(connection_field(
-                    "Destination host",
-                    Input::new(&self.connections.platform_destination)
-                        .id("settings-platform-auth-destination")
-                        .aria_label("Destination host")
-                        .small()
-                        .disabled(!enabled),
-                ))
-                .child(connection_field(
-                    "Auth type",
-                    Select::new(&self.connections.platform_auth_type)
-                        .id("settings-platform-auth-type")
-                        .small()
-                        .w(px(280.))
-                        .disabled(!enabled),
-                ));
-            for (id, label, input) in [
-                (
-                    "settings-platform-auth-username",
-                    "Username",
-                    &self.connections.platform_username,
-                ),
-                (
-                    "settings-platform-auth-password",
-                    "Password",
-                    &self.connections.platform_password,
-                ),
-                (
-                    "settings-platform-auth-domain",
-                    "Domain",
-                    &self.connections.platform_domain,
-                ),
-                (
-                    "settings-platform-auth-hostname",
-                    "Hostname",
-                    &self.connections.platform_hostname,
-                ),
-            ] {
-                plat_editor = plat_editor.child(connection_field(
-                    label,
-                    Input::new(input)
-                        .id(id)
-                        .aria_label(label)
-                        .small()
-                        .disabled(!enabled),
-                ));
-            }
-            body = body.child(
-                plat_editor.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            listeners_tls::mio_action_button(
-                                "settings-platform-auth-save",
-                                "保存",
-                                !enabled,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_platform_auth_rule(window, cx)
-                            })),
-                        )
-                        .child(
-                            listeners_tls::mio_action_button(
-                                "settings-platform-auth-cancel",
-                                "取消",
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.connections.platform_editor_visible = false;
-                                this.connections.editing_platform_auth = None;
-                                cx.notify();
-                            })),
-                        ),
-                ),
-            );
+            section = section.child(self.render_connections_platform_auth_editor(enabled, cx));
         }
 
-        let content = body.when_some(
-            self.connections
-                .error
-                .clone()
-                .or_else(|| self.state.error.clone()),
-            |this, error| {
-                this.child(
-                    div()
-                        .id("settings-upstream-error")
-                        .test_support()
-                        .role(Role::Alert)
-                        .aria_label(error.clone())
-                        .ml(px(30.))
-                        .p(px(8.))
-                        .rounded(px(4.))
-                        .bg(theme::danger_bg())
-                        .text_color(theme::danger_fg())
-                        .child(error),
-                )
-            },
-        );
+        section.into_any_element()
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_connections(
+        &self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled = self.state.enabled;
+        let content = div()
+            .px(px(22.))
+            .py(px(14.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(self.render_connections_upstream_section(enabled, cx))
+            .child(self.render_connections_socks_section(enabled, cx))
+            .child(self.render_connections_timeouts_section(enabled))
+            .child(self.render_connections_hostname_section(enabled, cx))
+            .child(self.render_connections_platform_auth_section(enabled, cx))
+            .when_some(
+                self.connections
+                    .error
+                    .clone()
+                    .or_else(|| self.state.error.clone()),
+                |this, error| {
+                    this.child(
+                        div()
+                            .id("settings-upstream-error")
+                            .test_support()
+                            .role(Role::Alert)
+                            .aria_label(error.clone())
+                            .ml(px(30.))
+                            .p(px(8.))
+                            .rounded(px(4.))
+                            .bg(theme::danger_bg())
+                            .text_color(theme::danger_fg())
+                            .child(error),
+                    )
+                },
+            );
         settings_scrollable_pane("settings-connections-page", &self.content_scroll, content)
             .into_any_element()
     }

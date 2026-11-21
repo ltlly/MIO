@@ -52,7 +52,7 @@ pub(super) fn intruder_fixture(
 ) -> Fixture {
     let mut fixture = fixture(cx, vec![tab("Repeater")], capacity);
     drain(&mut fixture.commands);
-    let mut workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     workspace.intruder = IntruderWorkspace {
         active: attacks.first().map(|tab| tab.id),
         tabs: attacks,

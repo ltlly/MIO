@@ -315,7 +315,7 @@ impl Workbench {
         let created = path.is_some() && self.ext_import.created_path() == path;
         let result = created.then(|| self.ext_import.result.take()).flatten();
         // Only the matching native panel callback releases its token.
-        self.ext_import = ExtImport {
+        *self.ext_import = ExtImport {
             visible: created,
             picker: self.ext_import.picker,
             result,

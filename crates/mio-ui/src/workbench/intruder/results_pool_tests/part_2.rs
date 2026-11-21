@@ -137,7 +137,7 @@ fn project_change_disconnect_and_owner_drop_cancel_pending_pool_admission(cx: &m
                 generation: fixture.project.generation + 1,
                 ..fixture.project
             };
-            let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+            let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
             emit(
                 &fixture,
                 Event::ProjectOpened {

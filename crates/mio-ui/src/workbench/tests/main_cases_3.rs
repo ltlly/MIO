@@ -87,7 +87,7 @@ fn project_save_status_waits_for_all_acks_and_preserves_network_status(cx: &mut 
         window.render_frame(cx);
         let view = fixture.view.read(cx);
         assert!(view.error.is_none());
-        assert_eq!(view.workspace, stored);
+        assert_eq!(*view.workspace, stored);
         assert_eq!(view.status, "Proxy 正在监听 127.0.0.1:9002");
         let status = rendered_status(window);
         assert!(status.contains("项目保存失败") && !status.contains("项目已保存"));
@@ -120,7 +120,7 @@ fn project_save_status_waits_for_all_acks_and_preserves_network_status(cx: &mut 
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, stored);
+        assert_eq!(*view.workspace, stored);
         assert_eq!(view.status, "Proxy 正在监听 127.0.0.1:9002");
         assert!(view.pending_sends.is_empty() && view.sending.is_empty());
         let status = rendered_status(window);
@@ -273,7 +273,7 @@ fn saved_composition_keeps_unsaved_status(cx: &mut TestAppContext, target_input:
         assert!(!hidden.focus_handle(cx).is_focused(window));
         let view = fixture.view.read(cx);
         assert!(view.error.is_none());
-        assert_eq!(view.workspace, stored);
+        assert_eq!(*view.workspace, stored);
         assert!(view.pending_workspace.is_none() && view.pending_project_save.is_none());
         assert!(view.pending_sends.is_empty() && view.sending.is_empty());
         for (stage, status) in [

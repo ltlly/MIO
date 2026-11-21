@@ -11,7 +11,7 @@ fn proxy_message_unpack_rejection_preserves_values_retries_and_backend_disconnec
             view.project_path = Some(PathBuf::from("/tmp/mio-proxy-unpack-retry.mio"));
         })
     });
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_rule_click(settings, "proxy-unpack-requests", cx);
     let rejected = saved(&mut fixture.commands);
     fixture
@@ -173,7 +173,7 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
     cx: &mut TestAppContext,
 ) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let response = original.proxy_interception.response.rules[2].id;
     proxy_rule_click(
         settings,
@@ -314,13 +314,13 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
 #[gpui_kit::test]
 fn proxy_interception_rules_add_edit_cancel_and_confirmed_project_save(cx: &mut TestAppContext) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_rule_click(settings, "proxy-request-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
     proxy_rule_condition(dialog, "^cancelled\\.invalid$", cx);
     proxy_rule_click(dialog, "proxy-rule-editor-cancel", cx);
     assert!(drain(&mut fixture.commands).is_empty());
-    cx.read(|cx| assert_eq!(fixture.view.read(cx).workspace, original));
+    cx.read(|cx| assert_eq!(*fixture.view.read(cx).workspace, original));
 
     proxy_rule_click(settings, "proxy-request-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
@@ -381,7 +381,7 @@ fn proxy_interception_rules_cas_rejection_preserves_input_and_retries_same_rule_
     cx: &mut TestAppContext,
 ) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_rule_click(settings, "proxy-request-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
     proxy_rule_condition(dialog, "^retry-kept$", cx);

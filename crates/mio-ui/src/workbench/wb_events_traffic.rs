@@ -182,7 +182,7 @@ impl Workbench {
                         window,
                         cx,
                     );
-                    self.extra_tools.logger_loaded_detail = Some((*record, *original));
+                    self.extra_tools.logger_loaded_detail = Some(Box::new((*record, *original)));
                 }
                 self.advance_logger_batch_op(window, cx);
             }

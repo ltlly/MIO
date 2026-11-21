@@ -780,7 +780,7 @@ impl Workbench {
         let detail = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(record, _)| record.summary.id == flow_id);
         let url = detail
             .map(|(record, _)| record.request.url.clone())
@@ -839,7 +839,7 @@ impl Workbench {
         let url = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(r, _)| r.summary.id == flow_id)
             .map(|(r, _)| r.request.url.clone())
             .or_else(|| self.selected_logger_summary().map(|s| s.url))
@@ -906,7 +906,7 @@ impl Workbench {
         let url = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(r, _)| r.summary.id == flow_id)
             .map(|(r, _)| r.request.url.clone())
             .or_else(|| self.selected_logger_summary().map(|s| s.url))
@@ -943,7 +943,7 @@ impl Workbench {
         let url = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(r, _)| r.summary.id == flow_id)
             .map(|(r, _)| r.request.url.clone())
             .or_else(|| self.selected_logger_summary().map(|s| s.url))
@@ -979,7 +979,7 @@ impl Workbench {
         let (url, raw_request) = if let Some((record, _)) = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(r, _)| r.summary.id == flow_id)
         {
             (record.request.url.clone(), request_to_raw(&record.request))
@@ -1100,7 +1100,7 @@ impl Workbench {
         let Some((record, _)) = self
             .extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(r, _)| r.summary.id == flow_id)
             .cloned()
         else {
@@ -1695,7 +1695,7 @@ impl Workbench {
             && self
                 .extra_tools
                 .logger_loaded_detail
-                .as_ref()
+                .as_deref()
                 .is_some_and(|(r, _)| r.summary.id == ids[0])
         {
             self.copy_draft_to_repeater(window, cx);
@@ -1720,7 +1720,7 @@ impl Workbench {
             && self
                 .extra_tools
                 .logger_loaded_detail
-                .as_ref()
+                .as_deref()
                 .is_some_and(|(r, _)| r.summary.id == ids[0])
         {
             self.open_in_intruder(window, cx);
@@ -1737,7 +1737,7 @@ impl Workbench {
     fn cached_logger_flow_record(&self, flow_id: FlowId) -> Option<FlowRecord> {
         self.extra_tools
             .logger_loaded_detail
-            .as_ref()
+            .as_deref()
             .filter(|(rec, _)| rec.summary.id == flow_id)
             .map(|(rec, _)| rec.clone())
             .or_else(|| {
@@ -2285,7 +2285,7 @@ pub(super) fn logger_row_menu(
                 workbench
                     .extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .is_some_and(|(record, _)| record.summary.id == sel_id)
             });
         let findings = workbench.existing_audit_finding_ids();

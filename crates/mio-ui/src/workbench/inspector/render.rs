@@ -118,6 +118,167 @@ impl Workbench {
     }
 
     #[inline(never)]
+    fn render_repeater_notes_toolbar(
+        &self,
+        can_format: bool,
+        preview_mode: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        toolbar()
+            .flex_nowrap()
+            .gap(px(3.))
+            .px(px(6.))
+            .child(
+                gpui_kit::component::Icon::new(IconName::FileText)
+                    .size(theme::scaled_px(13.))
+                    .text_color(theme::accent()),
+            )
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .mr(px(2.))
+                    .child("Notes"),
+            )
+            .child(
+                Button::new("repeater-notes-bold")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(24.))
+                    .px(px(6.))
+                    .label("B")
+                    .tooltip("为所选标签备注添加 Markdown 加粗格式 (**文本**)")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_repeater_notes_markdown(NoteMarkdownAction::Bold, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("repeater-notes-italic")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(24.))
+                    .px(px(6.))
+                    .label("I")
+                    .tooltip("为所选标签备注添加 Markdown 斜体格式 (*文本*)")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_repeater_notes_markdown(NoteMarkdownAction::Italic, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("repeater-notes-code")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(24.))
+                    .h(theme::scaled_px(24.))
+                    .icon(IconName::Code)
+                    .accessibility_label("Code")
+                    .tooltip("将所选标签备注包裹为行内代码或代码块")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_repeater_notes_markdown(NoteMarkdownAction::Code, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("repeater-notes-list")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(24.))
+                    .h(theme::scaled_px(24.))
+                    .icon(IconName::List)
+                    .accessibility_label("List")
+                    .tooltip("将所选标签备注行格式化为 Markdown 无序列表")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_repeater_notes_markdown(NoteMarkdownAction::List, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("repeater-notes-heading")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(24.))
+                    .px(px(6.))
+                    .label("H")
+                    .tooltip("将所选标签备注行格式化为 Markdown 标题")
+                    .disabled(!can_format)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_repeater_notes_markdown(NoteMarkdownAction::Heading, window, cx)
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("repeater-notes-preview-toggle")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(24.))
+                    .px(px(6.))
+                    .icon(if preview_mode {
+                        IconName::Pencil
+                    } else {
+                        IconName::Eye
+                    })
+                    .label(if preview_mode { "编辑" } else { "预览" })
+                    .selected(preview_mode)
+                    .tooltip(if preview_mode {
+                        "切换回 Markdown 源码编辑模式"
+                    } else {
+                        "以富文本排版预览当前工作标签 Markdown 备注"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if !this.inspector.tab_notes_preview
+                            && let Err(err) =
+                                editing::snapshot(&this.inspector.tab_notes_editor, window, cx)
+                        {
+                            this.inspector.tab_notes_error = Some(err.to_owned());
+                            cx.notify();
+                            return;
+                        }
+                        this.inspector.tab_notes_preview = !this.inspector.tab_notes_preview;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("repeater-notes-close")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(24.))
+                    .h(theme::scaled_px(24.))
+                    .icon(IconName::Close)
+                    .accessibility_label("关闭标签备注")
+                    .tooltip("收起当前 Repeater 标签备注侧栏并自动保存")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Err(err) =
+                            editing::snapshot(&this.inspector.tab_notes_editor, window, cx)
+                        {
+                            this.inspector.tab_notes_error = Some(err.to_owned());
+                            this.fail(err, cx);
+                            return;
+                        }
+                        this.commit_active_repeater_tab_note(window, cx);
+                        let focused = this
+                            .inspector
+                            .tab_notes_editor
+                            .focus_handle(cx)
+                            .is_focused(window);
+                        this.inspector.tab_notes_open = false;
+                        if focused {
+                            this.focus.focus(window, cx);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
     fn render_repeater_notes_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let preview_mode = self.inspector.tab_notes_preview;
         let editable = self.project.is_some() && self.transition.is_none();
@@ -135,179 +296,7 @@ impl Workbench {
             .bg(theme::surface())
             .flex()
             .flex_col()
-            .child(
-                toolbar()
-                    .flex_nowrap()
-                    .gap(px(3.))
-                    .px(px(6.))
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::FileText)
-                            .size(theme::scaled_px(13.))
-                            .text_color(theme::accent()),
-                    )
-                    .child(
-                        div()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .mr(px(2.))
-                            .child("Notes"),
-                    )
-                    .child(
-                        Button::new("repeater-notes-bold")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(24.))
-                            .px(px(6.))
-                            .label("B")
-                            .tooltip("为所选标签备注添加 Markdown 加粗格式 (**文本**)")
-                            .disabled(!can_format)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_repeater_notes_markdown(
-                                    NoteMarkdownAction::Bold,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-notes-italic")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(24.))
-                            .px(px(6.))
-                            .label("I")
-                            .tooltip("为所选标签备注添加 Markdown 斜体格式 (*文本*)")
-                            .disabled(!can_format)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_repeater_notes_markdown(
-                                    NoteMarkdownAction::Italic,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-notes-code")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(24.))
-                            .h(theme::scaled_px(24.))
-                            .icon(IconName::Code)
-                            .accessibility_label("Code")
-                            .tooltip("将所选标签备注包裹为行内代码或代码块")
-                            .disabled(!can_format)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_repeater_notes_markdown(
-                                    NoteMarkdownAction::Code,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-notes-list")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(24.))
-                            .h(theme::scaled_px(24.))
-                            .icon(IconName::List)
-                            .accessibility_label("List")
-                            .tooltip("将所选标签备注行格式化为 Markdown 无序列表")
-                            .disabled(!can_format)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_repeater_notes_markdown(
-                                    NoteMarkdownAction::List,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-notes-heading")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(24.))
-                            .px(px(6.))
-                            .label("H")
-                            .tooltip("将所选标签备注行格式化为 Markdown 标题")
-                            .disabled(!can_format)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_repeater_notes_markdown(
-                                    NoteMarkdownAction::Heading,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("repeater-notes-preview-toggle")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(24.))
-                            .px(px(6.))
-                            .icon(if preview_mode {
-                                IconName::Pencil
-                            } else {
-                                IconName::Eye
-                            })
-                            .label(if preview_mode { "编辑" } else { "预览" })
-                            .selected(preview_mode)
-                            .tooltip(if preview_mode {
-                                "切换回 Markdown 源码编辑模式"
-                            } else {
-                                "以富文本排版预览当前工作标签 Markdown 备注"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if !this.inspector.tab_notes_preview
-                                    && let Err(err) =
-                                        editing::snapshot(&this.inspector.tab_notes_editor, window, cx)
-                                {
-                                    this.inspector.tab_notes_error = Some(err.to_owned());
-                                    cx.notify();
-                                    return;
-                                }
-                                this.inspector.tab_notes_preview = !this.inspector.tab_notes_preview;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-notes-close")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(24.))
-                            .h(theme::scaled_px(24.))
-                            .icon(IconName::Close)
-                            .accessibility_label("关闭标签备注")
-                            .tooltip("收起当前 Repeater 标签备注侧栏并自动保存")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Err(err) =
-                                    editing::snapshot(&this.inspector.tab_notes_editor, window, cx)
-                                {
-                                    this.inspector.tab_notes_error = Some(err.to_owned());
-                                    this.fail(err, cx);
-                                    return;
-                                }
-                                this.commit_active_repeater_tab_note(window, cx);
-                                let focused = this
-                                    .inspector
-                                    .tab_notes_editor
-                                    .focus_handle(cx)
-                                    .is_focused(window);
-                                this.inspector.tab_notes_open = false;
-                                if focused {
-                                    this.focus.focus(window, cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(self.render_repeater_notes_toolbar(can_format, preview_mode, cx))
             .when_some(error, |this, err| {
                 this.child(
                     div()
@@ -333,7 +322,6 @@ impl Workbench {
             .into_any_element()
     }
 
-    #[inline(never)]
     pub(in crate::workbench) fn render_inspector_dock(
         &self,
         body: AnyElement,
@@ -342,7 +330,6 @@ impl Workbench {
         self.render_inspector_dock_inner(body, None, cx)
     }
 
-    #[inline(never)]
     pub(in crate::workbench) fn render_repeater_inspector_dock(
         &self,
         body: AnyElement,
@@ -1293,6 +1280,271 @@ impl Workbench {
 
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
+    fn render_inspector_row_main_button(
+        &self,
+        section: InspectorSection,
+        item_idx: usize,
+        name: String,
+        value: String,
+        can_select: bool,
+        is_selected: bool,
+        wrap_enabled: bool,
+        item_id_prefix: &'static str,
+        subtle_divider: gpui_kit::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = format!("{name}: {value}");
+        let tip = if can_select {
+            format!("{name}: {value}\n（点击在底部编辑此条目，再次点击收起）")
+        } else {
+            format!("{name}: {value}\n（点击查看完整键值或复制，再次点击收起）")
+        };
+        let name_display = name.clone();
+        let value_display = value.clone();
+        Button::new(SharedString::from(format!("{item_id_prefix}-{item_idx}")))
+            .ghost()
+            .rounded(ButtonRounded::None)
+            .flex_1()
+            .min_w_0()
+            .map(|this| {
+                if wrap_enabled {
+                    this.h_auto().min_h(px(25.))
+                } else {
+                    this.h(px(25.))
+                }
+            })
+            .px_0()
+            .selected(is_selected)
+            .when(is_selected, |b| b.bg(theme::selected()))
+            .accessibility_label(label)
+            .tooltip(tip)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.inspector.name_input.update(cx, |s, cx| {
+                    s.marked_text_range(window, cx).is_some()
+                }) || this.inspector.value_input.update(cx, |s, cx| {
+                    s.marked_text_range(window, cx).is_some()
+                }) {
+                    this.fail(editing::COMPOSITION_PENDING, cx);
+                    return;
+                }
+                this.inspector.auto_opened_by_selection = false;
+                if is_selected {
+                    this.unfocus_inspector_detail_inputs(window, cx);
+                    this.inspector.editing_index = None;
+                    this.inspector.editor_open = false;
+                    this.inspector.detail_url_decoded = false;
+                    cx.notify();
+                    return;
+                }
+                this.inspector.editing_section = section;
+                this.inspector.editing_index = Some(item_idx);
+                this.inspector.editor_open = true;
+                this.inspector.detail_url_decoded = false;
+                let name = name.clone();
+                let value = value.clone();
+                this.inspector
+                    .name_input
+                    .update(cx, |state, cx| state.set_value(name, window, cx));
+                this.inspector
+                    .value_input
+                    .update(cx, |state, cx| state.set_value(value, window, cx));
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .map(|this| {
+                        if wrap_enabled {
+                            this.min_h(px(25.)).items_stretch()
+                        } else {
+                            this.h_full().items_center()
+                        }
+                    })
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(143.))
+                            .flex_shrink_0()
+                            .px(px(8.))
+                            .border_r_1()
+                            .border_color(subtle_divider)
+                            .flex()
+                            .items_center()
+                            .map(|this| {
+                                if wrap_enabled {
+                                    this.min_h(px(25.)).py(px(4.)).whitespace_normal()
+                                } else {
+                                    this.h_full().truncate()
+                                }
+                            })
+                            .text_left()
+                            .font_family(theme::ui_font_family())
+                            .text_size(px(13.))
+                            .font_weight(gpui_kit::FontWeight::NORMAL)
+                            .text_color(theme::foreground())
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .map(|this| {
+                                        if wrap_enabled {
+                                            this.whitespace_normal()
+                                        } else {
+                                            this.truncate()
+                                        }
+                                    })
+                                    .child(name_display),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(4.))
+                            .pr(px(2.))
+                            .flex()
+                            .items_center()
+                            .map(|this| {
+                                if wrap_enabled {
+                                    this.min_h(px(25.)).py(px(4.)).whitespace_normal()
+                                } else {
+                                    this.h_full().truncate()
+                                }
+                            })
+                            .text_left()
+                            .font_family(theme::ui_font_family())
+                            .text_size(px(13.))
+                            .font_weight(gpui_kit::FontWeight::NORMAL)
+                            .text_color(theme::foreground())
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .map(|this| {
+                                        if wrap_enabled {
+                                            this.whitespace_normal()
+                                        } else {
+                                            this.truncate()
+                                        }
+                                    })
+                                    .child(value_display),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn render_inspector_row_actions(
+        &self,
+        section: InspectorSection,
+        item_idx: usize,
+        count: usize,
+        can_remove: bool,
+        item_id_prefix: &'static str,
+        move_up_prefix: &'static str,
+        move_down_prefix: &'static str,
+        remove_id_prefix: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_first = item_idx == 0;
+        let is_last = item_idx + 1 == count;
+        let mut actions_col = div()
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_end();
+        if can_remove {
+            actions_col = actions_col
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "{move_up_prefix}-{item_idx}"
+                    )))
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(20.))
+                    .h(theme::scaled_px(20.))
+                    .icon(IconName::ChevronUp)
+                    .accessibility_label("上移")
+                    .tooltip("将此条目向上移动一行并同步调整原始报文字节顺序")
+                    .disabled(is_first)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.inspector.auto_opened_by_selection = false;
+                        if item_idx > 0 {
+                            this.move_inspector_item(section, item_idx, item_idx - 1, window, cx);
+                        }
+                    })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "{move_down_prefix}-{item_idx}"
+                    )))
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(20.))
+                    .h(theme::scaled_px(20.))
+                    .icon(IconName::ChevronDown)
+                    .accessibility_label("下移")
+                    .tooltip("将此条目向下移动一行并同步调整原始报文字节顺序")
+                    .disabled(is_last)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.inspector.auto_opened_by_selection = false;
+                        if !is_last {
+                            this.move_inspector_item(section, item_idx, item_idx + 1, window, cx);
+                        }
+                    })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "{remove_id_prefix}-{item_idx}"
+                    )))
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(22.))
+                    .h(theme::scaled_px(22.))
+                    .icon(IconName::Trash)
+                    .accessibility_label("删除")
+                    .tooltip("从当前报文中移除此条目并同步更新原始字节")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.inspector.auto_opened_by_selection = false;
+                        this.remove_inspector_item(section, item_idx, window, cx);
+                    })),
+                );
+        } else {
+            actions_col = actions_col.w(px(28.));
+        }
+        actions_col
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "{item_id_prefix}-chevron-{item_idx}"
+                    )))
+                    .test_support()
+                    .w(px(14.))
+                    .h(px(14.))
+                    .ml(px(2.))
+                    .mr(px(6.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_kit::component::Icon::new(IconName::ChevronRight)
+                            .size(px(14.))
+                            .text_color(theme::foreground()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn render_inspector_section_row(
         &self,
         section: InspectorSection,
@@ -1309,273 +1561,49 @@ impl Workbench {
         subtle_divider: gpui_kit::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-                let name = item.name.clone();
-                let value = item.value.clone();
-                let label = format!("{name}: {value}");
-                let tip = if can_select {
-                    format!("{name}: {value}\n（点击在底部编辑此条目，再次点击收起）")
+        let is_selected = self.inspector.editor_open
+            && self.inspector.editing_section == section
+            && self.inspector.editing_index == Some(item_idx);
+        div()
+            .w_full()
+            .map(|this| {
+                if wrap_enabled {
+                    this.min_h(px(25.))
                 } else {
-                    format!("{name}: {value}\n（点击查看完整键值或复制，再次点击收起）")
-                };
-                let is_selected = self.inspector.editor_open
-                    && self.inspector.editing_section == section
-                    && self.inspector.editing_index == Some(item_idx);
-                let is_first = item_idx == 0;
-                let is_last = item_idx + 1 == count;
-                let name_display = name.clone();
-                let value_display = value.clone();
-                let mut row_div =
-                    div()
-                        .w_full()
-                        .map(|this| {
-                            if wrap_enabled {
-                                this.min_h(px(25.))
-                            } else {
-                                this.h(px(25.))
-                            }
-                        })
-                        .flex()
-                        .items_center()
-                        .bg(if is_selected {
-                            theme::selected()
-                        } else {
-                            theme::surface()
-                        })
-                        .child(
-                            Button::new(SharedString::from(format!("{item_id_prefix}-{item_idx}")))
-                                .ghost()
-                                .rounded(ButtonRounded::None)
-                                .flex_1()
-                                .min_w_0()
-                                .map(|this| {
-                                    if wrap_enabled {
-                                        this.h_auto().min_h(px(25.))
-                                    } else {
-                                        this.h(px(25.))
-                                    }
-                                })
-                                .px_0()
-                                .selected(is_selected)
-                                .when(is_selected, |b| b.bg(theme::selected()))
-                                .accessibility_label(label)
-                                .tooltip(tip)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.inspector.name_input.update(cx, |s, cx| {
-                                        s.marked_text_range(window, cx).is_some()
-                                    }) || this.inspector.value_input.update(cx, |s, cx| {
-                                        s.marked_text_range(window, cx).is_some()
-                                    }) {
-                                        this.fail(editing::COMPOSITION_PENDING, cx);
-                                        return;
-                                    }
-                                    this.inspector.auto_opened_by_selection = false;
-                                    if is_selected {
-                                        this.unfocus_inspector_detail_inputs(window, cx);
-                                        this.inspector.editing_index = None;
-                                        this.inspector.editor_open = false;
-                                        this.inspector.detail_url_decoded = false;
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.inspector.editing_section = section;
-                                    this.inspector.editing_index = Some(item_idx);
-                                    this.inspector.editor_open = true;
-                                    this.inspector.detail_url_decoded = false;
-                                    let name = name.clone();
-                                    let value = value.clone();
-                                    this.inspector
-                                        .name_input
-                                        .update(cx, |state, cx| state.set_value(name, window, cx));
-                                    this.inspector
-                                        .value_input
-                                        .update(cx, |state, cx| state.set_value(value, window, cx));
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .map(|this| {
-                                            if wrap_enabled {
-                                                this.min_h(px(25.)).items_stretch()
-                                            } else {
-                                                this.h_full().items_center()
-                                            }
-                                        })
-                                        .flex()
-                                        .child(
-                                            div()
-                                                .w(px(143.))
-                                                .flex_shrink_0()
-                                                .px(px(8.))
-                                                .border_r_1()
-                                                .border_color(subtle_divider)
-                                                .flex()
-                                                .items_center()
-                                                .map(|this| {
-                                                    if wrap_enabled {
-                                                        this.min_h(px(25.)).py(px(4.)).whitespace_normal()
-                                                    } else {
-                                                        this.h_full().truncate()
-                                                    }
-                                                })
-                                                .text_left()
-                                                .font_family(theme::ui_font_family())
-                                                .text_size(px(13.))
-                                                .font_weight(gpui_kit::FontWeight::NORMAL)
-                                                .text_color(theme::foreground())
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .map(|this| {
-                                                            if wrap_enabled {
-                                                                this.whitespace_normal()
-                                                            } else {
-                                                                this.truncate()
-                                                            }
-                                                        })
-                                                        .child(name_display),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .pl(px(4.))
-                                                .pr(px(2.))
-                                                .flex()
-                                                .items_center()
-                                                .map(|this| {
-                                                    if wrap_enabled {
-                                                        this.min_h(px(25.)).py(px(4.)).whitespace_normal()
-                                                    } else {
-                                                        this.h_full().truncate()
-                                                    }
-                                                })
-                                                .text_left()
-                                                .font_family(theme::ui_font_family())
-                                                .text_size(px(13.))
-                                                .font_weight(gpui_kit::FontWeight::NORMAL)
-                                                .text_color(theme::foreground())
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .map(|this| {
-                                                            if wrap_enabled {
-                                                                this.whitespace_normal()
-                                                            } else {
-                                                                this.truncate()
-                                                            }
-                                                        })
-                                                        .child(value_display),
-                                                ),
-                                        ),
-                                ),
-                        );
-                let mut actions_col = div()
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_end();
-                if can_remove {
-                    actions_col = actions_col
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "{move_up_prefix}-{item_idx}"
-                            )))
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(20.))
-                            .h(theme::scaled_px(20.))
-                            .icon(IconName::ChevronUp)
-                            .accessibility_label("上移")
-                            .tooltip("将此条目向上移动一行并同步调整原始报文字节顺序")
-                            .disabled(is_first)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.inspector.auto_opened_by_selection = false;
-                                if item_idx > 0 {
-                                    this.move_inspector_item(
-                                        section,
-                                        item_idx,
-                                        item_idx - 1,
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "{move_down_prefix}-{item_idx}"
-                            )))
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(20.))
-                            .h(theme::scaled_px(20.))
-                            .icon(IconName::ChevronDown)
-                            .accessibility_label("下移")
-                            .tooltip("将此条目向下移动一行并同步调整原始报文字节顺序")
-                            .disabled(is_last)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.inspector.auto_opened_by_selection = false;
-                                if !is_last {
-                                    this.move_inspector_item(
-                                        section,
-                                        item_idx,
-                                        item_idx + 1,
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "{remove_id_prefix}-{item_idx}"
-                            )))
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(22.))
-                            .h(theme::scaled_px(22.))
-                            .icon(IconName::Trash)
-                            .accessibility_label("删除")
-                            .tooltip("从当前报文中移除此条目并同步更新原始字节")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.inspector.auto_opened_by_selection = false;
-                                this.remove_inspector_item(section, item_idx, window, cx);
-                            })),
-                        );
-                } else {
-                    actions_col = actions_col.w(px(28.));
+                    this.h(px(25.))
                 }
-                actions_col = actions_col.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "{item_id_prefix}-chevron-{item_idx}"
-                        )))
-                        .test_support()
-                        .w(px(14.))
-                        .h(px(14.))
-                        .ml(px(2.))
-                        .mr(px(6.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui_kit::component::Icon::new(IconName::ChevronRight)
-                                .size(px(14.))
-                                .text_color(theme::foreground()),
-                        ),
-                );
-                row_div = row_div.child(actions_col);
-                row_div.into_any_element()
+            })
+            .flex()
+            .items_center()
+            .bg(if is_selected {
+                theme::selected()
+            } else {
+                theme::surface()
+            })
+            .child(self.render_inspector_row_main_button(
+                section,
+                item_idx,
+                item.name.clone(),
+                item.value.clone(),
+                can_select,
+                is_selected,
+                wrap_enabled,
+                item_id_prefix,
+                subtle_divider,
+                cx,
+            ))
+            .child(self.render_inspector_row_actions(
+                section,
+                item_idx,
+                count,
+                can_remove,
+                item_id_prefix,
+                move_up_prefix,
+                move_down_prefix,
+                remove_id_prefix,
+                cx,
+            ))
+            .into_any_element()
     }
 
     #[inline(never)]
@@ -1949,36 +1977,198 @@ impl Workbench {
     }
 
     #[inline(never)]
-    pub(in crate::workbench) fn render_inspector_sidebar(
+    fn render_inspector_title_bar(&self, show_http: bool, cx: &mut Context<Self>) -> AnyElement {
+        let dock_left = self.inspector.dock_left;
+        let inactive_bg: gpui_kit::Hsla =
+            rgb(if theme::is_dark() { 0x35383d } else { 0xdfdfdf }).into();
+        div()
+            .id("inspector-title-bar")
+            .test_support()
+            .w_full()
+            .h(px(40.))
+            .min_h(px(40.))
+            .max_h(px(40.))
+            .px(px(10.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(theme::toolbar_surface())
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme::foreground())
+                    .child("Inspector"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .w(px(50.))
+                    .h(px(19.))
+                    .flex()
+                    .items_center()
+                    .gap_0()
+                    .child(
+                        Button::new("inspector-dock-left")
+                            .ghost()
+                            .small()
+                            .rounded(ButtonRounded::None)
+                            .w(px(25.))
+                            .h(px(19.))
+                            .p_0()
+                            .bg(if dock_left { rgb(0x26649d).into() } else { inactive_bg })
+                            .text_color(if dock_left { rgb(0xffffff).into() } else { theme::foreground() })
+                            .icon(
+                                gpui_kit::component::Icon::default()
+                                    .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 15 13\" fill=\"none\"><rect x=\"0.75\" y=\"1.25\" width=\"13.5\" height=\"10.5\" rx=\"1\" stroke=\"currentColor\" stroke-width=\"1.2\"/><rect x=\"1.2\" y=\"1.7\" width=\"5.2\" height=\"9.6\" fill=\"currentColor\"/></svg>")
+                                    .size(px(14.))
+                                    .text_color(if dock_left { rgb(0xffffff).into() } else { theme::foreground() }),
+                            )
+                            .accessibility_label("Dock on the left")
+                            .tooltip("Dock on the left")
+                            .selected(dock_left)
+                            .toggled(dock_left)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector.dock_left = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("inspector-dock-right")
+                            .ghost()
+                            .small()
+                            .rounded(ButtonRounded::None)
+                            .w(px(25.))
+                            .h(px(19.))
+                            .p_0()
+                            .bg(if !dock_left { rgb(0x26649d).into() } else { inactive_bg })
+                            .text_color(if !dock_left { rgb(0xffffff).into() } else { theme::foreground() })
+                            .icon(
+                                gpui_kit::component::Icon::default()
+                                    .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 15 13\" fill=\"none\"><rect x=\"0.75\" y=\"1.25\" width=\"13.5\" height=\"10.5\" rx=\"1\" stroke=\"currentColor\" stroke-width=\"1.2\"/><rect x=\"8.6\" y=\"1.7\" width=\"5.2\" height=\"9.6\" fill=\"currentColor\"/></svg>")
+                                    .size(px(14.))
+                                    .text_color(if !dock_left { rgb(0xffffff).into() } else { theme::foreground() }),
+                            )
+                            .accessibility_label("Dock on the right")
+                            .tooltip("Dock on the right")
+                            .selected(!dock_left)
+                            .toggled(!dock_left)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector.dock_left = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(show_http, |bar| {
+                bar.child(
+                    Button::new("inspector-expand-all")
+                        .ghost()
+                        .small()
+                        .min_w(px(18.))
+                        .max_w(px(18.))
+                        .min_h(px(18.))
+                        .max_h(px(18.))
+                        .w(px(18.))
+                        .h(px(18.))
+                        .p_0()
+                        .child(
+                            gpui_kit::component::Icon::default()
+                                .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.45\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 2.5h11M2.5 13.5h11M8 4.8v6.4M5.6 7.1L8 4.8l2.4 2.3M5.6 8.9L8 11.2l2.4-2.3\"/></svg>")
+                                .size(px(15.))
+                                .text_color(theme::foreground()),
+                        )
+                        .accessibility_label("全部展开")
+                        .tooltip("展开全部非空检视分组")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.inspector.auto_opened_by_selection = false;
+                            let parsed = if let Some((ws_data, _)) =
+                                this.websocket_repeater_inspector_data(cx)
+                            {
+                                ws_data
+                            } else {
+                                this.inspect_current_http(cx).0
+                            };
+                            this.inspector.expanded = [
+                                !parsed.attributes.is_empty(),
+                                !parsed.query_params.is_empty(),
+                                !parsed.body_params.is_empty(),
+                                !parsed.cookies.is_empty(),
+                                !parsed.request_headers.is_empty(),
+                                !parsed.response_headers.is_empty(),
+                            ];
+                            this.inspector.selection_expanded = true;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("inspector-collapse-all")
+                        .ghost()
+                        .small()
+                        .min_w(px(18.))
+                        .max_w(px(18.))
+                        .min_h(px(18.))
+                        .max_h(px(18.))
+                        .w(px(18.))
+                        .h(px(18.))
+                        .p_0()
+                        .child(
+                            gpui_kit::component::Icon::default()
+                                .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.45\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 8h11M8 2.2v3.6M5.8 3.8L8 5.8l2.2-2M8 13.8v-3.6M5.8 12.2L8 10.2l2.2 2\"/></svg>")
+                                .size(px(15.))
+                                .text_color(theme::foreground()),
+                        )
+                        .accessibility_label("全部收起")
+                        .tooltip("折叠全部检视分组")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.inspector.auto_opened_by_selection = false;
+                            this.inspector.expanded = [false; 6];
+                            this.inspector.selection_expanded = false;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("inspector-close")
+                    .ghost()
+                    .small()
+                    .min_w(px(18.))
+                    .max_w(px(18.))
+                    .min_h(px(18.))
+                    .max_h(px(18.))
+                    .w(px(18.))
+                    .h(px(18.))
+                    .p_0()
+                    .child(
+                        gpui_kit::component::Icon::default()
+                            .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\"><path d=\"M3.2 3.2l9.6 9.6M12.8 3.2l-9.6 9.6\"/></svg>")
+                            .size(px(14.))
+                            .text_color(theme::foreground()),
+                    )
+                    .accessibility_label("收起 Inspector")
+                    .tooltip("收起 Inspector 检视面板")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.dismiss_inspector_for_current_selection(window, cx) {
+                            cx.notify();
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_inspector_sections_area(
         &self,
+        parsed_http: Option<&InspectorData>,
+        is_ws: bool,
+        req_editable: bool,
+        resp_editable: bool,
+        any_editable: bool,
+        has_selection_preview: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let show_http = self.inspector_supports_http_sections();
-        let ws_inspector = self.websocket_repeater_inspector_data(cx);
-        let (parsed_http, req_editable, resp_editable) = if show_http {
-            if let Some((ws_data, ws_editable)) = &ws_inspector {
-                (Some(ws_data.clone()), *ws_editable, false)
-            } else {
-                let (data, req_ed, resp_ed) = self.inspect_current_http(cx);
-                (Some(data), req_ed, resp_ed)
-            }
-        } else {
-            (None, false, false)
-        };
-        let selection_writable = self
-            .inspector
-            .selection_identity
-            .as_ref()
-            .is_some_and(|id| id.writable);
-        let any_editable = req_editable || resp_editable || selection_writable;
-        let has_selection_preview = self.inspector.selection_preview.is_some();
-        let detail_drawer = self.render_inspector_detail_drawer(
-            any_editable,
-            req_editable,
-            resp_editable,
-            parsed_http.as_deref(),
-            cx,
-        );
         let mut sections = div()
             .id("inspector-sections")
             .test_support()
@@ -1993,9 +2183,7 @@ impl Workbench {
             .bg(theme::toolbar_surface())
             .child(self.render_inspector_selection_section(any_editable, cx));
 
-        if ws_inspector.is_some()
-            && let Some(data) = &parsed_http
-        {
+        if is_ws && let Some(data) = parsed_http {
             sections = sections
                 .when(req_editable || !data.attributes.is_empty(), |s| {
                     s.child(self.render_inspector_section(
@@ -2013,7 +2201,7 @@ impl Workbench {
                         cx,
                     ))
                 });
-        } else if let Some(data) = &parsed_http {
+        } else if let Some(data) = parsed_http {
             sections = sections
                 .when(req_editable || !data.attributes.is_empty(), |s| {
                     s.child(self.render_inspector_section(
@@ -2076,13 +2264,13 @@ impl Workbench {
         let section_visible_and_expanded = |idx: usize, has_items: bool, has_add: bool| -> bool {
             self.inspector.expanded[idx] && (has_items || has_add)
         };
-        let any_section_expanded = if ws_inspector.is_some() {
-            parsed_http.as_ref().is_some_and(|data| {
+        let any_section_expanded = if is_ws {
+            parsed_http.is_some_and(|data| {
                 section_visible_and_expanded(0, !data.attributes.is_empty(), false)
                     || section_visible_and_expanded(4, !data.request_headers.is_empty(), req_editable)
             })
         } else {
-            parsed_http.as_ref().is_some_and(|data| {
+            parsed_http.is_some_and(|data| {
                 section_visible_and_expanded(0, !data.attributes.is_empty(), false)
                     || section_visible_and_expanded(1, !data.query_params.is_empty(), req_editable)
                     || section_visible_and_expanded(2, !data.body_params.is_empty(), req_editable)
@@ -2097,7 +2285,7 @@ impl Workbench {
             rgb(if theme::is_dark() { 0x2b2d30 } else { 0xf7f7f7 }).into();
         let scrollbar_thumb_bg: gpui_kit::Hsla =
             rgb(if theme::is_dark() { 0x5c626b } else { 0xc8c8c8 }).into();
-        let sections_with_scrollbar = div()
+        div()
             .flex_1()
             .min_h_0()
             .w_full()
@@ -2150,7 +2338,51 @@ impl Workbench {
                             .max_fps(60),
                         ),
                 )
-            });
+            })
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_inspector_sidebar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let show_http = self.inspector_supports_http_sections();
+        let ws_inspector = self.websocket_repeater_inspector_data(cx);
+        let (parsed_http, req_editable, resp_editable) = if show_http {
+            if let Some((ws_data, ws_editable)) = &ws_inspector {
+                (Some(ws_data.clone()), *ws_editable, false)
+            } else {
+                let (data, req_ed, resp_ed) = self.inspect_current_http(cx);
+                (Some(data), req_ed, resp_ed)
+            }
+        } else {
+            (None, false, false)
+        };
+        let selection_writable = self
+            .inspector
+            .selection_identity
+            .as_ref()
+            .is_some_and(|id| id.writable);
+        let any_editable = req_editable || resp_editable || selection_writable;
+        let has_selection_preview = self.inspector.selection_preview.is_some();
+        let detail_drawer = self.render_inspector_detail_drawer(
+            any_editable,
+            req_editable,
+            resp_editable,
+            parsed_http.as_deref(),
+            cx,
+        );
+        let title_bar = self.render_inspector_title_bar(show_http, cx);
+        let sections_with_scrollbar = self.render_inspector_sections_area(
+            parsed_http.as_deref(),
+            ws_inspector.is_some(),
+            req_editable,
+            resp_editable,
+            any_editable,
+            has_selection_preview,
+            cx,
+        );
 
         div()
             .id("inspector-sidebar")
@@ -2161,185 +2393,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .bg(theme::toolbar_surface())
-            .child(
-                div()
-                    .id("inspector-title-bar")
-                    .test_support()
-                    .w_full()
-                    .h(px(40.))
-                    .min_h(px(40.))
-                    .max_h(px(40.))
-                    .px(px(10.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .bg(theme::toolbar_surface())
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme::foreground())
-                            .child("Inspector"),
-                    )
-                    .child(div().flex_1())
-                    .child({
-                        let dock_left = self.inspector.dock_left;
-                        let inactive_bg: gpui_kit::Hsla =
-                            rgb(if theme::is_dark() { 0x35383d } else { 0xdfdfdf }).into();
-                        div()
-                            .w(px(50.))
-                            .h(px(19.))
-                            .flex()
-                            .items_center()
-                            .gap_0()
-                            .child(
-                                Button::new("inspector-dock-left")
-                                    .ghost()
-                                    .small()
-                                    .rounded(ButtonRounded::None)
-                                    .w(px(25.))
-                                    .h(px(19.))
-                                    .p_0()
-                                    .bg(if dock_left { rgb(0x26649d).into() } else { inactive_bg })
-                                    .text_color(if dock_left { rgb(0xffffff).into() } else { theme::foreground() })
-                                    .icon(
-                                        gpui_kit::component::Icon::default()
-                                            .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 15 13\" fill=\"none\"><rect x=\"0.75\" y=\"1.25\" width=\"13.5\" height=\"10.5\" rx=\"1\" stroke=\"currentColor\" stroke-width=\"1.2\"/><rect x=\"1.2\" y=\"1.7\" width=\"5.2\" height=\"9.6\" fill=\"currentColor\"/></svg>")
-                                            .size(px(14.))
-                                            .text_color(if dock_left { rgb(0xffffff).into() } else { theme::foreground() }),
-                                    )
-                                    .accessibility_label("Dock on the left")
-                                    .tooltip("Dock on the left")
-                                    .selected(dock_left)
-                                    .toggled(dock_left)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.inspector.dock_left = true;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("inspector-dock-right")
-                                    .ghost()
-                                    .small()
-                                    .rounded(ButtonRounded::None)
-                                    .w(px(25.))
-                                    .h(px(19.))
-                                    .p_0()
-                                    .bg(if !dock_left { rgb(0x26649d).into() } else { inactive_bg })
-                                    .text_color(if !dock_left { rgb(0xffffff).into() } else { theme::foreground() })
-                                    .icon(
-                                        gpui_kit::component::Icon::default()
-                                            .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 15 13\" fill=\"none\"><rect x=\"0.75\" y=\"1.25\" width=\"13.5\" height=\"10.5\" rx=\"1\" stroke=\"currentColor\" stroke-width=\"1.2\"/><rect x=\"8.6\" y=\"1.7\" width=\"5.2\" height=\"9.6\" fill=\"currentColor\"/></svg>")
-                                            .size(px(14.))
-                                            .text_color(if !dock_left { rgb(0xffffff).into() } else { theme::foreground() }),
-                                    )
-                                    .accessibility_label("Dock on the right")
-                                    .tooltip("Dock on the right")
-                                    .selected(!dock_left)
-                                    .toggled(!dock_left)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.inspector.dock_left = false;
-                                        cx.notify();
-                                    })),
-                            )
-                    })
-                    .when(show_http, |bar| {
-                        bar.child(
-                            Button::new("inspector-expand-all")
-                                .ghost()
-                                .small()
-                                .min_w(px(18.))
-                                .max_w(px(18.))
-                                .min_h(px(18.))
-                                .max_h(px(18.))
-                                .w(px(18.))
-                                .h(px(18.))
-                                .p_0()
-                                .child(
-                                    gpui_kit::component::Icon::default()
-                                        .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.45\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 2.5h11M2.5 13.5h11M8 4.8v6.4M5.6 7.1L8 4.8l2.4 2.3M5.6 8.9L8 11.2l2.4-2.3\"/></svg>")
-                                        .size(px(15.))
-                                        .text_color(theme::foreground()),
-                                )
-                                .accessibility_label("全部展开")
-                                .tooltip("展开全部非空检视分组")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.inspector.auto_opened_by_selection = false;
-                                    let parsed = if let Some((ws_data, _)) =
-                                        this.websocket_repeater_inspector_data(cx)
-                                    {
-                                        ws_data
-                                    } else {
-                                        this.inspect_current_http(cx).0
-                                    };
-                                    this.inspector.expanded = [
-                                        !parsed.attributes.is_empty(),
-                                        !parsed.query_params.is_empty(),
-                                        !parsed.body_params.is_empty(),
-                                        !parsed.cookies.is_empty(),
-                                        !parsed.request_headers.is_empty(),
-                                        !parsed.response_headers.is_empty(),
-                                    ];
-                                    this.inspector.selection_expanded = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("inspector-collapse-all")
-                                .ghost()
-                                .small()
-                                .min_w(px(18.))
-                                .max_w(px(18.))
-                                .min_h(px(18.))
-                                .max_h(px(18.))
-                                .w(px(18.))
-                                .h(px(18.))
-                                .p_0()
-                                .child(
-                                    gpui_kit::component::Icon::default()
-                                        .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.45\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 8h11M8 2.2v3.6M5.8 3.8L8 5.8l2.2-2M8 13.8v-3.6M5.8 12.2L8 10.2l2.2 2\"/></svg>")
-                                        .size(px(15.))
-                                        .text_color(theme::foreground()),
-                                )
-                                .accessibility_label("全部收起")
-                                .tooltip("折叠全部检视分组")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.inspector.auto_opened_by_selection = false;
-                                    this.inspector.expanded = [false; 6];
-                                    this.inspector.selection_expanded = false;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("inspector-close")
-                            .ghost()
-                            .small()
-                            .min_w(px(18.))
-                            .max_w(px(18.))
-                            .min_h(px(18.))
-                            .max_h(px(18.))
-                            .w(px(18.))
-                            .h(px(18.))
-                            .p_0()
-                            .child(
-                                gpui_kit::component::Icon::default()
-                                    .data(b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\"><path d=\"M3.2 3.2l9.6 9.6M12.8 3.2l-9.6 9.6\"/></svg>")
-                                    .size(px(14.))
-                                    .text_color(theme::foreground()),
-                            )
-                            .accessibility_label("收起 Inspector")
-                            .tooltip("收起 Inspector 检视面板")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.dismiss_inspector_for_current_selection(window, cx) {
-                                    cx.notify();
-                                }
-                            })),
-                    ),
-            )
+            .child(title_bar)
             .child(sections_with_scrollbar)
             .when_some(detail_drawer, |sidebar, drawer| sidebar.child(drawer))
             .into_any_element()

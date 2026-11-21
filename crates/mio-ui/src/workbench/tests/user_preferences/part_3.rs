@@ -186,7 +186,7 @@ fn user_tls_preferences_preserve_closing_draft_and_project_override_across_globa
     click(settings_window, "intruder-finished-keep", cx);
     drain(&mut fixture.commands);
     let certificate = settings::tls_test_certificate();
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let operation = cx
         .update(|cx| {
             fixture.view.update(cx, |view, cx| {
@@ -247,7 +247,7 @@ fn user_tls_preferences_preserve_closing_draft_and_project_override_across_globa
         assert_eq!(view.project, Some(next_project));
         assert_eq!(view.user_preferences.confirmed.as_ref(), Some(&saved));
         assert_eq!(view.user_preferences.finished, Finished::KeepMemory);
-        assert_eq!(view.workspace, original);
+        assert_eq!(*view.workspace, original);
     });
     click(settings_window, "intruder-running-continue", cx);
     let commands = drain(&mut fixture.commands);

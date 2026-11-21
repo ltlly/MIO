@@ -240,9 +240,9 @@ impl Workbench {
                 }),
             Tool::Proxy if self.proxy_page == ProxyPage::History => {
                 if self.history_response.has_focus(window, cx) {
-                    Some(&self.history_response)
+                    Some(&*self.history_response)
                 } else if self.history_request.has_focus(window, cx) {
-                    Some(&self.history_request)
+                    Some(&*self.history_request)
                 } else {
                     None
                 }

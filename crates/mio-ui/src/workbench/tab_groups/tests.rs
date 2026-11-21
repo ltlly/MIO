@@ -400,7 +400,7 @@ fn cancelled_or_old_project_group_dialog_never_commits_membership(cx: &mut TestA
     assert!(
         matches!(commands.as_slice(), [Command::QueryHttpHistory { query: mio_core::HttpHistoryQuery { project: actual, .. } }] if *actual == project)
     );
-    cx.read(|cx| assert_eq!(f.view.read(cx).workspace, next));
+    cx.read(|cx| assert_eq!(*f.view.read(cx).workspace, next));
 }
 
 #[gpui_kit::test]

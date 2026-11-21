@@ -662,7 +662,7 @@ fn organiser_collections_persist_rename_remove_and_restore_on_project_open(cx: &
     cx.run_until_parked();
     save_workspace(&mut f, 2, cx);
 
-    let persisted = cx.read(|cx| f.view.read(cx).workspace.clone());
+    let persisted = cx.read(|cx| (*f.view.read(cx).workspace).clone());
     assert_eq!(persisted.organiser_collections.len(), 1);
     assert_eq!(persisted.organiser_collections[0].name, "认证核心");
     assert_eq!(

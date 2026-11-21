@@ -38,7 +38,7 @@ fn intruder_numbers_payload_processing_and_logger_tool_work(cx: &mut TestAppCont
         },
     };
     let intruder_id = intruder_tab.id;
-    let mut workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     workspace.intruder = IntruderWorkspace {
         active: Some(intruder_id),
         tabs: vec![intruder_tab],
@@ -282,7 +282,7 @@ fn intruder_grep_match_extract_and_logger_history_query_work(cx: &mut TestAppCon
         },
     };
     let intruder_id = intruder_tab.id;
-    let mut workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     workspace.intruder = IntruderWorkspace {
         active: Some(intruder_id),
         tabs: vec![intruder_tab],

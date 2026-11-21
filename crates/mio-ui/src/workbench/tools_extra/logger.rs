@@ -341,11 +341,11 @@ impl Workbench {
             let original = self
                 .extra_tools
                 .logger_loaded_detail
-                .as_ref()
+                .as_deref()
                 .filter(|(existing, _)| existing.summary.id == record.summary.id)
                 .map(|(_, original)| original.clone())
                 .unwrap_or_default();
-            self.extra_tools.logger_loaded_detail = Some((record.clone(), original));
+            self.extra_tools.logger_loaded_detail = Some(Box::new((record.clone(), original)));
             self.extra_tools
                 .logger_request
                 .load(&request_to_raw(&record.request), window, cx);
@@ -393,7 +393,7 @@ impl Workbench {
                 .insert(flow_id, count);
             self.extra_tools.logger_pending_read = None;
             self.extra_tools.logger_loaded_detail =
-                Some(((**record).clone(), (*self.detail_original).clone()));
+                Some(Box::new(((**record).clone(), (*self.detail_original).clone())));
             self.extra_tools
                 .logger_request
                 .load(&request_to_raw(&record.request), window, cx);

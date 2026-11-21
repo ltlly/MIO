@@ -98,40 +98,182 @@ fn sequencer_live_request_row_menu(
 }
 
 impl Workbench {
-    pub(in crate::workbench) fn render_sequencer_live(
+    #[inline(never)]
+    fn render_sequencer_live_request_drawer(
         &self,
+        can_edit_config: bool,
+        has_selected_request: bool,
+        request_readonly: bool,
+        table_h: gpui_kit::Pixels,
+        table_border: gpui_kit::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = &self.sequencer_pane;
+        let pretty = pane.request.pretty_active;
+        let view = pane.request.view;
+        let add_current_btn = (!has_selected_request).then(|| {
+            button("sequencer-request-add-current", "加入列表")
+                .tooltip("将当前编辑的目标 URL 与请求添加到实时捕获列表")
+                .disabled(!can_edit_config)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.add_current_sequencer_request_to_list(window, cx);
+                }))
+        });
+
+        div()
+            .id("sequencer-request-drawer")
+            .test_support()
+            .flex_1()
+            .min_w(px(360.))
+            .h(table_h)
+            .border_1()
+            .border_color(table_border)
+            .bg(theme::surface())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .w_full()
+                    .min_h(theme::scaled_px(30.))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .bg(theme::toolbar_surface())
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(theme::scaled_px(12.))
+                            .text_color(theme::foreground())
+                            .child("目标 URL："),
+                    )
+                    .child(
+                        div().flex_1().min_w(px(120.)).child(
+                            Input::new(&pane.target_url)
+                                .id("sequencer-target-url")
+                                .aria_label("Sequencer 目标 URL")
+                                .small()
+                                .disabled(!can_edit_config),
+                        ),
+                    )
+                    .child(
+                        button("sequencer-version-http11", "HTTP/1.1")
+                            .tooltip("使用 HTTP/1.1 协议发送采样请求")
+                            .selected(pane.request_version != HttpVersion::Http2)
+                            .disabled(!can_edit_config)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sequencer_pane.request_version = HttpVersion::Http11;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("sequencer-version-http2", "HTTP/2")
+                            .tooltip("使用 HTTP/2 协议发送采样请求")
+                            .selected(pane.request_version == HttpVersion::Http2)
+                            .disabled(!can_edit_config)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sequencer_pane.request_version = HttpVersion::Http2;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_h(theme::scaled_px(26.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .bg(theme::surface())
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        button("sequencer-request-editor-pretty", "Pretty")
+                            .tooltip("格式化预览采样源请求报文")
+                            .selected(pretty)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.switch_sequencer_request_pretty(window, cx);
+                            })),
+                    )
+                    .child(
+                        button("sequencer-request-editor-raw", "Raw")
+                            .tooltip("查看或编辑采样源请求原始文本")
+                            .selected(!pretty && view == MessageView::Raw)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.switch_sequencer_request_view(MessageView::Raw, window, cx);
+                            })),
+                    )
+                    .child(
+                        button("sequencer-request-editor-hex", "Hex")
+                            .tooltip("以十六进制视图查看或编辑请求字节")
+                            .selected(!pretty && view == MessageView::Hex)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.switch_sequencer_request_view(MessageView::Hex, window, cx);
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        button("sequencer-delim-from-selection", "从选区生成分隔符")
+                            .icon(IconName::Scissors)
+                            .tooltip("根据请求编辑器当前选区前后文本自动填充起止分隔符")
+                            .disabled(!can_edit_config)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.fill_sequencer_delimiters_from_selection(window, cx);
+                            })),
+                    )
+                    .children(add_current_btn),
+            )
+            .child(
+                div()
+                    .id("sequencer-request-editor")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(theme::surface())
+                    .child(
+                        editing::message_editor(pane.request.state())
+                            .readonly(request_readonly)
+                            .size_full()
+                            .context_menu(self.request_context_menu(
+                                pane.request.state().clone(),
+                                request_readonly,
+                            ))
+                            .aria_label("Sequencer 采样源请求编辑器"),
+                    ),
+            )
+            .child(pane.request.render_search_bar_editable(
+                "sequencer-request-editor",
+                request_readonly,
+                cx,
+                |this, action, window, cx| {
+                    this.handle_sequencer_search_action(action, window, cx);
+                },
+            ))
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_sequencer_live_request_section(
+        &self,
+        can_edit_config: bool,
+        drawer_open: bool,
+        has_selected_request: bool,
+        request_readonly: bool,
+        can_start_capture: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let pane = &self.sequencer_pane;
         let dark = theme::is_dark();
-        let can_operate = self.sequencer_can_operate();
-        let capturing = pane.running.is_some();
-        let analyzing = pane.pending_analysis.is_some();
-        let can_edit_config = can_operate && !capturing;
-        let pretty = pane.request.pretty_active;
-        let view = pane.request.view;
-        let request_readonly = !can_edit_config || pane.request.is_readonly_preview();
-        let drawer_open = pane.request_drawer_open;
-        let has_selected_request = pane.selected_request_seq.is_some();
         let has_any_request = !pane.live_requests.is_empty();
-        let can_start_capture = can_edit_config && (has_selected_request || drawer_open);
-
-        let target_total = pane.capture.target_samples.max(1);
-        let collected_count = if capturing {
-            pane.capture.tokens_collected
-        } else {
-            pane.captured_samples
-                .len()
-                .max(pane.capture.tokens_collected)
-        };
-        let progress_pct =
-            ((collected_count as f64 / target_total as f64) * 100.0).clamp(0.0, 100.0);
-        let can_analyze_captured = can_operate
-            && !capturing
-            && !analyzing
-            && pane.captured_samples.len() >= MIN_SAMPLE_COUNT;
-
         let live_target_text = pane.target_url.read(cx).value().to_string();
         let live_req_text = pane.request.state().read(cx).value().to_string();
         let request_rows_data: Vec<(usize, String, String, bool)> = pane
@@ -391,160 +533,14 @@ impl Workbench {
             );
 
         let request_drawer = drawer_open.then(|| {
-            let add_current_btn = (!has_selected_request).then(|| {
-                button("sequencer-request-add-current", "加入列表")
-                    .tooltip("将当前编辑的目标 URL 与请求添加到实时捕获列表")
-                    .disabled(!can_edit_config)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_current_sequencer_request_to_list(window, cx);
-                    }))
-            });
-
-            div()
-                .id("sequencer-request-drawer")
-                .test_support()
-                .flex_1()
-                .min_w(px(360.))
-                .h(table_h)
-                .border_1()
-                .border_color(table_border)
-                .bg(theme::surface())
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .w_full()
-                        .min_h(theme::scaled_px(30.))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .bg(theme::toolbar_surface())
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(theme::scaled_px(12.))
-                                .text_color(theme::foreground())
-                                .child("目标 URL："),
-                        )
-                        .child(
-                            div().flex_1().min_w(px(120.)).child(
-                                Input::new(&pane.target_url)
-                                    .id("sequencer-target-url")
-                                    .aria_label("Sequencer 目标 URL")
-                                    .small()
-                                    .disabled(!can_edit_config),
-                            ),
-                        )
-                        .child(
-                            button("sequencer-version-http11", "HTTP/1.1")
-                                .tooltip("使用 HTTP/1.1 协议发送采样请求")
-                                .selected(pane.request_version != HttpVersion::Http2)
-                                .disabled(!can_edit_config)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sequencer_pane.request_version = HttpVersion::Http11;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            button("sequencer-version-http2", "HTTP/2")
-                                .tooltip("使用 HTTP/2 协议发送采样请求")
-                                .selected(pane.request_version == HttpVersion::Http2)
-                                .disabled(!can_edit_config)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sequencer_pane.request_version = HttpVersion::Http2;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .min_h(theme::scaled_px(26.))
-                        .px(px(8.))
-                        .py(px(2.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .bg(theme::surface())
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .child(
-                            button("sequencer-request-editor-pretty", "Pretty")
-                                .tooltip("格式化预览采样源请求报文")
-                                .selected(pretty)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.switch_sequencer_request_pretty(window, cx);
-                                })),
-                        )
-                        .child(
-                            button("sequencer-request-editor-raw", "Raw")
-                                .tooltip("查看或编辑采样源请求原始文本")
-                                .selected(!pretty && view == MessageView::Raw)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.switch_sequencer_request_view(
-                                        MessageView::Raw,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            button("sequencer-request-editor-hex", "Hex")
-                                .tooltip("以十六进制视图查看或编辑请求字节")
-                                .selected(!pretty && view == MessageView::Hex)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.switch_sequencer_request_view(
-                                        MessageView::Hex,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            button("sequencer-delim-from-selection", "从选区生成分隔符")
-                                .icon(IconName::Scissors)
-                                .tooltip("根据请求编辑器当前选区前后文本自动填充起止分隔符")
-                                .disabled(!can_edit_config)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.fill_sequencer_delimiters_from_selection(window, cx);
-                                })),
-                        )
-                        .children(add_current_btn),
-                )
-                .child(
-                    div()
-                        .id("sequencer-request-editor")
-                        .test_support()
-                        .flex_1()
-                        .min_h_0()
-                        .bg(theme::surface())
-                        .child(
-                            editing::message_editor(pane.request.state())
-                                .readonly(request_readonly)
-                                .size_full()
-                                .context_menu(self.request_context_menu(
-                                    pane.request.state().clone(),
-                                    request_readonly,
-                                ))
-                                .aria_label("Sequencer 采样源请求编辑器"),
-                        ),
-                )
-                .child(pane.request.render_search_bar_editable(
-                    "sequencer-request-editor",
-                    request_readonly,
-                    cx,
-                    |this, action, window, cx| {
-                        this.handle_sequencer_search_action(action, window, cx);
-                    },
-                ))
+            self.render_sequencer_live_request_drawer(
+                can_edit_config,
+                has_selected_request,
+                request_readonly,
+                table_h,
+                table_border,
+                cx,
+            )
         });
 
         let start_capture_btn = sequencer_primary_button(
@@ -566,7 +562,7 @@ impl Workbench {
             this.start_sequencer_capture(window, cx);
         }));
 
-        let section_request = sequencer_section(
+        sequencer_section(
             "sequencer-help-request",
             "选择实时捕获请求帮助",
             "从 Proxy、Target 或 Repeater 等工具将请求发送到 Sequencer，选中请求后即可发起实时采样。",
@@ -604,9 +600,19 @@ impl Workbench {
                 )
                 .child(div().flex().items_center().child(start_capture_btn))
                 .into_any_element(),
-        );
+        )
+    }
 
-        let location_enabled = can_edit_config && (has_selected_request || drawer_open);
+    #[inline(never)]
+    fn render_sequencer_live_location_section(
+        &self,
+        can_edit_config: bool,
+        location_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = &self.sequencer_pane;
+        let dark = theme::is_dark();
         let is_custom = matches!(
             pane.location_kind,
             LocationKind::BodyDelimiter | LocationKind::Regex | LocationKind::Header
@@ -1010,7 +1016,7 @@ impl Workbench {
             },
         );
 
-        let section_location = sequencer_section(
+        sequencer_section(
             "sequencer-help-location",
             "响应中的 Token 位置帮助",
             "指定从响应 Cookie、HTML 表单字段、响应体分隔符、正则表达式或响应头中提取待分析的 Token。",
@@ -1063,220 +1069,291 @@ impl Workbench {
                 )
                 .children(custom_config_panel)
                 .into_any_element(),
+        )
+    }
+
+    #[inline(never)]
+    fn render_sequencer_live_progress_section(
+        &self,
+        can_edit_config: bool,
+        capturing: bool,
+        can_analyze_captured: bool,
+        collected_count: usize,
+        progress_pct: f64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = &self.sequencer_pane;
+        let dark = theme::is_dark();
+        let stats_summary = format!(
+            "已发送 {} · 已提取 {} · 未命中 {} · 错误 {} · 进度 {:.1}%",
+            pane.capture.requests_sent,
+            collected_count,
+            pane.capture.extraction_misses,
+            pane.capture.request_errors,
+            progress_pct
         );
 
+        let stop_btn = sequencer_stack_button(
+            "sequencer-stop-capture",
+            "停止采样",
+            capturing,
+            window,
+            cx,
+        )
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("停止当前正在运行的实时采样任务")
+                .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.stop_sequencer_capture(cx);
+        }));
+
+        let analyze_btn = if can_analyze_captured {
+            sequencer_primary_button(
+                "sequencer-analyze-captured",
+                "分析已采样本",
+                true,
+                window,
+                cx,
+            )
+            .h(theme::scaled_px(26.))
+            .min_w(px(0.))
+            .px(theme::scaled_px(12.))
+        } else {
+            sequencer_stack_button(
+                "sequencer-analyze-captured",
+                "分析已采样本",
+                false,
+                window,
+                cx,
+            )
+        }
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(
+                "对已采集的 Token 样本执行 FIPS 140-2 与熵统计分析",
+            )
+            .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.analyze_captured_sequencer_samples(window, cx);
+        }));
+
+        let append_btn = sequencer_stack_button(
+            "sequencer-append-captured",
+            "从剪贴板追加",
+            can_edit_config,
+            window,
+            cx,
+        )
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(
+                "从剪贴板按行追加 Token 样本到已采集列表",
+            )
+            .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.append_sequencer_captured_from_clipboard(window, cx);
+        }));
+
+        let import_btn = sequencer_stack_button(
+            "sequencer-import-captured-file",
+            "从文件导入…",
+            can_edit_config && !self.file_picker_pending(),
+            window,
+            cx,
+        )
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("从本地文本文件按行导入 Token 样本")
+                .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.import_sequencer_samples_from_file(false, window, cx);
+        }));
+
+        let copy_btn = sequencer_stack_button(
+            "sequencer-copy-captured",
+            "复制全部样本",
+            collected_count > 0,
+            window,
+            cx,
+        )
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("复制全部已采集的 Token 样本到剪贴板")
+                .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.copy_all_sequencer_samples(window, cx);
+        }));
+
+        let export_btn = sequencer_stack_button(
+            "sequencer-export-captured-file",
+            "导出样本…",
+            collected_count > 0 && !self.file_picker_pending(),
+            window,
+            cx,
+        )
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("将当前采集的 Token 样本保存到本地文件")
+                .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.export_sequencer_samples_to_file(window, cx);
+        }));
+
+        let preview_section = (capturing || collected_count > 0).then(|| {
+            div()
+                .mt(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(theme::scaled_px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::foreground())
+                        .child("最近提取样本预览（只读）"),
+                )
+                .child(
+                    div()
+                        .id("sequencer-preview-box")
+                        .test_support()
+                        .h(px(120.))
+                        .max_w(px(658.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::surface())
+                        .child(
+                            Editor::new(&pane.preview_samples)
+                                .readonly(true)
+                                .bordered(false)
+                                .aria_label("Sequencer 最近提取样本预览")
+                                .size_full(),
+                        ),
+                )
+        });
+
+        sequencer_section(
+            "sequencer-help-progress",
+            "实时采样进度与样本帮助",
+            "查看实时采样请求计数、提取进度，以及停止采样、执行分析或导入/导出样本操作。",
+            "实时采样进度与样本",
+            None,
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .id("sequencer-capture-metrics")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(stats_summary.clone())
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(14.))
+                        .text_size(theme::scaled_px(12.5))
+                        .text_color(theme::foreground())
+                        .child(format!("已发送请求：{}", pane.capture.requests_sent))
+                        .child(format!("已提取 Token：{collected_count}"))
+                        .child(format!("未命中：{}", pane.capture.extraction_misses))
+                        .child(format!("错误：{}", pane.capture.request_errors))
+                        .child(format!("进度：{progress_pct:.1}%")),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(658.))
+                        .h(px(5.))
+                        .rounded(px(2.))
+                        .bg(rgb(if dark { 0x35383d } else { 0xe8e8e8 }))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui_kit::relative((progress_pct / 100.0) as f32))
+                                .bg(theme::accent()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(stop_btn)
+                        .child(analyze_btn)
+                        .child(append_btn)
+                        .child(import_btn)
+                        .child(copy_btn)
+                        .child(export_btn),
+                )
+                .children(preview_section)
+                .into_any_element(),
+        )
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_sequencer_live(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = &self.sequencer_pane;
+        let can_operate = self.sequencer_can_operate();
+        let capturing = pane.running.is_some();
+        let analyzing = pane.pending_analysis.is_some();
+        let can_edit_config = can_operate && !capturing;
+        let request_readonly = !can_edit_config || pane.request.is_readonly_preview();
+        let drawer_open = pane.request_drawer_open;
+        let has_selected_request = pane.selected_request_seq.is_some();
+        let can_start_capture = can_edit_config && (has_selected_request || drawer_open);
+
+        let target_total = pane.capture.target_samples.max(1);
+        let collected_count = if capturing {
+            pane.capture.tokens_collected
+        } else {
+            pane.captured_samples
+                .len()
+                .max(pane.capture.tokens_collected)
+        };
+        let progress_pct =
+            ((collected_count as f64 / target_total as f64) * 100.0).clamp(0.0, 100.0);
+        let can_analyze_captured = can_operate
+            && !capturing
+            && !analyzing
+            && pane.captured_samples.len() >= MIN_SAMPLE_COUNT;
+
+        let section_request = self.render_sequencer_live_request_section(
+            can_edit_config,
+            drawer_open,
+            has_selected_request,
+            request_readonly,
+            can_start_capture,
+            window,
+            cx,
+        );
+        let location_enabled = can_edit_config && (has_selected_request || drawer_open);
+        let section_location = self.render_sequencer_live_location_section(
+            can_edit_config,
+            location_enabled,
+            window,
+            cx,
+        );
         let show_capture_panel = capturing
             || collected_count > 0
             || pane.capture.requests_sent > 0
             || pane.capture_panel_open;
-
         let section_progress = show_capture_panel.then(|| {
-            let stats_summary = format!(
-                "已发送 {} · 已提取 {} · 未命中 {} · 错误 {} · 进度 {:.1}%",
-                pane.capture.requests_sent,
-                collected_count,
-                pane.capture.extraction_misses,
-                pane.capture.request_errors,
-                progress_pct
-            );
-
-            let stop_btn = sequencer_stack_button(
-                "sequencer-stop-capture",
-                "停止采样",
-                capturing,
-                window,
-                cx,
-            )
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("停止当前正在运行的实时采样任务")
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.stop_sequencer_capture(cx);
-            }));
-
-            let analyze_btn = if can_analyze_captured {
-                sequencer_primary_button(
-                    "sequencer-analyze-captured",
-                    "分析已采样本",
-                    true,
-                    window,
-                    cx,
-                )
-                .h(theme::scaled_px(26.))
-                .min_w(px(0.))
-                .px(theme::scaled_px(12.))
-            } else {
-                sequencer_stack_button(
-                    "sequencer-analyze-captured",
-                    "分析已采样本",
-                    false,
-                    window,
-                    cx,
-                )
-            }
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(
-                    "对已采集的 Token 样本执行 FIPS 140-2 与熵统计分析",
-                )
-                .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.analyze_captured_sequencer_samples(window, cx);
-            }));
-
-            let append_btn = sequencer_stack_button(
-                "sequencer-append-captured",
-                "从剪贴板追加",
+            self.render_sequencer_live_progress_section(
                 can_edit_config,
+                capturing,
+                can_analyze_captured,
+                collected_count,
+                progress_pct,
                 window,
                 cx,
-            )
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(
-                    "从剪贴板按行追加 Token 样本到已采集列表",
-                )
-                .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.append_sequencer_captured_from_clipboard(window, cx);
-            }));
-
-            let import_btn = sequencer_stack_button(
-                "sequencer-import-captured-file",
-                "从文件导入…",
-                can_edit_config && !self.file_picker_pending(),
-                window,
-                cx,
-            )
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("从本地文本文件按行导入 Token 样本")
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.import_sequencer_samples_from_file(false, window, cx);
-            }));
-
-            let copy_btn = sequencer_stack_button(
-                "sequencer-copy-captured",
-                "复制全部样本",
-                collected_count > 0,
-                window,
-                cx,
-            )
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("复制全部已采集的 Token 样本到剪贴板")
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.copy_all_sequencer_samples(window, cx);
-            }));
-
-            let export_btn = sequencer_stack_button(
-                "sequencer-export-captured-file",
-                "导出样本…",
-                collected_count > 0 && !self.file_picker_pending(),
-                window,
-                cx,
-            )
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("将当前采集的 Token 样本保存到本地文件")
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.export_sequencer_samples_to_file(window, cx);
-            }));
-
-            let preview_section = (capturing || collected_count > 0).then(|| {
-                div()
-                    .mt(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(theme::scaled_px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::foreground())
-                            .child("最近提取样本预览（只读）"),
-                    )
-                    .child(
-                        div()
-                            .id("sequencer-preview-box")
-                            .test_support()
-                            .h(px(120.))
-                            .max_w(px(658.))
-                            .border_1()
-                            .border_color(theme::border())
-                            .bg(theme::surface())
-                            .child(
-                                Editor::new(&pane.preview_samples)
-                                    .readonly(true)
-                                    .bordered(false)
-                                    .aria_label("Sequencer 最近提取样本预览")
-                                    .size_full(),
-                            ),
-                    )
-            });
-
-            sequencer_section(
-                "sequencer-help-progress",
-                "实时采样进度与样本帮助",
-                "查看实时采样请求计数、提取进度，以及停止采样、执行分析或导入/导出样本操作。",
-                "实时采样进度与样本",
-                None,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .id("sequencer-capture-metrics")
-                            .test_support()
-                            .role(Role::Status)
-                            .aria_label(stats_summary.clone())
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(14.))
-                            .text_size(theme::scaled_px(12.5))
-                            .text_color(theme::foreground())
-                            .child(format!("已发送请求：{}", pane.capture.requests_sent))
-                            .child(format!("已提取 Token：{collected_count}"))
-                            .child(format!("未命中：{}", pane.capture.extraction_misses))
-                            .child(format!("错误：{}", pane.capture.request_errors))
-                            .child(format!("进度：{progress_pct:.1}%")),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(658.))
-                            .h(px(5.))
-                            .rounded(px(2.))
-                            .bg(rgb(if dark { 0x35383d } else { 0xe8e8e8 }))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui_kit::relative((progress_pct / 100.0) as f32))
-                                    .bg(theme::accent()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(stop_btn)
-                            .child(analyze_btn)
-                            .child(append_btn)
-                            .child(import_btn)
-                            .child(copy_btn)
-                            .child(export_btn),
-                    )
-                    .children(preview_section)
-                    .into_any_element(),
             )
         });
 

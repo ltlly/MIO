@@ -82,7 +82,7 @@ impl Workbench {
             workspace
                 .validate_structure()
                 .map_err(|error| error.to_string())?;
-            self.workspace_dirty |= workspace != *stored;
+            self.workspace_dirty |= *workspace != *stored;
             self.workspace = workspace;
             // Keep uncommitted text and IME; only replace references to the deleted identity.
             for (id, editors) in &mut self.intruder.editors {

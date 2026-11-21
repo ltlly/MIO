@@ -128,9 +128,9 @@ impl Workbench {
                 if !has_detail {
                     None
                 } else if self.history_response.has_focus(window, cx) {
-                    Some(&mut self.history_response)
+                    Some(&mut *self.history_response)
                 } else {
-                    Some(&mut self.history_request)
+                    Some(&mut *self.history_request)
                 }
             }
             Tool::Proxy if self.proxy_page == ProxyPage::WebSocketHistory => self

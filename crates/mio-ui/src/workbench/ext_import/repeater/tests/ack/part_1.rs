@@ -158,7 +158,7 @@ fn a_new_project_open_event_revokes_an_inflight_archive_proposal_without_polluti
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert_eq!(view.project, Some(next_project));
-        assert_eq!(view.workspace, next_workspace);
+        assert_eq!(*view.workspace, next_workspace);
         assert!(view.ext_import.messages.is_none());
         assert!(view.ext_import.report.is_none());
         assert!(view.ext_import.repeater.pending.is_none());
@@ -185,7 +185,7 @@ fn a_new_project_open_event_revokes_an_inflight_archive_proposal_without_polluti
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert_eq!(view.project, Some(next_project));
-        assert_eq!(view.workspace, next_workspace);
+        assert_eq!(*view.workspace, next_workspace);
         assert_eq!(
             view.ext_repeater_selection().unwrap().message,
             next_rows[0].id

@@ -120,7 +120,7 @@ impl Workbench {
             );
 
         let has_cli = initial_project.is_some();
-        self.startup_wizard = Some(StartupWizard {
+        self.startup_wizard = Some(Box::new(StartupWizard {
             active: !has_cli,
             step: WizardStep::Step1,
             mode: ProjectMode::Temporary,
@@ -157,7 +157,7 @@ impl Workbench {
                 config_file_sub,
                 recent_sub,
             ],
-        });
+        }));
         if !has_cli {
             self.status = "请选择要创建或打开的项目。".into();
             window.set_window_title("MIO");

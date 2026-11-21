@@ -90,7 +90,7 @@ pub(super) struct MatchReplacePane {
     pub(super) logger_query_cancel: Option<CancellationToken>,
     pub(super) logger_selected: Option<FlowId>,
     pub(super) logger_pending_read: Option<(ProjectKey, u64, FlowId)>,
-    pub(super) logger_loaded_detail: Option<(FlowRecord, OriginalMessages)>,
+    pub(super) logger_loaded_detail: Option<Box<(FlowRecord, OriginalMessages)>>,
     pub(super) logger_request: MessageEditor,
     pub(super) logger_response: MessageEditor,
     plain_selection_seqs: [Rc<Cell<u64>>; 5],

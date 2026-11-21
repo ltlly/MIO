@@ -396,7 +396,7 @@ impl Workbench {
             self.fail("工作区 revision 已耗尽，无法继续保存。", cx);
             return false;
         };
-        let mut workspace = self.workspace.clone();
+        let mut workspace = (*self.workspace).clone();
         workspace.revision = revision;
         if self.enqueue(Command::SaveWorkspace { project, workspace }, cx) {
             self.pending_workspace = Some(revision);

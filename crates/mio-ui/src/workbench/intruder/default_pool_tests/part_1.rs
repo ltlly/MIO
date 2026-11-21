@@ -304,7 +304,7 @@ fn project_switch_and_disconnect_cancel_default_pool_without_late_tab(cx: &mut T
                 id: fixture.project.id,
                 generation: fixture.project.generation + 1,
             };
-            let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+            let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
             emit(
                 &fixture,
                 Event::ProjectOpened {

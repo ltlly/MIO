@@ -6,7 +6,7 @@ use super::*;
 use crate::workbench::tests::{drain, fixture};
 
 fn open_project(f: &mut crate::workbench::tests::Fixture, cx: &mut TestAppContext) {
-    let workspace = cx.read(|cx| f.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*f.view.read(cx).workspace).clone());
     f.events
         .try_send(Event::ProjectOpened {
             project: f.project,
@@ -138,7 +138,7 @@ fn tool_message_bytes_reads_target_sequencer_and_dashboard_editors(cx: &mut Test
             view.tool = Tool::Logger;
             view.record_logger_finished(&flow, window, cx);
             view.select_logger_entry(flow_id, window, cx);
-            view.extra_tools.logger_loaded_detail = Some((flow.clone(), Default::default()));
+            view.extra_tools.logger_loaded_detail = Some(Box::new((flow.clone(), Default::default())));
             view.extra_tools
                 .logger_request
                 .load(&raw_request, window, cx);
@@ -400,7 +400,7 @@ fn comparer_diff_navigation_and_logger_limit_har_export_work(cx: &mut TestAppCon
         f.view.update(cx, |view, cx| {
             view.record_logger_finished(&flow, window, cx);
             view.extra_tools.logger_selected = Some(flow.summary.id);
-            view.extra_tools.logger_loaded_detail = Some((flow, Default::default()));
+            view.extra_tools.logger_loaded_detail = Some(Box::new((flow, Default::default())));
             view.copy_selected_flow_har(window, cx);
         });
     })

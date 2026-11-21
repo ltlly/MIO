@@ -1722,6 +1722,530 @@ impl Workbench {
     }
 
     #[inline(never)]
+    fn render_custom_actions_header(
+        &self,
+        ui_state: &Entity<CustomActionsUiState>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state_for_new = ui_state.clone();
+        toolbar()
+            .flex_nowrap()
+            .gap(px(5.))
+            .px(px(8.))
+            .child(
+                gpui_kit::component::Icon::new(IconName::Zap)
+                    .size(theme::scaled_px(13.))
+                    .text_color(theme::accent()),
+            )
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Custom actions"),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("repeater-custom-action-new")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(22.))
+                    .px(px(6.))
+                    .label("新建")
+                    .tooltip("清空为自定义请求修改 + 日志输出示例模板")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        state_for_new.update(cx, |st, cx| {
+                            st.active_preset = None;
+                            st.selected_saved = None;
+                            st.error = None;
+                            st.saved_notice = None;
+                            st.script_name.update(cx, |inp, cx| {
+                                inp.set_value("", window, cx);
+                                inp.focus(window, cx);
+                            });
+                            st.script_editor.update(cx, |ed, cx| {
+                                ed.set_value(STARTER_CUSTOM_ACTION, window, cx);
+                            });
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("repeater-custom-actions-close")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .w(theme::scaled_px(24.))
+                    .h(theme::scaled_px(24.))
+                    .icon(IconName::Close)
+                    .accessibility_label("关闭 Custom actions")
+                    .tooltip("收起 Repeater Custom actions 侧栏")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.repeater_custom_actions_open = false;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_custom_actions_preset_group(
+        &self,
+        title: &'static str,
+        category: CustomActionCategory,
+        ui_state: &Entity<CustomActionsUiState>,
+        active_preset: Option<usize>,
+        has_http_tab: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut chips = div().flex().flex_wrap().items_center().gap(px(4.));
+        for (idx, preset) in CUSTOM_ACTION_PRESETS.into_iter().enumerate() {
+            if preset.category != category {
+                continue;
+            }
+            let state_load = ui_state.clone();
+            let state_exec = ui_state.clone();
+            let is_active = active_preset == Some(idx);
+            chips = chips.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .bg(if is_active {
+                        theme::selected()
+                    } else {
+                        theme::toolbar_surface()
+                    })
+                    .overflow_hidden()
+                    .child(
+                        Button::new(preset.id)
+                            .ghost()
+                            .small()
+                            .compact()
+                            .rounded(ButtonRounded::None)
+                            .h(theme::scaled_px(21.))
+                            .px(px(6.))
+                            .label(preset.label)
+                            .tooltip(format!("载入脚本：{}", preset.description))
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                state_load.update(cx, |st, cx| {
+                                    st.active_preset = Some(idx);
+                                    st.selected_saved = None;
+                                    st.error = None;
+                                    st.saved_notice = None;
+                                    st.script_editor.update(cx, |ed, cx| {
+                                        ed.set_value(preset.script, window, cx);
+                                    });
+                                    st.script_name.update(cx, |inp, cx| {
+                                        inp.set_value(preset.label, window, cx);
+                                    });
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{}-run", preset.id)))
+                            .ghost()
+                            .small()
+                            .compact()
+                            .rounded(ButtonRounded::None)
+                            .w(theme::scaled_px(20.))
+                            .h(theme::scaled_px(21.))
+                            .border_l_1()
+                            .border_color(theme::border())
+                            .icon(IconName::Play)
+                            .disabled(!has_http_tab)
+                            .accessibility_label(format!("立即执行：{}", preset.label))
+                            .tooltip(format!("载入并立即执行「{}」", preset.label))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                state_exec.update(cx, |st, cx| {
+                                    st.active_preset = Some(idx);
+                                    st.selected_saved = None;
+                                    st.script_editor.update(cx, |ed, cx| {
+                                        ed.set_value(preset.script, window, cx);
+                                    });
+                                    st.script_name.update(cx, |inp, cx| {
+                                        inp.set_value(preset.label, window, cx);
+                                    });
+                                });
+                                this.execute_custom_action_into_ui(
+                                    preset.script,
+                                    &state_exec,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .child(
+                div()
+                    .text_size(theme::scaled_px(11.))
+                    .text_color(theme::muted_foreground())
+                    .child(title),
+            )
+            .child(chips)
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_custom_actions_saved_section(
+        &self,
+        ui_state: &Entity<CustomActionsUiState>,
+        saved_scripts: &[CustomActionScriptEntry],
+        selected_saved: Option<&str>,
+        has_http_tab: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut saved_section = div()
+            .px(px(8.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(theme::border())
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(theme::scaled_px(11.))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme::muted_foreground())
+                            .child(format!("我的自定义脚本 ({})", saved_scripts.len())),
+                    ),
+            );
+        if saved_scripts.is_empty() {
+            saved_section = saved_section.child(
+                div()
+                    .id("repeater-custom-actions-saved-empty")
+                    .test_support()
+                    .text_size(theme::scaled_px(11.))
+                    .text_color(theme::muted_foreground())
+                    .child("暂无已保存的自定义脚本，在下方编辑名称与代码后点击「保存脚本」。"),
+            );
+        } else {
+            let mut list = div()
+                .id("repeater-custom-actions-saved-list")
+                .test_support()
+                .max_h(px(86.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(2.));
+            for (idx, entry) in saved_scripts.iter().enumerate() {
+                let entry_name_load = entry.name.clone();
+                let entry_code_load = entry.code.clone();
+                let entry_name_run = entry.name.clone();
+                let entry_code_run = entry.code.clone();
+                let entry_name_del = entry.name.clone();
+                let is_sel = selected_saved == Some(entry.name.as_str());
+                let st_load = ui_state.clone();
+                let st_run = ui_state.clone();
+                let st_del = ui_state.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "repeater-custom-action-saved-row-{idx}"
+                        )))
+                        .test_support()
+                        .h(theme::scaled_px(22.))
+                        .px(px(6.))
+                        .rounded(px(3.))
+                        .bg(if is_sel {
+                            theme::selected()
+                        } else {
+                            theme::toolbar_surface()
+                        })
+                        .border_1()
+                        .border_color(if is_sel {
+                            theme::accent()
+                        } else {
+                            theme::border()
+                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "repeater-custom-action-saved-select-{idx}"
+                                )))
+                                .flex_1()
+                                .min_w_0()
+                                .cursor_pointer()
+                                .truncate()
+                                .text_size(theme::scaled_px(11.5))
+                                .text_color(theme::foreground())
+                                .child(entry.name.clone())
+                                .on_click(cx.listener(move |_, _, window, cx| {
+                                    let name = entry_name_load.clone();
+                                    let code = entry_code_load.clone();
+                                    st_load.update(cx, |st, cx| {
+                                        st.active_preset = None;
+                                        st.selected_saved = Some(name.clone());
+                                        st.error = None;
+                                        st.saved_notice = None;
+                                        st.script_name.update(cx, |inp, cx| {
+                                            inp.set_value(name, window, cx);
+                                        });
+                                        st.script_editor.update(cx, |ed, cx| {
+                                            ed.set_value(code, window, cx);
+                                        });
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "repeater-custom-action-saved-run-{idx}"
+                            )))
+                            .ghost()
+                            .small()
+                            .compact()
+                            .w(theme::scaled_px(20.))
+                            .h(theme::scaled_px(18.))
+                            .icon(IconName::Play)
+                            .disabled(!has_http_tab)
+                            .accessibility_label("运行已保存脚本")
+                            .tooltip("立即在当前请求上执行此自定义脚本")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let name = entry_name_run.clone();
+                                let code = entry_code_run.clone();
+                                st_run.update(cx, |st, cx| {
+                                    st.active_preset = None;
+                                    st.selected_saved = Some(name.clone());
+                                    st.script_name.update(cx, |inp, cx| {
+                                        inp.set_value(name, window, cx);
+                                    });
+                                    st.script_editor.update(cx, |ed, cx| {
+                                        ed.set_value(code.clone(), window, cx);
+                                    });
+                                });
+                                this.execute_custom_action_into_ui(&code, &st_run, window, cx);
+                            })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "repeater-custom-action-saved-del-{idx}"
+                            )))
+                            .ghost()
+                            .small()
+                            .compact()
+                            .w(theme::scaled_px(20.))
+                            .h(theme::scaled_px(18.))
+                            .icon(IconName::Close)
+                            .accessibility_label("删除已保存脚本")
+                            .tooltip("从我的自定义脚本中删除")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let name = entry_name_del.clone();
+                                let lib_path = custom_actions_library_path().ok().flatten();
+                                let current = st_del.read(cx).saved_scripts.clone();
+                                match delete_custom_action_from_path(
+                                    lib_path.as_deref(),
+                                    &current,
+                                    &name,
+                                ) {
+                                    Ok(next) => {
+                                        st_del.update(cx, |st, _| {
+                                            st.saved_scripts = next;
+                                            if st.selected_saved.as_deref() == Some(&name) {
+                                                st.selected_saved = None;
+                                            }
+                                            st.error = None;
+                                            st.saved_notice =
+                                                Some(format!("已删除自定义脚本：{name}"));
+                                        });
+                                        this.status = format!("已删除自定义脚本：{name}");
+                                    }
+                                    Err(err) => {
+                                        st_del.update(cx, |st, _| {
+                                            st.saved_notice = None;
+                                            st.error = Some(format!("{err:#}"));
+                                        });
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                        ),
+                );
+            }
+            saved_section = saved_section.child(list);
+        }
+        saved_section.into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_custom_actions_name_bar(
+        &self,
+        ui_state: &Entity<CustomActionsUiState>,
+        script_name: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state_for_save = ui_state.clone();
+        div()
+            .px(px(8.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(theme::border())
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(script_name)
+                        .id("repeater-custom-action-name")
+                        .aria_label("自定义脚本名称")
+                        .small(),
+                ),
+            )
+            .child(
+                button("repeater-custom-action-save", "保存脚本")
+                    .icon(IconName::Save)
+                    .tooltip("校验并保存到本地「我的自定义脚本」(repeater-custom-actions.json)")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let (name_entity, editor_entity, current_scripts) = {
+                            let st = state_for_save.read(cx);
+                            (
+                                st.script_name.clone(),
+                                st.script_editor.clone(),
+                                st.saved_scripts.clone(),
+                            )
+                        };
+                        let name_res =
+                            editing::input_snapshot(&name_entity, window, cx).map(|s| s.to_string());
+                        let code_res =
+                            editing::snapshot(&editor_entity, window, cx).map(|s| s.to_string());
+                        let lib_path = custom_actions_library_path().ok().flatten();
+                        let result = name_res
+                            .map_err(|e| anyhow::anyhow!(e))
+                            .and_then(|name| {
+                                let code = code_res.map_err(|e| anyhow::anyhow!(e))?;
+                                save_custom_action_to_path(
+                                    lib_path.as_deref(),
+                                    &current_scripts,
+                                    &name,
+                                    &code,
+                                )
+                                .map(|next| (name.trim().to_owned(), next))
+                            });
+                        match result {
+                            Ok((name, next)) => {
+                                let notice = format!("已保存自定义脚本：{name}");
+                                state_for_save.update(cx, |st, _| {
+                                    st.active_preset = None;
+                                    st.selected_saved = Some(name);
+                                    st.saved_scripts = next;
+                                    st.error = None;
+                                    st.saved_notice = Some(notice.clone());
+                                });
+                                this.error = None;
+                                this.status = notice;
+                            }
+                            Err(err) => {
+                                state_for_save.update(cx, |st, _| {
+                                    st.saved_notice = None;
+                                    st.error = Some(format!("{err:#}"));
+                                });
+                            }
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_custom_actions_run_bar(
+        &self,
+        ui_state: &Entity<CustomActionsUiState>,
+        has_http_tab: bool,
+        has_output: bool,
+        has_error: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state_for_run = ui_state.clone();
+        let state_for_copy = ui_state.clone();
+        let state_for_clear = ui_state.clone();
+        div()
+            .px(px(8.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(theme::border())
+            .bg(theme::toolbar_surface())
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                button("repeater-custom-action-run", "运行 (Run)")
+                    .primary()
+                    .icon(IconName::Play)
+                    .disabled(!has_http_tab)
+                    .tooltip("针对当前激活的 Repeater 请求与响应执行上方脚本（如修改 request 将直接更新当前请求）")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let editor_entity = state_for_run.read(cx).script_editor.clone();
+                        let script = match editing::snapshot(&editor_entity, window, cx) {
+                            Ok(s) => s.to_string(),
+                            Err(err) => {
+                                state_for_run.update(cx, |st, _| {
+                                    st.error = Some(err.to_owned());
+                                });
+                                cx.notify();
+                                return;
+                            }
+                        };
+                        this.execute_custom_action_into_ui(&script, &state_for_run, window, cx);
+                    })),
+            )
+            .child(
+                button("repeater-custom-action-copy-output", "复制输出")
+                    .icon(IconName::Copy)
+                    .disabled(!has_output)
+                    .tooltip("将自定义动作脚本的输出结果复制到剪贴板")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let text = state_for_copy.read(cx).output.clone();
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                            this.status = "已复制 Custom actions 输出到剪贴板".into();
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("repeater-custom-action-clear")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .h(theme::scaled_px(22.))
+                    .px(px(6.))
+                    .label("清空")
+                    .disabled(!has_output && !has_error)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        state_for_clear.update(cx, |st, _| {
+                            st.output.clear();
+                            st.error = None;
+                            st.saved_notice = None;
+                        });
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
     pub(in crate::workbench) fn render_repeater_custom_actions_sidebar(
         &self,
         window: &mut Window,
@@ -1787,294 +2311,49 @@ impl Workbench {
             .active
             .is_some_and(|id| self.tab_editors.contains_key(&id));
         let dock_left = self.inspector.dock_left;
-        let state_for_new = ui_state.clone();
-        let state_for_run = ui_state.clone();
-        let state_for_save = ui_state.clone();
-        let state_for_copy = ui_state.clone();
-        let state_for_clear = ui_state.clone();
-
-        let render_preset_group = |title: &'static str, category: CustomActionCategory| {
-            let mut chips = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(4.));
-            for (idx, preset) in CUSTOM_ACTION_PRESETS.into_iter().enumerate() {
-                if preset.category != category {
-                    continue;
-                }
-                let state_load = ui_state.clone();
-                let state_exec = ui_state.clone();
-                let is_active = active_preset == Some(idx);
-                chips = chips.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(if is_active {
-                            theme::accent()
-                        } else {
-                            theme::border()
-                        })
-                        .bg(if is_active {
-                            theme::selected()
-                        } else {
-                            theme::toolbar_surface()
-                        })
-                        .overflow_hidden()
-                        .child(
-                            Button::new(preset.id)
-                                .ghost()
-                                .small()
-                                .compact()
-                                .rounded(ButtonRounded::None)
-                                .h(theme::scaled_px(21.))
-                                .px(px(6.))
-                                .label(preset.label)
-                                .tooltip(format!("载入脚本：{}", preset.description))
-                                .on_click(cx.listener(move |_, _, window, cx| {
-                                    state_load.update(cx, |st, cx| {
-                                        st.active_preset = Some(idx);
-                                        st.selected_saved = None;
-                                        st.error = None;
-                                        st.saved_notice = None;
-                                        st.script_editor.update(cx, |ed, cx| {
-                                            ed.set_value(preset.script, window, cx);
-                                        });
-                                        st.script_name.update(cx, |inp, cx| {
-                                            inp.set_value(preset.label, window, cx);
-                                        });
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("{}-run", preset.id)))
-                                .ghost()
-                                .small()
-                                .compact()
-                                .rounded(ButtonRounded::None)
-                                .w(theme::scaled_px(20.))
-                                .h(theme::scaled_px(21.))
-                                .border_l_1()
-                                .border_color(theme::border())
-                                .icon(IconName::Play)
-                                .disabled(!has_http_tab)
-                                .accessibility_label(format!("立即执行：{}", preset.label))
-                                .tooltip(format!("载入并立即执行「{}」", preset.label))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    state_exec.update(cx, |st, cx| {
-                                        st.active_preset = Some(idx);
-                                        st.selected_saved = None;
-                                        st.script_editor.update(cx, |ed, cx| {
-                                            ed.set_value(preset.script, window, cx);
-                                        });
-                                        st.script_name.update(cx, |inp, cx| {
-                                            inp.set_value(preset.label, window, cx);
-                                        });
-                                    });
-                                    this.execute_custom_action_into_ui(
-                                        preset.script,
-                                        &state_exec,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                );
-            }
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(
-                    div()
-                        .text_size(theme::scaled_px(11.))
-                        .text_color(theme::muted_foreground())
-                        .child(title),
-                )
-                .child(chips)
-        };
-
-        let mut saved_section = div()
-            .px(px(8.))
-            .py(px(6.))
+        let header = self.render_custom_actions_header(&ui_state, cx);
+        let presets = div()
+            .id("repeater-custom-actions-presets-pane")
+            .max_h(px(164.))
+            .flex_shrink_0()
+            .overflow_y_scroll()
+            .p(px(8.))
             .border_b_1()
             .border_color(theme::border())
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(theme::scaled_px(11.))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme::muted_foreground())
-                            .child(format!("我的自定义脚本 ({})", saved_scripts.len())),
-                    ),
-            );
-        if saved_scripts.is_empty() {
-            saved_section = saved_section.child(
-                div()
-                    .id("repeater-custom-actions-saved-empty")
-                    .test_support()
-                    .text_size(theme::scaled_px(11.))
-                    .text_color(theme::muted_foreground())
-                    .child("暂无已保存的自定义脚本，在下方编辑名称与代码后点击「保存脚本」。"),
-            );
-        } else {
-            let mut list = div()
-                .id("repeater-custom-actions-saved-list")
-                .test_support()
-                .max_h(px(86.))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(2.));
-            for (idx, entry) in saved_scripts.iter().enumerate() {
-                let entry_name_load = entry.name.clone();
-                let entry_code_load = entry.code.clone();
-                let entry_name_run = entry.name.clone();
-                let entry_code_run = entry.code.clone();
-                let entry_name_del = entry.name.clone();
-                let is_sel = selected_saved.as_deref() == Some(entry.name.as_str());
-                let st_load = ui_state.clone();
-                let st_run = ui_state.clone();
-                let st_del = ui_state.clone();
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "repeater-custom-action-saved-row-{idx}"
-                        )))
-                        .test_support()
-                        .h(theme::scaled_px(22.))
-                        .px(px(6.))
-                        .rounded(px(3.))
-                        .bg(if is_sel {
-                            theme::selected()
-                        } else {
-                            theme::toolbar_surface()
-                        })
-                        .border_1()
-                        .border_color(if is_sel {
-                            theme::accent()
-                        } else {
-                            theme::border()
-                        })
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .id(SharedString::from(format!(
-                                    "repeater-custom-action-saved-select-{idx}"
-                                )))
-                                .flex_1()
-                                .min_w_0()
-                                .cursor_pointer()
-                                .truncate()
-                                .text_size(theme::scaled_px(11.5))
-                                .text_color(theme::foreground())
-                                .child(entry.name.clone())
-                                .on_click(cx.listener(move |_, _, window, cx| {
-                                    let name = entry_name_load.clone();
-                                    let code = entry_code_load.clone();
-                                    st_load.update(cx, |st, cx| {
-                                        st.active_preset = None;
-                                        st.selected_saved = Some(name.clone());
-                                        st.error = None;
-                                        st.saved_notice = None;
-                                        st.script_name.update(cx, |inp, cx| {
-                                            inp.set_value(name, window, cx);
-                                        });
-                                        st.script_editor.update(cx, |ed, cx| {
-                                            ed.set_value(code, window, cx);
-                                        });
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "repeater-custom-action-saved-run-{idx}"
-                            )))
-                                .ghost()
-                                .small()
-                                .compact()
-                                .w(theme::scaled_px(20.))
-                                .h(theme::scaled_px(18.))
-                                .icon(IconName::Play)
-                                .disabled(!has_http_tab)
-                                .accessibility_label("运行已保存脚本")
-                                .tooltip("立即在当前请求上执行此自定义脚本")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    let name = entry_name_run.clone();
-                                    let code = entry_code_run.clone();
-                                    st_run.update(cx, |st, cx| {
-                                        st.active_preset = None;
-                                        st.selected_saved = Some(name.clone());
-                                        st.script_name.update(cx, |inp, cx| {
-                                            inp.set_value(name, window, cx);
-                                        });
-                                        st.script_editor.update(cx, |ed, cx| {
-                                            ed.set_value(code.clone(), window, cx);
-                                        });
-                                    });
-                                    this.execute_custom_action_into_ui(&code, &st_run, window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "repeater-custom-action-saved-del-{idx}"
-                            )))
-                                .ghost()
-                                .small()
-                                .compact()
-                                .w(theme::scaled_px(20.))
-                                .h(theme::scaled_px(18.))
-                                .icon(IconName::Close)
-                                .accessibility_label("删除已保存脚本")
-                                .tooltip("从我的自定义脚本中删除")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let name = entry_name_del.clone();
-                                    let lib_path = custom_actions_library_path().ok().flatten();
-                                    let current = st_del.read(cx).saved_scripts.clone();
-                                    match delete_custom_action_from_path(
-                                        lib_path.as_deref(),
-                                        &current,
-                                        &name,
-                                    ) {
-                                        Ok(next) => {
-                                            st_del.update(cx, |st, _| {
-                                                st.saved_scripts = next;
-                                                if st.selected_saved.as_deref() == Some(&name) {
-                                                    st.selected_saved = None;
-                                                }
-                                                st.error = None;
-                                                st.saved_notice =
-                                                    Some(format!("已删除自定义脚本：{name}"));
-                                            });
-                                            this.status = format!("已删除自定义脚本：{name}");
-                                        }
-                                        Err(err) => {
-                                            st_del.update(cx, |st, _| {
-                                                st.saved_notice = None;
-                                                st.error = Some(format!("{err:#}"));
-                                            });
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            saved_section = saved_section.child(list);
-        }
+            .gap(px(6.))
+            .child(self.render_custom_actions_preset_group(
+                "修改当前请求 (Rhai 原地修改草稿 · 点 ▶ 立即执行)：",
+                CustomActionCategory::MutateRequest,
+                &ui_state,
+                active_preset,
+                has_http_tab,
+                cx,
+            ))
+            .child(self.render_custom_actions_preset_group(
+                "分析与提取 (解析请求/响应并输出到下方)：",
+                CustomActionCategory::Inspect,
+                &ui_state,
+                active_preset,
+                has_http_tab,
+                cx,
+            ));
+        let saved_section = self.render_custom_actions_saved_section(
+            &ui_state,
+            &saved_scripts,
+            selected_saved.as_deref(),
+            has_http_tab,
+            cx,
+        );
+        let name_bar = self.render_custom_actions_name_bar(&ui_state, &script_name, cx);
+        let run_bar = self.render_custom_actions_run_bar(
+            &ui_state,
+            has_http_tab,
+            !output.is_empty(),
+            error.is_some(),
+            cx,
+        );
 
         div()
             .id("repeater-custom-actions-sidebar")
@@ -2088,157 +2367,10 @@ impl Workbench {
             .bg(theme::surface())
             .flex()
             .flex_col()
-            .child(
-                toolbar()
-                    .flex_nowrap()
-                    .gap(px(5.))
-                    .px(px(8.))
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::Zap)
-                            .size(theme::scaled_px(13.))
-                            .text_color(theme::accent()),
-                    )
-                    .child(
-                        div()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Custom actions"),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("repeater-custom-action-new")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(22.))
-                            .px(px(6.))
-                            .label("新建")
-                            .tooltip("清空为自定义请求修改 + 日志输出示例模板")
-                            .on_click(cx.listener(move |_, _, window, cx| {
-                                state_for_new.update(cx, |st, cx| {
-                                    st.active_preset = None;
-                                    st.selected_saved = None;
-                                    st.error = None;
-                                    st.saved_notice = None;
-                                    st.script_name.update(cx, |inp, cx| {
-                                        inp.set_value("", window, cx);
-                                        inp.focus(window, cx);
-                                    });
-                                    st.script_editor.update(cx, |ed, cx| {
-                                        ed.set_value(STARTER_CUSTOM_ACTION, window, cx);
-                                    });
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("repeater-custom-actions-close")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .w(theme::scaled_px(24.))
-                            .h(theme::scaled_px(24.))
-                            .icon(IconName::Close)
-                            .accessibility_label("关闭 Custom actions")
-                            .tooltip("收起 Repeater Custom actions 侧栏")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.repeater_custom_actions_open = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .id("repeater-custom-actions-presets-pane")
-                    .max_h(px(164.))
-                    .flex_shrink_0()
-                    .overflow_y_scroll()
-                    .p(px(8.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(render_preset_group(
-                        "修改当前请求 (Rhai 原地修改草稿 · 点 ▶ 立即执行)：",
-                        CustomActionCategory::MutateRequest,
-                    ))
-                    .child(render_preset_group(
-                        "分析与提取 (解析请求/响应并输出到下方)：",
-                        CustomActionCategory::Inspect,
-                    )),
-            )
+            .child(header)
+            .child(presets)
             .child(saved_section)
-            .child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&script_name)
-                                .id("repeater-custom-action-name")
-                                .aria_label("自定义脚本名称")
-                                .small(),
-                        ),
-                    )
-                    .child(
-                        button("repeater-custom-action-save", "保存脚本")
-                            .icon(IconName::Save)
-                            .tooltip("校验并保存到本地「我的自定义脚本」(repeater-custom-actions.json)")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let (name_entity, editor_entity, current_scripts) = {
-                                    let st = state_for_save.read(cx);
-                                    (
-                                        st.script_name.clone(),
-                                        st.script_editor.clone(),
-                                        st.saved_scripts.clone(),
-                                    )
-                                };
-                                let name_res = editing::input_snapshot(&name_entity, window, cx)
-                                    .map(|s| s.to_string());
-                                let code_res = editing::snapshot(&editor_entity, window, cx)
-                                    .map(|s| s.to_string());
-                                let lib_path = custom_actions_library_path().ok().flatten();
-                                let result = name_res
-                                    .map_err(|e| anyhow::anyhow!(e))
-                                    .and_then(|name| {
-                                        let code = code_res.map_err(|e| anyhow::anyhow!(e))?;
-                                        save_custom_action_to_path(
-                                            lib_path.as_deref(),
-                                            &current_scripts,
-                                            &name,
-                                            &code,
-                                        )
-                                        .map(|next| (name.trim().to_owned(), next))
-                                    });
-                                match result {
-                                    Ok((name, next)) => {
-                                        let notice = format!("已保存自定义脚本：{name}");
-                                        state_for_save.update(cx, |st, _| {
-                                            st.active_preset = None;
-                                            st.selected_saved = Some(name);
-                                            st.saved_scripts = next;
-                                            st.error = None;
-                                            st.saved_notice = Some(notice.clone());
-                                        });
-                                        this.error = None;
-                                        this.status = notice;
-                                    }
-                                    Err(err) => {
-                                        state_for_save.update(cx, |st, _| {
-                                            st.saved_notice = None;
-                                            st.error = Some(format!("{err:#}"));
-                                        });
-                                    }
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(name_bar)
             .child(
                 div()
                     .h(px(155.))
@@ -2252,76 +2384,7 @@ impl Workbench {
                             .aria_label("Custom actions Rhai 脚本编辑器"),
                     ),
             )
-            .child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .bg(theme::toolbar_surface())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        button("repeater-custom-action-run", "运行 (Run)")
-                            .primary()
-                            .icon(IconName::Play)
-                            .disabled(!has_http_tab)
-                            .tooltip("针对当前激活的 Repeater 请求与响应执行上方脚本（如修改 request 将直接更新当前请求）")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let editor_entity = state_for_run.read(cx).script_editor.clone();
-                                let script = match editing::snapshot(&editor_entity, window, cx) {
-                                    Ok(s) => s.to_string(),
-                                    Err(err) => {
-                                        state_for_run.update(cx, |st, _| {
-                                            st.error = Some(err.to_owned());
-                                        });
-                                        cx.notify();
-                                        return;
-                                    }
-                                };
-                                this.execute_custom_action_into_ui(
-                                    &script,
-                                    &state_for_run,
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        button("repeater-custom-action-copy-output", "复制输出")
-                            .icon(IconName::Copy)
-                            .disabled(output.is_empty())
-                            .tooltip("将自定义动作脚本的输出结果复制到剪贴板")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let text = state_for_copy.read(cx).output.clone();
-                                if !text.is_empty() {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
-                                    this.status = "已复制 Custom actions 输出到剪贴板".into();
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("repeater-custom-action-clear")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .h(theme::scaled_px(22.))
-                            .px(px(6.))
-                            .label("清空")
-                            .disabled(output.is_empty() && error.is_none())
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                state_for_clear.update(cx, |st, _| {
-                                    st.output.clear();
-                                    st.error = None;
-                                    st.saved_notice = None;
-                                });
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(run_bar)
             .when_some(error, |col, err| {
                 col.child(
                     div()

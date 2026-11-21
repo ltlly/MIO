@@ -263,7 +263,7 @@ fn project_switch_closes_production_windows_and_rejects_old_spec_body_page_and_c
     let old_spec = *selection_revision;
     let old_control = pause_command(&mut fixture, &started, true, cx);
     let old_project = fixture.project;
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     fixture.project.generation += 1;
     emit(
         &fixture,

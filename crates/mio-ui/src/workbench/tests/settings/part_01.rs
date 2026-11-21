@@ -65,7 +65,7 @@ fn websocket_interception_rules_defaults_and_persistence_clicks(cx: &mut TestApp
     acknowledge(&fixture, first.clone(), cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, first);
+        assert_eq!(*view.workspace, first);
         assert!(view.pending_workspace.is_none());
         assert!(view.pending_proxy_interception.is_none());
         assert!(view.error.is_none());
@@ -123,7 +123,7 @@ fn websocket_interception_rules_defaults_and_persistence_clicks(cx: &mut TestApp
     checkbox_checked(reopened, "proxy-ws-intercept-client-to-server", false, cx);
     checkbox_checked(reopened, "proxy-ws-intercept-server-to-client", false, cx);
     checkbox_checked(reopened, "proxy-ws-intercept-in-scope-only", true, cx);
-    cx.read(|cx| assert_eq!(fixture.view.read(cx).workspace, second));
+    cx.read(|cx| assert_eq!(*fixture.view.read(cx).workspace, second));
 }
 
 #[gpui_kit::test]
@@ -222,7 +222,7 @@ fn proxy_message_unpack_defaults_clicks_and_exact_workspace_acknowledgment(
         (false, "proxy-unpack-requests", false),
         (true, "proxy-unpack-responses", true),
     ] {
-        let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+        let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
         proxy_rule_click(settings, id, cx);
         checkbox_checked(settings, id, checked, cx);
         let candidate = saved(&mut fixture.commands);
@@ -251,7 +251,7 @@ fn proxy_message_unpack_defaults_clicks_and_exact_workspace_acknowledgment(
         acknowledge(&fixture, candidate.clone(), cx);
         cx.read(|cx| {
             let view = fixture.view.read(cx);
-            assert_eq!(view.workspace, candidate);
+            assert_eq!(*view.workspace, candidate);
             assert!(view.pending_workspace.is_none());
             assert!(!view.workspace_dirty);
         });
@@ -303,7 +303,7 @@ fn proxy_message_unpack_keyboard_close_reopen_keeps_pending_and_confirmed_values
     checkbox_checked(reopened, "proxy-unpack-responses", false, cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, pending);
+        assert_eq!(*view.workspace, pending);
         assert!(view.pending_workspace.is_none());
         assert!(view.pending_proxy_interception.is_none());
         assert!(!view.workspace_dirty);
@@ -363,7 +363,7 @@ fn proxy_message_unpack_pending_rule_ack_recovers_only_its_snapshot_error(cx: &m
         assert!(drain(&mut fixture.commands).is_empty());
         cx.read(|cx| {
             let view = fixture.view.read(cx);
-            assert_eq!(view.workspace, submitted);
+            assert_eq!(*view.workspace, submitted);
             assert!(view.pending_workspace.is_none());
             assert!(view.pending_proxy_interception.is_none());
             assert!(!view.workspace_dirty);

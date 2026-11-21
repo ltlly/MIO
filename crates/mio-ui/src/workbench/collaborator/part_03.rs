@@ -277,21 +277,18 @@ impl Workbench {
             .into_any_element()
     }
 
-    pub(in crate::workbench) fn render_collaborator_toolbar(
-        &mut self,
-        _window: &mut Window,
+    #[inline(never)]
+    fn render_collaborator_toolbar_payload_controls(
+        &self,
+        can_operate: bool,
+        running: bool,
+        count_input: &Entity<InputState>,
+        label_input: &Entity<InputState>,
+        badge: String,
+        badge_bg: u32,
+        badge_fg: u32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let can_operate = self.collaborator_can_operate();
-        let file_picker_pending = self.file_picker_pending();
-        let running = self.collaborator_pane.status.running;
-        let config_open = self.collaborator_pane.config_open;
-        let protocol_filter = self.collaborator_pane.protocol_filter;
-        let (badge, badge_bg, badge_fg) = server_badge_text(&self.collaborator_pane.status);
-        let count_input = self.collaborator_pane.count_input.clone();
-        let label_input = self.collaborator_pane.label_input.clone();
-        let search_input = self.collaborator_pane.search_input.clone();
-
         let divider = || {
             div()
                 .w(px(1.))
@@ -299,12 +296,9 @@ impl Workbench {
                 .flex_shrink_0()
                 .bg(theme::border())
         };
-
-        toolbar()
-            .flex_wrap()
-            .h_auto()
-            .min_h(theme::scaled_px(36.))
-            .py(px(4.))
+        div()
+            .flex()
+            .items_center()
             .gap(theme::scaled_px(6.))
             .child(
                 button("collaborator-copy-http", "复制 Payload")
@@ -340,7 +334,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .w(theme::scaled_px(48.).max(px(44.)))
                     .child(
-                        Input::new(&count_input)
+                        Input::new(count_input)
                             .id("collaborator-count")
                             .aria_label("生成 payload 数量")
                             .small()
@@ -352,7 +346,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .w(theme::scaled_px(110.).max(px(96.)))
                     .child(
-                        Input::new(&label_input)
+                        Input::new(label_input)
                             .id("collaborator-label")
                             .aria_label("payload 备注标签")
                             .small()
@@ -396,7 +390,20 @@ impl Workbench {
                     .text_color(rgb(badge_fg))
                     .child(badge),
             )
-            .child(div().flex_1().min_w(px(4.)))
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_collaborator_toolbar_filter_group(
+        &self,
+        protocol_filter: Option<OastProtocol>,
+        search_input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(theme::scaled_px(6.))
             .child(
                 div()
                     .flex()
@@ -443,83 +450,140 @@ impl Workbench {
                     .flex_shrink_0()
                     .w(theme::scaled_px(148.).max(px(120.)))
                     .child(
-                        Input::new(&search_input)
+                        Input::new(search_input)
                             .id("collaborator-search")
                             .aria_label("筛选交互")
                             .small(),
                     ),
             )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_collaborator_toolbar_actions(
+        &self,
+        can_operate: bool,
+        file_picker_pending: bool,
+        config_open: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        Button::new("collaborator-copy-json")
-                            .ghost()
-                            .small()
-                            .w(px(26.))
-                            .h(theme::control_height())
-                            .px(px(0.))
-                            .rounded(px(3.))
-                            .icon(IconName::Copy)
-                            .accessibility_label("复制交互记录 (JSON)")
-                            .tooltip("将当前全部交互记录以 JSON 格式复制到剪贴板")
-                            .disabled(!can_operate)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.copy_collaborator_interactions_json(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("collaborator-export-json-file")
-                            .ghost()
-                            .small()
-                            .w(px(26.))
-                            .h(theme::control_height())
-                            .px(px(0.))
-                            .rounded(px(3.))
-                            .icon(IconName::Download)
-                            .accessibility_label("导出交互记录…")
-                            .tooltip("将当前全部交互记录保存为本地 JSON 文件")
-                            .disabled(!can_operate || file_picker_pending)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.export_collaborator_interactions_file(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("collaborator-clear")
-                            .ghost()
-                            .small()
-                            .w(px(26.))
-                            .h(theme::control_height())
-                            .px(px(0.))
-                            .rounded(px(3.))
-                            .icon(IconName::Trash)
-                            .accessibility_label("清空交互")
-                            .tooltip("清空当前已捕获的带外交互记录（保留已签发的 Payload Token）")
-                            .disabled(!can_operate)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.clear_collaborator_interactions(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("collaborator-toggle-config")
-                            .ghost()
-                            .small()
-                            .w(px(26.))
-                            .h(theme::control_height())
-                            .px(px(0.))
-                            .rounded(px(3.))
-                            .icon(IconName::Settings)
-                            .accessibility_label("自托管配置")
-                            .tooltip("展开或收起自托管 OAST 服务器配置面板")
-                            .selected(config_open)
-                            .disabled(!can_operate)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_collaborator_config_panel(window, cx);
-                            })),
-                    ),
+                Button::new("collaborator-copy-json")
+                    .ghost()
+                    .small()
+                    .w(px(26.))
+                    .h(theme::control_height())
+                    .px(px(0.))
+                    .rounded(px(3.))
+                    .icon(IconName::Copy)
+                    .accessibility_label("复制交互记录 (JSON)")
+                    .tooltip("将当前全部交互记录以 JSON 格式复制到剪贴板")
+                    .disabled(!can_operate)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.copy_collaborator_interactions_json(window, cx);
+                    })),
             )
+            .child(
+                Button::new("collaborator-export-json-file")
+                    .ghost()
+                    .small()
+                    .w(px(26.))
+                    .h(theme::control_height())
+                    .px(px(0.))
+                    .rounded(px(3.))
+                    .icon(IconName::Download)
+                    .accessibility_label("导出交互记录…")
+                    .tooltip("将当前全部交互记录保存为本地 JSON 文件")
+                    .disabled(!can_operate || file_picker_pending)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.export_collaborator_interactions_file(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("collaborator-clear")
+                    .ghost()
+                    .small()
+                    .w(px(26.))
+                    .h(theme::control_height())
+                    .px(px(0.))
+                    .rounded(px(3.))
+                    .icon(IconName::Trash)
+                    .accessibility_label("清空交互")
+                    .tooltip("清空当前已捕获的带外交互记录（保留已签发的 Payload Token）")
+                    .disabled(!can_operate)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.clear_collaborator_interactions(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("collaborator-toggle-config")
+                    .ghost()
+                    .small()
+                    .w(px(26.))
+                    .h(theme::control_height())
+                    .px(px(0.))
+                    .rounded(px(3.))
+                    .icon(IconName::Settings)
+                    .accessibility_label("自托管配置")
+                    .tooltip("展开或收起自托管 OAST 服务器配置面板")
+                    .selected(config_open)
+                    .disabled(!can_operate)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_collaborator_config_panel(window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_collaborator_toolbar(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let can_operate = self.collaborator_can_operate();
+        let file_picker_pending = self.file_picker_pending();
+        let running = self.collaborator_pane.status.running;
+        let config_open = self.collaborator_pane.config_open;
+        let protocol_filter = self.collaborator_pane.protocol_filter;
+        let (badge, badge_bg, badge_fg) = server_badge_text(&self.collaborator_pane.status);
+        let count_input = self.collaborator_pane.count_input.clone();
+        let label_input = self.collaborator_pane.label_input.clone();
+        let search_input = self.collaborator_pane.search_input.clone();
+
+        let payload_controls = self.render_collaborator_toolbar_payload_controls(
+            can_operate,
+            running,
+            &count_input,
+            &label_input,
+            badge,
+            badge_bg,
+            badge_fg,
+            cx,
+        );
+        let filter_group =
+            self.render_collaborator_toolbar_filter_group(protocol_filter, &search_input, cx);
+        let actions = self.render_collaborator_toolbar_actions(
+            can_operate,
+            file_picker_pending,
+            config_open,
+            cx,
+        );
+
+        toolbar()
+            .flex_wrap()
+            .h_auto()
+            .min_h(theme::scaled_px(36.))
+            .py(px(4.))
+            .gap(theme::scaled_px(6.))
+            .child(payload_controls)
+            .child(div().flex_1().min_w(px(4.)))
+            .child(filter_group)
+            .child(actions)
             .into_any_element()
     }
 

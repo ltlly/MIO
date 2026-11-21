@@ -55,7 +55,7 @@ impl Workbench {
                 cx.notify();
                 return;
             }
-            self.intruder_result_close = Some(ResultClose {
+            self.intruder_result_close = Some(Box::new(ResultClose {
                 target: CloseTarget::Result(target),
                 operation_id: Uuid::new_v4(),
                 run,
@@ -67,7 +67,7 @@ impl Workbench {
                 dialog: None,
                 deadline: None,
                 _deadline: None,
-            });
+            }));
             self.finish_intruder_result_close(cx);
             return;
         }
@@ -87,7 +87,7 @@ impl Workbench {
             }
         };
         let operation_id = Uuid::new_v4();
-        self.intruder_result_close = Some(ResultClose {
+        self.intruder_result_close = Some(Box::new(ResultClose {
             target: CloseTarget::Result(target),
             operation_id,
             run,
@@ -99,7 +99,7 @@ impl Workbench {
             dialog: None,
             deadline: None,
             _deadline: None,
-        });
+        }));
         self.cancel_invalidated_result_transfer("正在关闭或丢弃攻击结果。", cx);
         if let Some(answer) = automatic_answer {
             self.answer_intruder_result_close(operation_id, Some(answer), cx);
@@ -229,7 +229,7 @@ impl Workbench {
             self.fail("攻击结束后可更改结果保存方式；当前结果仍保留。", cx);
             return;
         }
-        self.intruder_result_close = Some(ResultClose {
+        self.intruder_result_close = Some(Box::new(ResultClose {
             target,
             operation_id: Uuid::new_v4(),
             run,
@@ -245,7 +245,7 @@ impl Workbench {
             dialog: None,
             deadline: None,
             _deadline: None,
-        });
+        }));
         self.cancel_invalidated_result_transfer("正在关闭或丢弃攻击结果。", cx);
         self.start_intruder_close_deadline(cx);
         self.advance_intruder_result_close(cx);

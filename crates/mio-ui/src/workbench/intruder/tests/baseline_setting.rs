@@ -47,7 +47,7 @@ fn baseline_new_tab_default_and_group_restore_require_explicit_confirmation(
     cx.simulate_prompt_answer("否");
     cx.run_until_parked();
     assert!(drain(&mut fixture.commands).is_empty());
-    cx.read(|cx| assert_eq!(fixture.view.read(cx).workspace, disabled));
+    cx.read(|cx| assert_eq!(*fixture.view.read(cx).workspace, disabled));
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("intruder-attack-results-defaults", cx)
     })
@@ -93,7 +93,7 @@ fn baseline_change_revokes_a_pending_start_without_harvesting_ime(cx: &mut TestA
             state.replace_and_mark_text_in_range(None, "zhong", Some(5..5), window, cx)
         });
         window.click("intruder-config-baseline", cx);
-        assert_eq!(fixture.view.read(cx).workspace, saved_config);
+        assert_eq!(*fixture.view.read(cx).workspace, saved_config);
         assert!(input.update(cx, |state, cx| {
             state.marked_text_range(window, cx).is_some()
         }));
@@ -154,7 +154,7 @@ fn baseline_enabled_empty_payload_start_is_rejected_before_save_or_admission(
     );
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, enabled);
+        assert_eq!(*view.workspace, enabled);
         assert!(!view.intruder.starts.contains_key(&id));
         assert!(
             view.error

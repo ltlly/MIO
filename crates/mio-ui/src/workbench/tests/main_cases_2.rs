@@ -24,7 +24,7 @@ fn editing_after_save_ack_cannot_keep_the_visible_saved_status(cx: &mut TestAppC
         assert_eq!(editor.read(cx).value().as_ref(), latest);
         assert!(view.tab_editors[&id].dirty);
         assert_eq!(
-            view.workspace, stored,
+            *view.workspace, stored,
             "new native input is not the old persisted snapshot"
         );
         assert!(view.pending_workspace.is_none());
@@ -196,7 +196,7 @@ fn late_editor_input_stays_unsaved_until_its_own_save_ack(cx: &mut TestAppContex
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, *first_save);
+        assert_eq!(*view.workspace, *first_save);
         assert_eq!(editor.read(cx).value().as_ref(), latest);
         assert!(view.tab_editors[&id].dirty);
         assert!(view.pending_workspace.is_none());
@@ -263,7 +263,7 @@ fn late_editor_input_stays_unsaved_until_its_own_save_ack(cx: &mut TestAppContex
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, *latest_save);
+        assert_eq!(*view.workspace, *latest_save);
         assert_eq!(editor.read(cx).value().as_ref(), latest);
         assert!(!view.tab_editors[&id].dirty && !view.workspace_dirty);
         assert!(view.pending_workspace.is_none());

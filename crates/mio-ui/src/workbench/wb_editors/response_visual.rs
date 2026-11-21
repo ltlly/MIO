@@ -21,7 +21,6 @@ std::thread_local! {
 }
 
 impl Workbench {
-    #[inline(never)]
     pub(in crate::workbench) fn render_response_editor_body(
         &self,
         id: &'static str,

@@ -72,7 +72,7 @@ async fn payload_file_load_appends_binary_lines_saves_once_and_releases_picker(
     let attack = attack();
     let id = attack.id;
     let mut fixture = intruder_fixture(cx, vec![attack], 64);
-    let mut expected = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut expected = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let latest = "http://127.0.0.1:8123/unsaved-load-draft";
     let pending = "尚未添加";
     let (target, input, picker) = cx
@@ -90,7 +90,7 @@ async fn payload_file_load_appends_binary_lines_saves_once_and_releases_picker(
             let view = fixture.view.read(cx);
             assert!(view.intruder.editors[&id].loading_payloads);
             assert!(view.file_picker_pending());
-            assert_eq!(view.workspace, expected);
+            assert_eq!(*view.workspace, expected);
             (target, input, view.file_picker.unwrap())
         })
         .unwrap();
@@ -124,7 +124,7 @@ async fn payload_file_load_appends_binary_lines_saves_once_and_releases_picker(
     assert_eq!(std::fs::read(&source.0).unwrap(), bytes);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(target.read(cx).value().as_ref(), latest);
         assert_eq!(input.read(cx).value().as_ref(), pending);
         assert!(!view.intruder.editors[&id].loading_payloads);
@@ -162,7 +162,7 @@ async fn payload_file_load_appends_binary_lines_saves_once_and_releases_picker(
     assert!(drain(&mut fixture.commands).is_empty());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(target.read(cx).value().as_ref(), latest);
         assert_eq!(input.read(cx).value().as_ref(), pending);
         assert!(!view.intruder.editors[&id].loading_payloads);

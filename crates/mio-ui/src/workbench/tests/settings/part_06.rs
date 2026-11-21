@@ -154,7 +154,7 @@ fn save_as_picker_releases_its_token_after_an_auxiliary_reader_window_closes(
         assert!(view.quit_attempt.is_none());
         assert_eq!(view.workspace.tabs[0].id, draft_id);
         assert_eq!(view.workspace.tabs[0].draft.raw, latest.as_bytes());
-        (view.file_picker.unwrap(), view.workspace.clone())
+        (view.file_picker.unwrap(), (*view.workspace).clone())
     });
     assert!(drain(&mut fixture.commands).is_empty());
     // A freely closable auxiliary view models GPUI's shared-entity window mapping, not a product feature.
@@ -188,7 +188,7 @@ fn save_as_picker_releases_its_token_after_an_auxiliary_reader_window_closes(
         assert!(view.file_picker.is_none() && !view.choosing_save_as);
         assert!(view.quit_attempt.is_none() && view.transition.is_none());
         assert!(!view.shutdown.is_cancelled());
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(view.workspace.repeater_settings, original.repeater_settings);
     });
     let commands = drain(&mut fixture.commands);
@@ -248,7 +248,7 @@ fn open_picker_cancel_releases_its_token_after_an_auxiliary_reader_window_closes
 ) {
     let mut fixture = fixture(cx, vec![tab("打开取消后保留草稿")], 64);
     drain(&mut fixture.commands);
-    let expected = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let expected = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     menu_action(fixture.window, "项目", "打开项目…", cx);
     assert!(cx.did_prompt_for_paths());
     let picker = cx.read(|cx| fixture.view.read(cx).file_picker.unwrap());
@@ -263,7 +263,7 @@ fn open_picker_cancel_releases_its_token_after_an_auxiliary_reader_window_closes
         assert_ne!(view.file_picker, Some(picker));
         assert!(view.file_picker.is_none() && !view.choosing_save_as);
         assert_eq!(view.project, Some(fixture.project));
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert!(view.quit_attempt.is_none() && view.transition.is_none());
         assert!(!view.shutdown_requested && !view.shutdown.is_cancelled() && !view.quitting);
     });
@@ -276,7 +276,7 @@ fn export_ca_picker_cancel_releases_its_token_after_an_auxiliary_reader_window_c
 ) {
     let mut fixture = fixture(cx, vec![tab("CA导出取消后保留草稿")], 64);
     drain(&mut fixture.commands);
-    let expected = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let expected = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     menu_action(fixture.window, "项目", "导出 Proxy CA…", cx);
     assert!(cx.did_prompt_for_new_path());
     let picker = cx.read(|cx| fixture.view.read(cx).file_picker.unwrap());
@@ -291,7 +291,7 @@ fn export_ca_picker_cancel_releases_its_token_after_an_auxiliary_reader_window_c
         assert_ne!(view.file_picker, Some(picker));
         assert!(view.file_picker.is_none() && !view.choosing_save_as);
         assert_eq!(view.project, Some(fixture.project));
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert!(view.quit_attempt.is_none() && view.transition.is_none());
         assert!(!view.shutdown_requested && !view.shutdown.is_cancelled() && !view.quitting);
     });

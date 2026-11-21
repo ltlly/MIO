@@ -2,6 +2,11 @@ use gpui_kit::{AnyWindowHandle, ScrollHandle, size};
 
 use super::*;
 
+#[inline(never)]
+fn boxed_with<T>(build: impl FnOnce() -> T) -> Box<T> {
+    Box::new(build())
+}
+
 impl Workbench {
     pub(in crate::workbench) fn open_settings(
         &mut self,
@@ -68,7 +73,7 @@ impl Workbench {
             {
                 return;
             }
-            let state = SettingsState::new(owner.read(cx));
+            let state = boxed_with(|| SettingsState::new(owner.read(cx)));
             let scale = theme::ui_scale();
             let desired_w = if cfg!(test) || scale <= 1.0 {
                 px(1327.)
@@ -124,7 +129,7 @@ impl Settings {
     pub(in crate::workbench) fn new(
         owner: Entity<Workbench>,
         owner_window: AnyWindowHandle,
-        state: SettingsState,
+        state: Box<SettingsState>,
         page: SettingsPage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -427,7 +432,7 @@ impl Settings {
         .detach();
         let proxy_listener_input =
             cx.new(|cx| InputState::new(window, cx).default_value(state.proxy_listener.clone()));
-        let mut listeners_tls = listeners_tls::ListenersTlsUi::new(window, cx);
+        let mut listeners_tls = boxed_with(|| listeners_tls::ListenersTlsUi::new(window, cx));
         if !state.proxy_listeners.is_empty() {
             listeners_tls.selected_index = Some(0);
             listeners_tls
@@ -489,8 +494,8 @@ impl Settings {
             },
         )
         .detach();
-        let connections = connections::ConnectionsUi::new(&state, window, cx);
-        let sessions = sessions::SessionsUi::new(window, cx);
+        let connections = boxed_with(|| connections::ConnectionsUi::new(&state, window, cx));
+        let sessions = boxed_with(|| sessions::SessionsUi::new(window, cx));
         let upstream_protocol = state.upstream_proxy.protocol;
         let upstream_host = cx
             .new(|cx| InputState::new(window, cx).default_value(state.upstream_proxy.host.clone()));
@@ -528,8 +533,8 @@ impl Settings {
             cx.new(|cx| InputState::new(window, cx).placeholder("例如 http://127.0.0.1:9001"));
         let scope_exclude_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("例如 http://127.0.0.1:9001/logout"));
-        let user_pages = user_pages::UserPagesUi::new(&state.preferences, window, cx);
-        let proxy_advanced = proxy_advanced::ProxyAdvancedUi::new(&owner, window, cx);
+        let user_pages = boxed_with(|| user_pages::UserPagesUi::new(&state.preferences, window, cx));
+        let proxy_advanced = boxed_with(|| proxy_advanced::ProxyAdvancedUi::new(&owner, window, cx));
         let interception_tables = std::array::from_fn(|index| {
             let owner = cx.weak_entity();
             let table = cx.new(|table_cx| {

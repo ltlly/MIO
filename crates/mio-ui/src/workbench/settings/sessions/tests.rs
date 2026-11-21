@@ -475,7 +475,7 @@ fn sessions_settings_preserves_ime_composition_and_handles_workspace_cas_rejecti
     assert_eq!(attempted.sessions.rules[0].name, "中文会话规则");
 
     // 3. Backend rejects with CAS conflict (stored has advanced to initial_revision + 5).
-    let mut stored_on_disk = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut stored_on_disk = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     stored_on_disk.revision = initial_revision + 5;
     stored_on_disk.sessions = mio_core::SessionSettings::default();
     fixture

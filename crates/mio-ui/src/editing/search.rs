@@ -291,6 +291,378 @@ impl MessageEditor {
         self.render_search_bar_editable(id, true, cx, on_action)
     }
 
+    #[inline(never)]
+    fn render_search_help_popover(&self, id: &'static str) -> AnyElement {
+        div()
+            .mt(px(11.))
+            .w(px(22.))
+            .h(px(22.))
+            .child(
+                Popover::new(SharedString::from(format!("{id}-search-help-popover")))
+                    .anchor(gpui_kit::Anchor::BottomLeft)
+                    .trigger(
+                        Button::new(format!("{id}-search-help"))
+                            .ghost()
+                            .small()
+                            .compact()
+                            .rounded(ButtonRounded::None)
+                            .w(px(22.))
+                            .h(px(22.))
+                            .p_0()
+                            .border_0()
+                            .bg(gpui_kit::transparent_black())
+                            .text_color(crate::theme::foreground())
+                            .child(
+                                gpui_kit::component::Icon::new(IconName::CircleQuestionMark)
+                                    .size(px(17.))
+                                    .text_color(crate::theme::foreground()),
+                            )
+                            .accessibility_label("搜索帮助")
+                            .tooltip("查看消息编辑器搜索与替换使用说明"),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .id(SharedString::from(format!("{id}-search-help-content")))
+                            .test_support()
+                            .w(px(264.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .text_size(px(12.))
+                            .text_color(crate::theme::foreground())
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .child("消息搜索与替换帮助"),
+                            )
+                            .child("• Enter / →：跳转到下一个匹配项")
+                            .child("• Shift+Enter / ←：跳转到上一个匹配项")
+                            .child("• 齿轮菜单：开启区分大小写、正则表达式或展开查找替换栏")
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_search_options_popover<V: 'static>(
+        &self,
+        id: &'static str,
+        can_show_replace: bool,
+        show_replace_row: bool,
+        field_bg: gpui_kit::Hsla,
+        cx: &mut gpui_kit::Context<V>,
+        on_action: impl Fn(&mut V, SearchBarAction, &mut Window, &mut gpui_kit::Context<V>)
+        + Clone
+        + 'static,
+    ) -> AnyElement {
+        let owner = cx.weak_entity();
+        let case_sensitive = self.case_sensitive;
+        let regex_active = self.regex;
+        let auto_scroll = self.auto_scroll_to_match;
+        let replace_open = self.replace_open;
+        let case_action = on_action.clone();
+        let regex_action = on_action.clone();
+        let auto_scroll_action = on_action.clone();
+        let toggle_replace_action = on_action;
+        div()
+            .ml(px(5.))
+            .mt(px(11.))
+            .w(px(22.))
+            .h(px(22.))
+            .child(
+                Popover::new(SharedString::from(format!("{id}-search-options-popover")))
+                    .anchor(gpui_kit::Anchor::BottomLeft)
+                    .offset(px(0.))
+                    .p_0()
+                    .bg(field_bg)
+                    .trigger(
+                        Button::new(format!("{id}-search-options"))
+                            .ghost()
+                            .small()
+                            .compact()
+                            .rounded(ButtonRounded::None)
+                            .w(px(22.))
+                            .h(px(22.))
+                            .p_0()
+                            .border_0()
+                            .bg(gpui_kit::transparent_black())
+                            .text_color(crate::theme::foreground())
+                            .child(
+                                gpui_kit::component::Icon::new(IconName::Settings)
+                                    .size(px(17.))
+                                    .text_color(crate::theme::foreground()),
+                            )
+                            .accessibility_label("搜索选项")
+                            .tooltip("搜索与替换选项（区分大小写、正则表达式、展开替换）")
+                            .selected(
+                                case_sensitive
+                                    || regex_active
+                                    || auto_scroll
+                                    || show_replace_row,
+                            ),
+                    )
+                    .content(move |_, _, _| {
+                        let owner_case = owner.clone();
+                        let owner_regex = owner.clone();
+                        let owner_autoscroll = owner.clone();
+                        let owner_replace = owner.clone();
+                        let case_action = case_action.clone();
+                        let regex_action = regex_action.clone();
+                        let auto_scroll_action = auto_scroll_action.clone();
+                        let toggle_replace_action = toggle_replace_action.clone();
+                        div()
+                            .id(SharedString::from(format!("{id}-search-options-menu")))
+                            .test_support()
+                            .w(px(272.))
+                            .p_0()
+                            .bg(field_bg)
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(270.))
+                                    .h(px(83.))
+                                    .ml(px(1.))
+                                    .mt(px(4.))
+                                    .mb(px(4.))
+                                    .child(
+                                        search_option_checkbox(
+                                            format!("{id}-search-case"),
+                                            "Case sensitive",
+                                            case_sensitive,
+                                            px(115.),
+                                            px(5.),
+                                        )
+                                        .on_change(move |_, _, window, cx| {
+                                            let _ = owner_case.update(cx, |this, cx| {
+                                                case_action(
+                                                    this,
+                                                    SearchBarAction::ToggleCaseSensitive,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        search_option_checkbox(
+                                            format!("{id}-search-regex"),
+                                            "Regex",
+                                            regex_active,
+                                            px(66.),
+                                            px(31.),
+                                        )
+                                        .on_change(move |_, _, window, cx| {
+                                            let _ = owner_regex.update(cx, |this, cx| {
+                                                regex_action(
+                                                    this,
+                                                    SearchBarAction::ToggleRegex,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        search_option_checkbox(
+                                            format!("{id}-search-autoscroll"),
+                                            "Auto-scroll to match when text changes",
+                                            auto_scroll,
+                                            px(260.),
+                                            px(57.),
+                                        )
+                                        .on_change(move |_, _, window, cx| {
+                                            let _ = owner_autoscroll.update(cx, |this, cx| {
+                                                auto_scroll_action(
+                                                    this,
+                                                    SearchBarAction::ToggleAutoScroll,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                    ),
+                            )
+                            .when(can_show_replace, |menu| {
+                                menu.child(
+                                    div()
+                                        .border_t_1()
+                                        .border_color(crate::theme::border())
+                                        .px(px(5.))
+                                        .py(px(3.))
+                                        .child(
+                                            Popover::new(SharedString::from(format!(
+                                                "{id}-search-replace-submenu"
+                                            )))
+                                            .anchor(gpui_kit::Anchor::RightCenter)
+                                            .default_open(true)
+                                            .p(px(5.))
+                                            .bg(field_bg)
+                                            .trigger(
+                                                Button::new(format!(
+                                                    "{id}-search-replace-submenu-trigger"
+                                                ))
+                                                .ghost()
+                                                .small()
+                                                .w_full()
+                                                .h(px(21.))
+                                                .px(px(4.))
+                                                .icon(IconName::Replace)
+                                                .label("Replacement ▸")
+                                                .selected(replace_open),
+                                            )
+                                            .content(move |_, _, _| {
+                                                let owner_replace = owner_replace.clone();
+                                                let toggle_replace_action =
+                                                    toggle_replace_action.clone();
+                                                div()
+                                                    .w(px(180.))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(
+                                                        search_option_checkbox(
+                                                            format!(
+                                                                "{id}-search-replace-toggle"
+                                                            ),
+                                                            "Show replace bar",
+                                                            replace_open,
+                                                            px(170.),
+                                                            px(0.),
+                                                        )
+                                                        .relative()
+                                                        .left(px(0.))
+                                                        .top(px(0.))
+                                                        .on_change(move |_, _, window, cx| {
+                                                            let _ = owner_replace.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    toggle_replace_action(
+                                                                        this,
+                                                                        SearchBarAction::ToggleReplace,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            );
+                                                        }),
+                                                    )
+                                            }),
+                                        ),
+                                )
+                            })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_search_nav_button<V: 'static>(
+        button_id: String,
+        icon: IconName,
+        a11y_label: &'static str,
+        tip: &'static str,
+        action: SearchBarAction,
+        nav_bg: gpui_kit::Hsla,
+        nav_border: gpui_kit::Hsla,
+        cx: &mut gpui_kit::Context<V>,
+        on_action: impl Fn(&mut V, SearchBarAction, &mut Window, &mut gpui_kit::Context<V>) + 'static,
+    ) -> AnyElement {
+        Button::new(button_id)
+            .ghost()
+            .small()
+            .compact()
+            .rounded(ButtonRounded::Size(px(3.)))
+            .ml(px(5.))
+            .mt(px(10.))
+            .w(px(24.))
+            .h(px(24.))
+            .p_0()
+            .bg(nav_bg)
+            .border_1()
+            .border_color(nav_border)
+            .text_color(crate::theme::foreground())
+            .child(
+                gpui_kit::component::Icon::new(icon)
+                    .size(px(14.))
+                    .text_color(crate::theme::foreground()),
+            )
+            .accessibility_label(a11y_label)
+            .tooltip(tip)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_action(this, action, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_search_input_box(
+        &self,
+        id: &'static str,
+        field_bg: gpui_kit::Hsla,
+        field_border: gpui_kit::Hsla,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("{id}-search-input")))
+            .test_support()
+            .ml(px(10.))
+            .mt(px(11.))
+            .flex_1()
+            .min_w(crate::theme::scaled_px(80.))
+            .h(px(23.))
+            .rounded(px(3.))
+            .border_1()
+            .border_color(field_border)
+            .bg(field_bg)
+            .overflow_hidden()
+            .child(
+                Input::new(&self.search)
+                    .small()
+                    .appearance(false)
+                    .h(px(21.))
+                    .px(px(6.))
+                    .bg(field_bg)
+                    .suffix(
+                        gpui_kit::component::Icon::new(IconName::Search)
+                            .size(px(14.))
+                            .text_color(crate::theme::foreground()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_search_status_label(
+        &self,
+        id: &'static str,
+        status: String,
+        has_error: bool,
+    ) -> AnyElement {
+        let status: SharedString = status.into();
+        div()
+            .id(SharedString::from(format!("{id}-search-matches")))
+            .test_support()
+            .ml(px(15.))
+            .mt(px(9.))
+            .w(px(80.))
+            .flex_shrink_0()
+            .h(px(27.))
+            .flex()
+            .items_center()
+            .justify_start()
+            .text_left()
+            .role(gpui_kit::accesskit::Role::Status)
+            .aria_label(status.clone())
+            .text_color(if has_error {
+                crate::theme::danger_fg()
+            } else {
+                crate::theme::foreground()
+            })
+            .child(status)
+            .into_any_element()
+    }
+
+    #[inline(never)]
     pub fn render_search_bar_editable<V: 'static>(
         &self,
         id: &'static str,
@@ -302,20 +674,11 @@ impl MessageEditor {
     ) -> AnyElement {
         let prev_action = on_action.clone();
         let next_action = on_action.clone();
-        let case_action = on_action.clone();
-        let regex_action = on_action.clone();
-        let auto_scroll_action = on_action.clone();
-        let toggle_replace_action = on_action.clone();
         let has_error = self.search_error.borrow().is_some();
         let status = self.search_status_label(cx);
         let selected_len = Some(self.selected_byte_len(cx)).filter(|&n| n > 0);
         let can_show_replace = !readonly && !self.is_readonly_preview();
         let show_replace_row = can_show_replace && self.replace_open;
-        let owner = cx.weak_entity();
-        let case_sensitive = self.case_sensitive;
-        let regex_active = self.regex;
-        let auto_scroll = self.auto_scroll_to_match;
-        let replace_open = self.replace_open;
         let dark = crate::theme::is_dark();
         let nav_bg: gpui_kit::Hsla = rgb(if dark { 0x35383d } else { 0xeeeeee }).into();
         let nav_border: gpui_kit::Hsla = rgb(if dark { 0x4b4f56 } else { 0xd4d4d4 }).into();
@@ -330,352 +693,39 @@ impl MessageEditor {
             .flex()
             .pl(px(5.))
             .pr(px(5.))
-            .child(
-                div()
-                    .mt(px(11.))
-                    .w(px(22.))
-                    .h(px(22.))
-                    .child(
-                        Popover::new(SharedString::from(format!("{id}-search-help-popover")))
-                            .anchor(gpui_kit::Anchor::BottomLeft)
-                            .trigger(
-                                Button::new(format!("{id}-search-help"))
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .rounded(ButtonRounded::None)
-                                    .w(px(22.))
-                                    .h(px(22.))
-                                    .p_0()
-                                    .border_0()
-                                    .bg(gpui_kit::transparent_black())
-                                    .text_color(crate::theme::foreground())
-                                    .child(
-                                        gpui_kit::component::Icon::new(
-                                            IconName::CircleQuestionMark,
-                                        )
-                                        .size(px(17.))
-                                        .text_color(crate::theme::foreground()),
-                                    )
-                                    .accessibility_label("搜索帮助")
-                                    .tooltip("查看消息编辑器搜索与替换使用说明"),
-                            )
-                            .content(move |_, _, _| {
-                                div()
-                                    .id(SharedString::from(format!("{id}-search-help-content")))
-                                    .test_support()
-                                    .w(px(264.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.))
-                                    .text_size(px(12.))
-                                    .text_color(crate::theme::foreground())
-                                    .child(
-                                        div()
-                                            .font_weight(gpui_kit::FontWeight::BOLD)
-                                            .child("消息搜索与替换帮助"),
-                                    )
-                                    .child("• Enter / →：跳转到下一个匹配项")
-                                    .child("• Shift+Enter / ←：跳转到上一个匹配项")
-                                    .child("• 齿轮菜单：开启区分大小写、正则表达式或展开查找替换栏")
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .ml(px(5.))
-                    .mt(px(11.))
-                    .w(px(22.))
-                    .h(px(22.))
-                    .child(
-                    Popover::new(SharedString::from(format!("{id}-search-options-popover")))
-                        .anchor(gpui_kit::Anchor::BottomLeft)
-                        .offset(px(0.))
-                        .p_0()
-                        .bg(field_bg)
-                        .trigger(
-                            Button::new(format!("{id}-search-options"))
-                                .ghost()
-                                .small()
-                                .compact()
-                                .rounded(ButtonRounded::None)
-                                .w(px(22.))
-                                .h(px(22.))
-                                .p_0()
-                                .border_0()
-                                .bg(gpui_kit::transparent_black())
-                                .text_color(crate::theme::foreground())
-                                .child(
-                                    gpui_kit::component::Icon::new(IconName::Settings)
-                                        .size(px(17.))
-                                        .text_color(crate::theme::foreground()),
-                                )
-                                .accessibility_label("搜索选项")
-                                .tooltip("搜索与替换选项（区分大小写、正则表达式、展开替换）")
-                                .selected(
-                                    case_sensitive
-                                        || regex_active
-                                        || auto_scroll
-                                        || show_replace_row,
-                                ),
-                        )
-                        .content(move |_, _, _| {
-                            let owner_case = owner.clone();
-                            let owner_regex = owner.clone();
-                            let owner_autoscroll = owner.clone();
-                            let owner_replace = owner.clone();
-                            let case_action = case_action.clone();
-                            let regex_action = regex_action.clone();
-                            let auto_scroll_action = auto_scroll_action.clone();
-                            let toggle_replace_action = toggle_replace_action.clone();
-                            div()
-                                .id(SharedString::from(format!("{id}-search-options-menu")))
-                                .test_support()
-                                .w(px(272.))
-                                .p_0()
-                                .bg(field_bg)
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .relative()
-                                        .w(px(270.))
-                                        .h(px(83.))
-                                        .ml(px(1.))
-                                        .mt(px(4.))
-                                        .mb(px(4.))
-                                        .child(
-                                            search_option_checkbox(
-                                                format!("{id}-search-case"),
-                                                "Case sensitive",
-                                                case_sensitive,
-                                                px(115.),
-                                                px(5.),
-                                            )
-                                            .on_change(move |_, _, window, cx| {
-                                                let _ = owner_case.update(cx, |this, cx| {
-                                                    case_action(
-                                                        this,
-                                                        SearchBarAction::ToggleCaseSensitive,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                        )
-                                        .child(
-                                            search_option_checkbox(
-                                                format!("{id}-search-regex"),
-                                                "Regex",
-                                                regex_active,
-                                                px(66.),
-                                                px(31.),
-                                            )
-                                            .on_change(move |_, _, window, cx| {
-                                                let _ = owner_regex.update(cx, |this, cx| {
-                                                    regex_action(
-                                                        this,
-                                                        SearchBarAction::ToggleRegex,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                        )
-                                        .child(
-                                            search_option_checkbox(
-                                                format!("{id}-search-autoscroll"),
-                                                "Auto-scroll to match when text changes",
-                                                auto_scroll,
-                                                px(260.),
-                                                px(57.),
-                                            )
-                                            .on_change(move |_, _, window, cx| {
-                                                let _ = owner_autoscroll.update(cx, |this, cx| {
-                                                    auto_scroll_action(
-                                                        this,
-                                                        SearchBarAction::ToggleAutoScroll,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                        ),
-                                )
-                                .when(can_show_replace, |menu| {
-                                    menu.child(
-                                        div()
-                                            .border_t_1()
-                                            .border_color(crate::theme::border())
-                                            .px(px(5.))
-                                            .py(px(3.))
-                                            .child(
-                                                Popover::new(SharedString::from(format!(
-                                                    "{id}-search-replace-submenu"
-                                                )))
-                                                .anchor(gpui_kit::Anchor::RightCenter)
-                                                .default_open(true)
-                                                .p(px(5.))
-                                                .bg(field_bg)
-                                                .trigger(
-                                                    Button::new(format!(
-                                                        "{id}-search-replace-submenu-trigger"
-                                                    ))
-                                                    .ghost()
-                                                    .small()
-                                                    .w_full()
-                                                    .h(px(21.))
-                                                    .px(px(4.))
-                                                    .icon(IconName::Replace)
-                                                    .label("Replacement ▸")
-                                                    .selected(replace_open),
-                                                )
-                                                .content(move |_, _, _| {
-                                                    let owner_replace = owner_replace.clone();
-                                                    let toggle_replace_action =
-                                                        toggle_replace_action.clone();
-                                                    div()
-                                                        .w(px(180.))
-                                                        .flex()
-                                                        .flex_col()
-                                                        .child(
-                                                            search_option_checkbox(
-                                                                format!(
-                                                                    "{id}-search-replace-toggle"
-                                                                ),
-                                                                "Show replace bar",
-                                                                replace_open,
-                                                                px(170.),
-                                                                px(0.),
-                                                            )
-                                                            .relative()
-                                                            .left(px(0.))
-                                                            .top(px(0.))
-                                                            .on_change(
-                                                                move |_, _, window, cx| {
-                                                                    let _ = owner_replace.update(
-                                                                        cx,
-                                                                        |this, cx| {
-                                                                            toggle_replace_action(
-                                                                                this,
-                                                                                SearchBarAction::ToggleReplace,
-                                                                                window,
-                                                                                cx,
-                                                                            );
-                                                                        },
-                                                                    );
-                                                                },
-                                                            ),
-                                                        )
-                                                }),
-                                            ),
-                                    )
-                                })
-                        }),
-                ),
-            )
-            .child(
-                Button::new(format!("{id}-search-prev"))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::Size(px(3.)))
-                    .ml(px(5.))
-                    .mt(px(10.))
-                    .w(px(24.))
-                    .h(px(24.))
-                    .p_0()
-                    .bg(nav_bg)
-                    .border_1()
-                    .border_color(nav_border)
-                    .text_color(crate::theme::foreground())
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::ArrowLeft)
-                            .size(px(14.))
-                            .text_color(crate::theme::foreground()),
-                    )
-                    .accessibility_label("上一匹配")
-                    .tooltip("跳转到上一个搜索匹配项（Shift+Enter）")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        prev_action(this, SearchBarAction::Previous, window, cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("{id}-search-next"))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .rounded(ButtonRounded::Size(px(3.)))
-                    .ml(px(5.))
-                    .mt(px(10.))
-                    .w(px(24.))
-                    .h(px(24.))
-                    .p_0()
-                    .bg(nav_bg)
-                    .border_1()
-                    .border_color(nav_border)
-                    .text_color(crate::theme::foreground())
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::ArrowRight)
-                            .size(px(14.))
-                            .text_color(crate::theme::foreground()),
-                    )
-                    .accessibility_label("下一匹配")
-                    .tooltip("跳转到下一个搜索匹配项（Enter）")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        next_action(this, SearchBarAction::Next, window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id}-search-input")))
-                    .test_support()
-                    .ml(px(10.))
-                    .mt(px(11.))
-                    .flex_1()
-                    .min_w(crate::theme::scaled_px(80.))
-                    .h(px(23.))
-                    .rounded(px(3.))
-                    .border_1()
-                    .border_color(field_border)
-                    .bg(field_bg)
-                    .overflow_hidden()
-                    .child(
-                        Input::new(&self.search)
-                            .small()
-                            .appearance(false)
-                            .h(px(21.))
-                            .px(px(6.))
-                            .bg(field_bg)
-                            .suffix(
-                                gpui_kit::component::Icon::new(IconName::Search)
-                                    .size(px(14.))
-                                    .text_color(crate::theme::foreground()),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id}-search-matches")))
-                    .test_support()
-                    .ml(px(15.))
-                    .mt(px(9.))
-                    .w(px(80.))
-                    .flex_shrink_0()
-                    .h(px(27.))
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .text_left()
-                    .role(gpui_kit::accesskit::Role::Status)
-                    .aria_label(status.clone())
-                    .text_color(if has_error {
-                        crate::theme::danger_fg()
-                    } else {
-                        crate::theme::foreground()
-                    })
-                    .child(status),
-            )
+            .child(self.render_search_help_popover(id))
+            .child(self.render_search_options_popover(
+                id,
+                can_show_replace,
+                show_replace_row,
+                field_bg,
+                cx,
+                on_action.clone(),
+            ))
+            .child(Self::render_search_nav_button(
+                format!("{id}-search-prev"),
+                IconName::ArrowLeft,
+                "上一匹配",
+                "跳转到上一个搜索匹配项（Shift+Enter）",
+                SearchBarAction::Previous,
+                nav_bg,
+                nav_border,
+                cx,
+                prev_action,
+            ))
+            .child(Self::render_search_nav_button(
+                format!("{id}-search-next"),
+                IconName::ArrowRight,
+                "下一匹配",
+                "跳转到下一个搜索匹配项（Enter）",
+                SearchBarAction::Next,
+                nav_bg,
+                nav_border,
+                cx,
+                next_action,
+            ))
+            .child(self.render_search_input_box(id, field_bg, field_border))
+            .child(self.render_search_status_label(id, status, has_error))
             .when_some(selected_len, |row, n| {
                 let selection_label = format!("Selection: {n} (0x{n:x})");
                 row.child(

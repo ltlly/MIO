@@ -216,7 +216,7 @@ fn settings_save_failure_preserves_quit_sheet(workspace_rejected: bool, cx: &mut
     let id = first.id;
     let mut fixture = fixture(cx, vec![first], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let raw = cx.read(|cx| fixture.view.read(cx).tab_editors[&id].request.raw.clone());
     let settings_window = settings::open_settings(&fixture, cx);
     settings::toggle(settings_window, false, cx);

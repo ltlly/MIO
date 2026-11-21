@@ -20,7 +20,7 @@ fn payload_file_picker_project_change_keeps_token_until_stale_callback(cx: &mut 
     assert!(cx.did_prompt_for_paths());
     let mut next = fixture.project;
     next.generation += 1;
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     fixture
         .events
         .try_send(Event::ProjectOpened {

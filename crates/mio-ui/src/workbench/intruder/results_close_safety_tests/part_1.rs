@@ -209,7 +209,7 @@ fn dashboard_task_delete_prompt_cannot_apply_yes_to_a_replaced_project(cx: &mut 
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert_eq!(view.project, Some(replacement));
-        assert_eq!(view.workspace, Workspace::default());
+        assert_eq!(*view.workspace, Workspace::default());
         assert!(view.intruder_result_close.is_none());
         assert!(view.intruder.session_runs.is_empty());
     });

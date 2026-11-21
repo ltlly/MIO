@@ -280,7 +280,7 @@ impl Workbench {
                 let (record, _) = self
                     .extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .filter(|(r, _)| r.summary.id == flow_id)?;
                 Some((
                     record.summary.source.clone(),

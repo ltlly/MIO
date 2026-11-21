@@ -114,7 +114,7 @@ fn settings_save_as_failure_preserves_latest_draft_and_retries_snapshot(cx: &mut
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(&view.workspace, retried);
+        assert_eq!(&*view.workspace, retried);
         assert_eq!(view.project_path.as_ref(), Some(&copy));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(!view.saving_project_snapshot && view.pending_project_save.is_none());
@@ -206,7 +206,7 @@ fn settings_save_as_success_sends_once_with_activation_settings(cx: &mut TestApp
     checked(settings_window, false, cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(&view.workspace, snapshot);
+        assert_eq!(&*view.workspace, snapshot);
         assert_eq!(view.project_path.as_ref(), Some(&copy));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(view.pending_sends.is_empty() && view.pending_project_save.is_none());
@@ -221,7 +221,7 @@ fn settings_save_as_success_sends_once_with_activation_settings(cx: &mut TestApp
 fn settings_send_revision_overflow_preserves_setting_and_draft(cx: &mut TestAppContext) {
     let first = tab("revision 边界的未发送草稿");
     let mut fixture = fixture(cx, vec![first.clone()], 64);
-    let mut opened = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let mut opened = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     opened.revision = u64::MAX - 1;
     opened.tab_sidebar_width = 180;
     opened.repeater_settings.unpack_compressed_responses = false;
@@ -253,7 +253,7 @@ fn settings_send_revision_overflow_preserves_setting_and_draft(cx: &mut TestAppC
     assert!(drain(&mut fixture.commands).is_empty());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, opened);
+        assert_eq!(*view.workspace, opened);
         assert_eq!(view.pending_workspace, Some(u64::MAX));
         assert!(view.workspace_dirty);
         assert!(view.pending_sends.is_empty() && view.sending.is_empty());

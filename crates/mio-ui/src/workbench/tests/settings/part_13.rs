@@ -93,7 +93,7 @@ fn settings_save_as_picker_error_clears_native_send_preserves_rebind_and_retries
         assert_eq!(view.pending_sends.len(), 1);
         assert_eq!(view.pending_sends[&b.id].draft.raw, latest.as_bytes());
         assert!(view.sending.is_empty() && view.plugin_waiting(a.id));
-        view.workspace.clone()
+        (*view.workspace).clone()
     });
     picker
         .send(Err(anyhow::anyhow!("picker 返回错误🙂")))
@@ -107,7 +107,7 @@ fn settings_save_as_picker_error_clears_native_send_preserves_rebind_and_retries
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, retained);
+        assert_eq!(*view.workspace, retained);
         assert_eq!(view.project_path.as_ref(), Some(&source));
         assert_eq!(view.error.as_deref(), Some(error));
         assert!(!view.choosing_save_as && view.file_picker.is_none());
@@ -155,7 +155,7 @@ fn settings_save_as_picker_error_clears_native_send_preserves_rebind_and_retries
         let view = fixture.view.read(cx);
         assert!(!view.plugin_waiting(a.id));
         assert!(view.pending_sends.is_empty() && view.sending.is_empty());
-        assert_eq!(view.workspace, retained);
+        assert_eq!(*view.workspace, retained);
         assert!(view.workspace_dirty && view.pending_workspace.is_none());
         assert_eq!(view.project_path.as_ref(), Some(&source));
         assert_eq!(view.error.as_deref(), Some(error));
@@ -206,7 +206,7 @@ fn settings_save_as_picker_error_clears_native_send_preserves_rebind_and_retries
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(&view.workspace, snapshot);
+        assert_eq!(&*view.workspace, snapshot);
         assert_eq!(view.project_path.as_ref(), Some(&copy));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(!view.choosing_save_as && view.file_picker.is_none());
@@ -298,7 +298,7 @@ fn settings_save_as_enqueue_failure_does_not_revive_send_on_save(cx: &mut TestAp
             view.tab_editors[&id].target.read(cx).value().as_ref(),
             expected_draft.target
         );
-        (view.workspace.clone(), view.pending_sends.is_empty())
+        ((*view.workspace).clone(), view.pending_sends.is_empty())
     });
 
     menu_action(settings, "项目", "保存项目", cx);
@@ -337,7 +337,7 @@ fn settings_save_as_enqueue_failure_does_not_revive_send_on_save(cx: &mut TestAp
     checked(settings, true, cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(view.project_path.as_ref(), Some(&source));
         assert_ne!(view.project_path.as_ref(), Some(&destination));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());

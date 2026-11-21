@@ -365,7 +365,7 @@ impl Workbench {
             let action = PluginAction::ApplyWorkspace {
                 instance_id: instance,
                 request_id: request.request_id,
-                workspace: proposal.clone(),
+                workspace: (*proposal).clone(),
                 tab_id,
             };
             if self

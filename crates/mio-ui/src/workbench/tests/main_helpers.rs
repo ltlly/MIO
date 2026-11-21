@@ -263,7 +263,7 @@ pub(crate) fn rendered_status(window: &Window) -> String {
 pub(crate) fn saved_repeater_fixture(cx: &mut TestAppContext) -> (Fixture, Workspace) {
     let mut fixture = fixture(cx, vec![tab("已保存的请求")], 64);
     drain(&mut fixture.commands);
-    let stored = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         window.click("tool-repeater", cx);
@@ -293,7 +293,7 @@ pub(crate) fn saved_repeater_fixture(cx: &mut TestAppContext) -> (Fixture, Works
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, stored);
+        assert_eq!(*view.workspace, stored);
         let status = rendered_status(window);
         assert!(status.starts_with("项目已保存") && !status.contains("未保存"));
     })

@@ -258,7 +258,7 @@ impl Workbench {
                 .kind
             {
                 *sent = true;
-                *workspace = Some(Box::new(self.workspace.clone()));
+                *workspace = Some(self.workspace.clone());
             }
         } else {
             self.intruder.resource_pools.management.pending = None;

@@ -242,7 +242,7 @@ impl Workbench {
             clear_last_run(&mut self.workspace, run_id);
         }
         self.workspace.revision = workspace.revision;
-        self.workspace_dirty |= self.workspace != *workspace;
+        self.workspace_dirty |= *self.workspace != *workspace;
         self.apply_workspace_ack(workspace, window, cx);
         if let Some(error) = input_error {
             self.fail(

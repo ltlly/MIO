@@ -73,7 +73,7 @@ impl Workbench {
             return;
         };
         self.workspace.tab_sidebar_width = self.tab_width as u16;
-        let mut workspace = Box::new(self.workspace.clone());
+        let mut workspace = self.workspace.clone();
         workspace.revision = revision;
         if let Err(error) = workspace.validate_structure() {
             self.fail_intruder_result_close(format!("最新工作区无效：{error}；结果仍保留。"), cx);

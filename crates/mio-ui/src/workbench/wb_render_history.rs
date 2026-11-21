@@ -640,7 +640,7 @@ impl Workbench {
                     if let Some((record, _)) = self
                         .extra_tools
                         .logger_loaded_detail
-                        .as_ref()
+                        .as_deref()
                         .filter(|(r, _)| r.summary.id == flow_id)
                     {
                         let url = if !record.request.url.is_empty() {

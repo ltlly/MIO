@@ -92,7 +92,7 @@ impl Workbench {
                 let (record, _) = self
                     .extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .filter(|(record, _)| record.summary.id == flow_id)
                     .ok_or_else(|| "Logger 流量详情尚未读取完成。".to_owned())?;
                 OrganiserItem::from_flow_record(number, "Logger", record)

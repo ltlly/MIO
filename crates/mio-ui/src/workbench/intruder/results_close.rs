@@ -266,7 +266,7 @@ impl Workbench {
         } else {
             run.title.clone()
         };
-        self.intruder_result_close = Some(ResultClose {
+        self.intruder_result_close = Some(Box::new(ResultClose {
             target,
             operation_id,
             run,
@@ -278,7 +278,7 @@ impl Workbench {
             dialog: None,
             deadline: None,
             _deadline: None,
-        });
+        }));
         self.cancel_invalidated_result_transfer("正在关闭或丢弃攻击结果。", cx);
         let answer = window.prompt(
             PromptLevel::Warning,

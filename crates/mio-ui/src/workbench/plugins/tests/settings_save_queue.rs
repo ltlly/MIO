@@ -152,7 +152,7 @@ fn settings_save_as_success_preserves_plugin_commit_and_sends_once(cx: &mut Test
     settings::checked(settings_window, false, cx);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(&view.workspace, snapshot);
+        assert_eq!(&*view.workspace, snapshot);
         assert_eq!(view.project_path.as_ref(), Some(&copy));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(view.pending_project_save.is_none());
@@ -257,7 +257,7 @@ fn settings_coalesced_workspace_enqueue_failure_discards_plugin_commit(cx: &mut 
         assert!(instance.live && instance.panel.read(cx).has_unsaved_edits(cx));
         assert_eq!(instance.bound.as_ref(), Some(&tab.draft));
         (
-            view.workspace.clone(),
+            (*view.workspace).clone(),
             !view.extensions.saved_commits.contains_key(&tab.id),
         )
     });
@@ -296,7 +296,7 @@ fn settings_coalesced_workspace_enqueue_failure_discards_plugin_commit(cx: &mut 
     );
     cx.update_window(fixture.window, |_, window, cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(view.project_path.as_ref(), Some(&source));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(view.pending_sends.is_empty() && view.sending.is_empty());

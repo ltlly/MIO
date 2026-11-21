@@ -268,7 +268,7 @@ fn delete_pool_fixture(used: bool, cx: &mut TestAppContext) {
         ),
         (fixture.project, removed, before.revision, used)
     );
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     assert_eq!(*expected_workspace_revision, workspace.revision);
     let mut after = before.clone();
     after.revision += 1;

@@ -115,7 +115,7 @@ fn settings_abandonment_before_commit_reply(
             assert!(view.error.is_none());
         }
         (
-            view.workspace.clone(),
+            (*view.workspace).clone(),
             !view.extensions.operations.contains_key(&operation) && !view.plugin_waiting(tab.id),
             view.error.clone(),
         )
@@ -179,7 +179,7 @@ fn settings_abandonment_before_commit_reply(
     );
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, retained);
+        assert_eq!(*view.workspace, retained);
         assert_eq!(view.error, error);
         assert!(view.workspace_dirty && view.pending_workspace.is_none());
         assert!(view.pending_sends.is_empty() && view.extensions.saved_commits.is_empty());
@@ -227,7 +227,7 @@ fn settings_abandonment_before_commit_reply(
     settings::checked(settings_window, true, cx);
     cx.update_window(fixture.window, |_, window, cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, expected);
+        assert_eq!(*view.workspace, expected);
         assert_eq!(view.project_path.as_ref(), Some(&source));
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
         assert!(view.pending_project_save.is_none() && !view.saving_project_snapshot);

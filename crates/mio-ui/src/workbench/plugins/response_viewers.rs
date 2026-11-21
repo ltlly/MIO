@@ -78,7 +78,7 @@ impl Workbench {
                 let Some((record, _)) = self
                     .extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .filter(|(record, _)| record.summary.id == flow_id)
                 else {
                     return;

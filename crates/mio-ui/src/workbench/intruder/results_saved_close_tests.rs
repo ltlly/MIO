@@ -468,7 +468,7 @@ fn saved_detach_target_loss_preserves_the_send_waiting_for_workspace_ack(cx: &mu
         assert!(view.pending_workspace.is_none());
         assert_eq!(view.sending.len(), 1);
         assert!(view.sending.contains_key(&tab_id));
-        assert_eq!(view.workspace, *saving);
+        assert_eq!(*view.workspace, *saving);
     });
     assert!(!fixture.events.is_closed());
 }

@@ -41,7 +41,7 @@ fn appended_archive_tab_survives_queue_or_save_rejection_and_real_save_retries_t
                 .try_send(Event::WorkspaceRejected {
                     project: fixture.project,
                     revision: attempted.revision,
-                    stored: before.clone(),
+                    stored: (*before).clone(),
                     message: "synthetic appended-workspace write rejection".into(),
                 })
                 .unwrap();
@@ -179,7 +179,7 @@ fn archived_origin_target_loads_unsent_and_survives_workspace_save_and_reopen(
         );
         cx.read(|cx| {
             let view = fixture.view.read(cx);
-            assert_eq!(view.workspace, workspace);
+            assert_eq!(*view.workspace, workspace);
             assert_eq!(
                 view.tab_editors[&added.id].target.read(cx).value().as_ref(),
                 target

@@ -313,33 +313,302 @@ fn site_map_subtab(id: &'static str, label: String, selected: bool) -> Button {
 }
 
 impl Workbench {
-    pub(in crate::workbench) fn render_site_map(
-        &mut self,
-        window: &mut Window,
+    #[inline(never)]
+    fn render_site_map_filter_popover(
+        &self,
+        filter_summary_text: String,
+        filter_bg: gpui_kit::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let pane = &self.target_pane;
-        let hidden_count = pane.tree_state.hidden_prefixes.len() + pane.hidden_item_ids.len();
-        let issues_count = filter_branch_findings(
-            &self.audit_dashboard.snapshot.findings,
-            pane.tree_state.selected_key.as_deref(),
-            &pane.tree_state.hidden_prefixes,
-        )
-        .len();
-        let subview = pane.site_map_subview;
-        let view_mode = pane.site_map_view_mode;
-        let layout_mode = pane.site_map_layout;
-        let loading = pane.site_map_loading;
-        let search_input = pane.search.clone();
-        let search_val = search_input.read(cx).value().to_string();
-        let filter_summary_text = site_map_filter_summary(pane, &search_val);
+        let filter_owner = cx.weak_entity();
+        div()
+            .flex_1()
+            .min_w_0()
+            .child(
+                Popover::new("target-sitemap-filter-popover")
+                    .anchor(gpui_kit::Anchor::TopLeft)
+                    .trigger_style(gpui_kit::StyleRefinement::default().w_full())
+                    .trigger(
+                        Button::new("target-sitemap-filter-bar")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .w_full()
+                            .h(theme::scaled_px(23.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(theme::border())
+                            .px(theme::scaled_px(8.))
+                            .bg(filter_bg)
+                            .text_color(theme::foreground())
+                            .justify_start()
+                            .accessibility_label(filter_summary_text.clone())
+                            .tooltip("点击配置站点地图筛选条件（范围、404、MIME、状态码分类）")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme::scaled_px(6.))
+                                    .child(
+                                        Icon::new(IconName::Funnel)
+                                            .size(theme::scaled_px(13.))
+                                            .text_color(theme::foreground()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_left()
+                                            .text_size(theme::ui_font_size())
+                                            .child(
+                                                filter_summary_text
+                                                    .clone()
+                                                    .test_text(filter_summary_text),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .content(move |_, _, cx| {
+                        let Some(wb) = filter_owner.upgrade() else {
+                            return div().into_any_element();
+                        };
+                        let (
+                            in_scope_only,
+                            hide_not_found,
+                            hide_binary,
+                            hide_empty_folders,
+                            status_classes,
+                            hidden_cnt,
+                            is_loading,
+                        ) = {
+                            let p = &wb.read(cx).target_pane;
+                            (
+                                p.in_scope_only,
+                                p.hide_not_found,
+                                p.hide_css_image_binary,
+                                p.hide_empty_folders,
+                                p.status_classes,
+                                p.tree_state.hidden_prefixes.len() + p.hidden_item_ids.len(),
+                                p.site_map_loading,
+                            )
+                        };
+                        let o_scope = filter_owner.clone();
+                        let o_404 = filter_owner.clone();
+                        let o_binary = filter_owner.clone();
+                        let o_empty = filter_owner.clone();
+                        let o_refresh = filter_owner.clone();
+                        let o_reset = filter_owner.clone();
+                        let o_restore = filter_owner.clone();
+                        div()
+                            .id("target-sitemap-filter-content")
+                            .test_support()
+                            .w(px(360.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .text_size(theme::scaled_px(13.5))
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .child("站点地图筛选设置"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .text_size(theme::scaled_px(12.))
+                                            .text_color(theme::muted_foreground())
+                                            .child("按请求与内容类型筛选"),
+                                    )
+                                    .child(
+                                        mio_checkbox(
+                                            "target-sitemap-in-scope",
+                                            "仅显示范围内条目",
+                                            in_scope_only,
+                                            !is_loading,
+                                        )
+                                        .on_change(move |_, _, window, cx| {
+                                            let _ = o_scope.update(cx, |this, cx| {
+                                                this.target_pane.in_scope_only =
+                                                    !this.target_pane.in_scope_only;
+                                                this.refresh_target_site_map(0, window, cx);
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        mio_checkbox(
+                                            "target-sitemap-hide-404",
+                                            "隐藏未找到项 (404 / 无响应)",
+                                            hide_not_found,
+                                            !is_loading,
+                                        )
+                                        .on_change(move |_, _, window, cx| {
+                                            let _ = o_404.update(cx, |this, cx| {
+                                                this.target_pane.hide_not_found =
+                                                    !this.target_pane.hide_not_found;
+                                                this.refresh_target_site_map(0, window, cx);
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        mio_checkbox(
+                                            "target-sitemap-hide-binary",
+                                            "隐藏 CSS、图像和常规二进制内容",
+                                            hide_binary,
+                                            !is_loading,
+                                        )
+                                        .on_change(move |_, _, _, cx| {
+                                            let _ = o_binary.update(cx, |this, cx| {
+                                                this.target_pane.hide_css_image_binary =
+                                                    !this.target_pane.hide_css_image_binary;
+                                                cx.notify();
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        mio_checkbox(
+                                            "target-sitemap-hide-empty-folders",
+                                            "隐藏空文件夹",
+                                            hide_empty_folders,
+                                            !is_loading,
+                                        )
+                                        .on_change(move |_, _, _, cx| {
+                                            let _ = o_empty.update(cx, |this, cx| {
+                                                this.target_pane.hide_empty_folders =
+                                                    !this.target_pane.hide_empty_folders;
+                                                cx.notify();
+                                            });
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .pt(px(6.))
+                                    .border_t_1()
+                                    .border_color(theme::border())
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .text_size(theme::scaled_px(12.))
+                                            .text_color(theme::muted_foreground())
+                                            .child("按状态码显示"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap(px(10.))
+                                            .children(
+                                                [
+                                                    (0usize, "target-sitemap-status-2xx", "2xx [成功]"),
+                                                    (1usize, "target-sitemap-status-3xx", "3xx [重定向]"),
+                                                    (2usize, "target-sitemap-status-4xx", "4xx [请求错误]"),
+                                                    (3usize, "target-sitemap-status-5xx", "5xx [服务器错误]"),
+                                                ]
+                                                .into_iter()
+                                                .map(|(idx, cb_id, lbl)| {
+                                                    let o_st = filter_owner.clone();
+                                                    div().w(px(150.)).child(
+                                                        mio_checkbox(
+                                                            cb_id,
+                                                            lbl,
+                                                            status_classes[idx],
+                                                            !is_loading,
+                                                        )
+                                                        .on_change(move |_, _, window, cx| {
+                                                            let _ = o_st.update(cx, |this, cx| {
+                                                                this.target_pane.status_classes
+                                                                    [idx] = !this
+                                                                    .target_pane
+                                                                    .status_classes[idx];
+                                                                this.refresh_target_site_map(
+                                                                    0, window, cx,
+                                                                );
+                                                            });
+                                                        }),
+                                                    )
+                                                }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .pt(px(8.))
+                                    .border_t_1()
+                                    .border_color(theme::border())
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        button("target-sitemap-refresh", "刷新")
+                                            .icon(Icon::new(IconName::RefreshCw).size(px(12.)))
+                                            .disabled(is_loading)
+                                            .on_click(move |_, window, cx| {
+                                                let _ = o_refresh.update(cx, |this, cx| {
+                                                    this.refresh_target_site_map(0, window, cx);
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        button("target-sitemap-reset-filter", "显示全部")
+                                            .disabled(is_loading)
+                                            .on_click(move |_, window, cx| {
+                                                let _ = o_reset.update(cx, |this, cx| {
+                                                    this.target_pane.in_scope_only = false;
+                                                    this.target_pane.hide_not_found = false;
+                                                    this.target_pane.hide_css_image_binary = false;
+                                                    this.target_pane.hide_empty_folders = false;
+                                                    this.target_pane.status_classes = [true; 4];
+                                                    this.target_pane
+                                                        .search
+                                                        .update(cx, |s, cx| {
+                                                            s.set_value("", window, cx)
+                                                        });
+                                                    this.refresh_target_site_map(0, window, cx);
+                                                });
+                                            }),
+                                    )
+                                    .when(hidden_cnt > 0, |row| {
+                                        row.child(
+                                            button(
+                                                "target-sitemap-popover-show-hidden",
+                                                format!("恢复隐藏 ({hidden_cnt})"),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                let _ = o_restore.update(cx, |this, cx| {
+                                                    this.show_hidden_target_branches(window, cx);
+                                                });
+                                            }),
+                                        )
+                                    }),
+                            )
+                            .into_any_element()
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_site_map_top_bar(
+        &self,
+        hidden_count: usize,
+        view_mode: SiteMapViewMode,
+        layout_mode: SiteMapLayoutMode,
+        filter_summary_text: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let dark = theme::is_dark();
         let filter_bg: gpui_kit::Hsla = rgb(if dark { 0x35383d } else { 0xeeeeee }).into();
         let inactive_seg_bg: gpui_kit::Hsla = rgb(if dark { 0x35383d } else { 0xdfdfdf }).into();
         let active_seg_bg: gpui_kit::Hsla = rgb(0x26649d).into();
-        let owner = cx.weak_entity();
-        let filter_owner = owner.clone();
-        let options_owner = owner.clone();
 
         let view_toggle = div()
             .h(theme::scaled_px(23.))
@@ -405,272 +674,8 @@ impl Workbench {
                     })),
             );
 
-        let filter_popover = div().flex_1().min_w_0().child(
-            Popover::new("target-sitemap-filter-popover")
-                .anchor(gpui_kit::Anchor::TopLeft)
-                .trigger_style(gpui_kit::StyleRefinement::default().w_full())
-                .trigger(
-                    Button::new("target-sitemap-filter-bar")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .w_full()
-                        .h(theme::scaled_px(23.))
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .px(theme::scaled_px(8.))
-                        .bg(filter_bg)
-                        .text_color(theme::foreground())
-                        .justify_start()
-                        .accessibility_label(filter_summary_text.clone())
-                        .tooltip("点击配置站点地图筛选条件（范围、404、MIME、状态码分类）")
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(theme::scaled_px(6.))
-                                .child(
-                                    Icon::new(IconName::Funnel)
-                                        .size(theme::scaled_px(13.))
-                                        .text_color(theme::foreground()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_left()
-                                        .text_size(theme::ui_font_size())
-                                        .child(
-                                            filter_summary_text
-                                                .clone()
-                                                .test_text(filter_summary_text),
-                                        ),
-                                ),
-                        ),
-                )
-                .content(move |_, _, cx| {
-                    let Some(wb) = filter_owner.upgrade() else {
-                        return div().into_any_element();
-                    };
-                    let (
-                        in_scope_only,
-                        hide_not_found,
-                        hide_binary,
-                        hide_empty_folders,
-                        status_classes,
-                        hidden_cnt,
-                        is_loading,
-                    ) = {
-                        let p = &wb.read(cx).target_pane;
-                        (
-                            p.in_scope_only,
-                            p.hide_not_found,
-                            p.hide_css_image_binary,
-                            p.hide_empty_folders,
-                            p.status_classes,
-                            p.tree_state.hidden_prefixes.len() + p.hidden_item_ids.len(),
-                            p.site_map_loading,
-                        )
-                    };
-                    let o_scope = filter_owner.clone();
-                    let o_404 = filter_owner.clone();
-                    let o_binary = filter_owner.clone();
-                    let o_empty = filter_owner.clone();
-                    let o_refresh = filter_owner.clone();
-                    let o_reset = filter_owner.clone();
-                    let o_restore = filter_owner.clone();
-                    div()
-                        .id("target-sitemap-filter-content")
-                        .test_support()
-                        .w(px(360.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .child(
-                            div()
-                                .text_size(theme::scaled_px(13.5))
-                                .font_weight(gpui_kit::FontWeight::BOLD)
-                                .child("站点地图筛选设置"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(theme::scaled_px(12.))
-                                        .text_color(theme::muted_foreground())
-                                        .child("按请求与内容类型筛选"),
-                                )
-                                .child(
-                                    mio_checkbox(
-                                        "target-sitemap-in-scope",
-                                        "仅显示范围内条目",
-                                        in_scope_only,
-                                        !is_loading,
-                                    )
-                                    .on_change(move |_, _, window, cx| {
-                                        let _ = o_scope.update(cx, |this, cx| {
-                                            this.target_pane.in_scope_only =
-                                                !this.target_pane.in_scope_only;
-                                            this.refresh_target_site_map(0, window, cx);
-                                        });
-                                    }),
-                                )
-                                .child(
-                                    mio_checkbox(
-                                        "target-sitemap-hide-404",
-                                        "隐藏未找到项 (404 / 无响应)",
-                                        hide_not_found,
-                                        !is_loading,
-                                    )
-                                    .on_change(move |_, _, window, cx| {
-                                        let _ = o_404.update(cx, |this, cx| {
-                                            this.target_pane.hide_not_found =
-                                                !this.target_pane.hide_not_found;
-                                            this.refresh_target_site_map(0, window, cx);
-                                        });
-                                    }),
-                                )
-                                .child(
-                                    mio_checkbox(
-                                        "target-sitemap-hide-binary",
-                                        "隐藏 CSS、图像和常规二进制内容",
-                                        hide_binary,
-                                        !is_loading,
-                                    )
-                                    .on_change(move |_, _, _, cx| {
-                                        let _ = o_binary.update(cx, |this, cx| {
-                                            this.target_pane.hide_css_image_binary =
-                                                !this.target_pane.hide_css_image_binary;
-                                            cx.notify();
-                                        });
-                                    }),
-                                )
-                                .child(
-                                    mio_checkbox(
-                                        "target-sitemap-hide-empty-folders",
-                                        "隐藏空文件夹",
-                                        hide_empty_folders,
-                                        !is_loading,
-                                    )
-                                    .on_change(move |_, _, _, cx| {
-                                        let _ = o_empty.update(cx, |this, cx| {
-                                            this.target_pane.hide_empty_folders =
-                                                !this.target_pane.hide_empty_folders;
-                                            cx.notify();
-                                        });
-                                    }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .pt(px(6.))
-                                .border_t_1()
-                                .border_color(theme::border())
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(theme::scaled_px(12.))
-                                        .text_color(theme::muted_foreground())
-                                        .child("按状态码显示"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap(px(10.))
-                                        .children(
-                                            [
-                                                (0usize, "target-sitemap-status-2xx", "2xx [成功]"),
-                                                (1usize, "target-sitemap-status-3xx", "3xx [重定向]"),
-                                                (2usize, "target-sitemap-status-4xx", "4xx [请求错误]"),
-                                                (3usize, "target-sitemap-status-5xx", "5xx [服务器错误]"),
-                                            ]
-                                            .into_iter()
-                                            .map(|(idx, cb_id, lbl)| {
-                                                let o_st = filter_owner.clone();
-                                                div().w(px(150.)).child(
-                                                    mio_checkbox(
-                                                        cb_id,
-                                                        lbl,
-                                                        status_classes[idx],
-                                                        !is_loading,
-                                                    )
-                                                    .on_change(move |_, _, window, cx| {
-                                                        let _ = o_st.update(cx, |this, cx| {
-                                                            this.target_pane.status_classes[idx] =
-                                                                !this.target_pane.status_classes
-                                                                    [idx];
-                                                            this.refresh_target_site_map(
-                                                                0, window, cx,
-                                                            );
-                                                        });
-                                                    }),
-                                                )
-                                            }),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .pt(px(8.))
-                                .border_t_1()
-                                .border_color(theme::border())
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    button("target-sitemap-refresh", "刷新")
-                                        .icon(Icon::new(IconName::RefreshCw).size(px(12.)))
-                                        .disabled(is_loading)
-                                        .on_click(move |_, window, cx| {
-                                            let _ = o_refresh.update(cx, |this, cx| {
-                                                this.refresh_target_site_map(0, window, cx);
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    button("target-sitemap-reset-filter", "显示全部")
-                                        .disabled(is_loading)
-                                        .on_click(move |_, window, cx| {
-                                            let _ = o_reset.update(cx, |this, cx| {
-                                                this.target_pane.in_scope_only = false;
-                                                this.target_pane.hide_not_found = false;
-                                                this.target_pane.hide_css_image_binary = false;
-                                                this.target_pane.hide_empty_folders = false;
-                                                this.target_pane.status_classes = [true; 4];
-                                                this.target_pane
-                                                    .search
-                                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                                                this.refresh_target_site_map(0, window, cx);
-                                            });
-                                        }),
-                                )
-                                .when(hidden_cnt > 0, |row| {
-                                    row.child(
-                                        button(
-                                            "target-sitemap-popover-show-hidden",
-                                            format!("恢复隐藏 ({hidden_cnt})"),
-                                        )
-                                        .on_click(move |_, window, cx| {
-                                            let _ = o_restore.update(cx, |this, cx| {
-                                                this.show_hidden_target_branches(window, cx);
-                                            });
-                                        }),
-                                    )
-                                }),
-                        )
-                        .into_any_element()
-                }),
-        );
+        let filter_popover =
+            self.render_site_map_filter_popover(filter_summary_text, filter_bg, cx);
 
         let help_popover = Popover::new("target-sitemap-help-popover")
             .anchor(gpui_kit::Anchor::TopRight)
@@ -769,7 +774,7 @@ impl Workbench {
                     })),
             );
 
-        let top_filter_bar = div()
+        div()
             .w_full()
             .h(theme::scaled_px(36.))
             .flex_shrink_0()
@@ -796,9 +801,21 @@ impl Workbench {
                 )
             })
             .child(help_popover)
-            .child(layout_toggle);
+            .child(layout_toggle)
+            .into_any_element()
+    }
 
-        let right_header = div()
+    #[inline(never)]
+    fn render_site_map_right_header(
+        &self,
+        subview: SiteMapSubView,
+        issues_count: usize,
+        loading: bool,
+        search_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let options_owner = cx.weak_entity();
+        div()
             .w_full()
             .h(px(36.))
             .flex_shrink_0()
@@ -982,9 +999,24 @@ impl Workbench {
                                     }),
                             )
                     }),
-            );
+            )
+            .into_any_element()
+    }
 
-        let split_body = match layout_mode {
+    #[inline(never)]
+    fn render_site_map_split_body(
+        &mut self,
+        layout_mode: SiteMapLayoutMode,
+        subview: SiteMapSubView,
+        issues_count: usize,
+        loading: bool,
+        search_input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let right_header =
+            self.render_site_map_right_header(subview, issues_count, loading, search_input, cx);
+        match layout_mode {
             SiteMapLayoutMode::TreeLeftStackedRight => h_resizable("target-sitemap-hsplit")
                 .child(
                     resizable_panel()
@@ -1057,8 +1089,47 @@ impl Workbench {
                         .child(self.render_target_message_pair(cx)),
                 )
                 .into_any_element(),
-        };
+        }
+    }
 
+    #[inline(never)]
+    pub(in crate::workbench) fn render_site_map(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = &self.target_pane;
+        let hidden_count = pane.tree_state.hidden_prefixes.len() + pane.hidden_item_ids.len();
+        let issues_count = filter_branch_findings(
+            &self.audit_dashboard.snapshot.findings,
+            pane.tree_state.selected_key.as_deref(),
+            &pane.tree_state.hidden_prefixes,
+        )
+        .len();
+        let subview = pane.site_map_subview;
+        let view_mode = pane.site_map_view_mode;
+        let layout_mode = pane.site_map_layout;
+        let loading = pane.site_map_loading;
+        let search_input = pane.search.clone();
+        let search_val = search_input.read(cx).value().to_string();
+        let filter_summary_text = site_map_filter_summary(pane, &search_val);
+
+        let top_filter_bar = self.render_site_map_top_bar(
+            hidden_count,
+            view_mode,
+            layout_mode,
+            filter_summary_text,
+            cx,
+        );
+        let split_body = self.render_site_map_split_body(
+            layout_mode,
+            subview,
+            issues_count,
+            loading,
+            search_input,
+            window,
+            cx,
+        );
         let engagement_overlay = self.render_target_engagement_overlay(cx);
         let compare_overlay = self.render_target_compare_overlay(cx);
         div()

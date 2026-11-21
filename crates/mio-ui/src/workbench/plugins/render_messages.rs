@@ -395,7 +395,7 @@ impl Workbench {
             "logger" => self.extra_tools.logger_selected.is_some_and(|id| {
                 self.extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .is_some_and(|(record, _)| record.summary.id == id)
             }),
             "target" => self.target_pane.selected_row.is_some(),

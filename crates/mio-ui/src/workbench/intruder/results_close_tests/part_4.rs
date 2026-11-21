@@ -107,7 +107,7 @@ fn discard_close_main_ime_blocks_proposal_without_partial_harvest_or_retry(
     let mut fixture = intruder_fixture(cx, vec![attack()], 64);
     let mut started = start(&mut fixture, cx);
     bootstrap(&mut fixture, &mut started, &[], cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let (target, raw) = cx
         .update_window(fixture.window, |_, window, cx| {
             let view = fixture.view.read(cx);
@@ -138,7 +138,7 @@ fn discard_close_main_ime_blocks_proposal_without_partial_harvest_or_retry(
             state.marked_text_range(window, cx).is_some()
         }));
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.pending_workspace.is_none());
         assert!(view.intruder_result_close.is_none());
         assert_eq!(
@@ -198,7 +198,7 @@ fn discard_failure_preserves_results_inputs_and_does_not_hijack_later_save(
     started.summary.state = IntruderRunState::Stopped;
     page(&fixture, &started, revision, vec![row(0, &flow)], None, cx);
     let discard = take_discard(&mut fixture, &started, cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let target = type_target(&mut fixture, true, "http://127.0.0.1:11", cx);
     emit(
         &fixture,
@@ -209,7 +209,7 @@ fn discard_failure_preserves_results_inputs_and_does_not_hijack_later_save(
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         let result = &view.intruder.results.views[&started.summary.id];
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.workspace_dirty && view.pending_workspace.is_none());
         assert_eq!(
             view.workspace.intruder.tabs[0].last_run,
@@ -293,7 +293,7 @@ fn discard_queue_failure_after_terminal_never_closes_or_retries(cx: &mut TestApp
     bootstrap(&mut fixture, &mut started, &[], cx);
     choose_discard(&mut fixture, &started, cx);
     let revision = poll(&mut fixture, &started, cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let capacity = fill_commands(&fixture, cx);
     stopped(&fixture, &mut started, revision, cx);
     assert!(started.window.update(cx, |_, _, _| ()).is_ok());
@@ -306,7 +306,7 @@ fn discard_queue_failure_after_terminal_never_closes_or_retries(cx: &mut TestApp
     );
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.pending_workspace.is_none());
         assert!(view.intruder_result_close.is_none());
         assert!(
@@ -363,7 +363,7 @@ fn lost_event_channel_never_treats_pending_discard_as_acknowledged(cx: &mut Test
     let revision = poll(&mut fixture, &started, cx);
     stopped(&fixture, &mut started, revision, cx);
     let discard = take_discard(&mut fixture, &started, cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let (replacement, _receiver) = mpsc::channel(1);
     drop(std::mem::replace(&mut fixture.events, replacement));
     cx.run_until_parked();
@@ -371,7 +371,7 @@ fn lost_event_channel_never_treats_pending_discard_as_acknowledged(cx: &mut Test
     cx.read(|cx| {
         let view = fixture.view.read(cx);
         assert!(view.backend_disconnected);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.workspace.revision < discard.workspace.revision);
         assert!(view.workspace_dirty);
         assert_eq!(view.pending_workspace, Some(discard.workspace.revision));
@@ -393,7 +393,7 @@ fn late_close_answers_do_not_target_new_project_or_replacement_window(cx: &mut T
     let mut old = start(&mut fixture, cx);
     bootstrap(&mut fixture, &mut old, &[], cx);
     ask_to_close(&old, false, cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     fixture.project.generation += 1;
     emit(
         &fixture,
@@ -408,7 +408,7 @@ fn late_close_answers_do_not_target_new_project_or_replacement_window(cx: &mut T
     drain(&mut fixture.commands);
     let mut current = start(&mut fixture, cx);
     bootstrap(&mut fixture, &mut current, &[], cx);
-    let workspace = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let workspace = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     assert!(
         !has_close_dialog(cx),
         "project replacement retires the old close dialog"
@@ -443,7 +443,7 @@ fn late_close_answers_do_not_target_new_project_or_replacement_window(cx: &mut T
     assert!(!current.cancel.is_cancelled());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert_eq!(
             view.intruder.results.views[&current.summary.id].owner,
             replacement

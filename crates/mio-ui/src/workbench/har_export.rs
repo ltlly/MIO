@@ -73,7 +73,7 @@ impl Workbench {
                     .ok_or_else(|| "没有选中的 Logger 流量记录。".to_owned())?;
                 self.extra_tools
                     .logger_loaded_detail
-                    .as_ref()
+                    .as_deref()
                     .map(|(record, _)| record)
                     .filter(|record| record.summary.id == flow_id)
                     .ok_or_else(|| "正在读取所选 Logger 记录详情，请稍后重试复制为 HAR。".into())

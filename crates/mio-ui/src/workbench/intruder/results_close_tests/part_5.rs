@@ -392,7 +392,7 @@ fn malformed_discard_receipt_keeps_ownership_until_a_valid_receipt_reconciles(
     assert!(started.window.update(cx, |_, _, _| ()).is_ok());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, receipt(&discard).workspace);
+        assert_eq!(*view.workspace, receipt(&discard).workspace);
         assert!(view.pending_workspace.is_none());
     });
     assert!(matches!(

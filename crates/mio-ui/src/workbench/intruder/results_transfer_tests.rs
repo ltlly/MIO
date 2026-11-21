@@ -177,7 +177,7 @@ fn workspace_rejected_and_closing_or_discarding_result_view_cancel_in_flight_tra
         commands.as_slice(),
         [Command::SaveWorkspace { .. }]
     ));
-    let stored = cx.read(|cx| f.view.read(cx).workspace.clone());
+    let stored = cx.read(|cx| (*f.view.read(cx).workspace).clone());
     query_tests::emit(
         &f,
         Event::WorkspaceRejected {

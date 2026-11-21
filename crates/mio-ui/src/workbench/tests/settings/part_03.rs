@@ -88,7 +88,7 @@ fn proxy_interception_rules_pending_snapshot_survives_coalesced_editor_base(
     assert!(!cx.windows().contains(&dialog));
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(&view.workspace, candidate);
+        assert_eq!(&*view.workspace, candidate);
         assert!(view.error.is_none());
         assert!(!view.workspace_dirty && view.pending_workspace.is_none());
     });
@@ -308,7 +308,7 @@ fn proxy_interception_rules_defaults_cancel_and_apply_only_the_selected_group(
     cx.simulate_prompt_answer("否");
     cx.run_until_parked();
     assert!(drain(&mut fixture.commands).is_empty());
-    cx.read(|cx| assert_eq!(fixture.view.read(cx).workspace, modified));
+    cx.read(|cx| assert_eq!(*fixture.view.read(cx).workspace, modified));
     proxy_rule_click(settings, "proxy-request-rules-defaults", cx);
     cx.simulate_prompt_answer("是");
     cx.run_until_parked();

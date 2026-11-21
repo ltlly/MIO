@@ -593,95 +593,17 @@ impl Settings {
     }
 
     #[inline(never)]
-    pub(in crate::workbench) fn render_user_misc(
+    fn render_user_misc_hotkey_table(
         &self,
+        hotkey_ui: &Entity<HotkeyEditorUi>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let _ = (
-            &self.user_pages.confirm_close_focus,
-            &self.user_pages.redact_curl_focus,
-            &self.user_pages.send_hotkey_select,
-        );
-        let enabled = self.user_settings_enabled();
         let misc = &self.state.preferences.misc;
-
-        let settings_weak_sub = cx.weak_entity();
-        let hotkey_ui = window.use_keyed_state("settings-user-hotkey-editor-ui", cx, |window, cx| {
-            let capture_input =
-                cx.new(|icx| InputState::new(window, icx).placeholder("如 cmd-shift-r"));
-            let capture_focus = cx.focus_handle();
-            let _sub = cx.subscribe_in(
-                &capture_input,
-                window,
-                move |state: &mut HotkeyEditorUi, input, event, window, cx| {
-                    if !matches!(event, InputEvent::PressEnter { .. }) {
-                        return;
-                    }
-                    let Some(row_idx) = state.editing_row else {
-                        return;
-                    };
-                    if input.read(cx).has_marked_text() {
-                        let _ = settings_weak_sub.update(cx, |this, cx| {
-                            this.user_pages.local_error =
-                                Some(editing::COMPOSITION_PENDING.into());
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    let raw = input.read(cx).value().to_string();
-                    let saved = settings_weak_sub
-                        .update(cx, |this, cx| {
-                            this.save_hotkey_binding(row_idx, &raw, window, cx)
-                        })
-                        .unwrap_or(false);
-                    if saved {
-                        state.editing_row = None;
-                        state.capturing = false;
-                        cx.notify();
-                    }
-                },
-            );
-            HotkeyEditorUi {
-                selected_row: None,
-                editing_row: None,
-                capturing: false,
-                capture_input,
-                capture_focus,
-                _sub,
-            }
-        });
-        let (selected_row, editing_row, capturing, capture_input, capture_focus) = {
+        let (selected_row, editing_row, capture_input) = {
             let ui = hotkey_ui.read(cx);
-            (
-                ui.selected_row,
-                ui.editing_row,
-                ui.capturing,
-                ui.capture_input.clone(),
-                ui.capture_focus.clone(),
-            )
+            (ui.selected_row, ui.editing_row, ui.capture_input.clone())
         };
-
-        let owner_gear = cx.weak_entity();
-        let ui_gear = hotkey_ui.clone();
-        let hotkeys_gear = user_gear_menu_button(
-            "settings-user-misc-settings",
-            "快捷键设置菜单",
-            !enabled,
-        )
-        .dropdown_menu(move |menu, _, _| {
-            let owner = owner_gear.clone();
-            let ui_gear = ui_gear.clone();
-            menu.item(PopupMenuItem::new("恢复默认设置").on_click(move |_, window, cx| {
-                ui_gear.update(cx, |ui, cx| {
-                    ui.editing_row = None;
-                    ui.capturing = false;
-                    cx.notify();
-                });
-                let _ = owner.update(cx, |this, cx| this.reset_user_misc_defaults(window, cx));
-            }))
-        });
-
         let dark = theme::is_dark();
         let table_border = rgb(if dark { 0x464a52 } else { 0xe0e0e0 });
         let table_head_bg = rgb(if dark { 0x2b2e33 } else { 0xeaeaea });
@@ -816,7 +738,7 @@ impl Settings {
             visible_idx += 1;
         }
 
-        let hotkey_table = div()
+        div()
             .id("settings-user-hotkey-table")
             .test_support()
             .role(Role::Table)
@@ -923,8 +845,28 @@ impl Settings {
                                     }),
                             ),
                     ),
-            );
+            )
+            .into_any_element()
+    }
 
+    #[inline(never)]
+    fn render_user_misc_hotkey_toolbar(
+        &self,
+        hotkey_ui: &Entity<HotkeyEditorUi>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let misc = &self.state.preferences.misc;
+        let (selected_row, editing_row, capturing, capture_input, capture_focus) = {
+            let ui = hotkey_ui.read(cx);
+            (
+                ui.selected_row,
+                ui.editing_row,
+                ui.capturing,
+                ui.capture_input.clone(),
+                ui.capture_focus.clone(),
+            )
+        };
         let search_box = div()
             .w(theme::scaled_px(230.).max(px(230.)))
             .flex_shrink_0()
@@ -941,7 +883,7 @@ impl Settings {
                     ),
             );
 
-        let toolbar_row = if let Some(edit_idx) = editing_row
+        if let Some(edit_idx) = editing_row
             && let Some(edit_spec) = HOTKEY_TABLE.get(edit_idx)
         {
             let ui_cap_key = hotkey_ui.clone();
@@ -1115,6 +1057,7 @@ impl Settings {
                                 })),
                         ),
                 )
+                .into_any_element()
         } else if let Some(sel_idx) = selected_row
             && let Some(sel_spec) = HOTKEY_TABLE.get(sel_idx)
         {
@@ -1170,10 +1113,20 @@ impl Settings {
                             })),
                         ),
                 )
+                .into_any_element()
         } else {
-            div().child(search_box)
-        };
+            div().child(search_box).into_any_element()
+        }
+    }
 
+    #[inline(never)]
+    fn render_user_misc_updates_section(
+        &self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let misc = &self.state.preferences.misc;
         let update_status_text = match &self.state.update_status {
             mio_core::UpdateStatus::Idle => {
                 format!("当前版本 v{} · 尚未检查更新", env!("CARGO_PKG_VERSION"))
@@ -1245,7 +1198,7 @@ impl Settings {
             });
         });
 
-        let update_section = div()
+        div()
             .id("settings-user-updates-section")
             .test_support()
             .mt(px(12.))
@@ -1314,7 +1267,92 @@ impl Settings {
                                     .child(update_status_text),
                             ),
                     ),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_user_misc(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let _ = (
+            &self.user_pages.confirm_close_focus,
+            &self.user_pages.redact_curl_focus,
+            &self.user_pages.send_hotkey_select,
+        );
+        let enabled = self.user_settings_enabled();
+
+        let settings_weak_sub = cx.weak_entity();
+        let hotkey_ui = window.use_keyed_state("settings-user-hotkey-editor-ui", cx, |window, cx| {
+            let capture_input =
+                cx.new(|icx| InputState::new(window, icx).placeholder("如 cmd-shift-r"));
+            let capture_focus = cx.focus_handle();
+            let _sub = cx.subscribe_in(
+                &capture_input,
+                window,
+                move |state: &mut HotkeyEditorUi, input, event, window, cx| {
+                    if !matches!(event, InputEvent::PressEnter { .. }) {
+                        return;
+                    }
+                    let Some(row_idx) = state.editing_row else {
+                        return;
+                    };
+                    if input.read(cx).has_marked_text() {
+                        let _ = settings_weak_sub.update(cx, |this, cx| {
+                            this.user_pages.local_error =
+                                Some(editing::COMPOSITION_PENDING.into());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    let raw = input.read(cx).value().to_string();
+                    let saved = settings_weak_sub
+                        .update(cx, |this, cx| {
+                            this.save_hotkey_binding(row_idx, &raw, window, cx)
+                        })
+                        .unwrap_or(false);
+                    if saved {
+                        state.editing_row = None;
+                        state.capturing = false;
+                        cx.notify();
+                    }
+                },
             );
+            HotkeyEditorUi {
+                selected_row: None,
+                editing_row: None,
+                capturing: false,
+                capture_input,
+                capture_focus,
+                _sub,
+            }
+        });
+
+        let owner_gear = cx.weak_entity();
+        let ui_gear = hotkey_ui.clone();
+        let hotkeys_gear = user_gear_menu_button(
+            "settings-user-misc-settings",
+            "快捷键设置菜单",
+            !enabled,
+        )
+        .dropdown_menu(move |menu, _, _| {
+            let owner = owner_gear.clone();
+            let ui_gear = ui_gear.clone();
+            menu.item(PopupMenuItem::new("恢复默认设置").on_click(move |_, window, cx| {
+                ui_gear.update(cx, |ui, cx| {
+                    ui.editing_row = None;
+                    ui.capturing = false;
+                    cx.notify();
+                });
+                let _ = owner.update(cx, |this, cx| this.reset_user_misc_defaults(window, cx));
+            }))
+        });
+
+        let hotkey_table = self.render_user_misc_hotkey_table(&hotkey_ui, window, cx);
+        let toolbar_row = self.render_user_misc_hotkey_toolbar(&hotkey_ui, enabled, cx);
+        let update_section = self.render_user_misc_updates_section(enabled, window, cx);
 
         let body = div()
             .id("settings-user-misc-inner")

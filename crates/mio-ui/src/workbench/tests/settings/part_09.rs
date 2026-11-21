@@ -24,7 +24,7 @@ fn settings_only_temporary_proxy_websocket_requires_confirmation_for_quit_close_
     cx: &mut TestAppContext,
 ) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_ws_show_controls(settings, cx);
     proxy_rule_click(settings, "proxy-ws-intercept-in-scope-only", cx);
     let workspace = saved(&mut fixture.commands);
@@ -45,7 +45,7 @@ fn settings_only_temporary_proxy_interception_requires_confirmation_for_quit_clo
     cx: &mut TestAppContext,
 ) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_rule_click(settings, "proxy-request-rules-enabled", cx);
     let workspace = saved(&mut fixture.commands);
     let mut expected = original;
@@ -65,7 +65,7 @@ fn settings_only_temporary_proxy_messages_requires_confirmation_for_quit_close_a
     cx: &mut TestAppContext,
 ) {
     let (mut fixture, settings) = proxy_rule_settings(cx);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     proxy_message_show_controls(settings, cx);
     proxy_rule_click(settings, "proxy-unpack-requests", cx);
     let workspace = saved(&mut fixture.commands);
@@ -91,7 +91,7 @@ fn acknowledged_temporary_settings_require_confirmation(
         let view = fixture.view.read(cx);
         assert!(view.project_path.is_none());
         assert!(view.workspace.tabs.is_empty() && view.workspace.closed.is_empty());
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(!view.has_traffic && view.pending_records == 0);
         assert!(!view.workspace_dirty);
         assert!(view.pending_workspace.is_none() && view.pending_proxy_interception.is_none());
@@ -126,7 +126,7 @@ fn acknowledged_temporary_settings_require_confirmation(
     assert!(drain(&mut fixture.commands).is_empty());
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.transition.is_none());
         assert!(!view.shutdown.is_cancelled() && !view.quitting);
     });
@@ -177,7 +177,7 @@ fn settings_only_temporary_project_save_transition_preserves_settings(cx: &mut T
     assert!(!workspace.repeater_settings.unpack_compressed_responses);
     cx.read(|cx| {
         let view = fixture.view.read(cx);
-        assert_eq!(view.workspace, workspace);
+        assert_eq!(*view.workspace, workspace);
         assert!(view.pending_workspace.is_none() && !view.workspace_dirty);
         assert!(!view.shutdown.is_cancelled());
     });
@@ -269,7 +269,7 @@ fn settings_navigation_and_radio_keyboard_keep_accessible_selection_and_ack_sema
 
     let mut fixture = fixture(cx, vec![tab("导航保留草稿")], 64);
     drain(&mut fixture.commands);
-    let original = cx.read(|cx| fixture.view.read(cx).workspace.clone());
+    let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
     let settings = open_settings(&fixture, cx);
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
@@ -328,7 +328,7 @@ fn settings_navigation_and_radio_keyboard_keep_accessible_selection_and_ack_sema
         (0, RunningAttackClose::Continue, FinishedAttackClose::Ask)
     );
     cx.read(|cx| {
-        assert_eq!(fixture.view.read(cx).workspace, original);
+        assert_eq!(*fixture.view.read(cx).workspace, original);
         assert_eq!(
             fixture.view.read(cx).intruder_close_preferences(),
             (RunningAttackClose::Ask, FinishedAttackClose::Ask)

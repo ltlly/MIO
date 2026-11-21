@@ -144,7 +144,7 @@ impl Workbench {
                 self.fail("工作区 revision 已耗尽，无法保存项目。", cx);
                 return;
             };
-            let mut snapshot = self.workspace.clone();
+            let mut snapshot = (*self.workspace).clone();
             snapshot.revision = revision;
             Some(snapshot)
         } else {

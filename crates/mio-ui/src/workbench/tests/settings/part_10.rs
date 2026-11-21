@@ -220,7 +220,7 @@ fn settings_only_clean_ack_ordinary_save_save_as_and_reopen(cx: &mut TestAppCont
         cx.read(|cx| {
             let view = fixture.view.read(cx);
             assert_eq!(view.project, Some(fixture.project));
-            assert_eq!(view.workspace, stored);
+            assert_eq!(*view.workspace, stored);
             assert!(view.workspace.tabs.is_empty() && view.workspace.closed.is_empty());
             assert!(view.tab_editors.is_empty());
             assert_eq!(view.project_path.as_ref(), path);
