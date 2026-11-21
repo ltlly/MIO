@@ -1,3 +1,5 @@
+use mio_plugin_sdk::ui;
+
 use super::*;
 
 impl Lab {
@@ -328,19 +330,21 @@ impl Lab {
         };
         let mut findings = Vec::new();
         if let Some((parameter, evidence)) = header_hit.or(body_hit) {
-            findings.push(PluginFindingDto {
-                title: "插件被动合规检查命中敏感标记".into(),
-                detail: format!(
-                    "lab.protocol 在流量 {} ({}) 的响应中检测到调试或漏洞标记 `{}`。",
-                    flow_id, call.url, evidence
-                ),
-                remediation: "移除响应中的 x-plugin-audit-flag 调试头与 PLUGIN_VULN_MARKER 标记。"
-                    .into(),
-                severity: FindingSeverity::High as i32,
-                confidence: FindingConfidence::Certain as i32,
-                parameter,
-                evidence,
-            });
+            findings.push(
+                ui::finding("插件被动合规检查命中敏感标记")
+                    .severity(FindingSeverity::High)
+                    .confidence(FindingConfidence::Certain)
+                    .detail(format!(
+                        "lab.protocol 在流量 {} ({}) 的响应中检测到调试或漏洞标记 `{}`。",
+                        flow_id, call.url, evidence
+                    ))
+                    .remediation(
+                        "移除响应中的 x-plugin-audit-flag 调试头与 PLUGIN_VULN_MARKER 标记。",
+                    )
+                    .parameter(parameter)
+                    .evidence(evidence)
+                    .build(),
+            );
         }
         let log_line = format!(
             "lab.protocol passive_check: flow={} findings={}",
@@ -380,18 +384,19 @@ impl Lab {
             } else {
                 "PLUGIN_ACTIVE_VULN".to_owned()
             };
-            findings.push(PluginFindingDto {
-                title: "插件主动扫描检查命中注入或回显点".into(),
-                detail: format!(
-                    "lab.protocol 在流量 {} ({}) 的参数 `{}` 上检测到主动扫描特征 `{}`。",
-                    flow_id, req.url, param_name, evidence
-                ),
-                remediation: "对参数输入执行上下文转义与白名单校验。".into(),
-                severity: FindingSeverity::High as i32,
-                confidence: FindingConfidence::Firm as i32,
-                parameter: param_name,
-                evidence,
-            });
+            findings.push(
+                ui::finding("插件主动扫描检查命中注入或回显点")
+                    .severity(FindingSeverity::High)
+                    .confidence(FindingConfidence::Firm)
+                    .detail(format!(
+                        "lab.protocol 在流量 {} ({}) 的参数 `{}` 上检测到主动扫描特征 `{}`。",
+                        flow_id, req.url, param_name, evidence
+                    ))
+                    .remediation("对参数输入执行上下文转义与白名单校验。")
+                    .parameter(param_name)
+                    .evidence(evidence)
+                    .build(),
+            );
         }
         Ok(ActiveCheckResult { findings })
     }

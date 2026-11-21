@@ -1,97 +1,61 @@
+use mio_plugin_sdk::ui;
+
 use super::*;
 
 impl Lab {
-    pub(crate) fn publish<R: io::Read, W: io::Write>(
-        &mut self,
-        session: &mut WorkerSession<R, W>,
-        reply: u64,
-    ) -> io::Result<()> {
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("面板 revision 耗尽"))?;
+    pub(crate) fn snapshot_at(&mut self, revision: u64) -> Result<PanelSnapshot, String> {
+        self.revision = revision.max(1);
         let panel = self.snapshot();
-        panel.validate().map_err(io::Error::other)?;
-        session.send_on_panel(
-            self.panel_id,
-            envelope::Body::Snapshot(panel),
-            self.revision,
-            reply,
-        )?;
-        Ok(())
+        panel.validate()?;
+        Ok(panel)
     }
 
-    pub(crate) fn call<R: io::Read, W: io::Write>(
-        &mut self,
-        session: &mut WorkerSession<R, W>,
-        operation: host_call::Operation,
-        pending: PendingService,
-    ) -> io::Result<()> {
-        let id = session.send_on_panel(
-            self.panel_id,
-            envelope::Body::HostCall(HostCall {
-                operation: Some(operation),
-                parent_request_id: 0,
-            }),
-            self.revision,
-            0,
-        )?;
-        self.pending.insert(id, pending);
-        Ok(())
-    }
-
-    pub(crate) fn publish_canvas<R: io::Read, W: io::Write>(
-        &mut self,
-        session: &mut WorkerSession<R, W>,
-        reply: u64,
-    ) -> io::Result<()> {
-        let base_revision = self.revision;
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("面板 revision 耗尽"))?;
-        let patch = PanelPatch {
+    pub(crate) fn canvas_patch(&mut self, base_revision: u64, revision: u64) -> PanelPatch {
+        self.revision = revision.max(1);
+        ui::patch(
             base_revision,
-            revision: self.revision,
-            operations: vec![
+            self.revision,
+            vec![
                 PatchOperation {
                     node_id: CANVAS_NODE,
                     change: Some(patch_operation::Change::Canvas(self.timeline())),
                 },
                 PatchOperation {
                     node_id: 4,
-                    change: Some(patch_operation::Change::Replace(Node::new(
+                    change: Some(patch_operation::Change::Replace(ui::text(
                         4,
                         "任务状态",
-                        node::Kind::Text(Text {
-                            text: self.status.clone(),
-                            tone: if self.error {
-                                Tone::Error
-                            } else {
-                                Tone::Foreground
-                            } as i32,
-                        }),
+                        &self.status,
+                        if self.error {
+                            Tone::Error
+                        } else {
+                            Tone::Foreground
+                        },
                     ))),
                 },
             ],
-        };
-        session.send_on_panel(
-            self.panel_id,
-            envelope::Body::Patch(patch),
-            self.revision,
-            reply,
-        )?;
+        )
+    }
+
+    pub(crate) fn call(
+        &mut self,
+        ctx: &mut dyn HostClient,
+        operation: host_call::Operation,
+        pending: PendingService,
+    ) -> Result<(), String> {
+        let id = ctx.start_host_call(operation)?;
+        self.pending.insert(id, pending);
         Ok(())
     }
 
-    pub(crate) fn query<R: io::Read, W: io::Write>(
+    pub(crate) fn query(
         &mut self,
-        session: &mut WorkerSession<R, W>,
+        ctx: &mut dyn HostClient,
         offset: u64,
         limit: u32,
-    ) -> io::Result<()> {
+    ) -> Result<(), String> {
         self.call(
-            session,
+            ctx,
             host_call::Operation::QueryHistory(HistoryQuery {
                 offset,
                 limit,
@@ -103,9 +67,9 @@ impl Lab {
         )
     }
 
-    pub(crate) fn click<R: io::Read, W: io::Write>(
+    pub(crate) fn click(
         &mut self,
-        session: &mut WorkerSession<R, W>,
+        ctx: &mut dyn HostClient,
         event: &UiEvent,
     ) -> Result<Option<(host_call::Operation, PendingService)>, String> {
         let changed: Vec<_> = event
@@ -258,14 +222,7 @@ impl Lab {
                     return Err("没有在途发送任务".into());
                 }
                 for id in ids {
-                    session
-                        .send_on_panel(
-                            self.panel_id,
-                            envelope::Body::Cancel(Cancel { request_id: id }),
-                            self.revision,
-                            0,
-                        )
-                        .map_err(|e| e.to_string())?;
+                    ctx.cancel_host_call(id)?;
                 }
                 self.status = "已请求取消；等待宿主回收网络任务。".into();
             }
@@ -274,12 +231,11 @@ impl Lab {
         Ok(None)
     }
 
-    pub(crate) fn event<R: io::Read, W: io::Write>(
+    pub(crate) fn event(
         &mut self,
-        session: &mut WorkerSession<R, W>,
+        ctx: &mut dyn HostClient,
         event: UiEvent,
-        reply: u64,
-    ) -> io::Result<()> {
+    ) -> Result<PanelUpdate, String> {
         let mut service = None;
         let mut query = None;
         let result: Result<(), String> = (|| {
@@ -292,7 +248,7 @@ impl Lab {
                     query = Some((self.history.offset, 64));
                     self.status = "正在刷新实际项目流量…".into();
                 }
-                ui_event::Event::Click(_) => service = self.click(session, &event)?,
+                ui_event::Event::Click(_) => service = self.click(ctx, &event)?,
                 ui_event::Event::EditorChanged(editor) => {
                     self.sync_editor(editor)?;
                     self.active_document = editor.document_id;
@@ -418,7 +374,7 @@ impl Lab {
         if let Err(error) = result {
             self.status = error;
         }
-        if !self.error
+        let update = if !self.error
             && matches!(
                 event.event,
                 Some(
@@ -427,25 +383,26 @@ impl Lab {
                         | ui_event::Event::SplitResized(_)
                         | ui_event::Event::TabSelected(_)
                 )
-            )
-        {
-            session.send_on_panel(
-                self.panel_id,
-                envelope::Body::Ack(Empty {}),
-                self.revision,
-                reply,
-            )?;
+            ) {
+            PanelUpdate::None
         } else if matches!(event.event, Some(ui_event::Event::Pointer(_))) {
-            self.publish_canvas(session, reply)?;
+            let base = ctx.current_panel_revision();
+            let rev = ctx.next_panel_revision();
+            PanelUpdate::Patch(self.canvas_patch(base, rev))
         } else {
-            self.publish(session, reply)?;
+            let rev = ctx.next_panel_revision();
+            PanelUpdate::Snapshot(self.snapshot_at(rev)?)
+        };
+        if service.is_some() || query.is_some() {
+            ctx.publish_panel(update)?;
+            if let Some((operation, pending)) = service {
+                self.call(ctx, operation, pending)?;
+            }
+            if let Some((offset, limit)) = query {
+                self.query(ctx, offset, limit)?;
+            }
+            return Ok(PanelUpdate::None);
         }
-        if let Some((operation, pending)) = service {
-            self.call(session, operation, pending)?;
-        }
-        if let Some((offset, limit)) = query {
-            self.query(session, offset, limit)?;
-        }
-        Ok(())
+        Ok(update)
     }
 }

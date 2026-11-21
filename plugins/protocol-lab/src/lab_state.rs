@@ -2,7 +2,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE},
 };
-use mio_plugin_api::Header;
+use mio_plugin_sdk::Header;
 
 use super::*;
 
@@ -163,11 +163,11 @@ impl Lab {
         Ok(())
     }
 
-    pub(crate) fn close<R: io::Read, W: io::Write>(
+    pub(crate) fn close(
         &mut self,
-        session: &mut WorkerSession<R, W>,
+        ctx: &mut dyn HostClient,
         resource: Uuid,
-    ) -> io::Result<bool> {
+    ) -> Result<bool, String> {
         if !self
             .context
             .as_ref()
@@ -178,11 +178,11 @@ impl Lab {
         let previous_generation = self.context_generation;
         let generation = previous_generation
             .checked_add(1)
-            .ok_or_else(|| io::Error::other("消息上下文代际耗尽"))?;
+            .ok_or_else(|| "消息上下文代际耗尽".to_owned())?;
         let selection = self
             .selection_revision
             .checked_add(1)
-            .ok_or_else(|| io::Error::other("选择 revision 耗尽"))?;
+            .ok_or_else(|| "选择 revision 耗尽".to_owned())?;
         self.context = None;
         self.context_generation = generation;
         self.selection_revision = selection;
@@ -196,25 +196,20 @@ impl Lab {
                 | PendingService::WriteBack { context_generation, .. }
                 if *context_generation == previous_generation)
             {
-                session.send_on_panel(
-                    self.panel_id,
-                    envelope::Body::Cancel(Cancel { request_id: id }),
-                    self.revision,
-                    0,
-                )?;
+                ctx.cancel_host_call(id)?;
             }
         }
         Ok(true)
     }
 
-    pub(crate) fn host_result<R: io::Read, W: io::Write>(
+    pub(crate) fn host_result(
         &mut self,
-        session: &mut WorkerSession<R, W>,
+        ctx: &mut dyn HostClient,
         id: u64,
         result: HostResult,
-    ) -> io::Result<()> {
+    ) -> Result<PanelUpdate, String> {
         let Some(pending) = self.pending.remove(&id) else {
-            return Err(io::Error::other("未知宿主结果 ID"));
+            return Err("未知宿主结果 ID".into());
         };
         let history_viewport = match &pending {
             PendingService::History { viewport_revision } => Some(*viewport_revision),
@@ -243,7 +238,7 @@ impl Lab {
                         return Err("宿主流量分页无效".into());
                     }
                     for row in &page.rows {
-                        let _: mio_plugin_api::FlowSummary = row.clone().try_into()?;
+                        let _: mio_plugin_sdk::FlowSummary = row.clone().try_into()?;
                     }
                     self.history = page;
                     self.positions.retain(|id, _| {
@@ -278,7 +273,7 @@ impl Lab {
                     if selection != self.selection_revision {
                         return Ok(());
                     }
-                    let record: mio_plugin_api::FlowRecord = (*record).try_into()?;
+                    let record: mio_plugin_sdk::FlowRecord = (*record).try_into()?;
                     self.load(Context {
                         resource: record.summary.id,
                         revision: record.summary.revision,
@@ -295,7 +290,7 @@ impl Lab {
                         self.status = "先前请求已完成；响应未覆盖新的编辑上下文。".into();
                         return Ok(());
                     }
-                    let response: mio_plugin_api::HttpResponse = response.try_into()?;
+                    let response: mio_plugin_sdk::HttpResponse = response.try_into()?;
                     let editor = self
                         .response
                         .get_or_insert_with(|| empty_editor(RESPONSE_DOCUMENT, true));
@@ -380,7 +375,8 @@ impl Lab {
             }
             self.status = error;
         }
-        self.publish(session, 0)
+        let rev = ctx.next_panel_revision();
+        Ok(PanelUpdate::Snapshot(self.snapshot_at(rev)?))
     }
 
     pub(crate) fn commit(&mut self, request: CommitEditor) -> Result<Committed, String> {
@@ -406,8 +402,8 @@ impl Lab {
         })
     }
 
-    pub(crate) fn resync(&mut self, snapshot: &PanelSnapshot) -> io::Result<()> {
-        snapshot.validate().map_err(io::Error::other)?;
+    pub(crate) fn resync(&mut self, snapshot: &PanelSnapshot) -> Result<(), String> {
+        snapshot.validate()?;
         let mut editors = vec![];
         if let Some(root) = &snapshot.root {
             root.editors(&mut editors);
@@ -419,8 +415,8 @@ impl Lab {
                 RESPONSE_DOCUMENT => self
                     .response
                     .as_mut()
-                    .ok_or_else(|| io::Error::other("响应编辑器尚不存在"))?,
-                _ => return Err(io::Error::other("未知重同步编辑器")),
+                    .ok_or_else(|| "响应编辑器尚不存在".to_owned())?,
+                _ => return Err("未知重同步编辑器".into()),
             };
             if editor.revision >= current.revision {
                 // Only explicit host Resync can resolve equal-revision content conflicts.

@@ -1357,30 +1357,31 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
             true
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             _open: mio_plugin_api::protocol::OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             let rev = ctx.next_panel_revision();
-            Ok(Some(mio_plugin_sdk::ui::snapshot(
+            Ok(mio_plugin_sdk::ui::snapshot(
                 rev,
                 self.id(),
                 mio_plugin_sdk::ui::text(1, "ed", "initial", mio_plugin_api::panel::Tone::Foreground),
-            )))
+            )
+            .into())
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             event: mio_plugin_api::panel::UiEvent,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             if matches!(event.event, Some(mio_plugin_api::panel::ui_event::Event::Focus(true))) {
                 std::thread::sleep(std::time::Duration::from_millis(5150));
                 let rev = ctx.next_panel_revision();
-                return Ok(Some(mio_plugin_sdk::ui::snapshot(
+                return Ok(mio_plugin_sdk::ui::snapshot(
                     rev,
                     "late-timed-out",
                     mio_plugin_sdk::ui::text(
@@ -1389,11 +1390,12 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
                         "late-timed-out",
                         mio_plugin_api::panel::Tone::Foreground,
                     ),
-                )));
+                )
+                .into());
             }
             let _page = ctx.query_history(0, 10, "")?;
             let rev = ctx.next_panel_revision();
-            Ok(Some(mio_plugin_sdk::ui::snapshot(
+            Ok(mio_plugin_sdk::ui::snapshot(
                 rev,
                 "recovered-ok",
                 mio_plugin_sdk::ui::text(
@@ -1402,32 +1404,34 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
                     "recovered-ok",
                     mio_plugin_api::panel::Tone::Foreground,
                 ),
-            )))
+            )
+            .into())
         }
 
         fn on_cancel(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
+            _panel_id: u64,
             _cancel: mio_plugin_api::protocol::Cancel,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             // Arrives right after the timed-out UI callback bumped local `published` to 2, BEFORE Resync(1).
             let page = ctx.query_history(0, 10, "")?;
             assert_eq!(page.offset, 0);
             self.cancel_cleanup_ok.store(true, Ordering::Release);
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_resync(
+        fn on_resync(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             snapshot: PanelSnapshot,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             if panel_id == 2 && snapshot.revision == 1 {
                 self.resync_seen.store(true, Ordering::Release);
                 self.resync_notify.notify_one();
                 let rev = ctx.next_panel_revision();
-                return Ok(Some(mio_plugin_sdk::ui::snapshot(
+                return Ok(mio_plugin_sdk::ui::snapshot(
                     rev,
                     self.id(),
                     mio_plugin_sdk::ui::text(
@@ -1436,9 +1440,10 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
                         "initial",
                         mio_plugin_api::panel::Tone::Foreground,
                     ),
-                )));
+                )
+                .into());
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
     }
 
@@ -1671,14 +1676,14 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
             true
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             _open: mio_plugin_api::protocol::OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             let rev = ctx.next_panel_revision();
-            Ok(Some(mio_plugin_sdk::ui::snapshot(
+            Ok(mio_plugin_sdk::ui::snapshot(
                 rev,
                 &format!("panel-{panel_id}"),
                 mio_plugin_api::panel::Node::new(
@@ -1692,10 +1697,11 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
                         read_only: false,
                     }),
                 ),
-            )))
+            )
+            .into())
         }
 
-        fn on_panel_commit_editor(
+        fn on_commit_editor(
             &mut self,
             _ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
@@ -1720,11 +1726,11 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
             _ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             _close: mio_plugin_api::protocol::CloseRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
+        ) -> Result<mio_plugin_sdk::PanelUpdate, String> {
             if panel_id == 3 {
                 std::thread::sleep(std::time::Duration::from_millis(5150));
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
     }
 

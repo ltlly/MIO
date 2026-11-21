@@ -2732,13 +2732,13 @@ async fn concurrent_writer_cannot_claim_destroy_close_during_prepare_shutdown_or
                 }
             }
 
-            fn on_panel_open_request(
+            fn on_open_request(
                 &mut self,
                 _ctx: &mut dyn mio_plugin_sdk::HostClient,
                 _panel_id: u64,
                 _req: mio_plugin_api::protocol::OpenRequest,
-            ) -> std::result::Result<Option<PanelSnapshot>, String> {
-                Ok(Some(PanelSnapshot {
+            ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
+                Ok(PanelSnapshot {
                     revision: 1,
                     title: "child".into(),
                     root: Some(panel::Node::new(
@@ -2749,7 +2749,8 @@ async fn concurrent_writer_cannot_claim_destroy_close_during_prepare_shutdown_or
                             tone: 0,
                         }),
                     )),
-                }))
+                }
+                .into())
             }
 
             fn on_panel_destroy(
@@ -2757,9 +2758,9 @@ async fn concurrent_writer_cannot_claim_destroy_close_during_prepare_shutdown_or
                 _ctx: &mut dyn mio_plugin_sdk::HostClient,
                 _panel_id: u64,
                 _close: mio_plugin_api::protocol::CloseRequest,
-            ) -> std::result::Result<Option<PanelSnapshot>, String> {
+            ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
                 self.destroy_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(None)
+                Ok(mio_plugin_sdk::PanelUpdate::None)
             }
         }
 

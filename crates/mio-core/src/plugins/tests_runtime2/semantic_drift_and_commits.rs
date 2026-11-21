@@ -98,14 +98,15 @@ async fn persistent_semantic_drift_rejects_ordinary_and_repeated_interactions_un
             fn on_ui_event(
                 &mut self,
                 ctx: &mut dyn mio_plugin_sdk::HostClient,
+                _panel_id: u64,
                 event: UiEvent,
-            ) -> std::result::Result<Option<PanelSnapshot>, String> {
+            ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
                 match (event.node_id, &event.event) {
                     (2, Some(panel::ui_event::Event::Pointer(p))) => {
                         match panel::PointerPhase::try_from(p.phase).unwrap() {
                             panel::PointerPhase::Down => {
                                 self.down_seen.notify_one();
-                                Ok(None)
+                                Ok(mio_plugin_sdk::PanelUpdate::None)
                             }
                             panel::PointerPhase::Up => Err("up rejected".into()),
                             panel::PointerPhase::Cancel => {
@@ -121,13 +122,13 @@ async fn persistent_semantic_drift_rejects_ordinary_and_repeated_interactions_un
                                     let opts = *self.options.lock().unwrap();
                                     let ed_rev = *self.editor_rev.lock().unwrap();
                                     let contents = self.editor_contents.lock().unwrap().clone();
-                                    Ok(Some(Self::make_snap(rev, opts, ed_rev, &contents)))
+                                    Ok(Self::make_snap(rev, opts, ed_rev, &contents).into())
                                 } else {
                                     self.cancel2_seen.notify_one();
-                                    Ok(None)
+                                    Ok(mio_plugin_sdk::PanelUpdate::None)
                                 }
                             }
-                            panel::PointerPhase::Move => Ok(None),
+                            panel::PointerPhase::Move => Ok(mio_plugin_sdk::PanelUpdate::None),
                         }
                     }
                     (1, Some(panel::ui_event::Event::EditorChanged(ed))) => {
@@ -135,15 +136,15 @@ async fn persistent_semantic_drift_rejects_ordinary_and_repeated_interactions_un
                         *self.editor_contents.lock().unwrap() = ed.contents.clone();
                         let rev = ctx.next_panel_revision();
                         let opts = *self.options.lock().unwrap();
-                        Ok(Some(Self::make_snap(rev, opts, ed.revision, &ed.contents)))
+                        Ok(Self::make_snap(rev, opts, ed.revision, &ed.contents).into())
                     }
                     (3, Some(panel::ui_event::Event::SelectedOption(idx))) => {
                         let chosen = self.options.lock().unwrap()[*idx as usize].to_owned();
                         self.executed.lock().unwrap().push(chosen);
                         self.select_seen.notify_one();
-                        Ok(None)
+                        Ok(mio_plugin_sdk::PanelUpdate::None)
                     }
-                    _ => Ok(None),
+                    _ => Ok(mio_plugin_sdk::PanelUpdate::None),
                 }
             }
         }

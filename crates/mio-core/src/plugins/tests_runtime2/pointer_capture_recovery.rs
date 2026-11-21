@@ -2014,14 +2014,15 @@ async fn real_sdk_default_on_resync_and_bare_ack_cannot_release_stale_selected_o
         fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
+            _panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (2, Some(panel::ui_event::Event::Pointer(p))) => {
                     match panel::PointerPhase::try_from(p.phase).unwrap() {
                         panel::PointerPhase::Down => {
                             self.down_seen.notify_one();
-                            Ok(None)
+                            Ok(mio_plugin_sdk::PanelUpdate::None)
                         }
                         panel::PointerPhase::Up => Err("up rejected".into()),
                         panel::PointerPhase::Cancel => {
@@ -2034,21 +2035,21 @@ async fn real_sdk_default_on_resync_and_bare_ack_cannot_release_stale_selected_o
                                 self.cancel1_entered.notify_one();
                                 self.rt.block_on(self.cancel1_release.notified());
                                 let rev = ctx.next_panel_revision();
-                                Ok(Some(Self::make_snap(rev, ["B", "A"])))
+                                Ok(Self::make_snap(rev, ["B", "A"]).into())
                             } else {
                                 self.cancel2_seen.notify_one();
-                                Ok(None)
+                                Ok(mio_plugin_sdk::PanelUpdate::None)
                             }
                         }
-                        panel::PointerPhase::Move => Ok(None),
+                        panel::PointerPhase::Move => Ok(mio_plugin_sdk::PanelUpdate::None),
                     }
                 }
                 (3, Some(panel::ui_event::Event::SelectedOption(idx))) => {
                     let chosen = self.options.lock().unwrap()[*idx as usize].to_owned();
                     self.executed.lock().unwrap().push(chosen);
-                    Ok(None)
+                    Ok(mio_plugin_sdk::PanelUpdate::None)
                 }
-                _ => Ok(None),
+                _ => Ok(mio_plugin_sdk::PanelUpdate::None),
             }
         }
     }

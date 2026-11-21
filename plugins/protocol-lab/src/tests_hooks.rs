@@ -68,7 +68,7 @@ fn hooks_session_payload_and_kv_intruder_buttons_behave_as_specified() {
         Permission::PayloadProcess,
         Permission::Storage,
     ];
-    let mut session = session(&lab);
+    let mut ctx = client(&lab);
     lab.snapshot().validate().unwrap();
 
     let mut drop_req: RequestDto = request().into();
@@ -90,13 +90,12 @@ fn hooks_session_payload_and_kv_intruder_buttons_behave_as_specified() {
     assert_eq!(res.action, HookAction::Drop as i32);
 
     lab.event(
-        &mut session,
+        &mut ctx,
         UiEvent {
             node_id: TOGGLE_HOOKS,
             event: Some(ui_event::Event::Click(Empty {})),
             editors: vec![],
         },
-        10,
     )
     .unwrap();
     assert!(lab.auto_tag_hooks);
@@ -178,7 +177,7 @@ fn hooks_session_payload_and_kv_intruder_buttons_behave_as_specified() {
     ];
     let (op, _) = lab
         .click(
-            &mut session,
+            &mut ctx,
             &UiEvent {
                 node_id: SAVE_KV,
                 event: Some(ui_event::Event::Click(Empty {})),
@@ -193,7 +192,7 @@ fn hooks_session_payload_and_kv_intruder_buttons_behave_as_specified() {
 
     lab.pending.insert(99, PendingService::LoadKv);
     lab.host_result(
-        &mut session,
+        &mut ctx,
         99,
         HostResult {
             outcome: Some(host_result::Outcome::StorageValue(StorageValue {
@@ -215,7 +214,7 @@ fn context_menu_preferences_and_response_editor_behave_as_specified() {
         Permission::RepeaterOpen,
         Permission::Storage,
     ];
-    let mut session = session(&lab);
+    let mut ctx = client(&lab);
     let menu_res = lab
         .context_menu(ContextMenuCall {
             source: SourceDto::Repeater as i32,
@@ -239,24 +238,22 @@ fn context_menu_preferences_and_response_editor_behave_as_specified() {
     assert!(menu_res.replace_request.is_none());
 
     lab.event(
-        &mut session,
+        &mut ctx,
         UiEvent {
             node_id: AUTO_HOOK_CHECKBOX,
             event: Some(ui_event::Event::Toggled(true)),
             editors: vec![],
         },
-        11,
     )
     .unwrap();
     assert!(lab.auto_tag_hooks);
     lab.event(
-        &mut session,
+        &mut ctx,
         UiEvent {
             node_id: CODEC_SELECT,
             event: Some(ui_event::Event::SelectedOption(1)),
             editors: vec![],
         },
-        12,
     )
     .unwrap();
     assert!(lab.url_safe_base64);
@@ -294,7 +291,7 @@ fn context_menu_preferences_and_response_editor_behave_as_specified() {
     ];
     let (pref_set_op, _) = lab
         .click(
-            &mut session,
+            &mut ctx,
             &UiEvent {
                 node_id: SAVE_PREF,
                 event: Some(ui_event::Event::Click(Empty {})),
@@ -309,7 +306,7 @@ fn context_menu_preferences_and_response_editor_behave_as_specified() {
 
     let (pref_get_op, _) = lab
         .click(
-            &mut session,
+            &mut ctx,
             &UiEvent {
                 node_id: LOAD_PREF,
                 event: Some(ui_event::Event::Click(Empty {})),
@@ -323,7 +320,7 @@ fn context_menu_preferences_and_response_editor_behave_as_specified() {
     );
     lab.pending.insert(105, PendingService::LoadPref);
     lab.host_result(
-        &mut session,
+        &mut ctx,
         105,
         HostResult {
             outcome: Some(host_result::Outcome::StorageValue(StorageValue {

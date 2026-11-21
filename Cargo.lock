@@ -5009,6 +5009,7 @@ dependencies = [
  "base64 0.23.1",
  "mio-core",
  "mio-plugin-api",
+ "mio-plugin-sdk",
  "mio-proxy",
  "serde_json",
  "tempfile",

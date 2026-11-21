@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 mio-plugin-api = { path = "../../crates/mio-plugin-api" }
+mio-plugin-sdk = { path = "../../crates/mio-plugin-sdk" }
 base64.workspace = true
 
 [dev-dependencies]

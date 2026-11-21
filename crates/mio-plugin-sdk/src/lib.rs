@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{self, Read, Write},
 };
 
@@ -8,22 +8,57 @@ pub use mio_plugin_api::{
     protocol,
 };
 use mio_plugin_api::{
-    panel::{Empty, PanelSnapshot},
+    panel::{Empty, PanelPatch, PanelSnapshot},
     protocol::{
         ActiveCheckCall, ActiveCheckResult, Cancel, CloseRequest, CommitEditor,
-        CommitResponseEditor, Committed, Component, ContextMenuCall, ContextMenuResult, Envelope,
-        ErrorCode, Failure, HookAction, HttpHookCall, HttpHookResult, OpenRequest, OpenResponse,
-        PANEL_ID, PassiveCheckCall, PassiveCheckResult, PayloadCall, PayloadResult, Register,
-        ResponseCommitted, SessionActionCall, SessionActionResult, WebSocketHookCall,
+        CommitResponseEditor, Committed, Component, ContextMenuCall, ContextMenuResult,
+        ErrorCode, Failure, HookAction, HostResult, HttpHookCall, HttpHookResult, OpenRequest,
+        OpenResponse, PANEL_ID, PassiveCheckCall, PassiveCheckResult, PayloadCall, PayloadResult,
+        Register, ResponseCommitted, SessionActionCall, SessionActionResult, WebSocketHookCall,
         WebSocketHookResult, WorkerSession, envelope,
     },
 };
 
 pub mod context;
+#[cfg(test)]
+mod tests;
 pub mod ui;
 
-pub use context::{HostClient, HostContext};
-use context::PanelRevisionState;
+pub use context::{HostClient, HostContext, MAX_DEFERRED_ENVELOPES};
+use context::{
+    DeferredQueue, PanelRevisionState, emit_panel_update, is_prunable_expired, send_deadline_error,
+};
+pub use ui::FindingBuilder;
+
+/// Return value for panel and lifecycle callbacks: emit nothing (`Ack`), replace the panel (`Snapshot`), or mutate nodes incrementally (`Patch`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PanelUpdate {
+    #[default]
+    None,
+    Snapshot(PanelSnapshot),
+    Patch(PanelPatch),
+}
+
+impl From<PanelSnapshot> for PanelUpdate {
+    fn from(snapshot: PanelSnapshot) -> Self {
+        Self::Snapshot(snapshot)
+    }
+}
+
+impl From<PanelPatch> for PanelUpdate {
+    fn from(patch: PanelPatch) -> Self {
+        Self::Patch(patch)
+    }
+}
+
+impl From<Option<PanelSnapshot>> for PanelUpdate {
+    fn from(snapshot: Option<PanelSnapshot>) -> Self {
+        match snapshot {
+            Some(snap) => Self::Snapshot(snap),
+            None => Self::None,
+        }
+    }
+}
 
 pub trait MioPlugin {
     fn id(&self) -> &str;
@@ -36,6 +71,10 @@ pub trait MioPlugin {
         vec![Component::Text]
     }
 
+    fn supports_panel_multiplexing(&self) -> bool {
+        false
+    }
+
     fn initial_panel(&self) -> PanelSnapshot {
         ui::snapshot(
             1,
@@ -44,41 +83,60 @@ pub trait MioPlugin {
         )
     }
 
+    /// Invoked once immediately after the `Hello` / `Register` / `Ready` handshake succeeds.
+    fn on_ready(&mut self, _ctx: &mut dyn HostClient) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
+    }
+
     fn on_ui_event(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _event: panel::UiEvent,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        Ok(None)
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
     }
 
     fn on_open_request(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _open: OpenRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        Ok(None)
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
     }
 
     fn on_open_response(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _open: OpenResponse,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        Ok(None)
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
     }
 
     fn on_close_request(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        Ok(None)
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
+    }
+
+    fn on_panel_destroy(
+        &mut self,
+        ctx: &mut dyn HostClient,
+        panel_id: u64,
+        close: CloseRequest,
+    ) -> Result<PanelUpdate, String> {
+        self.on_close_request(ctx, panel_id, close)
     }
 
     fn on_commit_editor(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _commit: CommitEditor,
     ) -> Result<Committed, String> {
         Err("plugin does not handle CommitEditor".into())
@@ -87,6 +145,7 @@ pub trait MioPlugin {
     fn on_commit_response_editor(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _commit: CommitResponseEditor,
     ) -> Result<ResponseCommitted, String> {
         Err("plugin does not handle CommitResponseEditor".into())
@@ -170,6 +229,17 @@ pub trait MioPlugin {
         })
     }
 
+    /// Invoked when an asynchronous `HostResult` arrives for a call started via `HostClient::start_host_call`.
+    fn on_host_result(
+        &mut self,
+        _ctx: &mut dyn HostClient,
+        _panel_id: u64,
+        _request_id: u64,
+        _result: HostResult,
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
+    }
+
     /// Invoked when a host-initiated panel or hook operation is cancelled or times out.
     ///
     /// Derived `HostCall`s triggered inside `on_cancel` run inside a bounded cleanup window tied to
@@ -179,108 +249,35 @@ pub trait MioPlugin {
     /// `StorageSet`, `PreferencesGet`, `PreferencesSet`) are permitted even if local panel
     /// revision has transiently drifted from the host (scheduling `Resync` only if the active
     /// `Cancel` is for a non-`Resync` request and the callback's envelope revision exceeds the
-    /// host revision), whereas all
-    /// mutating or side-effect calls (including `UpdateDraft`, `OpenRepeater`, `OpenIntruder`,
-    /// `NetworkSend`, `ScopeUpdate`, `OpenOrganiser`, `UpdateAnnotations`, `SubmitAuditIssue`, and
-    /// `Collaborator*`) are rejected with `ErrorCode::Cancelled`. The runtime always replies `Ack`
-    /// (ignoring any returned `PanelSnapshot`) or `Error`, which ends the cleanup window.
+    /// host revision), whereas all mutating or side-effect calls (including `UpdateDraft`,
+    /// `OpenRepeater`, `OpenIntruder`, `NetworkSend`, `ScopeUpdate`, `OpenOrganiser`,
+    /// `UpdateAnnotations`, `SubmitAuditIssue`, and `Collaborator*`) are rejected with
+    /// `ErrorCode::Cancelled`. The runtime always replies `Ack` (ignoring any returned
+    /// `PanelUpdate`) or `Error`, which ends the cleanup window.
     fn on_cancel(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _cancel: Cancel,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        Ok(None)
+    ) -> Result<PanelUpdate, String> {
+        Ok(PanelUpdate::None)
     }
 
     /// Invoked when the host requests panel resynchronization to its authoritative `snapshot`.
     ///
-    /// Plugins that support resync recovery should override `on_resync` (or `on_panel_resync`),
-    /// adopt `snapshot`, and return `Ok(Some(confirmed_snapshot))` at `ctx.next_panel_revision()`
-    /// to confirm authoritative UI semantics after drift (returning `Ok(None)` confirms only the
-    /// revision without clearing semantic-drift protection). The default returns `Err(...)` so
-    /// plugins that do not apply `snapshot` never falsely acknowledge the host's view.
+    /// Plugins that support resync recovery should override `on_resync`, adopt `snapshot`, and
+    /// return `Ok(PanelUpdate::Snapshot(confirmed_snapshot))` (or `PanelUpdate::Patch`) at
+    /// `ctx.next_panel_revision()` to confirm authoritative UI semantics after drift (returning
+    /// `Ok(PanelUpdate::None)` confirms only the revision without clearing semantic-drift
+    /// protection). The default returns `Err(...)` so plugins that do not apply `snapshot` never
+    /// falsely acknowledge the host's view.
     fn on_resync(
         &mut self,
         _ctx: &mut dyn HostClient,
+        _panel_id: u64,
         _snapshot: PanelSnapshot,
-    ) -> Result<Option<PanelSnapshot>, String> {
+    ) -> Result<PanelUpdate, String> {
         Err("plugin does not implement on_resync".into())
-    }
-
-    fn supports_panel_multiplexing(&self) -> bool {
-        false
-    }
-
-    fn on_panel_ui_event(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        event: panel::UiEvent,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_ui_event(ctx, event)
-    }
-
-    fn on_panel_open_request(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        open: OpenRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_open_request(ctx, open)
-    }
-
-    fn on_panel_open_response(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        open: OpenResponse,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_open_response(ctx, open)
-    }
-
-    fn on_panel_close_request(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_close_request(ctx, close)
-    }
-
-    fn on_panel_destroy(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_panel_close_request(ctx, panel_id, close)
-    }
-
-    fn on_panel_commit_editor(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        commit: CommitEditor,
-    ) -> Result<Committed, String> {
-        self.on_commit_editor(ctx, commit)
-    }
-
-    fn on_panel_commit_response_editor(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        commit: CommitResponseEditor,
-    ) -> Result<ResponseCommitted, String> {
-        self.on_commit_response_editor(ctx, commit)
-    }
-
-    fn on_panel_resync(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        _panel_id: u64,
-        snapshot: PanelSnapshot,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        self.on_resync(ctx, snapshot)
     }
 }
 
@@ -288,44 +285,187 @@ pub fn run_stdio(plugin: impl MioPlugin) -> io::Result<()> {
     run_with_io(io::stdin().lock(), io::stdout().lock(), plugin)
 }
 
-fn reply_panel_or_ack<R: Read, W: Write>(
-    session: &mut WorkerSession<R, W>,
-    panel_id: u64,
-    panel_revision: &mut PanelRevisionState,
-    reply_to: u64,
-    outcome: Result<Option<PanelSnapshot>, String>,
-) -> io::Result<()> {
-    match outcome {
-        Ok(Some(snapshot)) => {
-            panel_revision.published = snapshot.revision;
-            panel_revision.pending = panel_revision.pending.max(snapshot.revision);
-            let rev = snapshot.revision;
-            session.send_on_panel(panel_id, envelope::Body::Snapshot(snapshot), rev, reply_to)?;
-        }
-        Ok(None) => {
-            session.send_on_panel(
-                panel_id,
-                envelope::Body::Ack(Empty {}),
-                panel_revision.published,
-                reply_to,
-            )?;
-        }
-        Err(msg) => {
-            session.send_on_panel(
-                panel_id,
-                envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                panel_revision.published,
-                reply_to,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 pub fn run_with_io<R: Read, W: Write>(
     reader: R,
     writer: W,
+    plugin: impl MioPlugin,
+) -> io::Result<()> {
+    run_with_io_bounded(reader, writer, plugin, MAX_DEFERRED_ENVELOPES)
+}
+
+struct Runner<R: Read, W: Write> {
+    session: WorkerSession<R, W>,
+    deferred: DeferredQueue,
+    panel_revisions: HashMap<u64, PanelRevisionState>,
+    initial_rev: u64,
+}
+
+impl<R: Read, W: Write> Runner<R, W> {
+    fn with_context<T>(
+        &mut self,
+        panel_id: u64,
+        parent_request_id: u64,
+        allow_panel_reply: bool,
+        f: impl FnOnce(&mut HostContext<'_, R, W>) -> T,
+    ) -> (T, bool, bool, Vec<PanelUpdate>) {
+        let mut post_reply_updates = Vec::new();
+        let (out, replied, cancelled) = {
+            let mut ctx = HostContext::new(
+                &mut self.session,
+                &mut self.deferred,
+                panel_id,
+                parent_request_id,
+                allow_panel_reply,
+                &mut self.panel_revisions,
+                &mut post_reply_updates,
+            );
+            let out = f(&mut ctx);
+            (out, ctx.replied, ctx.cancelled)
+        };
+        (out, replied, cancelled, post_reply_updates)
+    }
+
+    fn finish_panel_call(
+        &mut self,
+        panel_id: u64,
+        reply_to: u64,
+        allow_panel_reply: bool,
+        replied: bool,
+        cancelled: bool,
+        outcome: Result<PanelUpdate, String>,
+        post_reply_updates: Vec<PanelUpdate>,
+    ) -> io::Result<()> {
+        if self.deferred.shutdown_requested {
+            return Ok(());
+        }
+        let primary_reply_to = if allow_panel_reply && !replied {
+            reply_to
+        } else {
+            0
+        };
+        match outcome {
+            Ok(update) => {
+                if !matches!(update, PanelUpdate::None) || primary_reply_to != 0 {
+                    emit_panel_update(
+                        &mut self.session,
+                        panel_id,
+                        &mut self.panel_revisions,
+                        primary_reply_to,
+                        update,
+                    )?;
+                }
+            }
+            Err(msg) => {
+                if primary_reply_to == 0 {
+                    return Err(io::Error::other(msg));
+                }
+                let code = if cancelled {
+                    ErrorCode::Cancelled
+                } else {
+                    ErrorCode::Invalid
+                };
+                let rev = self
+                    .panel_revisions
+                    .get(&panel_id)
+                    .map_or(0, |s| s.published);
+                self.session.send_on_panel(
+                    panel_id,
+                    envelope::Body::Error(Failure::new(code, msg)),
+                    rev,
+                    primary_reply_to,
+                )?;
+            }
+        }
+        for extra in post_reply_updates {
+            if !matches!(extra, PanelUpdate::None) {
+                emit_panel_update(
+                    &mut self.session,
+                    panel_id,
+                    &mut self.panel_revisions,
+                    0,
+                    extra,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn dispatch_panel(
+        &mut self,
+        panel_id: u64,
+        incoming_rev: u64,
+        reply_to: u64,
+        f: impl FnOnce(&mut HostContext<'_, R, W>) -> Result<PanelUpdate, String>,
+    ) -> io::Result<()> {
+        self.panel_revisions
+            .entry(panel_id)
+            .or_insert_with(|| PanelRevisionState::new(incoming_rev));
+        let (res, replied, cancelled, post_reply_updates) =
+            self.with_context(panel_id, reply_to, true, f);
+        self.finish_panel_call(
+            panel_id,
+            reply_to,
+            true,
+            replied,
+            cancelled,
+            res,
+            post_reply_updates,
+        )
+    }
+
+    fn dispatch_typed<T>(
+        &mut self,
+        panel_id: u64,
+        default_rev: u64,
+        reply_to: u64,
+        err_code: ErrorCode,
+        f: impl FnOnce(&mut HostContext<'_, R, W>) -> Result<T, String>,
+        wrap: impl FnOnce(T) -> envelope::Body,
+    ) -> io::Result<()> {
+        self.panel_revisions
+            .entry(panel_id)
+            .or_insert_with(|| PanelRevisionState::new(default_rev));
+        let (out, _replied, cancelled, post_reply_updates) =
+            self.with_context(panel_id, reply_to, false, f);
+        if self.deferred.shutdown_requested {
+            return Ok(());
+        }
+        let wire = match out {
+            Ok(val) => wrap(val),
+            Err(msg) => {
+                let code = if cancelled {
+                    ErrorCode::Cancelled
+                } else {
+                    err_code
+                };
+                envelope::Body::Error(Failure::new(code, msg))
+            }
+        };
+        let rev = self
+            .panel_revisions
+            .get(&panel_id)
+            .map_or(default_rev, |s| s.published);
+        self.session.send_on_panel(panel_id, wire, rev, reply_to)?;
+        for extra in post_reply_updates {
+            if !matches!(extra, PanelUpdate::None) {
+                emit_panel_update(
+                    &mut self.session,
+                    panel_id,
+                    &mut self.panel_revisions,
+                    0,
+                    extra,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
+    reader: R,
+    writer: W,
     mut plugin: impl MioPlugin,
+    max_deferred: usize,
 ) -> io::Result<()> {
     let initial = plugin.initial_panel();
     let initial_rev = initial.revision.max(1);
@@ -340,1668 +480,254 @@ pub fn run_with_io<R: Read, W: Write>(
         panel: Some(initial),
         supports_panel_multiplexing: plugin.supports_panel_multiplexing(),
     };
-    let mut session = WorkerSession::accept(reader, writer, registration)?;
-    let mut deferred: VecDeque<Envelope> = VecDeque::new();
-    let mut panel_revisions: HashMap<u64, PanelRevisionState> =
-        HashMap::from([(PANEL_ID, PanelRevisionState::new(initial_rev))]);
+    let session = WorkerSession::accept(reader, writer, registration)?;
+    let mut runner = Runner {
+        session,
+        deferred: DeferredQueue::new(max_deferred),
+        panel_revisions: HashMap::from([(PANEL_ID, PanelRevisionState::new(initial_rev))]),
+        initial_rev,
+    };
+
+    let (ready_res, ready_replied, ready_cancelled, ready_extra) =
+        runner.with_context(PANEL_ID, 0, false, |ctx| plugin.on_ready(ctx));
+    runner.finish_panel_call(
+        PANEL_ID,
+        0,
+        false,
+        ready_replied,
+        ready_cancelled,
+        ready_res,
+        ready_extra,
+    )?;
+    if runner.deferred.shutdown_requested {
+        return Ok(());
+    }
 
     loop {
-        let envelope = match deferred.pop_front() {
+        let envelope = match runner.deferred.pop_next() {
             Some(env) => env,
-            None => match session.receive() {
+            None => match runner.session.receive() {
                 Ok(env) => env,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
                 Err(err) => return Err(err),
             },
         };
-        let expired = envelope.is_expired();
-        let reply_to = envelope.request_id;
-        let panel_id = envelope.panel_id.max(PANEL_ID);
-        let incoming_rev = envelope.revision;
-        let body = envelope.body.ok_or_else(|| io::Error::other("空消息"))?;
-        if expired
-            && !matches!(
-                body,
-                envelope::Body::Shutdown(_)
-                    | envelope::Body::Cancel(_)
-                    | envelope::Body::CloseRequest(_)
-            )
-        {
-            if reply_to != 0 {
-                let msg = if panel_id != PANEL_ID {
-                    "子面板请求已超时"
-                } else {
-                    "插件请求已超时"
-                };
-                let rev = panel_revisions
-                    .get(&panel_id)
-                    .map_or(incoming_rev, |s| s.published);
-                session.send_on_panel(
-                    panel_id,
-                    envelope::Body::Error(Failure::new(ErrorCode::Deadline, msg)),
-                    rev,
-                    reply_to,
-                )?;
+        if is_prunable_expired(&envelope) {
+            if envelope.request_id != 0 {
+                send_deadline_error(&mut runner.session, &envelope, &runner.panel_revisions)?;
             }
             continue;
         }
+        let reply_to = envelope.request_id;
+        let in_reply_to = envelope.in_reply_to;
+        let panel_id = envelope.panel_id.max(PANEL_ID);
+        let incoming_rev = envelope.revision;
+        let body = envelope.body.ok_or_else(|| io::Error::other("空消息"))?;
         match body {
             envelope::Body::Shutdown(_) => break,
             envelope::Body::UiEvent(ev) => {
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_ui_event(&mut ctx, panel_id, ev)
-                };
-                reply_panel_or_ack(&mut session, panel_id, panel_revision, reply_to, res)?;
+                runner.dispatch_panel(panel_id, incoming_rev, reply_to, |ctx| {
+                    plugin.on_ui_event(ctx, panel_id, ev)
+                })?;
             }
             envelope::Body::OpenRequest(open) => {
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_open_request(&mut ctx, panel_id, open)
-                };
-                reply_panel_or_ack(&mut session, panel_id, panel_revision, reply_to, res)?;
+                runner.dispatch_panel(panel_id, incoming_rev, reply_to, |ctx| {
+                    plugin.on_open_request(ctx, panel_id, open)
+                })?;
             }
             envelope::Body::OpenResponse(open) => {
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_open_response(&mut ctx, panel_id, open)
-                };
-                reply_panel_or_ack(&mut session, panel_id, panel_revision, reply_to, res)?;
+                runner.dispatch_panel(panel_id, incoming_rev, reply_to, |ctx| {
+                    plugin.on_open_response(ctx, panel_id, open)
+                })?;
             }
             envelope::Body::CloseRequest(close) => {
-                let destroy_panel = close.destroy_panel && panel_id != PANEL_ID;
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    if destroy_panel {
-                        plugin.on_panel_destroy(&mut ctx, panel_id, close)
+                let destroy = close.destroy_panel && panel_id != PANEL_ID;
+                runner.dispatch_panel(panel_id, incoming_rev, reply_to, |ctx| {
+                    if destroy {
+                        plugin.on_panel_destroy(ctx, panel_id, close)
                     } else {
-                        plugin.on_panel_close_request(&mut ctx, panel_id, close)
+                        plugin.on_close_request(ctx, panel_id, close)
                     }
-                };
-                reply_panel_or_ack(&mut session, panel_id, panel_revision, reply_to, res)?;
-                if destroy_panel {
-                    panel_revisions.remove(&panel_id);
+                })?;
+                if destroy {
+                    runner.panel_revisions.remove(&panel_id);
                 }
             }
             envelope::Body::CommitEditor(commit) => {
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_commit_editor(&mut ctx, panel_id, commit)
-                };
-                let wire = match out {
-                    Ok(committed) => envelope::Body::Committed(committed),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Stale, msg)),
-                };
-                session.send_on_panel(panel_id, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    panel_id,
+                    incoming_rev,
+                    reply_to,
+                    ErrorCode::Stale,
+                    |ctx| plugin.on_commit_editor(ctx, panel_id, commit),
+                    envelope::Body::Committed,
+                )?;
             }
             envelope::Body::CommitResponseEditor(commit) => {
-                let panel_revision = panel_revisions
-                    .entry(panel_id)
-                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_commit_response_editor(&mut ctx, panel_id, commit)
-                };
-                let wire = match out {
-                    Ok(committed) => envelope::Body::ResponseCommitted(committed),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Stale, msg)),
-                };
-                session.send_on_panel(panel_id, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    panel_id,
+                    incoming_rev,
+                    reply_to,
+                    ErrorCode::Stale,
+                    |ctx| plugin.on_commit_response_editor(ctx, panel_id, commit),
+                    envelope::Body::ResponseCommitted,
+                )?;
             }
             envelope::Body::ContextMenuCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_context_menu(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::ContextMenuResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_context_menu(ctx, call),
+                    envelope::Body::ContextMenuResult,
+                )?;
             }
             envelope::Body::HttpHookCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_http_hook(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::HttpHookResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_http_hook(ctx, call),
+                    envelope::Body::HttpHookResult,
+                )?;
             }
             envelope::Body::WebSocketHookCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_ws_hook(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::WebSocketHookResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_ws_hook(ctx, call),
+                    envelope::Body::WebSocketHookResult,
+                )?;
             }
             envelope::Body::SessionActionCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_session_action(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::SessionActionResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_session_action(ctx, call),
+                    envelope::Body::SessionActionResult,
+                )?;
             }
             envelope::Body::PayloadCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_payload(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::PayloadResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_payload(ctx, call),
+                    envelope::Body::PayloadResult,
+                )?;
             }
             envelope::Body::PassiveCheckCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_passive_check(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::PassiveCheckResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_passive_check(ctx, call),
+                    envelope::Body::PassiveCheckResult,
+                )?;
             }
             envelope::Body::ActiveCheckCall(call) => {
-                let panel_revision = panel_revisions
-                    .entry(PANEL_ID)
-                    .or_insert_with(|| PanelRevisionState::new(initial_rev));
-                let out = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id: PANEL_ID,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_active_check(&mut ctx, call)
-                };
-                let wire = match out {
-                    Ok(res) => envelope::Body::ActiveCheckResult(res),
-                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                };
-                session.send_on_panel(PANEL_ID, wire, panel_revision.published, reply_to)?;
+                runner.dispatch_typed(
+                    PANEL_ID,
+                    runner.initial_rev,
+                    reply_to,
+                    ErrorCode::Invalid,
+                    |ctx| plugin.on_active_check(ctx, call),
+                    envelope::Body::ActiveCheckResult,
+                )?;
+            }
+            envelope::Body::HostResult(result) => {
+                if runner.deferred.take_abandoned(in_reply_to)
+                    || (panel_id != PANEL_ID && !runner.panel_revisions.contains_key(&panel_id))
+                {
+                    continue;
+                }
+                let (res, replied, cancelled, post_reply_updates) =
+                    runner.with_context(panel_id, 0, false, |ctx| {
+                        plugin.on_host_result(ctx, panel_id, in_reply_to, result)
+                    });
+                runner.finish_panel_call(
+                    panel_id,
+                    0,
+                    false,
+                    replied,
+                    cancelled,
+                    res,
+                    post_reply_updates,
+                )?;
             }
             envelope::Body::Cancel(cancel) => {
-                let panel_revision = if panel_id == PANEL_ID {
-                    panel_revisions
-                        .entry(panel_id)
-                        .or_insert_with(|| PanelRevisionState::new(incoming_rev))
-                } else if let Some(existing) = panel_revisions.get_mut(&panel_id) {
-                    existing
-                } else {
-                    session.send_on_panel(
+                if panel_id != PANEL_ID && !runner.panel_revisions.contains_key(&panel_id) {
+                    runner.session.send_on_panel(
                         panel_id,
                         envelope::Body::Ack(Empty {}),
                         incoming_rev,
                         reply_to,
                     )?;
                     continue;
-                };
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_cancel(&mut ctx, cancel)
-                };
-                match res {
-                    Ok(_) => {
-                        session.send_on_panel(
-                            panel_id,
-                            envelope::Body::Ack(Empty {}),
-                            panel_revision.published,
-                            reply_to,
-                        )?;
-                    }
-                    Err(msg) => {
-                        session.send_on_panel(
-                            panel_id,
-                            envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
-                            panel_revision.published,
-                            reply_to,
-                        )?;
-                    }
                 }
+                runner
+                    .panel_revisions
+                    .entry(panel_id)
+                    .or_insert_with(|| PanelRevisionState::new(incoming_rev));
+                let (res, _replied, _cancelled, _post_reply_updates) = runner
+                    .with_context(panel_id, reply_to, false, |ctx| {
+                        plugin.on_cancel(ctx, panel_id, cancel)
+                    });
+                if runner.deferred.shutdown_requested {
+                    break;
+                }
+                let rev = runner.panel_revisions[&panel_id].published;
+                let wire = match res {
+                    Ok(_) => envelope::Body::Ack(Empty {}),
+                    Err(msg) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, msg)),
+                };
+                runner
+                    .session
+                    .send_on_panel(panel_id, wire, rev, reply_to)?;
             }
             envelope::Body::Resync(snapshot) => {
-                let panel_revision = panel_revisions
+                let state = runner
+                    .panel_revisions
                     .entry(panel_id)
                     .or_insert_with(|| PanelRevisionState::new(snapshot.revision));
-                let prev_published = panel_revision.published;
-                panel_revision.pending = panel_revision
-                    .pending
-                    .max(panel_revision.published)
-                    .max(snapshot.revision);
-                panel_revision.published = snapshot.revision;
-                let res = {
-                    let mut ctx = HostContext {
-                        session: &mut session,
-                        deferred: &mut deferred,
-                        panel_id,
-                        parent_request_id: reply_to,
-                        panel_revision,
-                    };
-                    plugin.on_panel_resync(&mut ctx, panel_id, snapshot)
-                };
-                if res.is_err() {
-                    panel_revision.published = prev_published;
+                let prev_published = state.published;
+                state.pending = state.pending.max(state.published).max(snapshot.revision);
+                state.published = snapshot.revision;
+                let (res, replied, cancelled, post_reply_updates) = runner
+                    .with_context(panel_id, reply_to, true, |ctx| {
+                        plugin.on_resync(ctx, panel_id, snapshot)
+                    });
+                if res.is_err()
+                    && !replied
+                    && let Some(state) = runner.panel_revisions.get_mut(&panel_id)
+                {
+                    state.published = prev_published;
                 }
-                reply_panel_or_ack(&mut session, panel_id, panel_revision, reply_to, res)?;
+                runner.finish_panel_call(
+                    panel_id,
+                    reply_to,
+                    true,
+                    replied,
+                    cancelled,
+                    res,
+                    post_reply_updates,
+                )?;
             }
             _ => return Err(io::Error::other("worker 收到方向无效的消息")),
         }
+        if runner.deferred.shutdown_requested {
+            break;
+        }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use mio_plugin_api::{
-        ProjectKey,
-        protocol::{
-            ChannelIdentity, CollaboratorPayloadDto, Hello, HttpRequestDto, HttpResponseDto,
-            HttpVersionDto, MAX_FRAME_BYTES, Permission, ScopeStatusDto, encode_frame,
-            host_result, read_frame,
-        },
-    };
-
-    use super::*;
-
-    struct DemoPlugin {
-        passive_hits: usize,
-        deferred_passive_seen: usize,
-    }
-
-    impl MioPlugin for DemoPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-demo"
-        }
-
-        fn on_ui_event(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _event: panel::UiEvent,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let in_scope = ctx.is_in_scope("https://example.com/")?;
-            assert!(in_scope);
-            let oast = ctx.collaborator_generate("sdk")?;
-            assert_eq!(oast.token, "tok-sdk");
-            let rev = ctx.next_panel_revision();
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::column(
-                    1,
-                    "root",
-                    vec![
-                        ui::badge(2, &oast.token, panel::Tone::Accent),
-                        ui::text(3, "status", "ok", panel::Tone::Foreground),
-                    ],
-                    6.0,
-                ),
-            )))
-        }
-
-        fn on_http_hook(
-            &mut self,
-            _ctx: &mut dyn HostClient,
-            call: HttpHookCall,
-        ) -> Result<HttpHookResult, String> {
-            let mut req = call.request.ok_or("missing request")?;
-            req.headers.push(protocol::HeaderDto {
-                name: "x-sdk-hook".into(),
-                value: b"1".to_vec(),
-            });
-            Ok(HttpHookResult {
-                action: HookAction::Modify as i32,
-                request: Some(req),
-                response: None,
-            })
-        }
-
-        fn on_passive_check(
-            &mut self,
-            _ctx: &mut dyn HostClient,
-            call: PassiveCheckCall,
-        ) -> Result<PassiveCheckResult, String> {
-            self.passive_hits += 1;
-            if call.url.contains("deferred") {
-                self.deferred_passive_seen += 1;
-            }
-            let findings = vec![ui::finding(
-                "SDK Demo Finding",
-                protocol::FindingSeverity::High,
-                protocol::FindingConfidence::Certain,
-                "Matched test marker",
-                "Fix it",
-                "body",
-                "DEMO",
-            )];
-            Ok(PassiveCheckResult {
-                findings,
-                log_line: format!("checked {}", call.url),
-            })
-        }
-    }
-
-    #[test]
-    fn sdk_handles_handshake_hooks_and_deferred_envelopes_during_host_calls() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.com/deferred".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-        let resp = HttpResponseDto {
-            status: 200,
-            version: HttpVersionDto::Http11 as i32,
-            body: b"DEMO".to_vec(),
-            ..Default::default()
-        };
-
-        // Pre-script incoming stream with Hello, Ready, UiEvent, interleaved PassiveCheckCall (before HostResult!),
-        // HostResult(ScopeStatus), HostResult(CollaboratorPayload), HttpHookCall, Shutdown.
-        // Expected outgoing request IDs from worker:
-        // 1 = Register
-        // 2 = HostCall(ScopeCheck)
-        // 3 = HostCall(CollaboratorGenerate)
-        // 4 = Snapshot(from UiEvent)
-        // 5 = PassiveCheckResult(from deferred PassiveCheckCall)
-        // 6 = HttpHookResult
-        let mut incoming_bytes = Vec::new();
-        let mut push_host = |req_id: u64, in_reply_to: u64, body: envelope::Body| {
-            let mut env = Envelope::new(identity, req_id, 1, body, timeout);
-            env.in_reply_to = in_reply_to;
-            incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-        };
-
-        push_host(
-            1,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![
-                    Permission::TrafficRead as i32,
-                    Permission::NetworkSend as i32,
-                ],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(2, 1, envelope::Body::Ready(Empty {}));
-        push_host(
-            3,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                event: Some(panel::ui_event::Event::Click(Empty {})),
-                editors: vec![],
-            }),
-        );
-        // Interleaved PassiveCheckCall arrives BEFORE HostResult for req_id=2!
-        push_host(
-            4,
-            0,
-            envelope::Body::PassiveCheckCall(PassiveCheckCall {
-                flow_id: Uuid::new_v4().as_bytes().to_vec(),
-                url: req.url.clone(),
-                request: Some(req.clone()),
-                response: Some(resp),
-            }),
-        );
-        push_host(
-            5,
-            2,
-            envelope::Body::HostResult(protocol::HostResult {
-                outcome: Some(host_result::Outcome::ScopeStatus(ScopeStatusDto {
-                    in_scope: true,
-                })),
-            }),
-        );
-        push_host(
-            6,
-            3,
-            envelope::Body::HostResult(protocol::HostResult {
-                outcome: Some(host_result::Outcome::CollaboratorPayload(
-                    CollaboratorPayloadDto {
-                        token: "tok-sdk".into(),
-                        label: "sdk".into(),
-                        http_callback_url: "http://127.0.0.1:9000/tok-sdk".into(),
-                        dns_qname: "tok-sdk.oast.local".into(),
-                        created_unix_ms: 1,
-                    },
-                )),
-            }),
-        );
-        push_host(
-            7,
-            0,
-            envelope::Body::HttpHookCall(HttpHookCall {
-                flow_id: Uuid::new_v4().as_bytes().to_vec(),
-                source: protocol::SourceDto::Proxy as i32,
-                plugin_id: "org.mio.sdk-demo".into(),
-                response_stage: false,
-                response_head_only: false,
-                request: Some(req),
-                response: None,
-            }),
-        );
-        push_host(8, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = DemoPlugin {
-            passive_hits: 0,
-            deferred_passive_seen: 0,
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-        assert_eq!(plugin.passive_hits, 1);
-        assert_eq!(plugin.deferred_passive_seen, 1);
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        assert_eq!(replies.len(), 6);
-        assert!(matches!(replies[0].body, Some(envelope::Body::Register(_))));
-        assert!(matches!(replies[1].body, Some(envelope::Body::HostCall(_))));
-        assert!(matches!(replies[2].body, Some(envelope::Body::HostCall(_))));
-        assert!(matches!(
-            replies[3].body,
-            Some(envelope::Body::Snapshot(ref s)) if s.revision == 2
-        ));
-        assert_eq!(replies[3].in_reply_to, 3);
-        assert!(matches!(
-            replies[4].body,
-            Some(envelope::Body::PassiveCheckResult(ref r)) if r.findings.len() == 1
-        ));
-        assert_eq!(replies[4].in_reply_to, 4);
-        assert!(matches!(
-            replies[5].body,
-            Some(envelope::Body::HttpHookResult(ref r)) if r.action == HookAction::Modify as i32
-        ));
-        assert_eq!(replies[5].in_reply_to, 7);
-    }
-
-    struct MultiplexPlugin {
-        panels: HashMap<u64, u64>,
-    }
-
-    impl MioPlugin for MultiplexPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-multiplex"
-        }
-
-        fn supports_panel_multiplexing(&self) -> bool {
-            true
-        }
-
-        fn on_panel_open_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _open: OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            assert_eq!(ctx.panel_id(), panel_id);
-            let rev = ctx.next_panel_revision();
-            self.panels.insert(panel_id, rev);
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(
-                    1,
-                    "panel",
-                    format!("panel-{panel_id}-rev-{rev}"),
-                    panel::Tone::Foreground,
-                ),
-            )))
-        }
-
-        fn on_panel_ui_event(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _event: panel::UiEvent,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let rev = ctx.next_panel_revision();
-            self.panels.insert(panel_id, rev);
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(
-                    1,
-                    "panel",
-                    format!("panel-{panel_id}-event-{rev}"),
-                    panel::Tone::Accent,
-                ),
-            )))
-        }
-
-        fn on_panel_close_request(
-            &mut self,
-            _ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _close: CloseRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            self.panels.remove(&panel_id);
-            Ok(None)
-        }
-    }
-
-    #[test]
-    fn sdk_multiplexes_multiple_panels_with_isolated_revisions_and_close() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let mut push_host = |panel_id: u64, req_id: u64, in_reply_to: u64, body: envelope::Body| {
-            let mut env = Envelope::new(identity, req_id, 1, body, timeout).with_panel_id(panel_id);
-            env.in_reply_to = in_reply_to;
-            incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-        };
-
-        push_host(
-            PANEL_ID,
-            1,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![Permission::TrafficRead as i32],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(PANEL_ID, 2, 1, envelope::Body::Ready(Empty {}));
-        push_host(
-            2,
-            3,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req.clone()),
-            }),
-        );
-        push_host(
-            3,
-            4,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-        );
-        push_host(
-            2,
-            5,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                event: Some(panel::ui_event::Event::Click(Empty {})),
-                editors: vec![],
-            }),
-        );
-        push_host(
-            2,
-            6,
-            0,
-            envelope::Body::CloseRequest(CloseRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                destroy_panel: true,
-            }),
-        );
-        push_host(PANEL_ID, 7, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = MultiplexPlugin {
-            panels: HashMap::new(),
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-        assert!(!plugin.panels.contains_key(&2));
-        assert!(plugin.panels.contains_key(&3));
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        assert_eq!(replies.len(), 5);
-        assert!(matches!(
-            replies[0].body,
-            Some(envelope::Body::Register(ref r)) if r.supports_panel_multiplexing
-        ));
-        assert_eq!(replies[1].panel_id, 2);
-        assert!(matches!(
-            replies[1].body,
-            Some(envelope::Body::Snapshot(ref s)) if s.revision == 2
-        ));
-        assert_eq!(replies[2].panel_id, 3);
-        assert!(matches!(
-            replies[2].body,
-            Some(envelope::Body::Snapshot(ref s)) if s.revision == 2
-        ));
-        assert_eq!(replies[3].panel_id, 2);
-        assert!(matches!(
-            replies[3].body,
-            Some(envelope::Body::Snapshot(ref s)) if s.revision == 3
-        ));
-        assert_eq!(replies[4].panel_id, 2);
-        assert!(matches!(replies[4].body, Some(envelope::Body::Ack(_))));
-    }
-
-    struct HostCallOnInitialOpenPlugin;
-
-    impl MioPlugin for HostCallOnInitialOpenPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-open-hostcall"
-        }
-
-        fn supports_panel_multiplexing(&self) -> bool {
-            true
-        }
-
-        fn on_panel_open_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _open: OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let next_rev = ctx.next_panel_revision();
-            let pref = ctx.preferences_get("selected_profile")?;
-            let text = String::from_utf8_lossy(&pref.unwrap_or_default()).into_owned();
-            Ok(Some(ui::snapshot(
-                next_rev,
-                self.id(),
-                ui::text(
-                    1,
-                    "panel",
-                    format!("panel-{panel_id}:{text}"),
-                    panel::Tone::Foreground,
-                ),
-            )))
-        }
-    }
-
-    #[test]
-    fn sdk_child_panel_host_call_during_initial_open_uses_published_revision_zero() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let mut push_host =
-            |panel_id: u64, req_id: u64, rev: u64, in_reply_to: u64, body: envelope::Body| {
-                let mut env =
-                    Envelope::new(identity, req_id, rev, body, timeout).with_panel_id(panel_id);
-                env.in_reply_to = in_reply_to;
-                incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-            };
-
-        push_host(
-            PANEL_ID,
-            1,
-            0,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![Permission::TrafficRead as i32],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(PANEL_ID, 2, 1, 1, envelope::Body::Ready(Empty {}));
-        // Host sends OpenRequest on child panel 2 with revision = 0 (no snapshot yet).
-        push_host(
-            2,
-            3,
-            0,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-        );
-        // HostResult for the PreferencesGet HostCall (request_id = 2 from worker).
-        push_host(
-            2,
-            4,
-            0,
-            2,
-            envelope::Body::HostResult(mio_plugin_api::protocol::HostResult {
-                outcome: Some(host_result::Outcome::StorageValue(
-                    mio_plugin_api::protocol::StorageValue {
-                        present: true,
-                        value: b"preset-a".to_vec(),
-                    },
-                )),
-            }),
-        );
-        push_host(PANEL_ID, 5, 1, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = HostCallOnInitialOpenPlugin;
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        assert_eq!(replies.len(), 3);
-        // Frame 1: Register
-        assert!(matches!(replies[0].body, Some(envelope::Body::Register(_))));
-        // Frame 2: HostCall on panel 2 MUST carry published revision 0 and parent_request_id == 3
-        assert_eq!(replies[1].panel_id, 2);
-        assert_eq!(replies[1].revision, 0);
-        assert!(matches!(
-            replies[1].body,
-            Some(envelope::Body::HostCall(ref hc)) if hc.parent_request_id == 3
-        ));
-        // Frame 3: Snapshot on panel 2 publishes revision 1
-        assert_eq!(replies[2].panel_id, 2);
-        assert_eq!(replies[2].revision, 1);
-        assert!(matches!(
-            replies[2].body,
-            Some(envelope::Body::Snapshot(ref s)) if s.revision == 1
-        ));
-    }
-
-    #[test]
-    fn sdk_expired_queued_child_frame_reports_deadline_without_exiting_worker() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let hello = Envelope::new(
-            identity,
-            1,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-            timeout,
-        );
-        let mut ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), timeout);
-        ready.in_reply_to = 1;
-        // Queued expired OpenRequest on panel 2
-        let mut expired_open2 = Envelope::new(
-            identity,
-            3,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req.clone()),
-            }),
-            timeout,
-        )
-        .with_panel_id(2);
-        expired_open2.deadline_unix_ms = 1;
-        // Subsequent valid OpenRequest on panel 3 (must still be handled!)
-        let valid_open3 = Envelope::new(
-            identity,
-            4,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-            timeout,
-        )
-        .with_panel_id(3);
-        let shutdown = Envelope::new(identity, 5, 1, envelope::Body::Shutdown(Empty {}), timeout);
-        for frame in [&hello, &ready, &expired_open2, &valid_open3, &shutdown] {
-            incoming_bytes.extend_from_slice(&encode_frame(frame).unwrap());
-        }
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = MultiplexPlugin {
-            panels: HashMap::new(),
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        assert_eq!(replies.len(), 3);
-        assert!(matches!(replies[0].body, Some(envelope::Body::Register(_))));
-        assert_eq!(replies[1].panel_id, 2);
-        assert_eq!(replies[1].in_reply_to, 3);
-        assert!(matches!(
-            replies[1].body,
-            Some(envelope::Body::Error(ref f)) if f.code == ErrorCode::Deadline as i32
-        ));
-        assert_eq!(replies[2].panel_id, 3);
-        assert_eq!(replies[2].in_reply_to, 4);
-        assert!(matches!(replies[2].body, Some(envelope::Body::Snapshot(_))));
-    }
-
-    struct CloseDestroyPlugin {
-        closed: Vec<(u64, u64)>,
-        destroyed: Vec<(u64, u64)>,
-    }
-
-    impl MioPlugin for CloseDestroyPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-close-destroy"
-        }
-
-        fn supports_panel_multiplexing(&self) -> bool {
-            true
-        }
-
-        fn on_panel_open_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _open: OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let rev = ctx.next_panel_revision();
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(1, "p", format!("p-{panel_id}"), panel::Tone::Foreground),
-            )))
-        }
-
-        fn on_panel_close_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _close: CloseRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            self.closed.push((panel_id, ctx.current_panel_revision()));
-            Ok(None)
-        }
-
-        fn on_panel_destroy(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _close: CloseRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            self.destroyed.push((panel_id, ctx.current_panel_revision()));
-            Ok(None)
-        }
-    }
-
-    #[test]
-    fn sdk_close_scope_preserves_panel_on_resource_revoke_and_destroys_on_expired_destroy() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let hello = Envelope::new(
-            identity,
-            1,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-            timeout,
-        );
-        let mut ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), timeout);
-        ready.in_reply_to = 1;
-        let open2 = Envelope::new(
-            identity,
-            3,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-            timeout,
-        )
-        .with_panel_id(2);
-        // Resource-only close (destroy_panel = false) keeps panel revision 1 intact.
-        let close_resource = Envelope::new(
-            identity,
-            4,
-            1,
-            envelope::Body::CloseRequest(CloseRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                destroy_panel: false,
-            }),
-            timeout,
-        )
-        .with_panel_id(2);
-        // Expired CloseRequest with destroy_panel = true STILL executes on_panel_destroy and replies Ack!
-        let mut destroy_expired = Envelope::new(
-            identity,
-            5,
-            1,
-            envelope::Body::CloseRequest(CloseRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                destroy_panel: true,
-            }),
-            timeout,
-        )
-        .with_panel_id(2);
-        destroy_expired.deadline_unix_ms = 1;
-        let shutdown = Envelope::new(identity, 6, 1, envelope::Body::Shutdown(Empty {}), timeout);
-        for frame in [
-            &hello,
-            &ready,
-            &open2,
-            &close_resource,
-            &destroy_expired,
-            &shutdown,
-        ] {
-            incoming_bytes.extend_from_slice(&encode_frame(frame).unwrap());
-        }
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = CloseDestroyPlugin {
-            closed: Vec::new(),
-            destroyed: Vec::new(),
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-        assert_eq!(plugin.closed, vec![(2, 1)]);
-        // Panel 2 preserved rev=1 across close_resource, then ran on_panel_destroy with rev=1 even when expired!
-        assert_eq!(plugin.destroyed, vec![(2, 1)]);
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        assert_eq!(replies.len(), 4);
-        assert!(matches!(replies[1].body, Some(envelope::Body::Snapshot(_))));
-        assert!(matches!(replies[2].body, Some(envelope::Body::Ack(_))));
-        assert!(matches!(replies[3].body, Some(envelope::Body::Ack(_))));
-        assert_eq!(replies[3].in_reply_to, 5);
-    }
-
-    struct ResyncRevisionPlugin {
-        seen_revs: Vec<u64>,
-    }
-
-    impl MioPlugin for ResyncRevisionPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-resync-rev"
-        }
-
-        fn supports_panel_multiplexing(&self) -> bool {
-            true
-        }
-
-        fn on_panel_open_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _panel_id: u64,
-            _open: OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let rev = ctx.next_panel_revision();
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(1, "p", format!("open-{rev}"), panel::Tone::Foreground),
-            )))
-        }
-
-        fn on_panel_ui_event(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _panel_id: u64,
-            _event: panel::UiEvent,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            if ctx.current_panel_revision() >= 3 {
-                let _ = ctx.is_in_scope("https://example.invalid/after")?;
-                return Ok(None);
-            }
-            let rev = ctx.next_panel_revision();
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(1, "p", format!("ui-{rev}"), panel::Tone::Foreground),
-            )))
-        }
-
-        fn on_panel_resync(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _panel_id: u64,
-            snapshot: PanelSnapshot,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            self.seen_revs.push(ctx.current_panel_revision());
-            let _ = ctx.is_in_scope("https://example.invalid/resync")?;
-            let rev = ctx.next_panel_revision();
-            assert_eq!(snapshot.revision, 1);
-            assert!(rev > 2, "pending must stay monotonic above discarded rev=2");
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(1, "p", format!("resync-{rev}"), panel::Tone::Foreground),
-            )))
-        }
-    }
-
-    #[test]
-    fn sdk_resync_resets_published_revision_while_preserving_monotonic_pending() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let mut push_host =
-            |panel_id: u64, req_id: u64, rev: u64, in_reply_to: u64, body: envelope::Body| {
-                let mut env =
-                    Envelope::new(identity, req_id, rev, body, timeout).with_panel_id(panel_id);
-                env.in_reply_to = in_reply_to;
-                incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-            };
-
-        push_host(
-            PANEL_ID,
-            1,
-            0,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![Permission::TrafficRead as i32],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(PANEL_ID, 2, 1, 1, envelope::Body::Ready(Empty {}));
-        // 1. Open on child panel 2 -> publishes rev=1.
-        push_host(
-            2,
-            3,
-            0,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-        );
-        // 2. UiEvent -> plugin emits Snapshot(rev=2), host rejects/discards it staying at rev=1.
-        push_host(
-            2,
-            4,
-            1,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                editors: vec![],
-                event: None,
-            }),
-        );
-        // 3. Host sends Resync(snapshot rev=1) on child panel 2 -> plugin calls is_in_scope & emits rev=3.
-        push_host(
-            2,
-            5,
-            1,
-            0,
-            envelope::Body::Resync(ui::snapshot(
-                1,
-                "host",
-                ui::text(1, "p", "host-confirmed", panel::Tone::Foreground),
-            )),
-        );
-        push_host(
-            2,
-            6,
-            1,
-            4,
-            envelope::Body::HostResult(mio_plugin_api::protocol::HostResult {
-                outcome: Some(host_result::Outcome::ScopeStatus(ScopeStatusDto {
-                    in_scope: true,
-                })),
-            }),
-        );
-        // 4. Subsequent UiEvent at rev=3 calls is_in_scope -> HostCall carries rev=3.
-        push_host(
-            2,
-            7,
-            3,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                editors: vec![],
-                event: None,
-            }),
-        );
-        push_host(
-            2,
-            8,
-            3,
-            6,
-            envelope::Body::HostResult(mio_plugin_api::protocol::HostResult {
-                outcome: Some(host_result::Outcome::ScopeStatus(ScopeStatusDto {
-                    in_scope: true,
-                })),
-            }),
-        );
-        push_host(PANEL_ID, 9, 1, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = ResyncRevisionPlugin {
-            seen_revs: Vec::new(),
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-        assert_eq!(plugin.seen_revs, vec![1]);
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        // Register, Snap(1), Snap(2), HostCall(resync), Snap(3), HostCall(after), Ack
-        assert_eq!(replies.len(), 7);
-        assert_eq!(replies[3].panel_id, 2);
-        assert_eq!(
-            replies[3].revision, 1,
-            "HostCall inside on_panel_resync MUST carry host-confirmed revision=1, not discarded 2"
-        );
-        assert!(matches!(
-            replies[3].body,
-            Some(envelope::Body::HostCall(ref hc)) if hc.parent_request_id == 5
-        ));
-        assert_eq!(replies[4].panel_id, 2);
-        assert_eq!(replies[4].revision, 3);
-        assert_eq!(replies[5].panel_id, 2);
-        assert_eq!(replies[5].revision, 3);
-        assert!(matches!(replies[6].body, Some(envelope::Body::Ack(_))));
-    }
-
-    struct CancelAckAndDestroyedGuardPlugin {
-        cancel_panels: Vec<u64>,
-    }
-
-    impl MioPlugin for CancelAckAndDestroyedGuardPlugin {
-        fn id(&self) -> &str {
-            "org.mio.sdk-cancel-guard"
-        }
-
-        fn supports_panel_multiplexing(&self) -> bool {
-            true
-        }
-
-        fn on_panel_open_request(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            panel_id: u64,
-            _open: OpenRequest,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let rev = ctx.next_panel_revision();
-            Ok(Some(ui::snapshot(
-                rev,
-                self.id(),
-                ui::text(1, "p", format!("p-{panel_id}"), panel::Tone::Foreground),
-            )))
-        }
-
-        fn on_cancel(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _cancel: Cancel,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let panel_id = ctx.panel_id();
-            self.cancel_panels.push(panel_id);
-            let next = ctx.next_panel_revision();
-            // Even if a plugin returns a Snapshot from on_cancel, the runtime MUST send Ack without bumping published!
-            Ok(Some(ui::snapshot(
-                next,
-                self.id(),
-                ui::text(1, "p", "ignored-cancel-snap", panel::Tone::Foreground),
-            )))
-        }
-
-        fn on_panel_ui_event(
-            &mut self,
-            ctx: &mut dyn HostClient,
-            _panel_id: u64,
-            _event: panel::UiEvent,
-        ) -> Result<Option<PanelSnapshot>, String> {
-            let _ = ctx.is_in_scope("https://example.invalid/after-cancel")?;
-            Ok(None)
-        }
-    }
-
-    #[test]
-    fn sdk_cancel_ignores_destroyed_panel_and_replies_ack_without_bumping_revision() {
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let req = HttpRequestDto {
-            method: "GET".into(),
-            url: "https://example.invalid/".into(),
-            version: HttpVersionDto::Http11 as i32,
-            ..Default::default()
-        };
-
-        let mut incoming_bytes = Vec::new();
-        let mut push_host =
-            |panel_id: u64, req_id: u64, rev: u64, in_reply_to: u64, body: envelope::Body| {
-                let mut env =
-                    Envelope::new(identity, req_id, rev, body, timeout).with_panel_id(panel_id);
-                env.in_reply_to = in_reply_to;
-                incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-            };
-
-        push_host(
-            PANEL_ID,
-            1,
-            0,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: vec![Permission::TrafficRead as i32],
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(PANEL_ID, 2, 1, 1, envelope::Body::Ready(Empty {}));
-        // Open child panel 2 -> rev = 1.
-        push_host(
-            2,
-            3,
-            0,
-            0,
-            envelope::Body::OpenRequest(OpenRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                message_revision: 1,
-                read_only: false,
-                request: Some(req),
-            }),
-        );
-        // Live Cancel on panel 2: on_cancel returns Some(snap(2)), SDK MUST emit Ack(rev=1) only.
-        push_host(2, 4, 1, 0, envelope::Body::Cancel(Cancel { request_id: 99 }));
-        // Subsequent UiEvent on panel 2 triggers is_in_scope HostCall -> revision MUST still be 1!
-        push_host(
-            2,
-            5,
-            1,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                editors: vec![],
-                event: None,
-            }),
-        );
-        push_host(
-            2,
-            6,
-            1,
-            4,
-            envelope::Body::HostResult(mio_plugin_api::protocol::HostResult {
-                outcome: Some(host_result::Outcome::ScopeStatus(ScopeStatusDto {
-                    in_scope: true,
-                })),
-            }),
-        );
-        // Destroy child panel 2, then send trailing Cancel on panel 2 -> on_cancel must NOT run!
-        push_host(
-            2,
-            7,
-            1,
-            0,
-            envelope::Body::CloseRequest(CloseRequest {
-                resource_id: Uuid::new_v4().as_bytes().to_vec(),
-                destroy_panel: true,
-            }),
-        );
-        push_host(2, 8, 1, 0, envelope::Body::Cancel(Cancel { request_id: 7 }));
-        push_host(PANEL_ID, 9, 1, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = CancelAckAndDestroyedGuardPlugin {
-            cancel_panels: Vec::new(),
-        };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-        assert_eq!(plugin.cancel_panels, vec![2]);
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        // Register(1), Snap(2), CancelAck(3), HostCall(4), UiAck(5), DestroyAck(6), StaleCancelAck(7)
-        assert_eq!(replies.len(), 7);
-        assert!(matches!(replies[2].body, Some(envelope::Body::Ack(_))));
-        assert_eq!(replies[2].revision, 1);
-        assert!(matches!(replies[3].body, Some(envelope::Body::HostCall(_))));
-        assert_eq!(
-            replies[3].revision, 1,
-            "on_cancel returning a Snapshot must not advance published revision"
-        );
-        assert!(matches!(replies[6].body, Some(envelope::Body::Ack(_))));
-        assert_eq!(replies[6].in_reply_to, 8);
-    }
-
-    #[test]
-    fn sdk_default_on_resync_returns_error_without_forging_host_revision_ack() {
-        struct NoResyncPlugin {
-            bumped: bool,
-        }
-
-        impl MioPlugin for NoResyncPlugin {
-            fn id(&self) -> &str {
-                "org.mio.sdk-no-resync"
-            }
-
-            fn on_panel_ui_event(
-                &mut self,
-                ctx: &mut dyn HostClient,
-                _panel_id: u64,
-                _event: panel::UiEvent,
-            ) -> Result<Option<PanelSnapshot>, String> {
-                if !self.bumped {
-                    self.bumped = true;
-                    let rev = ctx.next_panel_revision();
-                    return Ok(Some(ui::snapshot(
-                        rev,
-                        self.id(),
-                        ui::text(1, "p", format!("v-{rev}"), panel::Tone::Foreground),
-                    )));
-                }
-                Ok(None)
-            }
-        }
-
-        let identity = ChannelIdentity {
-            instance_id: Uuid::new_v4(),
-            project: ProjectKey {
-                id: Uuid::new_v4(),
-                generation: 1,
-            },
-        };
-        let timeout = Duration::from_secs(5);
-        let mut incoming_bytes = Vec::new();
-        let mut push_host =
-            |panel_id: u64, req_id: u64, rev: u64, in_reply_to: u64, body: envelope::Body| {
-                let mut env = Envelope::new(identity, req_id, rev, body, timeout);
-                env.panel_id = panel_id;
-                env.in_reply_to = in_reply_to;
-                incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
-            };
-        push_host(
-            PANEL_ID,
-            1,
-            0,
-            0,
-            envelope::Body::Hello(Hello {
-                max_frame_bytes: MAX_FRAME_BYTES as u32,
-                max_operation_ms: 5000,
-                granted_permissions: Vec::new(),
-                host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
-            }),
-        );
-        push_host(PANEL_ID, 2, 1, 1, envelope::Body::Ready(Empty {}));
-        push_host(
-            PANEL_ID,
-            3,
-            1,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                editors: vec![],
-                event: Some(panel::ui_event::Event::Click(Empty {})),
-            }),
-        );
-        push_host(
-            PANEL_ID,
-            4,
-            1,
-            0,
-            envelope::Body::Resync(ui::snapshot(
-                1,
-                "org.mio.sdk-no-resync",
-                ui::text(1, "p", "host-v1", panel::Tone::Foreground),
-            )),
-        );
-        push_host(
-            PANEL_ID,
-            5,
-            2,
-            0,
-            envelope::Body::UiEvent(panel::UiEvent {
-                node_id: 1,
-                editors: vec![],
-                event: Some(panel::ui_event::Event::Click(Empty {})),
-            }),
-        );
-        push_host(PANEL_ID, 6, 2, 0, envelope::Body::Shutdown(Empty {}));
-
-        let mut outgoing_bytes = Vec::new();
-        let mut plugin = NoResyncPlugin { bumped: false };
-        run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
-
-        let mut cursor = outgoing_bytes.as_slice();
-        let mut replies = Vec::new();
-        while !cursor.is_empty() {
-            replies.push(read_frame(&mut cursor).unwrap());
-        }
-        // Register(1), Snap v2(2), Resync Error(3), UiEvent Ack v2(4)
-        assert_eq!(replies.len(), 4);
-        assert!(matches!(replies[1].body, Some(envelope::Body::Snapshot(_))));
-        assert_eq!(replies[1].revision, 2);
-        assert!(matches!(
-            replies[2].body,
-            Some(envelope::Body::Error(ref f)) if f.code == ErrorCode::Invalid as i32
-        ));
-        assert_eq!(
-            replies[2].revision, 2,
-            "failed default on_resync must preserve previous published revision=2, never claim host rev=1"
-        );
-        assert!(matches!(replies[3].body, Some(envelope::Body::Ack(_))));
-        assert_eq!(replies[3].revision, 2);
-    }
 }
 
 impl<T: MioPlugin + ?Sized> MioPlugin for &mut T {
@@ -2014,50 +740,70 @@ impl<T: MioPlugin + ?Sized> MioPlugin for &mut T {
     fn required_components(&self) -> Vec<Component> {
         (**self).required_components()
     }
+    fn supports_panel_multiplexing(&self) -> bool {
+        (**self).supports_panel_multiplexing()
+    }
     fn initial_panel(&self) -> PanelSnapshot {
         (**self).initial_panel()
+    }
+    fn on_ready(&mut self, ctx: &mut dyn HostClient) -> Result<PanelUpdate, String> {
+        (**self).on_ready(ctx)
     }
     fn on_ui_event(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         event: panel::UiEvent,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_ui_event(ctx, event)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_ui_event(ctx, panel_id, event)
     }
     fn on_open_request(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         open: OpenRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_open_request(ctx, open)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_open_request(ctx, panel_id, open)
     }
     fn on_open_response(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         open: OpenResponse,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_open_response(ctx, open)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_open_response(ctx, panel_id, open)
     }
     fn on_close_request(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_close_request(ctx, close)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_close_request(ctx, panel_id, close)
+    }
+    fn on_panel_destroy(
+        &mut self,
+        ctx: &mut dyn HostClient,
+        panel_id: u64,
+        close: CloseRequest,
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_panel_destroy(ctx, panel_id, close)
     }
     fn on_commit_editor(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         commit: CommitEditor,
     ) -> Result<Committed, String> {
-        (**self).on_commit_editor(ctx, commit)
+        (**self).on_commit_editor(ctx, panel_id, commit)
     }
     fn on_commit_response_editor(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         commit: CommitResponseEditor,
     ) -> Result<ResponseCommitted, String> {
-        (**self).on_commit_response_editor(ctx, commit)
+        (**self).on_commit_response_editor(ctx, panel_id, commit)
     }
     fn on_context_menu(
         &mut self,
@@ -2108,85 +854,29 @@ impl<T: MioPlugin + ?Sized> MioPlugin for &mut T {
     ) -> Result<ActiveCheckResult, String> {
         (**self).on_active_check(ctx, call)
     }
+    fn on_host_result(
+        &mut self,
+        ctx: &mut dyn HostClient,
+        panel_id: u64,
+        request_id: u64,
+        result: HostResult,
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_host_result(ctx, panel_id, request_id, result)
+    }
     fn on_cancel(
         &mut self,
         ctx: &mut dyn HostClient,
+        panel_id: u64,
         cancel: Cancel,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_cancel(ctx, cancel)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_cancel(ctx, panel_id, cancel)
     }
     fn on_resync(
         &mut self,
         ctx: &mut dyn HostClient,
-        snapshot: PanelSnapshot,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_resync(ctx, snapshot)
-    }
-    fn supports_panel_multiplexing(&self) -> bool {
-        (**self).supports_panel_multiplexing()
-    }
-    fn on_panel_ui_event(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        event: panel::UiEvent,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_ui_event(ctx, panel_id, event)
-    }
-    fn on_panel_open_request(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        open: OpenRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_open_request(ctx, panel_id, open)
-    }
-    fn on_panel_open_response(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        open: OpenResponse,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_open_response(ctx, panel_id, open)
-    }
-    fn on_panel_close_request(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_close_request(ctx, panel_id, close)
-    }
-    fn on_panel_destroy(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        close: CloseRequest,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_destroy(ctx, panel_id, close)
-    }
-    fn on_panel_commit_editor(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        commit: CommitEditor,
-    ) -> Result<Committed, String> {
-        (**self).on_panel_commit_editor(ctx, panel_id, commit)
-    }
-    fn on_panel_commit_response_editor(
-        &mut self,
-        ctx: &mut dyn HostClient,
-        panel_id: u64,
-        commit: CommitResponseEditor,
-    ) -> Result<ResponseCommitted, String> {
-        (**self).on_panel_commit_response_editor(ctx, panel_id, commit)
-    }
-    fn on_panel_resync(
-        &mut self,
-        ctx: &mut dyn HostClient,
         panel_id: u64,
         snapshot: PanelSnapshot,
-    ) -> Result<Option<PanelSnapshot>, String> {
-        (**self).on_panel_resync(ctx, panel_id, snapshot)
+    ) -> Result<PanelUpdate, String> {
+        (**self).on_resync(ctx, panel_id, snapshot)
     }
 }

@@ -272,57 +272,60 @@ async fn real_sdk_resync_barrier_prevents_queued_ui_event_from_reverting_confirm
             Self::make_snap(1, "v1-old", 1, b"init".to_vec())
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (10, Some(panel::ui_event::Event::Click(_))) => {
                     self.ev0_entered.notify_one();
                     self.rt.block_on(self.ev0_release.notified());
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "stale-from-ev0",
                         1,
                         b"init".to_vec(),
-                    )));
+                    )
+                    .into());
                 }
                 (1, Some(panel::ui_event::Event::EditorChanged(ed))) => {
                     let mut st = self.status.lock().unwrap();
                     *st = "v2-confirmed".into();
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         &st,
                         ed.revision,
                         ed.contents.clone(),
-                    )));
+                    )
+                    .into());
                 }
                 (12, Some(panel::ui_event::Event::Click(_))) => {
                     let mut st = self.status.lock().unwrap();
                     *st = format!("{st}+evB");
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         &st,
                         2,
                         b"user-edit".to_vec(),
-                    )));
+                    )
+                    .into());
                 }
                 _ => {}
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_resync(
+        fn on_resync(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             snapshot: PanelSnapshot,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let status_text = snapshot
                 .root
                 .as_ref()
@@ -337,11 +340,13 @@ async fn real_sdk_resync_barrier_prevents_queued_ui_event_from_reverting_confirm
                 self.rt.block_on(self.resync1_release.notified());
                 *self.status.lock().unwrap() = status_text.clone();
                 let rev = ctx.next_panel_revision();
-                return Ok(Some(Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec())));
+                return Ok(
+                    Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec()).into(),
+                );
             }
             *self.status.lock().unwrap() = status_text.clone();
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec())))
+            Ok(Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec()).into())
         }
     }
 
@@ -575,60 +580,62 @@ async fn real_sdk_non_destroy_close_waits_for_resync_barrier_and_never_reverts_p
             Self::make_snap(1, "main-init", 1, b"init".to_vec())
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             _open: protocol::OpenRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             self.statuses
                 .lock()
                 .unwrap()
                 .insert(panel_id, "v1-old".into());
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(rev, "v1-old", 1, b"init".to_vec())))
+            Ok(Self::make_snap(rev, "v1-old", 1, b"init".to_vec()).into())
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (10, Some(panel::ui_event::Event::Click(_))) => {
                     self.ev0_entered.notify_one();
                     self.rt.block_on(self.ev0_release.notified());
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "stale-from-ev0",
                         1,
                         b"init".to_vec(),
-                    )));
+                    )
+                    .into());
                 }
                 (1, Some(panel::ui_event::Event::EditorChanged(ed))) => {
                     let mut map = self.statuses.lock().unwrap();
                     map.insert(panel_id, "v2-confirmed".into());
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "v2-confirmed",
                         ed.revision,
                         ed.contents.clone(),
-                    )));
+                    )
+                    .into());
                 }
                 _ => {}
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_resync(
+        fn on_resync(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             snapshot: PanelSnapshot,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let status_text = snapshot
                 .root
                 .as_ref()
@@ -646,18 +653,20 @@ async fn real_sdk_non_destroy_close_waits_for_resync_barrier_and_never_reverts_p
                     .unwrap()
                     .insert(panel_id, status_text.clone());
                 let rev = ctx.next_panel_revision();
-                return Ok(Some(Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec())));
+                return Ok(
+                    Self::make_snap(rev, &status_text, 2, b"user-edit".to_vec()).into(),
+                );
             }
             self.statuses.lock().unwrap().insert(panel_id, status_text);
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_close_request(
+        fn on_close_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             panel_id: u64,
             close: protocol::CloseRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             assert!(!close.destroy_panel);
             let mut map = self.statuses.lock().unwrap();
             let next = format!(
@@ -666,7 +675,7 @@ async fn real_sdk_non_destroy_close_waits_for_resync_barrier_and_never_reverts_p
             );
             map.insert(panel_id, next.clone());
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(rev, &next, 2, b"user-edit".to_vec())))
+            Ok(Self::make_snap(rev, &next, 2, b"user-edit".to_vec()).into())
         }
     }
 
@@ -1546,65 +1555,68 @@ async fn real_sdk_non_destroy_close_reordering_select_rejects_deferred_ui_event(
             Self::make_snap(1, "main-init", 1, b"init".to_vec(), ["Allow", "Deny"])
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             _open: protocol::OpenRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(
+            Ok(Self::make_snap(
                 rev,
                 "v1-old",
                 1,
                 b"init".to_vec(),
                 ["Allow", "Deny"],
-            )))
+            )
+            .into())
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (10, Some(panel::ui_event::Event::Click(_))) => {
                     self.ev0_entered.notify_one();
                     self.rt.block_on(self.ev0_release.notified());
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "stale-from-ev0",
                         1,
                         b"init".to_vec(),
                         ["Allow", "Deny"],
-                    )));
+                    )
+                    .into());
                 }
                 (1, Some(panel::ui_event::Event::EditorChanged(ed))) => {
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "v2-confirmed",
                         ed.revision,
                         ed.contents.clone(),
                         ["Allow", "Deny"],
-                    )));
+                    )
+                    .into());
                 }
                 (20, Some(panel::ui_event::Event::SelectedOption(idx))) => {
                     self.seen_select_events.lock().unwrap().push(*idx);
                 }
                 _ => {}
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_resync(
+        fn on_resync(
             &mut self,
             _ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             snapshot: PanelSnapshot,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let status_text = snapshot
                 .root
                 .as_ref()
@@ -1618,24 +1630,25 @@ async fn real_sdk_non_destroy_close_reordering_select_rejects_deferred_ui_event(
                 self.resync1_entered.notify_one();
                 self.rt.block_on(self.resync1_release.notified());
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_close_request(
+        fn on_close_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             close: protocol::CloseRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             assert!(!close.destroy_panel);
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(
+            Ok(Self::make_snap(
                 rev,
                 "v2-closed-reordered",
                 2,
                 b"user-edit".to_vec(),
                 ["Deny", "Allow"],
-            )))
+            )
+            .into())
         }
     }
 
@@ -2011,50 +2024,51 @@ async fn real_sdk_deferred_interactions_serialize_after_close_ack_and_reject_reo
             Self::make_snap(1, "main-init", ["Allow", "Deny"])
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             _open: protocol::OpenRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(rev, "v1-open", ["Allow", "Deny"])))
+            Ok(Self::make_snap(rev, "v1-open", ["Allow", "Deny"]).into())
         }
 
-        fn on_panel_close_request(
+        fn on_close_request(
             &mut self,
             _ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             close: protocol::CloseRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             assert!(!close.destroy_panel);
             self.close_entered.notify_one();
             self.rt.block_on(self.close_release.notified());
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (11, Some(panel::ui_event::Event::Click(_))) => {
                     self.seen_clicks.lock().unwrap().push(11);
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "v2-reordered",
                         ["Deny", "Allow"],
-                    )));
+                    )
+                    .into());
                 }
                 (20, Some(panel::ui_event::Event::SelectedOption(idx))) => {
                     self.seen_selects.lock().unwrap().push(*idx);
                 }
                 _ => {}
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
     }
 
@@ -2626,52 +2640,53 @@ async fn real_sdk_empty_deferred_queue_still_blocks_new_event_until_inflight_def
             Self::make_snap(1, "main-init", ["Allow", "Deny"])
         }
 
-        fn on_panel_open_request(
+        fn on_open_request(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             _open: protocol::OpenRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             let rev = ctx.next_panel_revision();
-            Ok(Some(Self::make_snap(rev, "v1-open", ["Allow", "Deny"])))
+            Ok(Self::make_snap(rev, "v1-open", ["Allow", "Deny"]).into())
         }
 
-        fn on_panel_close_request(
+        fn on_close_request(
             &mut self,
             _ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             close: protocol::CloseRequest,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             assert!(!close.destroy_panel);
             self.close_entered.notify_one();
             self.rt.block_on(self.close_release.notified());
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
 
-        fn on_panel_ui_event(
+        fn on_ui_event(
             &mut self,
             ctx: &mut dyn mio_plugin_sdk::HostClient,
             _panel_id: u64,
             event: UiEvent,
-        ) -> std::result::Result<Option<PanelSnapshot>, String> {
+        ) -> std::result::Result<mio_plugin_sdk::PanelUpdate, String> {
             match (event.node_id, &event.event) {
                 (11, Some(panel::ui_event::Event::Click(_))) => {
                     self.seen_clicks.lock().unwrap().push(11);
                     self.click_entered.notify_one();
                     self.rt.block_on(self.click_release.notified());
                     let rev = ctx.next_panel_revision();
-                    return Ok(Some(Self::make_snap(
+                    return Ok(Self::make_snap(
                         rev,
                         "v2-reordered",
                         ["Deny", "Allow"],
-                    )));
+                    )
+                    .into());
                 }
                 (20, Some(panel::ui_event::Event::SelectedOption(idx))) => {
                     self.seen_selects.lock().unwrap().push(*idx);
                 }
                 _ => {}
             }
-            Ok(None)
+            Ok(mio_plugin_sdk::PanelUpdate::None)
         }
     }
 
