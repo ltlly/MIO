@@ -21,7 +21,7 @@ impl Workbench {
         }
         if self.extra_tools.logger_pending_read == Some((project, selection_revision, flow_id)) {
             self.extra_tools.logger_pending_read = None;
-            self.clear_logger_pending_batch(cx);
+            self.clear_logger_pending_batch();
             self.fail(format!("无法读取 Logger 消息：{message}"), cx);
             return;
         }

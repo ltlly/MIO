@@ -57,6 +57,7 @@ pub(super) struct WebSocketHistory {
     pub(super) original_payload: Option<Vec<u8>>,
     pub(super) original_view: bool,
     pub(super) notes: notes::Notes,
+    pub(in crate::workbench::websocket) multi_selection: selection::WsMultiSelectionState,
 }
 
 impl WebSocketHistory {
@@ -107,6 +108,7 @@ impl WebSocketHistory {
             original_payload: None,
             original_view: false,
             notes: notes::Notes::new(window, cx),
+            multi_selection: selection::WsMultiSelectionState::default(),
         }
     }
 
@@ -130,6 +132,7 @@ impl WebSocketHistory {
         self.query_offset = 0;
         self.selection_revision = 0;
         self.clear_detail(window, cx);
+        self.multi_selection = selection::WsMultiSelectionState::default();
         self.table.update(cx, |state, cx| {
             let delegate = state.delegate_mut();
             delegate.rows.clear();
@@ -163,6 +166,7 @@ impl WebSocketHistory {
 
     pub(in crate::workbench) fn backend_disconnected(&mut self, cx: &mut Context<Workbench>) {
         self.notes.disconnect();
+        self.multi_selection.pending_batch = None;
         self.dirty = false;
         self.table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();

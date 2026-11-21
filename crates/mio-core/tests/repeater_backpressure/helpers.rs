@@ -17,19 +17,24 @@ pub(crate) const BODY: &[u8] = &[0, 0xff, b'P', b'O', b'S', b'T'];
 pub(crate) const WAITING_QUERY: u64 = u64::MAX;
 
 pub(crate) async fn next(client: &mut Client) -> Event {
-    let event = client
-        .events
-        .recv()
-        .await
-        .expect("the service stays connected");
-    assert!(
-        !matches!(
-            event,
-            Event::Error { .. } | Event::SendRejected { .. } | Event::WorkspaceRejected { .. }
-        ),
-        "{event:?}"
-    );
-    event
+    loop {
+        let event = client
+            .events
+            .recv()
+            .await
+            .expect("the service stays connected");
+        assert!(
+            !matches!(
+                event,
+                Event::Error { .. } | Event::SendRejected { .. } | Event::WorkspaceRejected { .. }
+            ),
+            "{event:?}"
+        );
+        if matches!(event, Event::ProjectDiskUsage { .. }) {
+            continue;
+        }
+        return event;
+    }
 }
 
 pub(crate) async fn event(client: &mut Client, predicate: impl Fn(&Event) -> bool) -> Event {

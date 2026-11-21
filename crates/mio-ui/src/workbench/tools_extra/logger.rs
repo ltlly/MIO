@@ -7,6 +7,8 @@ use super::*;
 
 mod render;
 mod table;
+pub(super) use render::LoggerRowsCacheEntry;
+pub(super) use table::LoggerUiTableState;
 
 pub(super) const LOGGER_MAX_LIMITS: [usize; 4] = [500, 1000, 2000, 5000];
 pub(super) const LOGGER_CAPTURE_SOURCE_LABELS: [&str; 5] = [
@@ -181,7 +183,7 @@ impl Workbench {
         self.extra_tools.logger_selected = None;
         self.extra_tools.logger_pending_read = None;
         self.extra_tools.logger_loaded_detail = None;
-        self.clear_logger_selection_state(cx);
+        self.clear_logger_selection_state();
         self.extra_tools.logger_request.load(b"", window, cx);
         self.extra_tools.logger_response.load(b"", window, cx);
         self.clear_context_viewer("logger", cx);
@@ -460,17 +462,16 @@ mod tests {
 
             let visible_ids = vec![id1, id2, id3];
             f.view.update(cx, |view, cx| {
-                let wb_id = cx.entity_id();
                 view.handle_logger_row_click(id1, &visible_ids, false, false, window, cx);
                 view.handle_logger_row_click(id3, &visible_ids, true, false, window, cx);
                 assert_eq!(
-                    view.logger_selected_target_ids(wb_id, id1),
+                    view.logger_selected_target_ids(id1),
                     vec![id1, id2, id3]
                 );
                 view.handle_logger_row_click(id2, &visible_ids, false, true, window, cx);
-                assert_eq!(view.logger_selected_target_ids(wb_id, id1), vec![id1, id3]);
+                assert_eq!(view.logger_selected_target_ids(id1), vec![id1, id3]);
                 view.handle_logger_row_right_down(id1, window, cx);
-                assert_eq!(view.logger_selected_target_ids(wb_id, id1), vec![id1, id3]);
+                assert_eq!(view.logger_selected_target_ids(id1), vec![id1, id3]);
 
                 view.copy_logger_batch_urls(&[id1, id3], window, cx);
             });

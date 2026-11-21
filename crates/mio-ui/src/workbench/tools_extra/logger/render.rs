@@ -53,7 +53,6 @@ enum LoggerHeaderSort {
 }
 
 struct LoggerRowsCacheKey {
-    workbench_id: gpui_kit::EntityId,
     entries_len: usize,
     first_id: Option<FlowId>,
     last_id: Option<FlowId>,
@@ -71,14 +70,9 @@ struct LoggerRowsCacheKey {
     live_notes_sig: (usize, u64),
 }
 
-struct LoggerRowsCacheEntry {
+pub(in crate::workbench::tools_extra) struct LoggerRowsCacheEntry {
     key: LoggerRowsCacheKey,
     rows: Rc<Vec<(usize, FlowId)>>,
-}
-
-std::thread_local! {
-    static LOGGER_VISIBLE_ROWS_CACHE: std::cell::RefCell<Option<LoggerRowsCacheEntry>> =
-        const { std::cell::RefCell::new(None) };
 }
 
 fn logger_entries_fingerprint(entries: &[mio_core::FlowSummary]) -> u64 {
@@ -1279,7 +1273,12 @@ impl Workbench {
                     .extra_tools
                     .logger_filters
                     .continuous_scroll;
-                let col_visible = table::logger_visible_column_flags(entity.entity_id());
+                let col_visible = entity
+                    .read(cx)
+                    .extra_tools
+                    .logger_ui_table
+                    .borrow()
+                    .col_visible;
                 let visible_count = col_visible.iter().filter(|&&v| v).count();
                 let o_csv = options_owner.clone();
                 let o_refresh = options_owner.clone();
@@ -1458,32 +1457,30 @@ impl Workbench {
             (0, 0)
         };
 
-        let cached_rows = LOGGER_VISIBLE_ROWS_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .as_ref()
-                .filter(|entry| {
-                    let k = &entry.key;
-                    k.workbench_id == workbench_id
-                        && k.entries_len == entries_len
-                        && k.first_id == first_id
-                        && k.last_id == last_id
-                        && k.entries_sig == entries_sig
-                        && k.source_filter == source_filter
-                        && k.search_term == search_term
-                        && k.sort == sort
-                        && k.extended_sort == extended_sort
-                        && k.status_classes == filters.status_classes
-                        && k.in_scope_only == filters.in_scope_only
-                        && k.script_enabled == filters.script_enabled
-                        && k.view_filter_script == filters.view_filter_script
-                        && k.param_counts_sig == param_counts_sig
-                        && k.live_notes_sig == live_notes_sig
-                        && (!filters.in_scope_only
-                            || k.scope.as_ref() == Some(&self.workspace.scope))
-                })
-                .map(|entry| Rc::clone(&entry.rows))
-        });
+        let cached_rows = self
+            .extra_tools
+            .logger_visible_rows_cache
+            .borrow()
+            .as_ref()
+            .filter(|entry| {
+                let k = &entry.key;
+                k.entries_len == entries_len
+                    && k.first_id == first_id
+                    && k.last_id == last_id
+                    && k.entries_sig == entries_sig
+                    && k.source_filter == source_filter
+                    && k.search_term == search_term
+                    && k.sort == sort
+                    && k.extended_sort == extended_sort
+                    && k.status_classes == filters.status_classes
+                    && k.in_scope_only == filters.in_scope_only
+                    && k.script_enabled == filters.script_enabled
+                    && k.view_filter_script == filters.view_filter_script
+                    && k.param_counts_sig == param_counts_sig
+                    && k.live_notes_sig == live_notes_sig
+                    && (!filters.in_scope_only || k.scope.as_ref() == Some(&self.workspace.scope))
+            })
+            .map(|entry| Rc::clone(&entry.rows));
 
         let rows_rc = if let Some(hit) = cached_rows {
             hit
@@ -1506,28 +1503,25 @@ impl Workbench {
                         .collect::<Vec<_>>(),
                 )
             };
-            LOGGER_VISIBLE_ROWS_CACHE.with(|cache| {
-                *cache.borrow_mut() = Some(LoggerRowsCacheEntry {
-                    key: LoggerRowsCacheKey {
-                        workbench_id,
-                        entries_len,
-                        first_id,
-                        last_id,
-                        entries_sig,
-                        source_filter: source_filter.clone(),
-                        search_term: search_term.clone(),
-                        sort,
-                        extended_sort,
-                        status_classes: filters.status_classes,
-                        in_scope_only: filters.in_scope_only,
-                        scope: filters.in_scope_only.then(|| self.workspace.scope.clone()),
-                        script_enabled: filters.script_enabled,
-                        view_filter_script: filters.view_filter_script.clone(),
-                        param_counts_sig,
-                        live_notes_sig,
-                    },
-                    rows: Rc::clone(&computed),
-                });
+            *self.extra_tools.logger_visible_rows_cache.borrow_mut() = Some(LoggerRowsCacheEntry {
+                key: LoggerRowsCacheKey {
+                    entries_len,
+                    first_id,
+                    last_id,
+                    entries_sig,
+                    source_filter: source_filter.clone(),
+                    search_term: search_term.clone(),
+                    sort,
+                    extended_sort,
+                    status_classes: filters.status_classes,
+                    in_scope_only: filters.in_scope_only,
+                    scope: filters.in_scope_only.then(|| self.workspace.scope.clone()),
+                    script_enabled: filters.script_enabled,
+                    view_filter_script: filters.view_filter_script.clone(),
+                    param_counts_sig,
+                    live_notes_sig,
+                },
+                rows: Rc::clone(&computed),
             });
             computed
         };
@@ -1535,12 +1529,11 @@ impl Workbench {
         let table_head_fg: gpui_kit::Hsla = rgb(if dark { 0xd4d4d4 } else { 0x141414 }).into();
         let table_head_hover: gpui_kit::Hsla = rgb(if dark { 0x2f3237 } else { 0xe6e6e6 }).into();
         let cell_px = theme::scaled_px(6.);
-        let (selected_set, col_widths, col_visible) = table::logger_ui_state_snapshot(
-            workbench_id,
-            cx.weak_entity(),
-            self.extra_tools.logger_selected,
-            entries,
-        );
+        let (selected_set, col_widths, col_visible) = self
+            .extra_tools
+            .logger_ui_table
+            .borrow_mut()
+            .snapshot(self.extra_tools.logger_selected, entries);
         let visible_cols: Vec<usize> = (0..table::LOGGER_COL_COUNT)
             .filter(|&col_ix| col_visible[col_ix])
             .collect();

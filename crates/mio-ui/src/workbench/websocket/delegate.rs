@@ -305,38 +305,40 @@ impl TableDelegate for WebSocketDelegate {
             .row(row)
             .and_then(|item| self.highlights.get(&item.id).copied())
             .filter(|c| (1..=9).contains(c));
-        let (owner_id, primary_selected) = self
-            .owner
-            .upgrade()
-            .map(|e| (Some(e.entity_id()), e.read(cx).websocket.selected))
-            .unwrap_or((None, None));
-        let is_multi_selected = match (owner_id, message_id) {
-            (Some(oid), Some(id)) => {
-                super::selection::is_ws_id_selected(oid, id, primary_selected)
-            }
+        let owner_entity = self.owner.upgrade();
+        let is_multi_selected = match (owner_entity.as_ref(), message_id) {
+            (Some(entity), Some(id)) => entity.read(cx).websocket.is_id_selected(id),
             _ => false,
         };
+        let owner_weak = owner_entity.as_ref().map(gpui_kit::Entity::downgrade);
         div()
             .id(("websocket-row", row))
             .aria_selected(is_multi_selected)
-            .when_some(owner_id, |this, oid| {
+            .when_some(owner_weak, |this, weak| {
+                let weak_left = weak.clone();
                 this.on_mouse_down(gpui_kit::MouseButton::Left, move |event, _, cx| {
-                    super::selection::record_ws_pointer_down(
-                        oid,
-                        row,
-                        gpui_kit::MouseButton::Left,
-                        event.modifiers.shift,
-                        event.modifiers.secondary(cx),
-                    );
+                    let toggle = event.modifiers.secondary(cx);
+                    let shift = event.modifiers.shift;
+                    let _ = weak_left.update(cx, |view, _| {
+                        view.websocket.record_pointer_down(
+                            row,
+                            gpui_kit::MouseButton::Left,
+                            shift,
+                            toggle,
+                        );
+                    });
                 })
                 .on_mouse_down(gpui_kit::MouseButton::Right, move |event, _, cx| {
-                    super::selection::record_ws_pointer_down(
-                        oid,
-                        row,
-                        gpui_kit::MouseButton::Right,
-                        event.modifiers.shift,
-                        event.modifiers.secondary(cx),
-                    );
+                    let toggle = event.modifiers.secondary(cx);
+                    let shift = event.modifiers.shift;
+                    let _ = weak.update(cx, |view, _| {
+                        view.websocket.record_pointer_down(
+                            row,
+                            gpui_kit::MouseButton::Right,
+                            shift,
+                            toggle,
+                        );
+                    });
                 })
             })
             .when_some(
@@ -539,10 +541,7 @@ impl TableDelegate for WebSocketDelegate {
         let message_id = self.row(row).map(|item| item.id);
         let target_ids: Vec<Uuid> = if let Some(clicked_id) = message_id {
             if let Some(entity) = self.owner.upgrade() {
-                let selected_set = super::selection::ws_selected_ids_snapshot(
-                    entity.entity_id(),
-                    entity.read(cx).websocket.selected,
-                );
+                let selected_set = entity.read(cx).websocket.selected_ids_snapshot();
                 if selected_set.contains(&clicked_id) && selected_set.len() > 1 {
                     let ordered: Vec<Uuid> = self
                         .rows

@@ -54,8 +54,7 @@ pub(super) struct PendingLoggerBatchOp {
 }
 
 #[derive(Clone)]
-pub(super) struct LoggerUiTableState {
-    pub(super) owner: Option<WeakEntity<Workbench>>,
+pub(in crate::workbench::tools_extra) struct LoggerUiTableState {
     pub(super) selected_set: HashSet<FlowId>,
     pub(super) anchor_id: Option<FlowId>,
     pub(super) explicit_empty: Option<FlowId>,
@@ -68,7 +67,6 @@ pub(super) struct LoggerUiTableState {
 impl Default for LoggerUiTableState {
     fn default() -> Self {
         Self {
-            owner: None,
             selected_set: HashSet::new(),
             anchor_id: None,
             explicit_empty: None,
@@ -77,6 +75,31 @@ impl Default for LoggerUiTableState {
             resize_drag: None,
             pending_batch: None,
         }
+    }
+}
+
+impl LoggerUiTableState {
+    pub(super) fn snapshot(
+        &mut self,
+        primary_selected: Option<FlowId>,
+        entries: &[FlowSummary],
+    ) -> (HashSet<FlowId>, [f32; LOGGER_COL_COUNT], [bool; LOGGER_COL_COUNT]) {
+        if primary_selected.is_none() || entries.is_empty() {
+            self.selected_set.clear();
+            self.anchor_id = None;
+            self.explicit_empty = None;
+        } else {
+            self.selected_set
+                .retain(|id| entries.iter().any(|e| e.id == *id));
+            if let Some(sel) = primary_selected
+                && self.selected_set.is_empty()
+                && self.explicit_empty != Some(sel)
+            {
+                self.explicit_empty = None;
+                self.selected_set.insert(sel);
+            }
+        }
+        (self.selected_set.clone(), self.col_widths, self.col_visible)
     }
 }
 
@@ -94,52 +117,6 @@ impl gpui_kit::Render for ResizeLoggerCol {
     ) -> impl gpui_kit::IntoElement {
         gpui_kit::Empty
     }
-}
-
-std::thread_local! {
-    static LOGGER_UI_TABLE_STATE: std::cell::RefCell<HashMap<gpui_kit::EntityId, LoggerUiTableState>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-pub(super) fn logger_visible_column_flags(workbench_id: gpui_kit::EntityId) -> [bool; LOGGER_COL_COUNT] {
-    LOGGER_UI_TABLE_STATE.with(|map| {
-        map.borrow()
-            .get(&workbench_id)
-            .map(|st| st.col_visible)
-            .unwrap_or([true; LOGGER_COL_COUNT])
-    })
-}
-
-pub(super) fn logger_ui_state_snapshot(
-    workbench_id: gpui_kit::EntityId,
-    owner: WeakEntity<Workbench>,
-    primary_selected: Option<FlowId>,
-    entries: &[FlowSummary],
-) -> (HashSet<FlowId>, [f32; LOGGER_COL_COUNT], [bool; LOGGER_COL_COUNT]) {
-    LOGGER_UI_TABLE_STATE.with(|map| {
-        let mut map = map.borrow_mut();
-        map.retain(|&id, st| {
-            id == workbench_id || st.owner.as_ref().is_some_and(|w| w.upgrade().is_some())
-        });
-        let st = map.entry(workbench_id).or_default();
-        st.owner = Some(owner);
-        if primary_selected.is_none() || entries.is_empty() {
-            st.selected_set.clear();
-            st.anchor_id = None;
-            st.explicit_empty = None;
-        } else {
-            st.selected_set
-                .retain(|id| entries.iter().any(|e| e.id == *id));
-            if let Some(sel) = primary_selected
-                && st.selected_set.is_empty()
-                && st.explicit_empty != Some(sel)
-            {
-                st.explicit_empty = None;
-                st.selected_set.insert(sel);
-            }
-        }
-        (st.selected_set.clone(), st.col_widths, st.col_visible)
-    })
 }
 
 pub(super) fn logger_cell_text_for_entry(
@@ -1223,21 +1200,19 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
         let cur_selected = self.extra_tools.logger_selected;
         if shift {
-            let anchor = LOGGER_UI_TABLE_STATE.with(|map| {
-                let map_ref = map.borrow();
-                map_ref.get(&wb_id).and_then(|st| st.anchor_id)
-            });
-            let anchor = anchor.or(cur_selected).unwrap_or(flow_id);
+            let anchor = self
+                .extra_tools
+                .logger_ui_table
+                .borrow()
+                .anchor_id
+                .or(cur_selected)
+                .unwrap_or(flow_id);
             let start_pos = visible_ids.iter().position(|id| *id == anchor);
             let end_pos = visible_ids.iter().position(|id| *id == flow_id);
-            LOGGER_UI_TABLE_STATE.with(|map| {
-                let mut map_mut = map.borrow_mut();
-                let st = map_mut.entry(wb_id).or_default();
-                st.owner = Some(weak);
+            {
+                let mut st = self.extra_tools.logger_ui_table.borrow_mut();
                 st.explicit_empty = None;
                 if let (Some(s), Some(e)) = (start_pos, end_pos) {
                     let (lo, hi) = (s.min(e), s.max(e));
@@ -1248,17 +1223,15 @@ impl Workbench {
                 if st.anchor_id.is_none() {
                     st.anchor_id = Some(anchor);
                 }
-            });
+            }
             self.select_logger_entry(flow_id, window, cx);
             return;
         }
         if toggle {
             let mut next_primary = Some(flow_id);
             let mut deselected_last = false;
-            LOGGER_UI_TABLE_STATE.with(|map| {
-                let mut map_mut = map.borrow_mut();
-                let st = map_mut.entry(wb_id).or_default();
-                st.owner = Some(weak);
+            {
+                let mut st = self.extra_tools.logger_ui_table.borrow_mut();
                 if st.selected_set.is_empty()
                     && st.explicit_empty != cur_selected
                     && let Some(cur) = cur_selected
@@ -1286,7 +1259,7 @@ impl Workbench {
                     st.selected_set.insert(flow_id);
                     st.anchor_id = Some(flow_id);
                 }
-            });
+            }
             if deselected_last {
                 if self.extra_tools.logger_selected.is_some() && !self.leave_http_notes(window, cx)
                 {
@@ -1309,15 +1282,13 @@ impl Workbench {
             }
             return;
         }
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             st.explicit_empty = None;
             st.selected_set.clear();
             st.selected_set.insert(flow_id);
             st.anchor_id = Some(flow_id);
-        });
+        }
         self.select_logger_entry(flow_id, window, cx);
     }
 
@@ -1327,27 +1298,21 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        let already_in_multi = LOGGER_UI_TABLE_STATE.with(|map| {
-            let map_ref = map.borrow();
-            map_ref
-                .get(&wb_id)
-                .is_some_and(|st| st.selected_set.contains(&flow_id) && st.selected_set.len() > 1)
-        });
+        let already_in_multi = {
+            let st = self.extra_tools.logger_ui_table.borrow();
+            st.selected_set.contains(&flow_id) && st.selected_set.len() > 1
+        };
         if already_in_multi {
             cx.notify();
             return;
         }
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             st.explicit_empty = None;
             st.selected_set.clear();
             st.selected_set.insert(flow_id);
             st.anchor_id = Some(flow_id);
-        });
+        }
         if self.extra_tools.logger_selected != Some(flow_id) {
             self.select_logger_entry(flow_id, window, cx);
         }
@@ -1472,12 +1437,8 @@ impl Workbench {
         if col_ix == 0 || col_ix >= LOGGER_COL_COUNT {
             return;
         }
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             let visible_count = st.col_visible.iter().filter(|&&v| v).count();
             if st.col_visible[col_ix] {
                 if visible_count > 1 {
@@ -1486,7 +1447,7 @@ impl Workbench {
             } else {
                 st.col_visible[col_ix] = true;
             }
-        });
+        }
         cx.notify();
     }
 
@@ -1527,14 +1488,7 @@ impl Workbench {
         }
         drop(live_notes);
         let fitted = (widest + 16.0).round().clamp(38.0, 520.0);
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
-            st.col_widths[col_ix] = fitted;
-        });
+        self.extra_tools.logger_ui_table.borrow_mut().col_widths[col_ix] = fitted;
         cx.notify();
     }
 
@@ -1542,20 +1496,14 @@ impl Workbench {
         &mut self,
         col_ix: usize,
         start_x: f32,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         if col_ix >= LOGGER_COL_COUNT {
             return;
         }
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
-            let start_w = st.col_widths[col_ix];
-            st.resize_drag = Some((col_ix, start_x, start_w));
-        });
+        let mut st = self.extra_tools.logger_ui_table.borrow_mut();
+        let start_w = st.col_widths[col_ix];
+        st.resize_drag = Some((col_ix, start_x, start_w));
     }
 
     pub(super) fn update_logger_column_resize(
@@ -1567,12 +1515,9 @@ impl Workbench {
         if col_ix >= LOGGER_COL_COUNT {
             return;
         }
-        let wb_id = cx.entity_id();
         let scale = theme::ui_scale().max(0.75);
-        let mut changed = false;
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
+        let changed = {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             if let Some((drag_col, start_x, start_w)) = st.resize_drag
                 && drag_col == col_ix
             {
@@ -1580,10 +1525,14 @@ impl Workbench {
                 let next_w = (start_w + delta_unscaled).round().clamp(38.0, 520.0);
                 if (st.col_widths[col_ix] - next_w).abs() >= 0.5 {
                     st.col_widths[col_ix] = next_w;
-                    changed = true;
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
-        });
+        };
         if changed {
             cx.notify();
         }
@@ -1598,63 +1547,45 @@ impl Workbench {
         if col_ix >= LOGGER_COL_COUNT {
             return;
         }
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             st.col_widths[col_ix] = (st.col_widths[col_ix] + delta).clamp(38.0, 520.0);
-        });
+        }
         cx.notify();
     }
 
     pub(super) fn reset_logger_column_layout(&mut self, cx: &mut Context<Self>) {
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
             st.col_widths = LOGGER_DEFAULT_COL_WIDTHS;
             st.col_visible = [true; LOGGER_COL_COUNT];
             st.resize_drag = None;
-        });
+        }
         cx.notify();
     }
 
-    pub(in crate::workbench) fn clear_logger_pending_batch(&mut self, cx: &Context<Self>) {
-        let wb_id = cx.entity_id();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            if let Some(st) = map.borrow_mut().get_mut(&wb_id) {
-                st.pending_batch = None;
-            }
-        });
+    pub(in crate::workbench) fn clear_logger_pending_batch(&mut self) {
+        self.extra_tools
+            .logger_ui_table
+            .borrow_mut()
+            .pending_batch = None;
     }
 
-    pub(in crate::workbench) fn clear_logger_selection_state(&mut self, cx: &Context<Self>) {
-        let wb_id = cx.entity_id();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            if let Some(st) = map.borrow_mut().get_mut(&wb_id) {
-                st.selected_set.clear();
-                st.anchor_id = None;
-                st.explicit_empty = None;
-                st.pending_batch = None;
-            }
-        });
+    pub(in crate::workbench) fn clear_logger_selection_state(&mut self) {
+        let mut st = self.extra_tools.logger_ui_table.borrow_mut();
+        st.selected_set.clear();
+        st.anchor_id = None;
+        st.explicit_empty = None;
+        st.pending_batch = None;
     }
 
-    pub(super) fn logger_selected_target_ids(
-        &self,
-        workbench_id: gpui_kit::EntityId,
-        fallback_id: FlowId,
-    ) -> Vec<FlowId> {
-        let selected_set = LOGGER_UI_TABLE_STATE.with(|map| {
-            map.borrow()
-                .get(&workbench_id)
-                .map(|st| st.selected_set.clone())
-                .unwrap_or_default()
-        });
+    pub(super) fn logger_selected_target_ids(&self, fallback_id: FlowId) -> Vec<FlowId> {
+        let selected_set = self
+            .extra_tools
+            .logger_ui_table
+            .borrow()
+            .selected_set
+            .clone();
         if selected_set.contains(&fallback_id) && selected_set.len() > 1 {
             let ordered: Vec<FlowId> = self
                 .extra_tools
@@ -1754,37 +1685,36 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.transition.is_some() || self.project.is_none() || !self.backend_available() {
-            self.clear_logger_pending_batch(cx);
+            self.clear_logger_pending_batch();
             return;
         }
-        let wb_id = cx.entity_id();
         let mut next_to_read = None;
         let mut finished = None;
         loop {
-            let front = LOGGER_UI_TABLE_STATE.with(|map| {
-                map.borrow()
-                    .get(&wb_id)
-                    .and_then(|st| st.pending_batch.as_ref())
-                    .and_then(|b| b.remaining.front().copied())
-            });
+            let front = self
+                .extra_tools
+                .logger_ui_table
+                .borrow()
+                .pending_batch
+                .as_ref()
+                .and_then(|b| b.remaining.front().copied());
             let Some(front_id) = front else {
-                finished = LOGGER_UI_TABLE_STATE.with(|map| {
-                    map.borrow_mut()
-                        .get_mut(&wb_id)
-                        .and_then(|st| st.pending_batch.take())
-                });
+                finished = self
+                    .extra_tools
+                    .logger_ui_table
+                    .borrow_mut()
+                    .pending_batch
+                    .take();
                 break;
             };
             if let Some(record) = self.cached_logger_flow_record(front_id) {
-                LOGGER_UI_TABLE_STATE.with(|map| {
-                    if let Some(st) = map.borrow_mut().get_mut(&wb_id)
-                        && let Some(batch) = st.pending_batch.as_mut()
-                        && batch.remaining.front() == Some(&front_id)
-                    {
-                        batch.collected.push(record);
-                        batch.remaining.pop_front();
-                    }
-                });
+                let mut st = self.extra_tools.logger_ui_table.borrow_mut();
+                if let Some(batch) = st.pending_batch.as_mut()
+                    && batch.remaining.front() == Some(&front_id)
+                {
+                    batch.collected.push(record);
+                    batch.remaining.pop_front();
+                }
             } else {
                 next_to_read = Some(front_id);
                 break;
@@ -1919,17 +1849,13 @@ impl Workbench {
         {
             return;
         }
-        let wb_id = cx.entity_id();
-        let weak = cx.weak_entity();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            let mut map_mut = map.borrow_mut();
-            let st = map_mut.entry(wb_id).or_default();
-            st.owner = Some(weak);
-            st.pending_batch = Some(PendingLoggerBatchOp {
-                kind,
-                remaining: ids.iter().copied().collect(),
-                collected: Vec::with_capacity(ids.len()),
-            });
+        self.extra_tools
+            .logger_ui_table
+            .borrow_mut()
+            .pending_batch = Some(PendingLoggerBatchOp {
+            kind,
+            remaining: ids.iter().copied().collect(),
+            collected: Vec::with_capacity(ids.len()),
         });
         self.advance_logger_batch_op(window, cx);
     }
@@ -2125,16 +2051,14 @@ impl Workbench {
         for id in &remove_set {
             self.extra_tools.logger_filters.param_counts.remove(id);
         }
-        let wb_id = cx.entity_id();
-        LOGGER_UI_TABLE_STATE.with(|map| {
-            if let Some(st) = map.borrow_mut().get_mut(&wb_id) {
-                st.selected_set.retain(|id| !remove_set.contains(id));
-                if st.anchor_id.is_some_and(|id| remove_set.contains(&id)) {
-                    st.anchor_id = next_selected;
-                }
-                st.pending_batch = None;
+        {
+            let mut st = self.extra_tools.logger_ui_table.borrow_mut();
+            st.selected_set.retain(|id| !remove_set.contains(id));
+            if st.anchor_id.is_some_and(|id| remove_set.contains(&id)) {
+                st.anchor_id = next_selected;
             }
-        });
+            st.pending_batch = None;
+        }
         if selected_removed {
             if let Some(next_id) = next_selected {
                 self.select_logger_entry(next_id, window, cx);
@@ -2299,7 +2223,7 @@ pub(super) fn logger_row_menu(
             .unwrap_or(0);
         let in_scope = workbench.workspace.scope.has_enabled_includes()
             && workbench.workspace.scope.is_url_in_scope(&row_url);
-        let target_ids = workbench.logger_selected_target_ids(entity.entity_id(), flow_id);
+        let target_ids = workbench.logger_selected_target_ids(flow_id);
         (available, can_export_har, findings, hl, in_scope, target_ids)
     };
 

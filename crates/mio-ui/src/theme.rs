@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap};
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, Hsla, KeyBinding, Pixels, px, rgb};
+use gpui_kit::{App, Global, Hsla, KeyBinding, Pixels, px, rgb};
 use mio_core::{UserDisplaySettings, UserMessageEditorSettings, UserMiscSettings, UserThemeMode};
 
 pub(crate) const ROW_HEIGHT: f32 = 19.;
@@ -79,110 +79,98 @@ pub(crate) const fn svg_ui_font_family() -> &'static str {
     }
 }
 
-#[cfg(not(test))]
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
-};
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UiPreferencesState {
+    pub dark_mode: bool,
+    pub ui_font_size_px: u8,
+    pub scale_factor_percent: u16,
+    pub system_dpi_scale_percent: u16,
+    pub user_custom_scale_percent: u16,
+    pub table_cell_preview_chars: u16,
+    pub table_zebra_stripe: bool,
+    pub issues_grouped_evidence: bool,
+    pub use_system_dpi: bool,
+    pub editor_font_size_px: u8,
+    pub editor_soft_wrap: bool,
+    pub pretty_print_by_default: bool,
+    pub auto_expand_inspector: bool,
+    pub highlight_search_case_sensitive_default: bool,
+    pub search_regex_default: bool,
+    pub search_autoscroll_default: bool,
+    pub html_render_external_requests: bool,
+    pub editor_charset_mode: u8,
+    pub editor_specific_charset: String,
+    pub confirm_on_close_tab_with_unsaved_draft: bool,
+    pub redact_sensitive_headers_in_copy_curl: bool,
+    pub hotkey_send_request: String,
+    pub custom_hotkeys: BTreeMap<String, String>,
+    pub hidden_request_headers: Option<Vec<String>>,
+    pub hidden_response_headers: Option<Vec<String>>,
+    pub hide_request_headers_by_default: bool,
+    pub hide_response_headers_by_default: bool,
+    pub url_encode_as_you_type: bool,
+}
 
-#[cfg(not(test))]
-static DARK_MODE: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static UI_FONT_SIZE_PX: AtomicU8 = AtomicU8::new(13);
-#[cfg(not(test))]
-static SCALE_FACTOR_PERCENT: AtomicU16 = AtomicU16::new(100);
-#[cfg(not(test))]
-static SYSTEM_DPI_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);
-#[cfg(not(test))]
-static USER_CUSTOM_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);
-#[cfg(not(test))]
-static TABLE_CELL_PREVIEW_CHARS: AtomicU16 = AtomicU16::new(256);
-#[cfg(not(test))]
-static TABLE_ZEBRA_STRIPE: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static ISSUES_GROUPED_EVIDENCE: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static USE_SYSTEM_DPI: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static EDITOR_FONT_SIZE_PX: AtomicU8 = AtomicU8::new(13);
-#[cfg(not(test))]
-static EDITOR_SOFT_WRAP: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static PRETTY_PRINT_BY_DEFAULT: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static AUTO_EXPAND_INSPECTOR: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static SEARCH_REGEX_DEFAULT: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static SEARCH_AUTOSCROLL_DEFAULT: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static HTML_RENDER_EXTERNAL_REQUESTS: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static EDITOR_CHARSET_MODE: AtomicU8 = AtomicU8::new(0);
-#[cfg(not(test))]
-static EDITOR_SPECIFIC_CHARSET: Mutex<Option<String>> = Mutex::new(None);
-#[cfg(not(test))]
-static CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT: AtomicBool = AtomicBool::new(true);
-#[cfg(not(test))]
-static REDACT_SENSITIVE_HEADERS_IN_COPY_CURL: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static HOTKEY_SEND_REQUEST: Mutex<Option<String>> = Mutex::new(None);
-#[cfg(not(test))]
-static CUSTOM_HOTKEYS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
-#[cfg(not(test))]
-static HIDDEN_REQUEST_HEADERS: Mutex<Option<Vec<String>>> = Mutex::new(None);
-#[cfg(not(test))]
-static HIDDEN_RESPONSE_HEADERS: Mutex<Option<Vec<String>>> = Mutex::new(None);
-#[cfg(not(test))]
-static HIDE_REQUEST_HEADERS_BY_DEFAULT: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static HIDE_RESPONSE_HEADERS_BY_DEFAULT: AtomicBool = AtomicBool::new(false);
+impl Default for UiPreferencesState {
+    fn default() -> Self {
+        Self {
+            dark_mode: false,
+            ui_font_size_px: 13,
+            scale_factor_percent: 100,
+            system_dpi_scale_percent: 100,
+            user_custom_scale_percent: 100,
+            table_cell_preview_chars: 256,
+            table_zebra_stripe: true,
+            issues_grouped_evidence: true,
+            use_system_dpi: false,
+            editor_font_size_px: 13,
+            editor_soft_wrap: true,
+            pretty_print_by_default: true,
+            auto_expand_inspector: false,
+            highlight_search_case_sensitive_default: false,
+            search_regex_default: false,
+            search_autoscroll_default: false,
+            html_render_external_requests: true,
+            editor_charset_mode: 0,
+            editor_specific_charset: "UTF-8".into(),
+            confirm_on_close_tab_with_unsaved_draft: true,
+            redact_sensitive_headers_in_copy_curl: false,
+            hotkey_send_request: "cmd-enter".into(),
+            custom_hotkeys: BTreeMap::new(),
+            hidden_request_headers: None,
+            hidden_response_headers: None,
+            hide_request_headers_by_default: false,
+            hide_response_headers_by_default: false,
+            url_encode_as_you_type: false,
+        }
+    }
+}
 
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
+impl Global for UiPreferencesState {}
 
-#[cfg(test)]
 thread_local! {
-    static TEST_DARK_MODE: Cell<bool> = const { Cell::new(false) };
-    static TEST_UI_FONT_SIZE_PX: Cell<u8> = const { Cell::new(13) };
-    static TEST_SCALE_FACTOR_PERCENT: Cell<u16> = const { Cell::new(100) };
-    static TEST_SYSTEM_DPI_SCALE_PERCENT: Cell<u16> = const { Cell::new(100) };
-    static TEST_USER_CUSTOM_SCALE_PERCENT: Cell<u16> = const { Cell::new(100) };
-    static TEST_TABLE_CELL_PREVIEW_CHARS: Cell<u16> = const { Cell::new(256) };
-    static TEST_TABLE_ZEBRA_STRIPE: Cell<bool> = const { Cell::new(true) };
-    static TEST_ISSUES_GROUPED_EVIDENCE: Cell<bool> = const { Cell::new(true) };
-    static TEST_USE_SYSTEM_DPI: Cell<bool> = const { Cell::new(false) };
-    static TEST_EDITOR_FONT_SIZE_PX: Cell<u8> = const { Cell::new(13) };
-    static TEST_EDITOR_SOFT_WRAP: Cell<bool> = const { Cell::new(true) };
-    static TEST_PRETTY_PRINT_BY_DEFAULT: Cell<bool> = const { Cell::new(true) };
-    static TEST_AUTO_EXPAND_INSPECTOR: Cell<bool> = const { Cell::new(false) };
-    static TEST_HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT: Cell<bool> = const { Cell::new(false) };
-    static TEST_SEARCH_REGEX_DEFAULT: Cell<bool> = const { Cell::new(false) };
-    static TEST_SEARCH_AUTOSCROLL_DEFAULT: Cell<bool> = const { Cell::new(false) };
-    static TEST_HTML_RENDER_EXTERNAL_REQUESTS: Cell<bool> = const { Cell::new(true) };
-    static TEST_EDITOR_CHARSET_MODE: Cell<u8> = const { Cell::new(0) };
-    static TEST_EDITOR_SPECIFIC_CHARSET: RefCell<String> = RefCell::new("UTF-8".into());
-    static TEST_CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT: Cell<bool> = const { Cell::new(true) };
-    static TEST_REDACT_SENSITIVE_HEADERS_IN_COPY_CURL: Cell<bool> = const { Cell::new(false) };
-    static TEST_HOTKEY_SEND_REQUEST: RefCell<String> = RefCell::new("cmd-enter".into());
-    static TEST_CUSTOM_HOTKEYS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
-    static TEST_HIDDEN_REQUEST_HEADERS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
-    static TEST_HIDDEN_RESPONSE_HEADERS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
-    static TEST_HIDE_REQUEST_HEADERS_BY_DEFAULT: Cell<bool> = const { Cell::new(false) };
-    static TEST_HIDE_RESPONSE_HEADERS_BY_DEFAULT: Cell<bool> = const { Cell::new(false) };
+    static ACTIVE_UI_STATE: RefCell<UiPreferencesState> =
+        RefCell::new(UiPreferencesState::default());
+}
+
+fn read_state<R>(f: impl FnOnce(&UiPreferencesState) -> R) -> R {
+    ACTIVE_UI_STATE.with(|state| f(&state.borrow()))
+}
+
+fn update_state(cx: &mut App, f: impl FnOnce(&mut UiPreferencesState)) {
+    if cx.try_global::<UiPreferencesState>().is_none() {
+        cx.set_global(UiPreferencesState::default());
+    }
+    let snapshot = {
+        let state = cx.global_mut::<UiPreferencesState>();
+        f(state);
+        state.clone()
+    };
+    ACTIVE_UI_STATE.with(|cell| *cell.borrow_mut() = snapshot);
 }
 
 pub(crate) fn is_dark() -> bool {
-    #[cfg(not(test))]
-    {
-        DARK_MODE.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_DARK_MODE.with(Cell::get)
-    }
+    read_state(|s| s.dark_mode)
 }
 
 #[cfg(test)]
@@ -195,51 +183,23 @@ pub(crate) fn mode() -> ThemeMode {
 }
 
 pub(crate) fn ui_font_size_px() -> u8 {
-    #[cfg(not(test))]
-    {
-        UI_FONT_SIZE_PX.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_UI_FONT_SIZE_PX.with(Cell::get)
-    }
+    read_state(|s| s.ui_font_size_px)
 }
 
 pub(crate) fn scale_factor_percent() -> u16 {
     if use_system_dpi() {
         return system_dpi_scale_percent();
     }
-    #[cfg(not(test))]
-    {
-        SCALE_FACTOR_PERCENT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_SCALE_FACTOR_PERCENT.with(Cell::get)
-    }
+    read_state(|s| s.scale_factor_percent)
 }
 
 pub(crate) fn system_dpi_scale_percent() -> u16 {
-    #[cfg(not(test))]
-    {
-        SYSTEM_DPI_SCALE_PERCENT.load(Ordering::Relaxed).clamp(80, 200)
-    }
-    #[cfg(test)]
-    {
-        TEST_SYSTEM_DPI_SCALE_PERCENT.with(Cell::get).clamp(80, 200)
-    }
+    read_state(|s| s.system_dpi_scale_percent.clamp(80, 200))
 }
 
 #[allow(dead_code)]
 pub(crate) fn user_custom_scale_percent() -> u16 {
-    #[cfg(not(test))]
-    {
-        USER_CUSTOM_SCALE_PERCENT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_USER_CUSTOM_SCALE_PERCENT.with(Cell::get)
-    }
+    read_state(|s| s.user_custom_scale_percent)
 }
 
 fn compute_system_dpi_scale_percent(window_scale_factor: f32, is_macos: bool) -> u16 {
@@ -258,16 +218,20 @@ fn compute_system_dpi_scale_percent(window_scale_factor: f32, is_macos: bool) ->
     (ratio * 100.0).round() as u16
 }
 
-pub(crate) fn sync_window_system_dpi(window_scale_factor: f32) {
-    #[cfg(not(test))]
-    {
-        let pct = compute_system_dpi_scale_percent(window_scale_factor, cfg!(target_os = "macos"));
-        SYSTEM_DPI_SCALE_PERCENT.store(pct, Ordering::Relaxed);
+pub(crate) fn sync_window_system_dpi(window_scale_factor: f32, cx: &mut App) {
+    if cfg!(test) {
+        let _ = (window_scale_factor, cx);
+        return;
     }
-    #[cfg(test)]
+    let pct = compute_system_dpi_scale_percent(window_scale_factor, cfg!(target_os = "macos"));
+    if read_state(|s| s.system_dpi_scale_percent == pct)
+        && cx
+            .try_global::<UiPreferencesState>()
+            .is_some_and(|s| s.system_dpi_scale_percent == pct)
     {
-        let _ = window_scale_factor;
+        return;
     }
+    update_state(cx, |s| s.system_dpi_scale_percent = pct);
 }
 
 #[cfg(test)]
@@ -292,14 +256,7 @@ mod system_dpi_tests {
 }
 
 pub(crate) fn table_cell_preview_chars() -> usize {
-    #[cfg(not(test))]
-    {
-        usize::from(TABLE_CELL_PREVIEW_CHARS.load(Ordering::Relaxed))
-    }
-    #[cfg(test)]
-    {
-        usize::from(TEST_TABLE_CELL_PREVIEW_CHARS.with(Cell::get))
-    }
+    read_state(|s| usize::from(s.table_cell_preview_chars))
 }
 
 pub(crate) fn truncate_cell_preview(text: &str) -> String {
@@ -320,14 +277,7 @@ pub(crate) fn ui_font_size() -> Pixels {
 }
 
 pub(crate) fn editor_font_size_px() -> u8 {
-    #[cfg(not(test))]
-    {
-        EDITOR_FONT_SIZE_PX.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_EDITOR_FONT_SIZE_PX.with(Cell::get)
-    }
+    read_state(|s| s.editor_font_size_px)
 }
 
 pub(crate) fn editor_font_size() -> Pixels {
@@ -336,258 +286,98 @@ pub(crate) fn editor_font_size() -> Pixels {
 }
 
 pub(crate) fn editor_soft_wrap() -> bool {
-    #[cfg(not(test))]
-    {
-        EDITOR_SOFT_WRAP.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_EDITOR_SOFT_WRAP.with(Cell::get)
-    }
+    read_state(|s| s.editor_soft_wrap)
 }
 
 pub(crate) fn pretty_print_by_default() -> bool {
-    #[cfg(not(test))]
-    {
-        PRETTY_PRINT_BY_DEFAULT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_PRETTY_PRINT_BY_DEFAULT.with(Cell::get)
-    }
+    read_state(|s| s.pretty_print_by_default)
 }
 
 pub(crate) fn auto_expand_inspector() -> bool {
-    #[cfg(not(test))]
-    {
-        AUTO_EXPAND_INSPECTOR.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_AUTO_EXPAND_INSPECTOR.with(Cell::get)
-    }
+    read_state(|s| s.auto_expand_inspector)
 }
 
 pub(crate) fn highlight_search_case_sensitive_default() -> bool {
-    #[cfg(not(test))]
-    {
-        HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT.with(Cell::get)
-    }
+    read_state(|s| s.highlight_search_case_sensitive_default)
 }
 
 pub(crate) fn table_zebra_stripe() -> bool {
-    #[cfg(not(test))]
-    {
-        TABLE_ZEBRA_STRIPE.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_TABLE_ZEBRA_STRIPE.with(Cell::get)
-    }
+    read_state(|s| s.table_zebra_stripe)
 }
 
 pub(crate) fn issues_grouped_evidence() -> bool {
-    #[cfg(not(test))]
-    {
-        ISSUES_GROUPED_EVIDENCE.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_ISSUES_GROUPED_EVIDENCE.with(Cell::get)
-    }
+    read_state(|s| s.issues_grouped_evidence)
 }
 
 pub(crate) fn use_system_dpi() -> bool {
-    #[cfg(not(test))]
-    {
-        USE_SYSTEM_DPI.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_USE_SYSTEM_DPI.with(Cell::get)
-    }
+    read_state(|s| s.use_system_dpi)
 }
 
 #[allow(dead_code)]
 pub(crate) fn html_render_external_requests() -> bool {
-    #[cfg(not(test))]
-    {
-        HTML_RENDER_EXTERNAL_REQUESTS.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_HTML_RENDER_EXTERNAL_REQUESTS.with(Cell::get)
-    }
+    read_state(|s| s.html_render_external_requests)
 }
 
 pub(crate) fn message_editor_search_regex_default() -> bool {
-    #[cfg(not(test))]
-    {
-        SEARCH_REGEX_DEFAULT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_SEARCH_REGEX_DEFAULT.with(Cell::get)
-    }
+    read_state(|s| s.search_regex_default)
 }
 
 pub(crate) fn message_editor_search_autoscroll_default() -> bool {
-    #[cfg(not(test))]
-    {
-        SEARCH_AUTOSCROLL_DEFAULT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_SEARCH_AUTOSCROLL_DEFAULT.with(Cell::get)
-    }
+    read_state(|s| s.search_autoscroll_default)
 }
 
 pub(crate) fn message_editor_charset() -> (u8, String) {
-    #[cfg(not(test))]
-    {
-        let mode = EDITOR_CHARSET_MODE.load(Ordering::Relaxed).min(3);
-        let specific = EDITOR_SPECIFIC_CHARSET
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_else(|| "UTF-8".into());
-        (mode, specific)
-    }
-    #[cfg(test)]
-    {
-        let mode = TEST_EDITOR_CHARSET_MODE.with(Cell::get).min(3);
-        let specific = TEST_EDITOR_SPECIFIC_CHARSET.with(|c| c.borrow().clone());
-        (mode, specific)
-    }
+    read_state(|s| (s.editor_charset_mode.min(3), s.editor_specific_charset.clone()))
 }
 
 pub(crate) fn confirm_on_close_tab_with_unsaved_draft() -> bool {
-    #[cfg(not(test))]
-    {
-        CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT.with(Cell::get)
-    }
+    read_state(|s| s.confirm_on_close_tab_with_unsaved_draft)
 }
 
 pub(crate) fn redact_sensitive_headers_in_copy_curl() -> bool {
-    #[cfg(not(test))]
-    {
-        REDACT_SENSITIVE_HEADERS_IN_COPY_CURL.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_REDACT_SENSITIVE_HEADERS_IN_COPY_CURL.with(Cell::get)
-    }
+    read_state(|s| s.redact_sensitive_headers_in_copy_curl)
 }
 
 pub(crate) fn hotkey_send_request() -> String {
-    #[cfg(not(test))]
-    {
-        HOTKEY_SEND_REQUEST
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_else(|| "cmd-enter".into())
-    }
-    #[cfg(test)]
-    {
-        TEST_HOTKEY_SEND_REQUEST.with(|c| c.borrow().clone())
-    }
+    read_state(|s| s.hotkey_send_request.clone())
 }
 
 #[allow(dead_code)]
 pub(crate) fn custom_hotkeys() -> BTreeMap<String, String> {
-    #[cfg(not(test))]
-    {
-        CUSTOM_HOTKEYS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-    #[cfg(test)]
-    {
-        TEST_CUSTOM_HOTKEYS.with(|c| c.borrow().clone())
-    }
+    read_state(|s| s.custom_hotkeys.clone())
 }
 
 pub(crate) fn hidden_request_headers() -> Option<Vec<String>> {
-    #[cfg(not(test))]
-    {
-        HIDDEN_REQUEST_HEADERS
-            .lock()
-            .expect("hidden request headers mutex must remain available")
-            .clone()
-    }
-    #[cfg(test)]
-    {
-        TEST_HIDDEN_REQUEST_HEADERS.with(|c| c.borrow().clone())
-    }
+    read_state(|s| s.hidden_request_headers.clone())
 }
 
 pub(crate) fn hide_headers_by_default(response: bool) -> bool {
-    #[cfg(not(test))]
-    {
+    read_state(|s| {
         if response {
-            HIDE_RESPONSE_HEADERS_BY_DEFAULT.load(Ordering::Relaxed)
+            s.hide_response_headers_by_default
         } else {
-            HIDE_REQUEST_HEADERS_BY_DEFAULT.load(Ordering::Relaxed)
+            s.hide_request_headers_by_default
         }
-    }
-    #[cfg(test)]
-    {
-        if response {
-            TEST_HIDE_RESPONSE_HEADERS_BY_DEFAULT.with(Cell::get)
-        } else {
-            TEST_HIDE_REQUEST_HEADERS_BY_DEFAULT.with(Cell::get)
-        }
-    }
-}
-
-pub(crate) fn set_hidden_request_headers(headers: Option<Vec<String>>) {
-    #[cfg(not(test))]
-    {
-        *HIDDEN_REQUEST_HEADERS
-            .lock()
-            .expect("hidden request headers mutex must remain available") = headers;
-    }
-    #[cfg(test)]
-    {
-        TEST_HIDDEN_REQUEST_HEADERS.with(|c| *c.borrow_mut() = headers);
-    }
+    })
 }
 
 pub(crate) fn hidden_response_headers() -> Option<Vec<String>> {
-    #[cfg(not(test))]
-    {
-        HIDDEN_RESPONSE_HEADERS
-            .lock()
-            .expect("hidden response headers mutex must remain available")
-            .clone()
-    }
-    #[cfg(test)]
-    {
-        TEST_HIDDEN_RESPONSE_HEADERS.with(|c| c.borrow().clone())
-    }
+    read_state(|s| s.hidden_response_headers.clone())
 }
 
-pub(crate) fn set_hidden_response_headers(headers: Option<Vec<String>>) {
-    #[cfg(not(test))]
+pub(crate) fn url_encode_as_you_type() -> bool {
+    read_state(|s| s.url_encode_as_you_type)
+}
+
+pub(crate) fn set_url_encode_as_you_type(enabled: bool, cx: &mut App) {
+    if read_state(|s| s.url_encode_as_you_type == enabled)
+        && cx
+            .try_global::<UiPreferencesState>()
+            .is_some_and(|s| s.url_encode_as_you_type == enabled)
     {
-        *HIDDEN_RESPONSE_HEADERS
-            .lock()
-            .expect("hidden response headers mutex must remain available") = headers;
+        return;
     }
-    #[cfg(test)]
-    {
-        TEST_HIDDEN_RESPONSE_HEADERS.with(|c| *c.borrow_mut() = headers);
-    }
+    update_state(cx, |s| s.url_encode_as_you_type = enabled);
 }
 
 pub(crate) fn border() -> Hsla {
@@ -628,6 +418,8 @@ pub(crate) fn danger_border() -> Hsla {
 }
 
 pub(crate) fn init(cx: &mut App) {
+    cx.set_global(UiPreferencesState::default());
+    ACTIVE_UI_STATE.with(|cell| *cell.borrow_mut() = UiPreferencesState::default());
     apply_user_display(
         &UserDisplaySettings::default(),
         &UserMessageEditorSettings::default(),
@@ -657,8 +449,6 @@ pub(crate) fn apply_user_display(
     cx: &mut App,
 ) {
     editor.validate().expect("applied message editor preferences must be validated");
-    set_hidden_request_headers(editor.hidden_request_headers.clone());
-    set_hidden_response_headers(editor.hidden_response_headers.clone());
     let dark = matches!(display.theme, UserThemeMode::Dark);
     let ui_px = display.ui_font_size_px.clamp(11, 18);
     let custom_scale_pct = display.scale_factor_percent.clamp(80, 150);
@@ -675,59 +465,31 @@ pub(crate) fn apply_user_display(
     } else {
         editor.specific_charset.trim().to_owned()
     };
-    #[cfg(not(test))]
-    {
-        DARK_MODE.store(dark, Ordering::Relaxed);
-        UI_FONT_SIZE_PX.store(ui_px, Ordering::Relaxed);
-        SCALE_FACTOR_PERCENT.store(scale_pct, Ordering::Relaxed);
-        USER_CUSTOM_SCALE_PERCENT.store(custom_scale_pct, Ordering::Relaxed);
-        TABLE_CELL_PREVIEW_CHARS.store(preview_chars, Ordering::Relaxed);
-        TABLE_ZEBRA_STRIPE.store(display.table_zebra_stripe, Ordering::Relaxed);
-        ISSUES_GROUPED_EVIDENCE.store(display.issues_grouped_evidence, Ordering::Relaxed);
-        USE_SYSTEM_DPI.store(display.use_system_dpi, Ordering::Relaxed);
-        EDITOR_FONT_SIZE_PX.store(ed_px, Ordering::Relaxed);
-        EDITOR_SOFT_WRAP.store(editor.soft_wrap, Ordering::Relaxed);
-        PRETTY_PRINT_BY_DEFAULT.store(editor.pretty_print_by_default, Ordering::Relaxed);
-        AUTO_EXPAND_INSPECTOR.store(editor.auto_expand_inspector, Ordering::Relaxed);
-        HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT.store(
-            editor.highlight_search_case_sensitive_default,
-            Ordering::Relaxed,
-        );
-        SEARCH_REGEX_DEFAULT.store(editor.search_regex_default, Ordering::Relaxed);
-        SEARCH_AUTOSCROLL_DEFAULT.store(editor.search_autoscroll_default, Ordering::Relaxed);
-        HTML_RENDER_EXTERNAL_REQUESTS
-            .store(editor.html_render_external_requests, Ordering::Relaxed);
-        EDITOR_CHARSET_MODE.store(charset_mode, Ordering::Relaxed);
-        *EDITOR_SPECIFIC_CHARSET
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(specific_charset);
-        HIDE_REQUEST_HEADERS_BY_DEFAULT.store(editor.hide_request_headers_by_default, Ordering::Relaxed);
-        HIDE_RESPONSE_HEADERS_BY_DEFAULT.store(editor.hide_response_headers_by_default, Ordering::Relaxed);
-    }
-    #[cfg(test)]
-    {
-        TEST_DARK_MODE.with(|c| c.set(dark));
-        TEST_UI_FONT_SIZE_PX.with(|c| c.set(ui_px));
-        TEST_SCALE_FACTOR_PERCENT.with(|c| c.set(scale_pct));
-        TEST_USER_CUSTOM_SCALE_PERCENT.with(|c| c.set(custom_scale_pct));
-        TEST_TABLE_CELL_PREVIEW_CHARS.with(|c| c.set(preview_chars));
-        TEST_TABLE_ZEBRA_STRIPE.with(|c| c.set(display.table_zebra_stripe));
-        TEST_ISSUES_GROUPED_EVIDENCE.with(|c| c.set(display.issues_grouped_evidence));
-        TEST_USE_SYSTEM_DPI.with(|c| c.set(display.use_system_dpi));
-        TEST_EDITOR_FONT_SIZE_PX.with(|c| c.set(ed_px));
-        TEST_EDITOR_SOFT_WRAP.with(|c| c.set(editor.soft_wrap));
-        TEST_PRETTY_PRINT_BY_DEFAULT.with(|c| c.set(editor.pretty_print_by_default));
-        TEST_AUTO_EXPAND_INSPECTOR.with(|c| c.set(editor.auto_expand_inspector));
-        TEST_HIGHLIGHT_SEARCH_CASE_SENSITIVE_DEFAULT
-            .with(|c| c.set(editor.highlight_search_case_sensitive_default));
-        TEST_SEARCH_REGEX_DEFAULT.with(|c| c.set(editor.search_regex_default));
-        TEST_SEARCH_AUTOSCROLL_DEFAULT.with(|c| c.set(editor.search_autoscroll_default));
-        TEST_HTML_RENDER_EXTERNAL_REQUESTS.with(|c| c.set(editor.html_render_external_requests));
-        TEST_EDITOR_CHARSET_MODE.with(|c| c.set(charset_mode));
-        TEST_EDITOR_SPECIFIC_CHARSET.with(|c| *c.borrow_mut() = specific_charset);
-        TEST_HIDE_REQUEST_HEADERS_BY_DEFAULT.with(|c| c.set(editor.hide_request_headers_by_default));
-        TEST_HIDE_RESPONSE_HEADERS_BY_DEFAULT.with(|c| c.set(editor.hide_response_headers_by_default));
-    }
+    update_state(cx, |s| {
+        s.dark_mode = dark;
+        s.ui_font_size_px = ui_px;
+        s.scale_factor_percent = scale_pct;
+        s.user_custom_scale_percent = custom_scale_pct;
+        s.table_cell_preview_chars = preview_chars;
+        s.table_zebra_stripe = display.table_zebra_stripe;
+        s.issues_grouped_evidence = display.issues_grouped_evidence;
+        s.use_system_dpi = display.use_system_dpi;
+        s.editor_font_size_px = ed_px;
+        s.editor_soft_wrap = editor.soft_wrap;
+        s.pretty_print_by_default = editor.pretty_print_by_default;
+        s.auto_expand_inspector = editor.auto_expand_inspector;
+        s.highlight_search_case_sensitive_default = editor.highlight_search_case_sensitive_default;
+        s.search_regex_default = editor.search_regex_default;
+        s.search_autoscroll_default = editor.search_autoscroll_default;
+        s.html_render_external_requests = editor.html_render_external_requests;
+        s.editor_charset_mode = charset_mode;
+        s.editor_specific_charset = specific_charset;
+        s.hidden_request_headers = editor.hidden_request_headers.clone();
+        s.hidden_response_headers = editor.hidden_response_headers.clone();
+        s.hide_request_headers_by_default = editor.hide_request_headers_by_default;
+        s.hide_response_headers_by_default = editor.hide_response_headers_by_default;
+        s.url_encode_as_you_type = editor.url_encode_as_you_type;
+    });
 
     let theme_mode = if dark {
         ThemeMode::Dark
@@ -1092,30 +854,12 @@ pub(crate) fn apply_user_misc(misc: &UserMiscSettings, cx: &mut App) {
     };
     let previous = hotkey_send_request();
     let previous_custom = custom_hotkeys();
-    #[cfg(not(test))]
-    {
-        CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT.store(
-            misc.confirm_on_close_tab_with_unsaved_draft,
-            Ordering::Relaxed,
-        );
-        REDACT_SENSITIVE_HEADERS_IN_COPY_CURL.store(
-            misc.redact_sensitive_headers_in_copy_curl,
-            Ordering::Relaxed,
-        );
-        *HOTKEY_SEND_REQUEST
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(hotkey.to_owned());
-        *CUSTOM_HOTKEYS.lock().unwrap_or_else(|e| e.into_inner()) = misc.custom_hotkeys.clone();
-    }
-    #[cfg(test)]
-    {
-        TEST_CONFIRM_ON_CLOSE_TAB_WITH_UNSAVED_DRAFT
-            .with(|c| c.set(misc.confirm_on_close_tab_with_unsaved_draft));
-        TEST_REDACT_SENSITIVE_HEADERS_IN_COPY_CURL
-            .with(|c| c.set(misc.redact_sensitive_headers_in_copy_curl));
-        TEST_HOTKEY_SEND_REQUEST.with(|c| *c.borrow_mut() = hotkey.to_owned());
-        TEST_CUSTOM_HOTKEYS.with(|c| *c.borrow_mut() = misc.custom_hotkeys.clone());
-    }
+    update_state(cx, |s| {
+        s.confirm_on_close_tab_with_unsaved_draft = misc.confirm_on_close_tab_with_unsaved_draft;
+        s.redact_sensitive_headers_in_copy_curl = misc.redact_sensitive_headers_in_copy_curl;
+        s.hotkey_send_request = hotkey.to_owned();
+        s.custom_hotkeys = misc.custom_hotkeys.clone();
+    });
 
     let mut bindings = Vec::new();
     for old in [
@@ -1226,5 +970,99 @@ pub(crate) fn apply_user_misc(misc: &UserMiscSettings, cx: &mut App) {
 
     if !bindings.is_empty() {
         cx.bind_keys(bindings);
+    }
+}
+
+#[cfg(test)]
+mod ui_preferences_state_tests {
+    use super::*;
+
+    #[gpui_kit::test]
+    fn ui_preferences_global_stays_synced_with_theme_and_editing_accessors(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            init(cx);
+            assert_eq!(
+                cx.global::<UiPreferencesState>(),
+                &UiPreferencesState::default()
+            );
+            assert!(!is_dark());
+            assert!(!url_encode_as_you_type());
+
+            let display = UserDisplaySettings {
+                theme: UserThemeMode::Dark,
+                ui_font_size_px: 15,
+                scale_factor_percent: 125,
+                max_table_cell_preview_chars: 512,
+                table_zebra_stripe: false,
+                issues_grouped_evidence: false,
+                ..UserDisplaySettings::default()
+            };
+            let editor = UserMessageEditorSettings {
+                font_size_px: 16,
+                soft_wrap: false,
+                pretty_print_by_default: false,
+                auto_expand_inspector: true,
+                url_encode_as_you_type: true,
+                hidden_request_headers: Some(vec!["X-Test".into()]),
+                hide_request_headers_by_default: true,
+                ..UserMessageEditorSettings::default()
+            };
+            apply_user_display(&display, &editor, cx);
+
+            let misc = UserMiscSettings {
+                confirm_on_close_tab_with_unsaved_draft: false,
+                redact_sensitive_headers_in_copy_curl: true,
+                hotkey_send_request: "ctrl-enter".into(),
+                ..UserMiscSettings::default()
+            };
+            apply_user_misc(&misc, cx);
+
+            let global = cx.global::<UiPreferencesState>();
+            assert!(global.dark_mode);
+            assert_eq!(global.ui_font_size_px, 15);
+            assert_eq!(global.scale_factor_percent, 125);
+            assert_eq!(global.table_cell_preview_chars, 512);
+            assert!(!global.table_zebra_stripe);
+            assert!(!global.issues_grouped_evidence);
+            assert_eq!(global.editor_font_size_px, 16);
+            assert!(!global.editor_soft_wrap);
+            assert!(!global.pretty_print_by_default);
+            assert!(global.auto_expand_inspector);
+            assert!(global.url_encode_as_you_type);
+            assert_eq!(global.hidden_request_headers.as_deref(), Some(&["X-Test".to_string()][..]));
+            assert!(global.hide_request_headers_by_default);
+            assert!(!global.confirm_on_close_tab_with_unsaved_draft);
+            assert!(global.redact_sensitive_headers_in_copy_curl);
+            assert_eq!(global.hotkey_send_request, "ctrl-enter");
+
+            assert!(is_dark());
+            assert_eq!(ui_font_size_px(), 15);
+            assert_eq!(scale_factor_percent(), 125);
+            assert_eq!(table_cell_preview_chars(), 512);
+            assert!(!table_zebra_stripe());
+            assert!(!issues_grouped_evidence());
+            assert_eq!(editor_font_size_px(), 16);
+            assert!(!editor_soft_wrap());
+            assert!(!pretty_print_by_default());
+            assert!(auto_expand_inspector());
+            assert!(url_encode_as_you_type());
+            assert!(hide_headers_by_default(false));
+            assert!(!confirm_on_close_tab_with_unsaved_draft());
+            assert!(redact_sensitive_headers_in_copy_curl());
+            assert_eq!(hotkey_send_request(), "ctrl-enter");
+
+            set_url_encode_as_you_type(false, cx);
+            assert!(!cx.global::<UiPreferencesState>().url_encode_as_you_type);
+            assert!(!url_encode_as_you_type());
+
+            init(cx);
+            assert_eq!(
+                cx.global::<UiPreferencesState>(),
+                &UiPreferencesState::default()
+            );
+        });
     }
 }

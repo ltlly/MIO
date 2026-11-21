@@ -230,35 +230,12 @@ pub(crate) enum ConvertKind {
 #[action(namespace = mio, no_json)]
 pub(crate) struct CopyConvertedSelection(pub(crate) ConvertKind);
 
-#[cfg(not(test))]
-static URL_ENCODE_AS_YOU_TYPE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(test)]
-thread_local! {
-    static TEST_URL_ENCODE_AS_YOU_TYPE: Cell<bool> = const { Cell::new(false) };
-}
-
 pub(crate) fn url_encode_as_you_type() -> bool {
-    #[cfg(not(test))]
-    {
-        URL_ENCODE_AS_YOU_TYPE.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        TEST_URL_ENCODE_AS_YOU_TYPE.with(Cell::get)
-    }
+    crate::theme::url_encode_as_you_type()
 }
 
-pub(crate) fn set_url_encode_as_you_type(enabled: bool) {
-    #[cfg(not(test))]
-    {
-        URL_ENCODE_AS_YOU_TYPE.store(enabled, Ordering::Relaxed);
-    }
-    #[cfg(test)]
-    {
-        TEST_URL_ENCODE_AS_YOU_TYPE.with(|cell| cell.set(enabled));
-    }
+pub(crate) fn set_url_encode_as_you_type(enabled: bool, cx: &mut App) {
+    crate::theme::set_url_encode_as_you_type(enabled, cx);
 }
 
 pub(crate) fn url_encode_typed_char(byte: u8) -> Option<&'static str> {
@@ -843,14 +820,14 @@ mod extended_convert_and_url_encode_tests {
             }
         }
         cx.update(gpui_kit::init);
-        set_url_encode_as_you_type(false);
+        cx.update(|cx| set_url_encode_as_you_type(false, cx));
         let (view, visual) = cx.add_window_view(|window, cx| {
             let ed = new_editor(window, cx);
             ed.update(cx, |s, cx| s.set_value("GET /?a=1", window, cx));
             EditorHost(ed)
         });
-        set_url_encode_as_you_type(true);
         visual.update(|window, cx| {
+            set_url_encode_as_you_type(true, cx);
             let editor = view.read(cx).0.clone();
             editor.update(cx, |state, cx| {
                 let end = state.text().len();
@@ -861,6 +838,6 @@ mod extended_convert_and_url_encode_tests {
         cx.run_until_parked();
         let value = cx.read(|cx| view.read(cx).0.read(cx).value().to_string());
         assert_eq!(value, "GET /?a=1%26");
-        set_url_encode_as_you_type(false);
+        cx.update(|cx| set_url_encode_as_you_type(false, cx));
     }
 }

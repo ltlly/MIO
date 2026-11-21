@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mio_core::{
@@ -900,12 +898,15 @@ impl Workbench {
 
         let owner_window = self.owner_window;
         let self_entity = cx.entity();
-        let sub_slot: Rc<RefCell<Option<Subscription>>> = Rc::new(RefCell::new(None));
-        let sub_for_observer = sub_slot.clone();
-        let sub_for_timeout = sub_slot.clone();
         let observer = cx.observe(&self_entity, move |view, entity, cx| {
             if view.project != Some(project) || !view.backend_available() {
-                *sub_for_observer.borrow_mut() = None;
+                if view
+                    .collaborator_insert_sub
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == seq)
+                {
+                    view.collaborator_insert_sub = None;
+                }
                 return;
             }
             let fresh = view
@@ -924,7 +925,13 @@ impl Workbench {
                 })
                 .map(|item| item.http_callback_url.clone());
             if let Some(payload) = fresh {
-                *sub_for_observer.borrow_mut() = None;
+                if view
+                    .collaborator_insert_sub
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == seq)
+                {
+                    view.collaborator_insert_sub = None;
+                }
                 let weak = entity.downgrade();
                 cx.defer(move |cx| {
                     let _ = owner_window.update(cx, |_, window, cx| {
@@ -949,19 +956,30 @@ impl Workbench {
                 });
                 return;
             }
-            if view.collaborator_pane.error.is_some() && view.collaborator_pane.error != before_error
+            if view.collaborator_pane.error.is_some()
+                && view.collaborator_pane.error != before_error
+                && view
+                    .collaborator_insert_sub
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == seq)
             {
-                *sub_for_observer.borrow_mut() = None;
+                view.collaborator_insert_sub = None;
             }
         });
-        *sub_slot.borrow_mut() = Some(observer);
+        self.collaborator_insert_sub = Some((seq, observer));
         let timer = cx
             .background_executor()
             .timer(std::time::Duration::from_secs(15));
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             timer.await;
-            let _ = cx.update(|_| {
-                *sub_for_timeout.borrow_mut() = None;
+            let _ = this.update(cx, |view, _| {
+                if view
+                    .collaborator_insert_sub
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == seq)
+                {
+                    view.collaborator_insert_sub = None;
+                }
             });
         })
         .detach();
@@ -1061,7 +1079,7 @@ impl Workbench {
     pub(in crate::workbench) fn toggle_url_encode_as_you_type(&mut self, cx: &mut Context<Self>) {
         let next = !self.url_encode_as_you_type_enabled();
         self.user_preferences.message_editor.url_encode_as_you_type = next;
-        editing::set_url_encode_as_you_type(next);
+        editing::set_url_encode_as_you_type(next, cx);
         if let Some(confirmed) = self.user_preferences.confirmed.clone() {
             let mut message_editor = confirmed.message_editor.clone();
             message_editor.url_encode_as_you_type = next;

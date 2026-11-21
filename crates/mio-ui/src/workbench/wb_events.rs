@@ -20,6 +20,7 @@ impl Workbench {
             Event::UserPreferences { .. }
             | Event::UserPreferencesSaved { .. }
             | Event::ProjectOpened { .. }
+            | Event::ProjectDiskUsage { .. }
             | Event::ProjectSaved { .. }
             | Event::ProjectSlimSaved { .. }
             | Event::Quiesced { .. }
@@ -183,6 +184,12 @@ impl Workbench {
                 self.project = Some(project);
                 self.ext_project_opened(path.as_ref(), cx);
                 self.project_path = path;
+                self.project_disk_bytes = None;
+                self.closed_repeater_order.clear();
+                self.repeater_ui_caches.clear_caches();
+                self.sequential_group_queue = None;
+                self.editor_ui_caches.clear();
+                self.collaborator_insert_sub = None;
                 *self.workspace = workspace;
                 self.listener_input.update(cx, |input, cx| {
                     input.set_value(
@@ -293,6 +300,7 @@ impl Workbench {
                 };
                 self.project_saves_in_flight = self.project_saves_in_flight.saturating_sub(1);
                 self.project_path = Some(path.clone());
+                self.project_disk_bytes = Some(total_bytes);
                 let submitted = self.project_notes_save.take().unwrap_or_default();
                 if let Err(error) =
                     self.accept_saved_websocket_notes(&submitted, &websocket_notes, window, cx)
@@ -355,6 +363,9 @@ impl Workbench {
                 self.send_websocket_notes(false, cx);
                 self.send_http_notes(false, cx);
                 self.send_http_highlights(false, cx);
+            }
+            Event::ProjectDiskUsage { project, bytes } if self.project == Some(project) => {
+                self.project_disk_bytes = Some(bytes);
             }
             Event::ProjectSlimSaved {
                 project,

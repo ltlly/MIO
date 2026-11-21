@@ -8,6 +8,7 @@ pub(crate) mod fs_atomic;
 pub mod har;
 mod http;
 pub mod intruder;
+pub(crate) mod lru;
 pub mod oast;
 mod organiser;
 pub mod plugins;
@@ -62,8 +63,7 @@ pub use service::ai_ipc::{
 };
 pub use store::{inspect_mio_ext_archive, read_mio_ext_websocket_fragment};
 pub use sys_metrics::{
-    current_process_memory_bytes, measure_project_disk_bytes, project_disk_bytes,
-    total_physical_memory_bytes,
+    current_process_memory_bytes, measure_project_disk_bytes, total_physical_memory_bytes,
 };
 pub use updater::{UpdateInfo, UpdateStatus};
 pub use ext_archive::is_external_archive_file;

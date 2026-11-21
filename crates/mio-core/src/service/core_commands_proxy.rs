@@ -215,8 +215,10 @@ impl State {
         let upstream_tls = self
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)?;
-        workspace.upstream_proxy.sync_user_level_cache();
-        let eff_upstream = workspace.upstream_proxy.effective_for_runtime();
+        let eff_upstream = workspace
+            .upstream_proxy
+            .effective_for_runtime(&self.user_level_connections_cache);
+        eff_upstream.sync_user_level_cache(&mut self.user_level_connections_cache);
         let upstream_route = eff_upstream
             .to_route_with_tls(upstream_tls.clone())?;
         let upstream_route_resolver = eff_upstream
@@ -300,7 +302,12 @@ impl State {
             config.network.hostname_overrides = hostname_overrides.clone();
             config.limits.request_timeout = request_timeout;
             config.limits.streaming_timeout = streaming_timeout;
-            apply_listener_and_workspace_options(&mut config, listener_cfg, &workspace);
+            apply_listener_and_workspace_options(
+                &mut config,
+                listener_cfg,
+                &workspace,
+                &eff_upstream,
+            );
             config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
             config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
             config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
@@ -429,8 +436,9 @@ impl State {
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)?;
         let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
-        workspace.upstream_proxy.sync_user_level_cache();
-        let eff_upstream = workspace.upstream_proxy.effective_for_runtime();
+        let eff_upstream = workspace
+            .upstream_proxy
+            .effective_for_runtime(&self.user_level_connections_cache);
         let upstream_route = eff_upstream
             .to_route_with_tls(upstream_tls.clone())?;
         let upstream_route_resolver = eff_upstream
@@ -518,7 +526,12 @@ impl State {
             config.network.hostname_overrides = hostname_overrides.clone();
             config.limits.request_timeout = request_timeout;
             config.limits.streaming_timeout = streaming_timeout;
-            apply_listener_and_workspace_options(&mut config, listener_cfg, workspace);
+            apply_listener_and_workspace_options(
+                &mut config,
+                listener_cfg,
+                workspace,
+                &eff_upstream,
+            );
             config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
             config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
             config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
@@ -779,6 +792,7 @@ fn apply_listener_and_workspace_options(
     config: &mut ProxyConfig,
     listener: &ProxyListenerConfig,
     workspace: &Workspace,
+    eff_up: &UpstreamProxySettings,
 ) {
     config.network.invisible_proxying = listener.invisible_proxying;
     config.network.redirect_to_host = (!listener.redirect_to_host.trim().is_empty())
@@ -811,7 +825,6 @@ fn apply_listener_and_workspace_options(
     config.http.understand_100_continue = http.understand_100_continue;
     config.http.remove_100_continue_headers = http.remove_100_continue_headers;
 
-    let eff_up = workspace.upstream_proxy.effective_for_runtime();
     config.auth.platform_enabled = eff_up.platform_auth.enabled;
     config.auth.platform_rules = eff_up.compiled_platform_auth_rules();
     config.auth.upstream_rules = eff_up.compiled_upstream_auth_rules();

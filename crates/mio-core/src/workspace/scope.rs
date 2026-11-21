@@ -1,21 +1,24 @@
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-};
+use std::sync::{Mutex, OnceLock};
+
+use crate::lru::BoundedLruCache;
 
 use super::*;
 
 const SCOPE_REGEX_CACHE_LIMIT: usize = 256;
 
+fn scope_regex_cache() -> &'static Mutex<BoundedLruCache<String, Option<regex::Regex>>> {
+    static CACHE: OnceLock<Mutex<BoundedLruCache<String, Option<regex::Regex>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BoundedLruCache::new(SCOPE_REGEX_CACHE_LIMIT)))
+}
+
 fn cached_scope_regex(pattern: &str) -> Option<regex::Regex> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = scope_regex_cache();
     {
-        let guard = cache
+        let mut guard = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = guard.get(pattern) {
-            return cached.clone();
+            return cached;
         }
     }
     let compiled = regex::RegexBuilder::new(pattern)
@@ -27,9 +30,6 @@ fn cached_scope_regex(pattern: &str) -> Option<regex::Regex> {
         let mut guard = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.len() >= SCOPE_REGEX_CACHE_LIMIT && !guard.contains_key(pattern) {
-            guard.clear();
-        }
         guard.insert(pattern.to_owned(), compiled.clone());
     }
     compiled
@@ -346,5 +346,34 @@ impl AdvancedScopeRule {
             }
             None => re.is_match(parsed.path()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_regex_cache_evicts_lru_without_dropping_recent_patterns() {
+        let pat_evict = "^lab-evict-host\\.invalid$";
+        let pat_keep = "^lab-keep-host\\.invalid$";
+        assert!(cached_scope_regex(pat_evict).is_some());
+        assert!(cached_scope_regex(pat_keep).is_some());
+        for idx in 0..(SCOPE_REGEX_CACHE_LIMIT - 2) {
+            let pat = format!("^lab-host-{idx}\\.invalid$");
+            assert!(cached_scope_regex(&pat).is_some());
+        }
+        // Touch `pat_keep` so `pat_evict` is the least-recently-used entry when inserting one more.
+        assert!(cached_scope_regex(pat_keep).is_some());
+        let pat_overflow = "^lab-host-overflow\\.invalid$";
+        assert!(cached_scope_regex(pat_overflow).is_some());
+
+        let guard = scope_regex_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(guard.len(), SCOPE_REGEX_CACHE_LIMIT);
+        assert!(guard.contains_key(pat_keep));
+        assert!(guard.contains_key(pat_overflow));
+        assert!(!guard.contains_key(pat_evict));
     }
 }

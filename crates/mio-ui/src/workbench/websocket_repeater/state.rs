@@ -354,7 +354,7 @@ impl Workbench {
             .find(|tab| tab.id == id)
         {
             tab.closed = true;
-            crate::workbench::tabs::actions::record_closed_repeater_tab(self.project, id, true);
+            self.record_closed_repeater_tab(id, true);
         }
         if let Some(mut editors) = self.websocket_repeater.editors.remove(&id) {
             if let Some(cancel) = editors.connecting.take() {

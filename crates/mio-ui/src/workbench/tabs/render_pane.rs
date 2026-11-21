@@ -15,49 +15,66 @@ gpui_kit::actions!(mio_repeater_pane, [SaveRepeaterEntireHistory]);
 const REPEATER_HISTORY_PAGE_SIZE: usize = 64;
 
 type RepeaterRedirectCacheKey = (
-    gpui_kit::EntityId,
     TabId,
     crate::workbench::inspector::MessageEditorRevKey,
     HttpVersion,
 );
 
+#[derive(Default)]
+pub(in crate::workbench) struct RepeaterUiCaches {
+    pub(in crate::workbench::tabs::render_pane) open_target_dialogs:
+        std::cell::RefCell<Vec<gpui_kit::WeakEntity<RepeaterTargetDialog>>>,
+    pub(in crate::workbench::tabs::render_pane) redirect_cache:
+        std::cell::RefCell<Option<(RepeaterRedirectCacheKey, bool)>>,
+    pub(in crate::workbench::tabs::render_pane) response_len_cache:
+        std::cell::RefCell<Option<(crate::workbench::inspector::MessageEditorRevKey, usize)>>,
+    pub(in crate::workbench::tabs::render_pane) explanation_cache: std::cell::RefCell<
+        Option<(drawers::ExplanationCacheKey, std::rc::Rc<drawers::RepeaterExplanationReport>)>,
+    >,
+}
+
+impl RepeaterUiCaches {
+    pub(in crate::workbench) fn clear_caches(&self) {
+        self.open_target_dialogs
+            .borrow_mut()
+            .retain(|entry| entry.upgrade().is_some());
+        *self.redirect_cache.borrow_mut() = None;
+        *self.response_len_cache.borrow_mut() = None;
+        *self.explanation_cache.borrow_mut() = None;
+    }
+}
+
+#[cfg(test)]
 std::thread_local! {
-    static OPEN_REPEATER_TARGET_DIALOGS: std::cell::RefCell<Vec<gpui_kit::WeakEntity<RepeaterTargetDialog>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static REPEATER_REDIRECT_CACHE: std::cell::RefCell<Option<(RepeaterRedirectCacheKey, bool)>> =
-        const { std::cell::RefCell::new(None) };
-    static REPEATER_RESPONSE_LEN_CACHE: std::cell::RefCell<
-        Option<(crate::workbench::inspector::MessageEditorRevKey, usize)>,
-    > = const { std::cell::RefCell::new(None) };
-    #[cfg(test)]
     static AUTO_OPEN_REPEATER_INSPECTOR_IN_TEST: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
-fn cached_message_byte_len(editor: &MessageEditor, cx: &App) -> usize {
-    let text_len = if editor.pretty_active() || editor.view() == MessageView::Raw {
-        editor.raw.read(cx).text().len()
-    } else {
-        editor.hex.read(cx).text().len()
-    };
-    if text_len == 0 {
-        return 0;
-    }
-    let key = crate::workbench::inspector::message_editor_rev_key(editor, cx);
-    if let Some(len) = REPEATER_RESPONSE_LEN_CACHE.with(|cache| {
-        cache
+impl Workbench {
+    fn cached_message_byte_len(&self, editor: &MessageEditor, cx: &App) -> usize {
+        let text_len = if editor.pretty_active() || editor.view() == MessageView::Raw {
+            editor.raw.read(cx).text().len()
+        } else {
+            editor.hex.read(cx).text().len()
+        };
+        if text_len == 0 {
+            return 0;
+        }
+        let key = crate::workbench::inspector::message_editor_rev_key(editor, cx);
+        if let Some(len) = self
+            .repeater_ui_caches
+            .response_len_cache
             .borrow()
             .as_ref()
             .filter(|(cached_key, _)| *cached_key == key)
             .map(|(_, len)| *len)
-    }) {
-        return len;
+        {
+            return len;
+        }
+        let exact_len = editor.bytes_lossless(cx).len();
+        *self.repeater_ui_caches.response_len_cache.borrow_mut() = Some((key, exact_len));
+        exact_len
     }
-    let exact_len = editor.bytes_lossless(cx).len();
-    REPEATER_RESPONSE_LEN_CACHE.with(|cache| {
-        *cache.borrow_mut() = Some((key, exact_len));
-    });
-    exact_len
 }
 
 #[cfg(test)]
@@ -192,12 +209,6 @@ impl RepeaterTargetDialog {
             weak.update(cx, |this, cx| this.can_close(window, cx)).unwrap_or(true)
         });
         window.set_window_title("Edit target");
-        let self_weak = cx.weak_entity();
-        OPEN_REPEATER_TARGET_DIALOGS.with(|slot| {
-            let mut list = slot.borrow_mut();
-            list.retain(|entry| entry.upgrade().is_some());
-            list.push(self_weak);
-        });
         Self {
             owner: owner.downgrade(),
             owner_window,
@@ -205,7 +216,7 @@ impl RepeaterTargetDialog {
             tab_id,
             target,
             base_target: initial,
-            sync_host: crate::workbench::wb_repeater::repeater_target_sync_host_enabled(),
+            sync_host: owner.read(cx).repeater_target_sync_host,
             pending: None,
             submitting: false,
             available: true,
@@ -396,7 +407,7 @@ impl RepeaterTargetDialog {
                     }
                     view.status = format!("Repeater 目标：{target}");
                     cx.notify();
-                    crate::workbench::wb_repeater::set_repeater_target_sync_host(sync_host);
+                    view.repeater_target_sync_host = sync_host;
                     Ok(view.pending_workspace)
                 })
             });
@@ -1059,20 +1070,19 @@ impl Workbench {
             let can_follow_redirect = tab_meta.is_some_and(|tab| {
                 let resp_key =
                     crate::workbench::inspector::message_editor_rev_key(&editors.response, cx);
-                let cache_key = (cx.entity_id(), tab.id, resp_key, tab.draft.version);
-                if let Some(cached) = REPEATER_REDIRECT_CACHE.with(|cache| {
-                    cache
-                        .borrow()
-                        .as_ref()
-                        .filter(|(k, _)| *k == cache_key)
-                        .map(|(_, v)| *v)
-                }) {
+                let cache_key = (tab.id, resp_key, tab.draft.version);
+                if let Some(cached) = self
+                    .repeater_ui_caches
+                    .redirect_cache
+                    .borrow()
+                    .as_ref()
+                    .filter(|(k, _)| *k == cache_key)
+                    .map(|(_, v)| *v)
+                {
                     return cached;
                 }
                 let result = self.can_follow_repeater_redirect(tab, window, cx);
-                REPEATER_REDIRECT_CACHE.with(|cache| {
-                    *cache.borrow_mut() = Some((cache_key, result));
-                });
+                *self.repeater_ui_caches.redirect_cache.borrow_mut() = Some((cache_key, result));
                 result
             });
             let revision = tab_meta.map_or(0, |tab| tab.draft.revision);
@@ -1105,7 +1115,7 @@ impl Workbench {
                     let resp_bytes = if let Some(response) = flow.response.as_ref() {
                         crate::workbench::wb_repeater::raw_response_byte_len(response) as u64
                     } else {
-                        let loaded_len = cached_message_byte_len(&editors.response, cx) as u64;
+                        let loaded_len = self.cached_message_byte_len(&editors.response, cx) as u64;
                         if loaded_len > 0 {
                             loaded_len
                         } else {
@@ -1115,7 +1125,7 @@ impl Workbench {
                     format!("{resp_bytes} bytes | {} millis", flow.summary.elapsed_ms)
                 })
                 .unwrap_or_else(|| {
-                    let resp_len = cached_message_byte_len(&editors.response, cx);
+                    let resp_len = self.cached_message_byte_len(&editors.response, cx);
                     if resp_len > 0 {
                         format!("{resp_len} bytes | 0 millis")
                     } else {
@@ -1354,11 +1364,11 @@ impl Workbench {
             return Ok(());
         };
         let owner_id = self.owner_window;
-        let dialogs = OPEN_REPEATER_TARGET_DIALOGS.with(|slot| {
-            let mut list = slot.borrow_mut();
+        let dialogs = {
+            let mut list = self.repeater_ui_caches.open_target_dialogs.borrow_mut();
             list.retain(|entry| entry.upgrade().is_some());
             list.clone()
-        });
+        };
         for weak in dialogs {
             if let Some(dialog) = weak.upgrade() {
                 let d = dialog.read(cx);
@@ -1378,11 +1388,11 @@ impl Workbench {
             return false;
         };
         let owner_id = self.owner_window;
-        let dialogs = OPEN_REPEATER_TARGET_DIALOGS.with(|slot| {
-            let mut list = slot.borrow_mut();
+        let dialogs = {
+            let mut list = self.repeater_ui_caches.open_target_dialogs.borrow_mut();
             list.retain(|entry| entry.upgrade().is_some());
             list.clone()
-        });
+        };
         dialogs.into_iter().any(|weak| {
             let Some(dialog) = weak.upgrade() else {
                 return false;
@@ -1409,11 +1419,11 @@ impl Workbench {
     ) -> Option<Entity<RepeaterTargetDialog>> {
         let project = self.project?;
         let owner_id = self.owner_window;
-        let dialogs = OPEN_REPEATER_TARGET_DIALOGS.with(|slot| {
-            let mut list = slot.borrow_mut();
+        let dialogs = {
+            let mut list = self.repeater_ui_caches.open_target_dialogs.borrow_mut();
             list.retain(|entry| entry.upgrade().is_some());
             list.clone()
-        });
+        };
         dialogs.into_iter().find_map(|weak| {
             let dialog = weak.upgrade()?;
             let d = dialog.read(cx);
@@ -1470,8 +1480,18 @@ impl Workbench {
                     owner.clone(), owner_window, project, tab_id, initial, window, cx,
                 )),
             );
-            if let Err(error) = opened {
-                owner.update(cx, |view, cx| view.fail(format!("目标窗口打开失败：{error}"), cx));
+            match opened {
+                Ok((_, dialog)) => {
+                    let weak = dialog.downgrade();
+                    owner.update(cx, |view, _| {
+                        let mut list = view.repeater_ui_caches.open_target_dialogs.borrow_mut();
+                        list.retain(|entry| entry.upgrade().is_some());
+                        list.push(weak);
+                    });
+                }
+                Err(error) => {
+                    owner.update(cx, |view, cx| view.fail(format!("目标窗口打开失败：{error}"), cx));
+                }
             }
         });
     }

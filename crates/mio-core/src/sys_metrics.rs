@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -8,9 +7,6 @@ use std::{
 
 use anyhow::Result;
 
-use crate::ProjectKey;
-
-static PROJECT_DISK_BYTES: Mutex<BTreeMap<ProjectKey, u64>> = Mutex::new(BTreeMap::new());
 static TOTAL_PHYSICAL_MEMORY_BYTES: OnceLock<u64> = OnceLock::new();
 static PROCESS_MEMORY_CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
 const PROCESS_MEMORY_CACHE_TTL: Duration = Duration::from_millis(1500);
@@ -219,25 +215,9 @@ pub fn measure_project_disk_bytes(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-pub(crate) fn set_project_disk_bytes(project: ProjectKey, bytes: u64) {
-    if let Ok(mut guard) = PROJECT_DISK_BYTES.lock() {
-        guard.retain(|key, _| key.id != project.id || key.generation >= project.generation);
-        guard.insert(project, bytes);
-    }
-}
-
-/// Returns the most recently observed project disk footprint (`main + wal + shm`) for `project`.
-pub fn project_disk_bytes(project: ProjectKey) -> Option<u64> {
-    PROJECT_DISK_BYTES
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(&project).copied())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Uuid;
 
     #[test]
     fn process_memory_and_project_disk_bytes_report_real_values() {
@@ -263,12 +243,5 @@ mod tests {
             measure_project_disk_bytes(&main).unwrap(),
             4096 + 2048 + 512
         );
-
-        let key = ProjectKey {
-            id: Uuid::new_v4(),
-            generation: 1,
-        };
-        set_project_disk_bytes(key, 6656);
-        assert_eq!(project_disk_bytes(key), Some(6656));
     }
 }

@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::Arc,
-    sync::Mutex,
     sync::RwLock,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -128,8 +127,11 @@ struct ActiveSend {
 
 struct State {
     preferences: crate::preferences::PreferencesStore,
+    user_level_connections_cache: UserLevelConnectionsCache,
     project: ProjectKey,
     store: ProjectStore,
+    project_disk_bytes: u64,
+    last_disk_refresh: Option<Instant>,
     events: mpsc::Sender<Event>,
     awaiting_event_slot: bool,
     cancel: CancellationToken,

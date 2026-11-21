@@ -1,8 +1,5 @@
 use std::{
-    borrow::Borrow,
     cell::{Cell, OnceCell, RefCell},
-    collections::HashMap,
-    hash::Hash,
     rc::Rc,
 };
 
@@ -10,80 +7,14 @@ use anyhow::{Result, ensure};
 use rhai::{AST, Dynamic, Engine, EvalAltResult, ImmutableString};
 use tokio_util::sync::CancellationToken;
 
+pub(super) use crate::lru::BoundedLruCache;
+
 use super::{MAX_BODY, builtins, highlight::ScriptRequirements};
 
 pub(super) const SCRIPT_CANCELLED_MESSAGE: &str = "脚本执行已取消";
 pub(super) const MIO_SCRIPT_AST_CACHE_LIMIT: usize = 128;
 const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 const MAX_CAPTURED_PRINT_LINES: usize = 256;
-
-/// Bounded single-item-evicting LRU cache backed by monotonic access ticks.
-pub(super) struct BoundedLruCache<K, V> {
-    capacity: usize,
-    tick: u64,
-    entries: HashMap<K, (V, u64)>,
-}
-
-impl<K, V> BoundedLruCache<K, V> {
-    pub(super) fn new(capacity: usize) -> Self {
-        assert!(capacity > 0, "LRU cache capacity must be non-zero");
-        Self {
-            capacity,
-            tick: 0,
-            entries: HashMap::with_capacity(capacity.min(256)),
-        }
-    }
-
-    pub(super) fn get<Q>(&mut self, key: &Q) -> Option<V>
-    where
-        K: Borrow<Q> + Eq + Hash,
-        Q: Hash + Eq + ?Sized,
-        V: Clone,
-    {
-        if let Some((value, last_used)) = self.entries.get_mut(key) {
-            self.tick = self.tick.wrapping_add(1);
-            *last_used = self.tick;
-            return Some(value.clone());
-        }
-        None
-    }
-
-    pub(super) fn insert(&mut self, key: K, value: V)
-    where
-        K: Clone + Eq + Hash,
-    {
-        self.tick = self.tick.wrapping_add(1);
-        let tick = self.tick;
-        if let Some(slot) = self.entries.get_mut(&key) {
-            *slot = (value, tick);
-            return;
-        }
-        if self.entries.len() >= self.capacity
-            && let Some(evict_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (_, last_used))| *last_used)
-                .map(|(k, _)| k.clone())
-        {
-            self.entries.remove(&evict_key);
-        }
-        self.entries.insert(key, (value, tick));
-    }
-
-    #[cfg(test)]
-    pub(super) fn contains_key<Q>(&self, key: &Q) -> bool
-    where
-        K: Borrow<Q> + Eq + Hash,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.entries.contains_key(key)
-    }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
 
 #[derive(Clone)]
 pub(super) struct CompiledScript {

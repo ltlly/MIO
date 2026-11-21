@@ -92,8 +92,10 @@ impl State {
             .preferences
             .effective_upstream_tls(&workspace.upstream_tls)?;
         let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
-        workspace.upstream_proxy.sync_user_level_cache();
-        let upstream_settings = workspace.upstream_proxy.effective_for_runtime();
+        let upstream_settings = workspace
+            .upstream_proxy
+            .effective_for_runtime(&self.user_level_connections_cache);
+        upstream_settings.sync_user_level_cache(&mut self.user_level_connections_cache);
         let route_resolver = upstream_settings.build_route_resolver(upstream_tls.clone())?;
         let hostname_overrides = upstream_settings.compiled_hostname_overrides()?;
         let platform_auth_enabled = upstream_settings.platform_auth.enabled;

@@ -289,6 +289,10 @@ pub enum Event {
         path: Option<PathBuf>,
         workspace: Workspace,
     },
+    ProjectDiskUsage {
+        project: ProjectKey,
+        bytes: u64,
+    },
     ProjectSaved {
         project: ProjectKey,
         path: PathBuf,

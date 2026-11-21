@@ -624,13 +624,13 @@ fn detect_response_line_version(raw: &[u8], fallback: HttpVersion) -> HttpVersio
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExplanationSeverity {
+pub(super) enum ExplanationSeverity {
     Ok,
     Info,
     Warn,
 }
 
-struct ExplanationItem {
+pub(super) struct ExplanationItem {
     badge: &'static str,
     severity: ExplanationSeverity,
     title: String,
@@ -638,7 +638,7 @@ struct ExplanationItem {
     mono: bool,
 }
 
-struct RepeaterExplanationReport {
+pub(super) struct RepeaterExplanationReport {
     title: String,
     overview: Vec<(&'static str, String)>,
     auth_items: Vec<ExplanationItem>,
@@ -649,9 +649,8 @@ struct RepeaterExplanationReport {
 }
 
 #[derive(PartialEq, Eq)]
-enum ExplanationCacheKey {
+pub(super) enum ExplanationCacheKey {
     Http {
-        workbench_id: gpui_kit::EntityId,
         tab_id: TabId,
         title: String,
         target_id: gpui_kit::EntityId,
@@ -662,7 +661,6 @@ enum ExplanationCacheKey {
         loaded_flow: Option<(FlowId, u64, bool)>,
     },
     WebSocket {
-        workbench_id: gpui_kit::EntityId,
         ws_id: TabId,
         title: String,
         url: String,
@@ -674,12 +672,6 @@ enum ExplanationCacheKey {
         draft_rev: Option<crate::workbench::inspector::MessageEditorRevKey>,
     },
     Empty,
-}
-
-std::thread_local! {
-    static REPEATER_EXPLANATION_CACHE: std::cell::RefCell<
-        Option<(ExplanationCacheKey, std::rc::Rc<RepeaterExplanationReport>)>,
-    > = const { std::cell::RefCell::new(None) };
 }
 
 fn decode_b64url_json(segment: &str) -> Option<String> {
@@ -2566,7 +2558,6 @@ impl Workbench {
         {
             let tab_meta = self.workspace.tabs.iter().find(|t| t.id == tab_id);
             ExplanationCacheKey::Http {
-                workbench_id: cx.entity_id(),
                 tab_id,
                 title: tab_meta.map_or("Repeater", |t| t.title.as_str()).to_owned(),
                 target_id: editors.target.entity_id(),
@@ -2590,7 +2581,6 @@ impl Workbench {
                 .find(|t| !t.closed && t.id == ws_id)
         {
             ExplanationCacheKey::WebSocket {
-                workbench_id: cx.entity_id(),
                 ws_id,
                 title: ws_tab.title.clone(),
                 url: ws_tab.url.clone(),
@@ -2609,13 +2599,13 @@ impl Workbench {
             ExplanationCacheKey::Empty
         };
 
-        let cached_report = REPEATER_EXPLANATION_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .as_ref()
-                .filter(|(k, _)| *k == cache_key)
-                .map(|(_, report)| std::rc::Rc::clone(report))
-        });
+        let cached_report = self
+            .repeater_ui_caches
+            .explanation_cache
+            .borrow()
+            .as_ref()
+            .filter(|(k, _)| *k == cache_key)
+            .map(|(_, report)| std::rc::Rc::clone(report));
 
         let report: std::rc::Rc<RepeaterExplanationReport> = if let Some(hit) = cached_report {
             hit
@@ -2722,9 +2712,8 @@ impl Workbench {
                 }
             };
             let rc = std::rc::Rc::new(computed);
-            REPEATER_EXPLANATION_CACHE.with(|cache| {
-                *cache.borrow_mut() = Some((cache_key, std::rc::Rc::clone(&rc)));
-            });
+            *self.repeater_ui_caches.explanation_cache.borrow_mut() =
+                Some((cache_key, std::rc::Rc::clone(&rc)));
             rc
         };
 

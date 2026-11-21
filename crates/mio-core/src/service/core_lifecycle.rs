@@ -195,7 +195,6 @@ impl State {
     }
 
     pub(super) async fn project_opened(&mut self) -> Result<()> {
-        self.refresh_project_disk_bytes();
         self.emit(Event::ProjectOpened {
             project: self.project,
             path: self.store.path.clone(),
@@ -203,6 +202,7 @@ impl State {
         })
         .await;
         self.proxy_state().await;
+        self.refresh_project_disk_bytes();
         if let Ok(audit_state) = self.store.read_audit_state()
             && audit_state != AuditStateSnapshot::default()
         {
@@ -287,6 +287,8 @@ impl State {
         }
         self.history_dirty = false;
         self.websocket_history_dirty = false;
+        self.project_disk_bytes = 0;
+        self.last_disk_refresh = None;
         self.intruder = intruder;
         self.quiesced = false;
         self.provenance.clear();

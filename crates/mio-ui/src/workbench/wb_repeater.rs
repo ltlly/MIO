@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use super::*;
@@ -8,7 +7,7 @@ use mio_core::{
 };
 
 #[derive(Clone, Debug)]
-struct SequentialGroupQueue {
+pub(in crate::workbench) struct SequentialGroupQueue {
     project: ProjectKey,
     group_id: mio_core::Uuid,
     mode: mio_core::RepeaterGroupSendMode,
@@ -17,25 +16,6 @@ struct SequentialGroupQueue {
     remaining: VecDeque<TabId>,
     total: usize,
     completed: usize,
-}
-
-thread_local! {
-    static SEQUENTIAL_GROUP_QUEUE: RefCell<Option<SequentialGroupQueue>> = const { RefCell::new(None) };
-    static TARGET_SYNC_HOST_HEADER: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-}
-
-pub(in crate::workbench) fn repeater_target_sync_host_enabled() -> bool {
-    TARGET_SYNC_HOST_HEADER.with(std::cell::Cell::get)
-}
-
-pub(in crate::workbench) fn set_repeater_target_sync_host(enabled: bool) {
-    TARGET_SYNC_HOST_HEADER.with(|cell| cell.set(enabled));
-}
-
-fn clear_sequential_group_queue() {
-    SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
 }
 
 pub(in crate::workbench) fn normalize_origin_from_candidate(raw: &str, prefer_tls: bool) -> Option<String> {
@@ -316,11 +296,9 @@ impl Workbench {
         let Some(project) = self.project else {
             return false;
         };
-        SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .is_some_and(|q| q.project == project && (q.active_tab.is_some() || !q.remaining.is_empty()))
-        })
+        self.sequential_group_queue
+            .as_ref()
+            .is_some_and(|q| q.project == project && (q.active_tab.is_some() || !q.remaining.is_empty()))
     }
 
     pub(in crate::workbench) fn can_send(&self, tab_id: TabId) -> bool {
@@ -443,7 +421,7 @@ impl Workbench {
         if self.project.is_none() || !self.flush_workspace(window, cx) {
             return;
         }
-        clear_sequential_group_queue();
+        self.sequential_group_queue = None;
         let ids: Vec<TabId> = self
             .workspace
             .tabs
@@ -586,17 +564,15 @@ impl Workbench {
         let connection_pool_group_id =
             (mode == mio_core::RepeaterGroupSendMode::SequentialSingleConnection)
                 .then(|| mio_core::Uuid::new_v4().as_u128());
-        SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-            *slot.borrow_mut() = Some(SequentialGroupQueue {
-                project,
-                group_id,
-                mode,
-                connection_pool_group_id,
-                active_tab: None,
-                remaining: candidates,
-                total,
-                completed: 0,
-            });
+        self.sequential_group_queue = Some(SequentialGroupQueue {
+            project,
+            group_id,
+            mode,
+            connection_pool_group_id,
+            active_tab: None,
+            remaining: candidates,
+            total,
+            completed: 0,
         });
         self.tool = Tool::Repeater;
         self.advance_sequential_group_queue(window, cx);
@@ -605,25 +581,22 @@ impl Workbench {
 
     fn advance_sequential_group_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.project else {
-            clear_sequential_group_queue();
+            self.sequential_group_queue = None;
             return;
         };
         if !self.backend_available() || self.transition.is_some() || self.pending_records > 0 {
-            clear_sequential_group_queue();
+            self.sequential_group_queue = None;
             return;
         }
         loop {
-            let next_step = SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-                let mut guard = slot.borrow_mut();
-                let state = guard.as_mut()?;
-                if state.project != project {
-                    *guard = None;
-                    return None;
+            let next_step = match self.sequential_group_queue.as_mut() {
+                None => None,
+                Some(state) if state.project != project => {
+                    self.sequential_group_queue = None;
+                    None
                 }
-                if state.active_tab.is_some() {
-                    return None;
-                }
-                match state.remaining.pop_front() {
+                Some(state) if state.active_tab.is_some() => None,
+                Some(state) => match state.remaining.pop_front() {
                     Some(tab_id) => Some((
                         Some(tab_id),
                         state.completed,
@@ -641,11 +614,11 @@ impl Workbench {
                             state.mode,
                             state.connection_pool_group_id,
                         );
-                        *guard = None;
+                        self.sequential_group_queue = None;
                         Some(summary)
                     }
-                }
-            });
+                },
+            };
             let Some((maybe_tab, completed, total, group_id, mode, connection_pool_group_id)) =
                 next_step
             else {
@@ -666,20 +639,18 @@ impl Workbench {
                 continue;
             }
             if self.sending.len() + self.pending_sends.len() >= 16 {
-                clear_sequential_group_queue();
+                self.sequential_group_queue = None;
                 self.fail("并发 Repeater 请求达到 16 个限额；顺序发送队列已终止。", cx);
                 return;
             }
             if !self.flush_workspace(window, cx) {
-                clear_sequential_group_queue();
+                self.sequential_group_queue = None;
                 return;
             }
             if self.begin_plugin_send(tab_id, window, cx) {
-                SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-                    if let Some(state) = slot.borrow_mut().as_mut() {
-                        state.active_tab = Some(tab_id);
-                    }
-                });
+                if let Some(state) = self.sequential_group_queue.as_mut() {
+                    state.active_tab = Some(tab_id);
+                }
                 return;
             }
             let Some(draft) = self
@@ -700,26 +671,22 @@ impl Workbench {
             });
             if self.pending_workspace.is_some() || self.workspace_dirty {
                 self.pending_sends.insert(tab_id, send);
-                SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-                    if let Some(state) = slot.borrow_mut().as_mut() {
-                        state.active_tab = Some(tab_id);
-                    }
-                });
+                if let Some(state) = self.sequential_group_queue.as_mut() {
+                    state.active_tab = Some(tab_id);
+                }
                 self.status = format!(
                     "正在保存草稿；保存成功后顺序发送本组第 {step_no}/{total} 个请求。"
                 );
                 return;
             }
             if self.enqueue_send(tab_id, send, cx) {
-                SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-                    if let Some(state) = slot.borrow_mut().as_mut() {
-                        state.active_tab = Some(tab_id);
-                    }
-                });
+                if let Some(state) = self.sequential_group_queue.as_mut() {
+                    state.active_tab = Some(tab_id);
+                }
                 self.status = format!("Repeater 正在顺序发送本组第 {step_no}/{total} 个请求…");
                 return;
             } else {
-                clear_sequential_group_queue();
+                self.sequential_group_queue = None;
                 return;
             }
         }
@@ -733,29 +700,26 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project else {
-            clear_sequential_group_queue();
+            self.sequential_group_queue = None;
             return;
         };
-        let should_advance = SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            let Some(state) = guard.as_mut() else {
-                return false;
-            };
-            if state.project != project {
-                *guard = None;
-                return false;
+        let should_advance = match self.sequential_group_queue.as_mut() {
+            None => false,
+            Some(state) if state.project != project => {
+                self.sequential_group_queue = None;
+                false
             }
-            if state.active_tab != Some(tab_id) {
-                return false;
+            Some(state) if state.active_tab != Some(tab_id) => false,
+            Some(_) if cancelled => {
+                self.sequential_group_queue = None;
+                false
             }
-            if cancelled {
-                *guard = None;
-                return false;
+            Some(state) => {
+                state.active_tab = None;
+                state.completed += 1;
+                true
             }
-            state.active_tab = None;
-            state.completed += 1;
-            true
-        });
+        };
         if should_advance {
             self.advance_sequential_group_queue(window, cx);
         }
@@ -945,9 +909,10 @@ impl Workbench {
         if self.tool != Tool::Repeater {
             return;
         }
-        let queued_tab = SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-            slot.borrow_mut().take().and_then(|q| q.active_tab)
-        });
+        let queued_tab = self
+            .sequential_group_queue
+            .take()
+            .and_then(|q| q.active_tab);
         let (Some(_), Some(tab_id)) = (self.project, self.workspace.active) else {
             if let Some(q_tab) = queued_tab {
                 self.cancel_plugin_send(q_tab, cx);
@@ -990,15 +955,13 @@ impl Workbench {
         let Some(send) = self.sending.get(&tab_id) else {
             return false;
         };
-        SEQUENTIAL_GROUP_QUEUE.with(|slot| {
-            if slot
-                .borrow()
-                .as_ref()
-                .is_some_and(|q| q.active_tab == Some(tab_id))
-            {
-                *slot.borrow_mut() = None;
-            }
-        });
+        if self
+            .sequential_group_queue
+            .as_ref()
+            .is_some_and(|q| q.active_tab == Some(tab_id))
+        {
+            self.sequential_group_queue = None;
+        }
         if send.cancel.is_cancelled() {
             return true;
         }

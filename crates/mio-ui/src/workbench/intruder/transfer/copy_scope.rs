@@ -265,7 +265,7 @@ impl Workbench {
                     )
                 })
                 .unwrap_or_default();
-            crate::editing::set_url_encode_as_you_type(url_encode_on);
+            crate::editing::set_url_encode_as_you_type(url_encode_on, cx);
             let selected = has_selection(cx);
             let req_edit_disabled = unavailable || readonly;
 

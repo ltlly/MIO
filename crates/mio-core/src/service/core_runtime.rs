@@ -235,8 +235,11 @@ impl State {
         };
         Ok(Self {
             preferences,
+            user_level_connections_cache: UserLevelConnectionsCache::default(),
             project,
             store,
+            project_disk_bytes: 0,
+            last_disk_refresh: None,
             events,
             awaiting_event_slot: false,
             cancel,

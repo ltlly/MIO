@@ -553,7 +553,6 @@ impl Workbench {
             self.fail(error.to_string(), cx);
             return;
         }
-        settings.sync_user_level_cache();
         if self.workspace.upstream_proxy == settings {
             return;
         }

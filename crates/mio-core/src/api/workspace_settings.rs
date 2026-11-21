@@ -328,19 +328,15 @@ impl UpstreamProxySettings {
         std::sync::Arc::from(list)
     }
 
-    pub fn sync_user_level_cache(&self) {
-        let cache = user_level_connections_cache();
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn sync_user_level_cache(&self, cache: &mut UserLevelConnectionsCache) {
         if !self.override_project_only {
-            guard.upstream_rules = self.rules.clone();
+            cache.upstream_rules = self.rules.clone();
         }
         if !self.socks.override_project_only {
-            guard.socks = self.socks.clone();
+            cache.socks = self.socks.clone();
         }
         if !self.platform_auth.override_project_only {
-            guard.platform_auth = PlatformAuthSettings {
+            cache.platform_auth = PlatformAuthSettings {
                 enabled: self.platform_auth.enabled,
                 prompt_on_failure: self.platform_auth.prompt_on_failure,
                 override_project_only: false,
@@ -349,48 +345,38 @@ impl UpstreamProxySettings {
         }
     }
 
-    pub fn effective_for_runtime(&self) -> Self {
+    pub fn effective_for_runtime(&self, cache: &UserLevelConnectionsCache) -> Self {
         let mut out = self.clone();
-        let cache = user_level_connections_cache();
-        let guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !out.override_project_only
             && out.rules.is_empty()
-            && !guard.upstream_rules.is_empty()
+            && !cache.upstream_rules.is_empty()
         {
-            out.rules = guard.upstream_rules.clone();
+            out.rules = cache.upstream_rules.clone();
         }
         if !out.socks.override_project_only
             && out.socks.is_default()
-            && !guard.socks.is_default()
+            && !cache.socks.is_default()
         {
-            out.socks = guard.socks.clone();
+            out.socks = cache.socks.clone();
         }
         if !out.platform_auth.override_project_only
             && !out.platform_auth.enabled
             && out.platform_auth.rules.is_empty()
-            && (guard.platform_auth.enabled || !guard.platform_auth.rules.is_empty())
+            && (cache.platform_auth.enabled || !cache.platform_auth.rules.is_empty())
         {
-            out.platform_auth.enabled = guard.platform_auth.enabled;
-            out.platform_auth.prompt_on_failure = guard.platform_auth.prompt_on_failure;
-            out.platform_auth.rules = guard.platform_auth.rules.clone();
+            out.platform_auth.enabled = cache.platform_auth.enabled;
+            out.platform_auth.prompt_on_failure = cache.platform_auth.prompt_on_failure;
+            out.platform_auth.rules = cache.platform_auth.rules.clone();
         }
         out
     }
 }
 
-#[derive(Default, Clone)]
-struct UserLevelConnectionsCache {
+#[derive(Default, Clone, Debug)]
+pub struct UserLevelConnectionsCache {
     upstream_rules: Vec<UpstreamProxyRule>,
     socks: SocksProxySettings,
     platform_auth: PlatformAuthSettings,
-}
-
-fn user_level_connections_cache() -> &'static std::sync::Mutex<UserLevelConnectionsCache> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<UserLevelConnectionsCache>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(UserLevelConnectionsCache::default()))
 }
 
 impl std::fmt::Debug for UpstreamProxySettings {
@@ -1146,5 +1132,57 @@ mod tests {
         assert!(oversized.len() > MAX_SCOPE_JSON_BYTES);
         let err = parse_target_scope_json(&oversized).expect_err("oversized scope JSON must fail");
         assert!(err.contains("256 KiB"));
+    }
+
+    #[test]
+    fn user_level_connections_cache_is_isolated_per_instance_and_respects_override() {
+        let mut cache_a = UserLevelConnectionsCache::default();
+        let cache_b = UserLevelConnectionsCache::default();
+
+        let shared_rule = UpstreamProxyRule {
+            destination_host: "*.example.invalid".into(),
+            protocol: UpstreamProxyProtocol::Http,
+            host: "127.0.0.1".into(),
+            port: 8888,
+            ..UpstreamProxyRule::default()
+        };
+        let mut settings_a = UpstreamProxySettings {
+            rules: vec![shared_rule.clone()],
+            socks: SocksProxySettings {
+                use_proxy: true,
+                host: "127.0.0.1".into(),
+                port: 1080,
+                ..SocksProxySettings::default()
+            },
+            platform_auth: PlatformAuthSettings {
+                enabled: true,
+                prompt_on_failure: true,
+                override_project_only: false,
+                rules: vec![PlatformAuthRule::default()],
+            },
+            ..UpstreamProxySettings::default()
+        };
+        settings_a.sync_user_level_cache(&mut cache_a);
+
+        // Second runtime cache must stay clean without leaking settings from `cache_a`.
+        let empty = UpstreamProxySettings::default();
+        assert_eq!(empty.effective_for_runtime(&cache_b), empty);
+
+        // Same runtime inherits cached non-project-only settings when current project is empty.
+        let inherited = empty.effective_for_runtime(&cache_a);
+        assert_eq!(inherited.rules, vec![shared_rule]);
+        assert!(inherited.socks.use_proxy);
+        assert!(inherited.platform_auth.enabled);
+
+        // `override_project_only = true` keeps project settings isolated from the cache.
+        settings_a.override_project_only = true;
+        settings_a.rules.clear();
+        settings_a.sync_user_level_cache(&mut cache_a);
+        let isolated = UpstreamProxySettings {
+            override_project_only: true,
+            ..UpstreamProxySettings::default()
+        };
+        assert!(isolated.effective_for_runtime(&cache_a).rules.is_empty());
+        assert_eq!(empty.effective_for_runtime(&cache_a).rules.len(), 1);
     }
 }

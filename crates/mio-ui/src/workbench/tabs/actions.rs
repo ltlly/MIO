@@ -5,27 +5,9 @@ mod protocol_and_rename;
 pub(in crate::workbench) use naming_and_duplicate::extract_repeater_urlpath;
 pub(super) use protocol_and_rename::sync_captured_draft_version;
 
+#[cfg(test)]
 thread_local! {
-    #[cfg(test)]
     static FORCE_CLOSE_UNSAVED_PROMPT_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static CLOSED_REPEATER_ORDER: std::cell::RefCell<Vec<(Option<ProjectKey>, TabId, bool)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub(in crate::workbench) fn record_closed_repeater_tab(
-    project: Option<ProjectKey>,
-    id: TabId,
-    is_ws: bool,
-) {
-    CLOSED_REPEATER_ORDER.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        stack.retain(|(proj, existing, _)| !(*proj == project && *existing == id));
-        stack.push((project, id, is_ws));
-        if stack.len() > 512 {
-            let excess = stack.len() - 512;
-            stack.drain(..excess);
-        }
-    });
 }
 
 #[cfg(test)]
@@ -34,6 +16,16 @@ pub(in crate::workbench) fn set_force_close_unsaved_prompt_in_test(enabled: bool
 }
 
 impl Workbench {
+    pub(in crate::workbench) fn record_closed_repeater_tab(&mut self, id: TabId, is_ws: bool) {
+        let project = self.project;
+        self.closed_repeater_order
+            .retain(|(proj, existing, _)| !(*proj == project && *existing == id));
+        self.closed_repeater_order.push((project, id, is_ws));
+        if self.closed_repeater_order.len() > 512 {
+            let excess = self.closed_repeater_order.len() - 512;
+            self.closed_repeater_order.drain(..excess);
+        }
+    }
     pub(in crate::workbench) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.tool, Tool::Repeater | Tool::Intruder) {
             return;
@@ -239,7 +231,7 @@ impl Workbench {
             self.close_plugin_tab(id, cx);
             let tab = self.workspace.tabs.remove(index);
             self.workspace.closed.push(tab);
-            record_closed_repeater_tab(self.project, id, false);
+            self.record_closed_repeater_tab(id, false);
             if self.workspace.active == Some(id) {
                 self.workspace.active = self
                     .workspace
@@ -284,10 +276,14 @@ impl Workbench {
         if !self.flush_workspace(window, cx) {
             return;
         }
-        let next_recorded = CLOSED_REPEATER_ORDER.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            while let Some(pos) = stack.iter().rposition(|(proj, _, _)| *proj == self.project) {
-                let (_, id, is_ws) = stack.remove(pos);
+        let next_recorded = {
+            let mut found = None;
+            while let Some(pos) = self
+                .closed_repeater_order
+                .iter()
+                .rposition(|(proj, _, _)| *proj == self.project)
+            {
+                let (_, id, is_ws) = self.closed_repeater_order.remove(pos);
                 if is_ws {
                     if self
                         .workspace
@@ -295,14 +291,16 @@ impl Workbench {
                         .iter()
                         .any(|tab| tab.closed && tab.id == id)
                     {
-                        return Some((id, true));
+                        found = Some((id, true));
+                        break;
                     }
                 } else if self.workspace.closed.iter().any(|tab| tab.id == id) {
-                    return Some((id, false));
+                    found = Some((id, false));
+                    break;
                 }
             }
-            None
-        });
+            found
+        };
         match next_recorded {
             Some((id, false)) => {
                 if let Some(pos) = self.workspace.closed.iter().position(|tab| tab.id == id) {

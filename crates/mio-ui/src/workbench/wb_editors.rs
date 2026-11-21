@@ -11,7 +11,6 @@ mod response_visual;
 mod tests;
 
 type ProvenanceMenuCacheKey = (
-    gpui_kit::EntityId,
     TabId,
     FlowId,
     u64,
@@ -23,10 +22,23 @@ type ProvenanceMenuCacheKey = (
 
 type ProvenanceMenuCacheVal = Option<(std::sync::Arc<Vec<(String, Vec<u8>)>>, usize)>;
 
-std::thread_local! {
-    static PROVENANCE_MENU_CACHE: std::cell::RefCell<
-        Vec<(ProvenanceMenuCacheKey, ProvenanceMenuCacheVal)>,
-    > = const { std::cell::RefCell::new(Vec::new()) };
+#[derive(Default)]
+pub(in crate::workbench) struct EditorUiCaches {
+    provenance_menu_cache:
+        std::cell::RefCell<Vec<(ProvenanceMenuCacheKey, ProvenanceMenuCacheVal)>>,
+    pub(in crate::workbench::wb_editors) rendered_response_cache: std::cell::RefCell<
+        Vec<(
+            crate::workbench::inspector::MessageEditorRevKey,
+            Option<std::rc::Rc<response_visual::CachedRenderedResponse>>,
+        )>,
+    >,
+}
+
+impl EditorUiCaches {
+    pub(in crate::workbench) fn clear(&self) {
+        self.provenance_menu_cache.borrow_mut().clear();
+        self.rendered_response_cache.borrow_mut().clear();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -809,7 +821,7 @@ impl Workbench {
         };
         let replace_readonly = readonly || self.is_message_replace_readonly(request_slot);
         let req_readonly = readonly || request.is_readonly_preview();
-        editing::set_url_encode_as_you_type(self.url_encode_as_you_type_enabled());
+        editing::set_url_encode_as_you_type(self.url_encode_as_you_type_enabled(), cx);
         let request_pane = div()
             .size_full()
             .min_w_0()
@@ -1024,7 +1036,6 @@ impl Workbench {
             &editors.request
         };
         let cache_key: ProvenanceMenuCacheKey = (
-            cx.entity_id(),
             tab_id,
             flow.summary.id,
             flow.summary.revision,
@@ -1033,13 +1044,13 @@ impl Workbench {
             has_orig,
             crate::workbench::inspector::message_editor_rev_key(editor, cx),
         );
-        let cached = PROVENANCE_MENU_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .iter()
-                .find(|(k, _)| *k == cache_key)
-                .map(|(_, val)| val.clone())
-        });
+        let cached = self
+            .editor_ui_caches
+            .provenance_menu_cache
+            .borrow()
+            .iter()
+            .find(|(k, _)| *k == cache_key)
+            .map(|(_, val)| val.clone());
         let resolved = if let Some(hit) = cached {
             hit
         } else {
@@ -1101,15 +1112,15 @@ impl Workbench {
                         .unwrap_or(steps.len() - 1);
                     Some((std::sync::Arc::new(steps), active_idx))
                 };
-            PROVENANCE_MENU_CACHE.with(|cache| {
-                let mut entries = cache.borrow_mut();
+            {
+                let mut entries = self.editor_ui_caches.provenance_menu_cache.borrow_mut();
                 if let Some(pos) = entries.iter().position(|(k, _)| *k == cache_key) {
                     entries.remove(pos);
                 } else if entries.len() >= 4 {
                     entries.remove(0);
                 }
                 entries.push((cache_key, computed.clone()));
-            });
+            }
             computed
         };
         let (steps, active_idx) = resolved?;

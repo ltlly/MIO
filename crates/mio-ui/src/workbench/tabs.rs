@@ -11,7 +11,7 @@ pub(in crate::workbench) mod actions;
 pub(in crate::workbench) mod menus;
 mod render_pane;
 mod render_strip;
-pub(in crate::workbench) use render_pane::RepeaterCombinedPane;
+pub(in crate::workbench) use render_pane::{RepeaterCombinedPane, RepeaterUiCaches};
 
 use menus::{repeater_group_menu, repeater_tab_menu, ws_repeater_tab_menu};
 

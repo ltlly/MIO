@@ -93,6 +93,10 @@ pub(super) struct MatchReplacePane {
     pub(super) logger_loaded_detail: Option<Box<(FlowRecord, OriginalMessages)>>,
     pub(super) logger_request: MessageEditor,
     pub(super) logger_response: MessageEditor,
+    pub(in crate::workbench::tools_extra) logger_ui_table:
+        std::cell::RefCell<logger::LoggerUiTableState>,
+    pub(in crate::workbench::tools_extra) logger_visible_rows_cache:
+        std::cell::RefCell<Option<logger::LoggerRowsCacheEntry>>,
     plain_selection_seqs: [Rc<Cell<u64>>; 5],
     _selection_subscriptions: [Subscription; 5],
 }
@@ -1079,6 +1083,8 @@ impl MatchReplacePane {
             logger_loaded_detail: None,
             logger_request: MessageEditor::new(window, cx),
             logger_response: MessageEditor::new(window, cx),
+            logger_ui_table: std::cell::RefCell::new(logger::LoggerUiTableState::default()),
+            logger_visible_rows_cache: std::cell::RefCell::new(None),
             plain_selection_seqs,
             _selection_subscriptions: [s1, s2, s3, s4, s5],
         }
@@ -1252,7 +1258,8 @@ impl Workbench {
         self.extra_tools.logger_selected = None;
         self.extra_tools.logger_pending_read = None;
         self.extra_tools.logger_loaded_detail = None;
-        self.clear_logger_selection_state(cx);
+        self.clear_logger_selection_state();
+        *self.extra_tools.logger_visible_rows_cache.borrow_mut() = None;
         self.extra_tools.logger_request.load(b"", window, cx);
         self.extra_tools.logger_response.load(b"", window, cx);
         self.clear_context_viewer("logger", cx);

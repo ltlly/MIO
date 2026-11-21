@@ -1,40 +1,33 @@
 use super::*;
 
-static LAST_DISK_REFRESH: std::sync::LazyLock<Mutex<HashMap<ProjectKey, Instant>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl State {
-    pub(super) fn refresh_project_disk_bytes(&self) {
+    pub(super) fn refresh_project_disk_bytes(&mut self) {
         self.refresh_project_disk_bytes_inner(true);
     }
 
-    pub(super) fn refresh_project_disk_bytes_throttled(&self) {
+    pub(super) fn refresh_project_disk_bytes_throttled(&mut self) {
         self.refresh_project_disk_bytes_inner(false);
     }
 
-    fn refresh_project_disk_bytes_inner(&self, force: bool) {
+    fn refresh_project_disk_bytes_inner(&mut self, force: bool) {
         let now = Instant::now();
+        if !force
+            && let Some(prev) = self.last_disk_refresh
+            && now.saturating_duration_since(prev) < DISK_REFRESH_INTERVAL
         {
-            let mut guard = LAST_DISK_REFRESH
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !force
-                && let Some(&prev) = guard.get(&self.project)
-                && now.saturating_duration_since(prev) < DISK_REFRESH_INTERVAL
-            {
-                return;
-            }
-            if guard.len() >= 64 && !guard.contains_key(&self.project) {
-                guard.retain(|_, ts| now.saturating_duration_since(*ts) < Duration::from_secs(60));
-                if guard.len() >= 64 {
-                    guard.clear();
-                }
-            }
-            guard.insert(self.project, now);
+            return;
         }
+        self.last_disk_refresh = Some(now);
         if let Ok(bytes) = self.store.total_bytes() {
-            crate::sys_metrics::set_project_disk_bytes(self.project, bytes);
+            self.project_disk_bytes = bytes;
+            if self.events.capacity() > 4 {
+                let _ = self.events.try_send(Event::ProjectDiskUsage {
+                    project: self.project,
+                    bytes,
+                });
+            }
         }
     }
 

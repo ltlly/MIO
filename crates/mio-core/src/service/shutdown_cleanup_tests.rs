@@ -5,7 +5,7 @@ use std::{
     future::{Future, poll_fn},
     os::unix::fs::MetadataExt,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context as TaskContext, Poll, Wake, Waker},
 };
 #[cfg(unix)]

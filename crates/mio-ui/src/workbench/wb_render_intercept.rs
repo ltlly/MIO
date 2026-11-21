@@ -1681,7 +1681,7 @@ impl Workbench {
         can_decide: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        editing::set_url_encode_as_you_type(self.url_encode_as_you_type_enabled());
+        editing::set_url_encode_as_you_type(self.url_encode_as_you_type_enabled(), cx);
         let pending_id = pending.id();
         let header_owner = cx.weak_entity();
         let editor_readonly = pending.deciding || pending.editor.is_readonly_preview();

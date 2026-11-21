@@ -1,7 +1,7 @@
 use super::*;
 use gpui_kit::assets::IconName;
 
-struct CachedRenderedResponse {
+pub(super) struct CachedRenderedResponse {
     status_line: String,
     status_code: Option<u16>,
     content_type: Option<String>,
@@ -9,15 +9,6 @@ struct CachedRenderedResponse {
     body_len: usize,
     summary: editing::RenderedBodySummary,
     body_for_browser: std::sync::Arc<Vec<u8>>,
-}
-
-std::thread_local! {
-    static RENDERED_RESPONSE_CACHE: std::cell::RefCell<
-        Vec<(
-            crate::workbench::inspector::MessageEditorRevKey,
-            Option<std::rc::Rc<CachedRenderedResponse>>,
-        )>,
-    > = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Workbench {
@@ -46,13 +37,13 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let rev_key = crate::workbench::inspector::message_editor_rev_key(response, cx);
-        let cached = RENDERED_RESPONSE_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .iter()
-                .find(|(k, _)| *k == rev_key)
-                .map(|(_, val)| val.clone())
-        });
+        let cached = self
+            .editor_ui_caches
+            .rendered_response_cache
+            .borrow()
+            .iter()
+            .find(|(k, _)| *k == rev_key)
+            .map(|(_, val)| val.clone());
         let entry = if let Some(hit) = cached {
             hit
         } else {
@@ -72,15 +63,15 @@ impl Workbench {
                     body_for_browser,
                 }))
             };
-            RENDERED_RESPONSE_CACHE.with(|cache| {
-                let mut entries = cache.borrow_mut();
+            {
+                let mut entries = self.editor_ui_caches.rendered_response_cache.borrow_mut();
                 if let Some(pos) = entries.iter().position(|(k, _)| *k == rev_key) {
                     entries.remove(pos);
                 } else if entries.len() >= 4 {
                     entries.remove(0);
                 }
                 entries.push((rev_key, computed.clone()));
-            });
+            }
             computed
         };
         let Some(parsed) = entry else {

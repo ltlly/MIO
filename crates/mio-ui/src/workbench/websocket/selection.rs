@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone)]
 pub(in crate::workbench::websocket) enum WsBatchOpKind {
@@ -24,68 +24,37 @@ pub(in crate::workbench::websocket) struct WsMultiSelectionState {
     pub(in crate::workbench::websocket) pending_batch: Option<PendingWsBatchOp>,
 }
 
-std::thread_local! {
-    static WS_MULTI_SELECTION: std::cell::RefCell<HashMap<gpui_kit::EntityId, WsMultiSelectionState>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-pub(in crate::workbench::websocket) fn record_ws_pointer_down(
-    owner_id: gpui_kit::EntityId,
-    row: usize,
-    button: gpui_kit::MouseButton,
-    shift: bool,
-    toggle: bool,
-) {
-    WS_MULTI_SELECTION.with(|map| {
-        let mut map = map.borrow_mut();
-        map.entry(owner_id).or_default().pending_pointer =
-            Some((row, button, shift, toggle));
-    });
-}
-
-pub(in crate::workbench::websocket) fn is_ws_id_selected(
-    owner_id: gpui_kit::EntityId,
-    id: Uuid,
-    primary_selected: Option<Uuid>,
-) -> bool {
-    if primary_selected == Some(id) {
-        return true;
+impl super::WebSocketHistory {
+    pub(in crate::workbench::websocket) fn record_pointer_down(
+        &mut self,
+        row: usize,
+        button: gpui_kit::MouseButton,
+        shift: bool,
+        toggle: bool,
+    ) {
+        self.multi_selection.pending_pointer = Some((row, button, shift, toggle));
     }
-    WS_MULTI_SELECTION.with(|map| {
-        map.borrow()
-            .get(&owner_id)
-            .is_some_and(|st| st.selected_ids.contains(&id))
-    })
-}
 
-pub(in crate::workbench::websocket) fn ws_selected_ids_snapshot(
-    owner_id: gpui_kit::EntityId,
-    primary_selected: Option<Uuid>,
-) -> HashSet<Uuid> {
-    let mut set = WS_MULTI_SELECTION.with(|map| {
-        map.borrow()
-            .get(&owner_id)
-            .map(|st| st.selected_ids.clone())
-            .unwrap_or_default()
-    });
-    if set.is_empty()
-        && let Some(primary) = primary_selected
-    {
-        set.insert(primary);
+    pub(in crate::workbench::websocket) fn is_id_selected(&self, id: Uuid) -> bool {
+        self.selected == Some(id) || self.multi_selection.selected_ids.contains(&id)
     }
-    set
-}
 
-pub(in crate::workbench::websocket) fn clear_ws_multi_selection(owner_id: gpui_kit::EntityId) {
-    WS_MULTI_SELECTION.with(|map| {
-        let mut map = map.borrow_mut();
-        if let Some(st) = map.get_mut(&owner_id) {
-            st.selected_ids.clear();
-            st.anchor_id = None;
-            st.pending_pointer = None;
-            st.pending_batch = None;
+    pub(in crate::workbench::websocket) fn selected_ids_snapshot(&self) -> HashSet<Uuid> {
+        let mut set = self.multi_selection.selected_ids.clone();
+        if set.is_empty()
+            && let Some(primary) = self.selected
+        {
+            set.insert(primary);
         }
-    });
+        set
+    }
+
+    pub(in crate::workbench::websocket) fn clear_multi_selection(&mut self) {
+        self.multi_selection.selected_ids.clear();
+        self.multi_selection.anchor_id = None;
+        self.multi_selection.pending_pointer = None;
+        self.multi_selection.pending_batch = None;
+    }
 }
 
 impl Workbench {
@@ -98,24 +67,19 @@ impl Workbench {
         if !self.leave_websocket_notes(window, cx) {
             return;
         }
-        let owner_id = cx.entity_id();
-        let pointer = WS_MULTI_SELECTION.with(|map| {
-            let mut map = map.borrow_mut();
-            map
-                .get_mut(&owner_id)
-                .and_then(|st| st.pending_pointer.take())
-                .filter(|(r, _, _, _)| *r == row)
-        });
+        let pointer = self
+            .websocket
+            .multi_selection
+            .pending_pointer
+            .take()
+            .filter(|(r, _, _, _)| *r == row);
         let delegate = self.websocket.table.read(cx).delegate();
         if let Some(message) = delegate.row(row) {
             let id = message.id;
             if let Some((_, button, shift, toggle)) = pointer {
                 if button == gpui_kit::MouseButton::Right {
-                    let already_in_multi = WS_MULTI_SELECTION.with(|map| {
-                        map.borrow()
-                            .get(&owner_id)
-                            .is_some_and(|st| st.selected_ids.contains(&id) && st.selected_ids.len() > 1)
-                    });
+                    let already_in_multi = self.websocket.multi_selection.selected_ids.contains(&id)
+                        && self.websocket.multi_selection.selected_ids.len() > 1;
                     if already_in_multi {
                         if let Some(primary) = self.websocket.selected
                             && let Some(pos) = delegate.rows.iter().position(|r| r.id == primary)
@@ -129,8 +93,10 @@ impl Workbench {
                         return;
                     }
                 } else if button == gpui_kit::MouseButton::Left && shift {
-                    let anchor = WS_MULTI_SELECTION
-                        .with(|map| map.borrow().get(&owner_id).and_then(|st| st.anchor_id))
+                    let anchor = self
+                        .websocket
+                        .multi_selection
+                        .anchor_id
                         .or(self.websocket.selected)
                         .unwrap_or(id);
                     let start_idx = delegate
@@ -146,55 +112,48 @@ impl Workbench {
                         .iter()
                         .map(|r| r.id)
                         .collect();
-                    WS_MULTI_SELECTION.with(|map| {
-                        let mut map = map.borrow_mut();
-                        let st = map.entry(owner_id).or_default();
-                        st.selected_ids = range_ids;
-                        if st.anchor_id.is_none() {
-                            st.anchor_id = Some(anchor);
-                        }
-                    });
+                    self.websocket.multi_selection.selected_ids = range_ids;
+                    if self.websocket.multi_selection.anchor_id.is_none() {
+                        self.websocket.multi_selection.anchor_id = Some(anchor);
+                    }
                     self.select_websocket(id, window, cx);
                     return;
                 } else if button == gpui_kit::MouseButton::Left && toggle {
                     let mut next_primary = Some(id);
                     let mut next_row_idx = None;
                     let mut cleared_all = false;
-                    WS_MULTI_SELECTION.with(|map| {
-                        let mut map = map.borrow_mut();
-                        let st = map.entry(owner_id).or_default();
-                        if st.selected_ids.is_empty()
-                            && let Some(cur) = self.websocket.selected
-                        {
-                            st.selected_ids.insert(cur);
-                        }
-                        if st.selected_ids.contains(&id) {
-                            st.selected_ids.remove(&id);
-                            if st.selected_ids.is_empty() {
-                                st.anchor_id = None;
-                                next_primary = None;
-                                cleared_all = true;
-                            } else if self.websocket.selected == Some(id) {
-                                next_primary = delegate
+                    let st = &mut self.websocket.multi_selection;
+                    if st.selected_ids.is_empty()
+                        && let Some(cur) = self.websocket.selected
+                    {
+                        st.selected_ids.insert(cur);
+                    }
+                    if st.selected_ids.contains(&id) {
+                        st.selected_ids.remove(&id);
+                        if st.selected_ids.is_empty() {
+                            st.anchor_id = None;
+                            next_primary = None;
+                            cleared_all = true;
+                        } else if self.websocket.selected == Some(id) {
+                            next_primary = delegate
+                                .rows
+                                .iter()
+                                .find(|r| st.selected_ids.contains(&r.id))
+                                .map(|r| r.id);
+                            next_row_idx = next_primary.and_then(|pid| {
+                                delegate
                                     .rows
                                     .iter()
-                                    .find(|r| st.selected_ids.contains(&r.id))
-                                    .map(|r| r.id);
-                                next_row_idx = next_primary.and_then(|pid| {
-                                    delegate
-                                        .rows
-                                        .iter()
-                                        .position(|r| r.id == pid)
-                                        .map(|pos| delegate.offset + pos)
-                                });
-                            } else {
-                                next_primary = self.websocket.selected;
-                            }
+                                    .position(|r| r.id == pid)
+                                    .map(|pos| delegate.offset + pos)
+                            });
                         } else {
-                            st.selected_ids.insert(id);
-                            st.anchor_id = Some(id);
+                            next_primary = self.websocket.selected;
                         }
-                    });
+                    } else {
+                        st.selected_ids.insert(id);
+                        st.anchor_id = Some(id);
+                    }
                     if cleared_all {
                         self.clear_websocket_detail(window, cx);
                         self.websocket.table.update(cx, |table, cx| {
@@ -215,13 +174,9 @@ impl Workbench {
                     return;
                 }
             }
-            WS_MULTI_SELECTION.with(|map| {
-                let mut map = map.borrow_mut();
-                let st = map.entry(owner_id).or_default();
-                st.selected_ids.clear();
-                st.selected_ids.insert(id);
-                st.anchor_id = Some(id);
-            });
+            self.websocket.multi_selection.selected_ids.clear();
+            self.websocket.multi_selection.selected_ids.insert(id);
+            self.websocket.multi_selection.anchor_id = Some(id);
             self.select_websocket(id, window, cx);
         } else if row < delegate.total {
             self.clear_websocket_detail(window, cx);
@@ -271,7 +226,7 @@ impl Workbench {
         if self.websocket.payload.has_focus(window, cx) {
             self.focus.focus(window, cx);
         }
-        clear_ws_multi_selection(cx.entity_id());
+        self.websocket.clear_multi_selection();
         self.websocket.clear_detail(window, cx);
     }
 
@@ -733,13 +688,7 @@ impl Workbench {
             {
                 self.websocket.pending_transfer = None;
                 self.websocket.pending_copy = None;
-                let owner_id = cx.entity_id();
-                WS_MULTI_SELECTION.with(|map| {
-                    let mut map = map.borrow_mut();
-                    if let Some(st) = map.get_mut(&owner_id) {
-                        st.pending_batch = None;
-                    }
-                });
+                self.websocket.multi_selection.pending_batch = None;
                 self.websocket.detail_error = Some(message);
             }
             event @ (Event::WebSocketNotes { .. } | Event::WebSocketNotesChanged { .. }) => {
@@ -758,20 +707,18 @@ impl Workbench {
                 };
                 self.on_websocket_notes_event(event, window, cx);
                 if let Some((changed_id, note_text)) = synced_note {
-                    let owner_id = cx.entity_id();
-                    let other_ids: Vec<Uuid> = WS_MULTI_SELECTION.with(|map| {
-                        map.borrow()
-                            .get(&owner_id)
-                            .filter(|st| st.selected_ids.len() > 1 && st.selected_ids.contains(&changed_id))
-                            .map(|st| {
-                                st.selected_ids
-                                    .iter()
-                                    .copied()
-                                    .filter(|id| *id != changed_id)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    });
+                    let st = &self.websocket.multi_selection;
+                    let other_ids: Vec<Uuid> = if st.selected_ids.len() > 1
+                        && st.selected_ids.contains(&changed_id)
+                    {
+                        st.selected_ids
+                            .iter()
+                            .copied()
+                            .filter(|id| *id != changed_id)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     if !other_ids.is_empty() {
                         let need_sync: Vec<Uuid> = self
                             .websocket
@@ -818,33 +765,21 @@ impl Workbench {
                 break;
             }
         }
-        let owner_id = cx.entity_id();
-        WS_MULTI_SELECTION.with(|map| {
-            let mut map = map.borrow_mut();
-            map.entry(owner_id).or_default().pending_batch = Some(PendingWsBatchOp {
-                kind,
-                remaining,
-                collected,
-            });
+        self.websocket.multi_selection.pending_batch = Some(PendingWsBatchOp {
+            kind,
+            remaining,
+            collected,
         });
         self.advance_pending_ws_batch_op(window, cx);
     }
 
     fn advance_pending_ws_batch_op(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let owner_id = cx.entity_id();
-        let loaded = self.websocket.detail.as_deref().cloned();
         let mut next_to_read = None;
         let mut finished = None;
-        WS_MULTI_SELECTION.with(|map| {
-            let mut map = map.borrow_mut();
-            let Some(st) = map.get_mut(&owner_id) else {
-                return;
-            };
-            let Some(batch) = st.pending_batch.as_mut() else {
-                return;
-            };
+        let loaded = self.websocket.detail.as_deref();
+        if let Some(batch) = self.websocket.multi_selection.pending_batch.as_mut() {
             while let Some(&front_id) = batch.remaining.front() {
-                if let Some(ref detail) = loaded
+                if let Some(detail) = loaded
                     && detail.id == front_id
                 {
                     batch.collected.push(detail.clone());
@@ -855,9 +790,9 @@ impl Workbench {
                 }
             }
             if next_to_read.is_none() && batch.remaining.is_empty() {
-                finished = st.pending_batch.take();
+                finished = self.websocket.multi_selection.pending_batch.take();
             }
-        });
+        }
         if let Some(target_id) = next_to_read {
             self.select_websocket(target_id, window, cx);
             return;
@@ -1156,7 +1091,7 @@ impl Workbench {
             }
             self.clear_websocket_detail(window, cx);
         } else {
-            clear_ws_multi_selection(cx.entity_id());
+            self.websocket.clear_multi_selection();
         }
         let mut removed_count = 0usize;
         self.websocket.table.update(cx, |table, cx| {

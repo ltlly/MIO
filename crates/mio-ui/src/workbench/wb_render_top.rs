@@ -171,7 +171,7 @@ impl Focusable for Workbench {
 impl Render for Workbench {
     #[inline(never)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        theme::sync_window_system_dpi(window.scale_factor());
+        theme::sync_window_system_dpi(window.scale_factor(), cx);
         if self.startup_wizard_active() && !self.shutdown_requested {
             return self.render_startup_wizard(window, cx).into_any_element();
         }
@@ -812,9 +812,7 @@ impl Workbench {
             FooterActiveDrawer::Info => {
                 let project_name = self.current_footer_project_name().unwrap_or_else(|| "临时项目".into());
                 let status = self.footer_status(window, cx);
-                let disk = self.project.and_then(mio_core::project_disk_bytes).or_else(|| {
-                    self.project_path.as_deref().and_then(|path| mio_core::measure_project_disk_bytes(path).ok())
-                });
+                let disk = self.project_disk_bytes;
                 let process = mio_core::current_process_memory_bytes();
                 let total = mio_core::total_physical_memory_bytes();
                 div().p(px(12.)).flex().flex_col().gap(px(8.))

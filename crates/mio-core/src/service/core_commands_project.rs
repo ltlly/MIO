@@ -176,6 +176,14 @@ impl State {
                 self.flush_all_provenance_to_store();
                 self.refresh_project_disk_bytes();
                 if let Some(workspace) = workspace {
+                    if prev_workspace
+                        .as_ref()
+                        .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)
+                    {
+                        workspace
+                            .upstream_proxy
+                            .sync_user_level_cache(&mut self.user_level_connections_cache);
+                    }
                     self.sync_compiled_client_certs(&workspace).await;
                     self.sync_ws_repeater_workspace(&workspace);
                     self.sync_sessions_workspace(&workspace);
@@ -462,6 +470,14 @@ impl State {
             }
         };
         save_outcome?;
+        if prev_workspace
+            .as_ref()
+            .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)
+        {
+            workspace
+                .upstream_proxy
+                .sync_user_level_cache(&mut self.user_level_connections_cache);
+        }
         self.sync_compiled_client_certs(&workspace).await;
         self.sync_ws_repeater_workspace(&workspace);
         self.sync_sessions_workspace(&workspace);

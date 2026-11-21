@@ -11,6 +11,7 @@ async fn next(client: &mut Client) -> Event {
         let event = client.events.recv().await.expect("runtime stays connected");
         match event {
             Event::ProxyState { address: None, .. }
+            | Event::ProjectDiskUsage { .. }
             | Event::HistoryChanged { .. }
             | Event::WebSocketHistoryChanged { .. }
             | Event::SendProgress { .. }

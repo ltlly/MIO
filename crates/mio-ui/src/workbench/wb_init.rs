@@ -137,6 +137,9 @@ impl Workbench {
                             cancel.cancel();
                         }
                         view.extra_tools.logger_pending_read = None;
+                        view.clear_logger_pending_batch();
+                        view.collaborator_insert_sub = None;
+                        view.sequential_group_queue = None;
                         view.cancel_history_transfer("后台断开；未转送所选请求。", cx);
                         view.imported_history_disconnected(cx);
                         view.tab_groups_save_failed(
@@ -195,6 +198,7 @@ impl Workbench {
             backend_disconnected: false,
             project: None,
             project_path: None,
+            project_disk_bytes: None,
             settings_window: None,
             tab_group_dialog: None,
             user_preferences: user_preferences::UserPreferencesUi::default(),
@@ -271,6 +275,12 @@ impl Workbench {
             selected_intercept: None,
             tab_editors: HashMap::new(),
             tab_editor_lru: Vec::new(),
+            closed_repeater_order: Vec::new(),
+            repeater_ui_caches: tabs::RepeaterUiCaches::default(),
+            sequential_group_queue: None,
+            repeater_target_sync_host: true,
+            editor_ui_caches: wb_editors::EditorUiCaches::default(),
+            collaborator_insert_sub: None,
             websocket_repeater: websocket_repeater::WebSocketRepeaterState::default(),
             target_pane: boxed_with(|| target::TargetPane::new(window, cx)),
             sequencer_pane: boxed_with(|| sequencer::SequencerPane::new(window, cx)),

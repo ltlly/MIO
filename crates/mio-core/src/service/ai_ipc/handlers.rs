@@ -238,7 +238,7 @@ impl State {
         map
     }
 
-    fn ipc_status(&self) -> Result<AiIpcPayload> {
+    fn ipc_status(&mut self) -> Result<AiIpcPayload> {
         let mut total_flows = self.store.flow_count()?;
         let recovery = self.latest_recovery_summaries();
         for &id in recovery.keys() {
@@ -248,10 +248,17 @@ impl State {
         }
         let project_disk_bytes = match self.store.total_bytes() {
             Ok(bytes) => {
-                crate::sys_metrics::set_project_disk_bytes(self.project, bytes);
+                self.project_disk_bytes = bytes;
+                self.last_disk_refresh = Some(std::time::Instant::now());
+                if self.events.capacity() > 4 {
+                    let _ = self.events.try_send(Event::ProjectDiskUsage {
+                        project: self.project,
+                        bytes,
+                    });
+                }
                 bytes
             }
-            Err(_) => crate::project_disk_bytes(self.project).unwrap_or(0),
+            Err(_) => self.project_disk_bytes,
         };
         let proxy_address = self.proxy.as_ref().map(|p| p.address().to_string());
         Ok(AiIpcPayload::Status {
