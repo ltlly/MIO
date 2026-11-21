@@ -5,8 +5,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use mio_plugin_api::{FlowState, Header, HttpRequest, HttpVersion, ProjectKey, Uuid};
 use mio_proxy::{
     ClientCertificateFormat, ClientCertificateRule, InterceptDecision, InterceptFilter,
-    MitmAuthority, ParsedClientIdentity, ProxyConfig, ProxyCredentials, ProxyEndpoint, ProxyError,
-    ProxyEvent, SendConfig, UpstreamRoute, UpstreamTls,
+    InterceptFilterOutcome, MitmAuthority, ParsedClientIdentity, ProxyConfig, ProxyCredentials,
+    ProxyEndpoint, ProxyError, ProxyEvent, SendConfig, UpstreamRoute, UpstreamTls,
 };
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use std::{

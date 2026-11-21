@@ -111,18 +111,13 @@ async fn mtls_origin_rejects_unauthenticated_and_succeeds_via_send_and_proxy() {
         body: Vec::new(),
         trailers: Vec::new(),
     };
+    let mut unauth_send_cfg = SendConfig::default();
+    unauth_send_cfg.tls.trust = upstream_tls.clone();
+    unauth_send_cfg.limits.timeout = DEADLINE;
     assert!(
-        mio_proxy::send(
-            req.clone(),
-            SendConfig {
-                upstream_tls: upstream_tls.clone(),
-                timeout: DEADLINE,
-                ..SendConfig::default()
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .is_err(),
+        mio_proxy::send(req.clone(), unauth_send_cfg, CancellationToken::new())
+            .await
+            .is_err(),
         "unauthenticated client must fail mTLS handshake"
     );
 
@@ -138,26 +133,21 @@ async fn mtls_origin_rejects_unauthenticated_and_succeeds_via_send_and_proxy() {
     let client_certs: Arc<[(ClientCertificateRule, ParsedClientIdentity)]> =
         Arc::from([(rule, identity)]);
 
-    let direct_ok = mio_proxy::send(
-        req,
-        SendConfig {
-            upstream_tls: upstream_tls.clone(),
-            timeout: DEADLINE,
-            client_certificates: client_certs.clone(),
-            ..SendConfig::default()
-        },
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let mut direct_send_cfg = SendConfig::default();
+    direct_send_cfg.tls.trust = upstream_tls.clone();
+    direct_send_cfg.limits.timeout = DEADLINE;
+    direct_send_cfg.tls.client_certificates = client_certs.clone();
+    let direct_ok = mio_proxy::send(req, direct_send_cfg, CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(direct_ok.status, 200);
     assert_eq!(direct_ok.body, b"mtls-ok");
 
     let ca = MitmAuthority::generate().unwrap();
     let ca_der = ca.certificate_der();
     let mut unauth_cfg = ProxyConfig::new(ca.clone());
-    unauth_cfg.upstream_tls = upstream_tls.clone();
-    unauth_cfg.request_timeout = DEADLINE;
+    unauth_cfg.tls.upstream.trust = upstream_tls.clone();
+    unauth_cfg.limits.request_timeout = DEADLINE;
     let (unauth_tx, _unauth_rx) = mpsc::channel(16);
     let mut unauth_proxy = mio_proxy::start(
         unauth_cfg,
@@ -181,9 +171,9 @@ async fn mtls_origin_rejects_unauthenticated_and_succeeds_via_send_and_proxy() {
     unauth_proxy.stop().await.unwrap();
 
     let mut mtls_cfg = ProxyConfig::new(ca);
-    mtls_cfg.upstream_tls = upstream_tls;
-    mtls_cfg.request_timeout = DEADLINE;
-    mtls_cfg.client_certificates = client_certs;
+    mtls_cfg.tls.upstream.trust = upstream_tls;
+    mtls_cfg.limits.request_timeout = DEADLINE;
+    mtls_cfg.tls.upstream.client_certificates = client_certs;
     let (events_tx, mut events_rx) = mpsc::channel(16);
     let mut mtls_proxy = mio_proxy::start(
         mtls_cfg,

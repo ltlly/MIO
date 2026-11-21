@@ -19,7 +19,7 @@ impl State {
         let job = self.intruder.prep_jobs.spawn(async move {
             let mut record = record;
             let started = Instant::now();
-            let deadline = started + config.timeout;
+            let deadline = started + config.limits.timeout;
             if sessions
                 .apply_to_flow_record(
                     SessionTool::Intruder,

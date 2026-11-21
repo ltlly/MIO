@@ -150,7 +150,7 @@ async fn archived_item_to_explicit_loopback_send_survives_save_as_and_runtime_re
                     if actual == project && workspace == saved
             ));
             assert!(matches!(
-                exchange(&mut client, Command::Send { run_id: Uuid::new_v4(), cancel: tokio_util::sync::CancellationToken::new(), project, tab_id, draft: draft.clone(), settings: saved.repeater_settings.clone() }).await,
+                exchange(&mut client, Command::Send { run_id: Uuid::new_v4(), cancel: tokio_util::sync::CancellationToken::new(), project, tab_id, draft: draft.clone(), settings: saved.repeater_settings.clone(), group_send: None }).await,
                 Event::SendStarted { project: actual, tab_id: actual_tab, draft_revision: 2, .. }
                     if actual == project && actual_tab == tab_id
             ));

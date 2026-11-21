@@ -1,11 +1,78 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+
 use mio_plugin_api::{Header, HttpVersion};
 use rama::extensions::ExtensionsRef;
-use rama::http::{HeaderMap, HeaderValue};
-
+use rama::http::HeaderValue;
+use rama::io::Io;
 use rama::tls::rustls::dep::rustls;
 
 use super::*;
+
+impl State {
+    pub(super) async fn serve_http_connection<IO, S>(&self, io: IO, service: S)
+    where
+        IO: Io + ExtensionsRef,
+        S: Service<Request, Output = Response, Error = Infallible> + Clone,
+    {
+        if self.config.http.enable_http2 {
+            let mut server = HttpServer::auto(self.exec.clone());
+            server
+                .http1_mut()
+                .set_keep_alive(self.config.http.http1_keep_alive);
+            server.h2_mut().set_max_concurrent_streams(
+                self.config.limits.max_connections.min(u32::MAX as usize) as u32,
+            );
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {},
+                _ = server.serve(io, service) => {},
+            }
+        } else {
+            let mut server = HttpServer::new_http1(self.exec.clone());
+            server
+                .http1_mut()
+                .set_keep_alive(self.config.http.http1_keep_alive);
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {},
+                _ = server.serve(io, service) => {},
+            }
+        }
+    }
+
+    pub(super) async fn serve_tls_http_connection<IO, S>(
+        &self,
+        io: IO,
+        tls_config: TlsServerConfig,
+        service: S,
+        store_client_hello: bool,
+    ) -> Result<(), rama::error::BoxError>
+    where
+        IO: Io + Unpin + ExtensionsRef,
+        S: Service<Request, Output = Response, Error = Infallible> + Clone,
+    {
+        if self.config.http.enable_http2 {
+            let mut server = HttpServer::auto(self.exec.clone());
+            server
+                .http1_mut()
+                .set_keep_alive(self.config.http.http1_keep_alive);
+            server.h2_mut().set_max_concurrent_streams(
+                self.config.limits.max_connections.min(u32::MAX as usize) as u32,
+            );
+            TlsAcceptorService::new(tls_config, server.service(service), store_client_hello)
+                .serve(io)
+                .await
+        } else {
+            let mut server = HttpServer::new_http1(self.exec.clone());
+            server
+                .http1_mut()
+                .set_keep_alive(self.config.http.http1_keep_alive);
+            TlsAcceptorService::new(tls_config, server.service(service), store_client_hello)
+                .serve(io)
+                .await
+        }
+    }
+}
 
 impl ActiveFlow {
     pub(super) async fn finish(&mut self, result: Result<(), &ProxyError>) {
@@ -78,30 +145,32 @@ impl Drop for ActiveFlow {
 }
 
 pub async fn start(
-    mut config: ProxyConfig,
+    config: ProxyConfig,
     project: ProjectKey,
     events: mpsc::Sender<ProxyEvent>,
 ) -> Result<ProxyHandle, ProxyError> {
-    if config.max_connections == 0
-        || config.max_body_bytes == 0
-        || config.request_timeout.is_zero()
-        || config.intercept_timeout.is_zero()
+    if config.limits.max_connections == 0
+        || config.limits.max_body_bytes == 0
+        || config.limits.request_timeout.is_zero()
+        || config.limits.intercept_timeout.is_zero()
     {
         return Err(ProxyError::invalid("连接/正文预算及请求期限必须大于零"));
     }
-    if config.redirect_to_port == Some(0) {
+    if config.network.redirect_to_port == Some(0) {
         return Err(ProxyError::invalid("重定向目标端口必须大于零"));
     }
-    config.cert_mode.validate()?;
+    config.tls.cert_mode.validate()?;
     config
-        .upstream_tls
-        .config_with_options(None, &config.upstream_tls_options)?;
-    config.upstream_route.rama()?;
-    config.upstream_route.tls_config_with_options(
-        &config.client_certificates,
-        &config.upstream_tls_options,
+        .tls
+        .upstream
+        .trust
+        .config_with_options(None, &config.tls.upstream.options)?;
+    config.network.upstream_route.rama()?;
+    config.network.upstream_route.tls_config_with_options(
+        &config.tls.upstream.client_certificates,
+        &config.tls.upstream.options,
     )?;
-    let listener = TcpListener::bind(config.listen)
+    let listener = TcpListener::bind(config.network.listen)
         .await
         .map_err(ProxyError::network)?;
     let address = listener.local_addr().map_err(ProxyError::network)?;
@@ -109,49 +178,25 @@ pub async fn start(
     let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
     let exec = Executor::graceful(shutdown.guard());
     let tasks = TaskTracker::new();
-    let (intercept, receiver) = watch::channel(InterceptMode {
-        requests: config.intercept_requests,
-        responses: config.intercept_responses,
-    });
-    let (processing, processing_receiver) = watch::channel((
-        config.flow_transform.take(),
-        config.intercept_filter.take(),
-        config.websocket_intercept_filter.take(),
-    ));
-    let (websocket_transform, websocket_transform_receiver) =
-        watch::channel(config.websocket_transform.take());
-    let (ssl_pass_through, ssl_pass_through_receiver) =
-        watch::channel(config.ssl_pass_through.take());
-    let (plugin_hooks, plugin_hooks_receiver) = watch::channel((
-        config.async_flow_hook.take(),
-        config.async_websocket_hook.take(),
-    ));
-    let (drop_out_of_scope, drop_out_of_scope_receiver) =
-        watch::channel(config.drop_out_of_scope_fn.take());
-    let stop_timeout = config.stop_timeout;
-    let connections = config
-        .shared_connections
-        .clone()
-        .unwrap_or_else(|| Arc::new(Semaphore::new(config.max_connections)));
-    let requests = config
-        .shared_requests
-        .clone()
-        .unwrap_or_else(|| Arc::new(Semaphore::new(config.max_connections)));
+    let (static_config, dynamic_init, shared) = config.into_parts();
+    let (dynamic_tx, dynamic_rx) = watch::channel(dynamic_init);
+    let stop_timeout = static_config.limits.stop_timeout;
+    let connections = shared
+        .connections
+        .unwrap_or_else(|| Arc::new(Semaphore::new(static_config.limits.max_connections)));
+    let requests = shared
+        .requests
+        .unwrap_or_else(|| Arc::new(Semaphore::new(static_config.limits.max_connections)));
     let terminal_records = TerminalRecords::default();
-    let injectors = config.shared_injectors.clone().unwrap_or_default();
+    let injectors = shared.injectors.unwrap_or_default();
     let state = Arc::new(State {
         project,
         listener_port: address.port(),
         requests,
-        config,
+        config: static_config,
         events,
         cancel: cancel.clone(),
-        intercept: receiver,
-        processing: processing_receiver,
-        websocket_transform: websocket_transform_receiver,
-        ssl_pass_through: ssl_pass_through_receiver,
-        plugin_hooks: plugin_hooks_receiver,
-        drop_out_of_scope: drop_out_of_scope_receiver,
+        dynamic: dynamic_rx,
         tasks: tasks.clone(),
         exec,
         terminal_records: terminal_records.clone(),
@@ -179,7 +224,7 @@ pub async fn start(
                     let permit = Arc::new(permit);
                     match socks5::peek_first_byte(
                         &stream,
-                        state.config.request_timeout,
+                        state.config.limits.request_timeout,
                         &state.cancel,
                     )
                     .await
@@ -189,13 +234,26 @@ pub async fn start(
                             return;
                         }
                         Ok(Some(socks5::TLS_CLIENT_HELLO_LEAD_BYTE))
-                            if state.config.invisible_proxying =>
+                            if state.config.network.invisible_proxying =>
                         {
                             serve_invisible_tls(stream, state, permit).await;
                             return;
                         }
                         Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => return,
+                        Ok(None) => return,
+                        Err(ProxyError::Cancelled) => return,
+                        Err(error) => {
+                            let failed = HttpRequest {
+                                method: "CONNECT".into(),
+                                url: format!("proxy://127.0.0.1:{}", state.listener_port),
+                                version: HttpVersion::Http11,
+                                headers: Vec::new(),
+                                body: Vec::new(),
+                                trailers: Vec::new(),
+                            };
+                            state.failure(failed, &error).await;
+                            return;
+                        }
                     }
                     let io = GracefulIo::new(
                         Box::pin(state.cancel.clone().cancelled_owned()),
@@ -207,30 +265,7 @@ pub async fn start(
                         let permit = permit.clone();
                         async move { Ok::<_, Infallible>(handle_entry(request, state, permit).await) }
                     });
-                    if state.config.enable_http2 {
-                        let mut server = HttpServer::auto(state.exec.clone());
-                        server
-                            .http1_mut()
-                            .set_keep_alive(state.config.http1_keep_alive);
-                        server.h2_mut().set_max_concurrent_streams(
-                            state.config.max_connections.min(u32::MAX as usize) as u32,
-                        );
-                        tokio::select! {
-                            biased;
-                            _ = state.cancel.cancelled() => {},
-                            _ = server.serve(io, service) => {},
-                        }
-                    } else {
-                        let mut server = HttpServer::new_http1(state.exec.clone());
-                        server
-                            .http1_mut()
-                            .set_keep_alive(state.config.http1_keep_alive);
-                        tokio::select! {
-                            biased;
-                            _ = state.cancel.cancelled() => {},
-                            _ = server.serve(io, service) => {},
-                        }
-                    }
+                    state.serve_http_connection(io, service).await;
                 });
             }
             Ok(())
@@ -248,12 +283,7 @@ pub async fn start(
     Ok(ProxyHandle {
         address,
         cancel,
-        intercept,
-        processing,
-        websocket_transform,
-        ssl_pass_through,
-        plugin_hooks,
-        drop_out_of_scope,
+        dynamic: dynamic_tx,
         runner: Some(runner),
         stop_timeout,
         terminal_records,
@@ -269,11 +299,12 @@ async fn serve_invisible_tls(
     let _permit = permit;
     let fallback_host = state
         .config
+        .network
         .redirect_to_host
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty())
-        .or_else(|| match &state.config.cert_mode {
+        .or_else(|| match &state.config.tls.cert_mode {
             crate::ListenerCertMode::SpecificHostname(host) if !host.trim().is_empty() => {
                 Some(host.trim())
             }
@@ -282,7 +313,7 @@ async fn serve_invisible_tls(
         .unwrap_or("localhost")
         .to_owned();
     let observed_sni = Arc::new(std::sync::Mutex::new(None::<String>));
-    let tls_config = state.config.ca.invisible_server_config(
+    let tls_config = state.config.tls.ca.invisible_server_config(
         state.listener_tls_options(),
         fallback_host.clone(),
         observed_sni.clone(),
@@ -306,12 +337,7 @@ async fn serve_invisible_tls(
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .map(str::to_owned)
-            .or_else(|| {
-                sni_for_req
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-            })
+            .or_else(|| crate::lock_unpoison(&sni_for_req).clone())
             .unwrap_or_else(|| fallback_for_req.clone());
         async move {
             Ok::<_, Infallible>(
@@ -320,26 +346,9 @@ async fn serve_invisible_tls(
         }
     });
     let run = async {
-        let serve_result = if state.config.enable_http2 {
-            let mut server = HttpServer::auto(state.exec.clone());
-            server
-                .http1_mut()
-                .set_keep_alive(state.config.http1_keep_alive);
-            server.h2_mut().set_max_concurrent_streams(
-                state.config.max_connections.min(u32::MAX as usize) as u32,
-            );
-            TlsAcceptorService::new(tls_config, server.service(service), true)
-                .serve(io)
-                .await
-        } else {
-            let mut server = HttpServer::new_http1(state.exec.clone());
-            server
-                .http1_mut()
-                .set_keep_alive(state.config.http1_keep_alive);
-            TlsAcceptorService::new(tls_config, server.service(service), true)
-                .serve(io)
-                .await
-        };
+        let serve_result = state
+            .serve_tls_http_connection(io, tls_config, service, true)
+            .await;
         serve_result
             .or_else(|err| {
                 if served_any.load(Ordering::Relaxed)
@@ -347,12 +356,10 @@ async fn serve_invisible_tls(
                 {
                     Ok(())
                 } else {
-                    let sni_host = observed_sni
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    let sni_host = crate::lock_unpoison(&observed_sni)
                         .clone()
                         .unwrap_or_else(|| fallback_host.clone());
-                    let port = state.config.redirect_to_port.unwrap_or(443);
+                    let port = state.config.network.redirect_to_port.unwrap_or(443);
                     state.notify_client_tls_failure(sni_host, port);
                     Err(err)
                 }
@@ -364,14 +371,12 @@ async fn serve_invisible_tls(
         _ = state.cancel.cancelled() => {},
         result = run => {
             if let Err(error) = result {
-                let sni_host = observed_sni
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                let sni_host = crate::lock_unpoison(&observed_sni)
                     .clone()
                     .unwrap_or_else(|| fallback_host.clone());
                 let failed_request = HttpRequest {
                     method: "CONNECT".into(),
-                    url: format!("{sni_host}:{}", state.config.redirect_to_port.unwrap_or(443)),
+                    url: format!("{sni_host}:{}", state.config.network.redirect_to_port.unwrap_or(443)),
                     version: HttpVersion::Http11,
                     headers: Vec::new(),
                     body: Vec::new(),
@@ -416,9 +421,10 @@ async fn handle_entry(
         }
         let tls_options = state.listener_tls_options();
         let config = tokio::time::timeout(
-            state.config.request_timeout,
+            state.config.limits.request_timeout,
             state
                 .config
+                .tls
                 .ca
                 .server_config_with_options(&host, &tls_options),
         )
@@ -446,26 +452,9 @@ async fn handle_entry(
                         )
                     }
                 });
-                let serve_result = if task_state.config.enable_http2 {
-                    let mut server = HttpServer::auto(task_state.exec.clone());
-                    server
-                        .http1_mut()
-                        .set_keep_alive(task_state.config.http1_keep_alive);
-                    server.h2_mut().set_max_concurrent_streams(
-                        task_state.config.max_connections.min(u32::MAX as usize) as u32,
-                    );
-                    TlsAcceptorService::new(config, server.service(service), true)
-                        .serve(upgraded)
-                        .await
-                } else {
-                    let mut server = HttpServer::new_http1(task_state.exec.clone());
-                    server
-                        .http1_mut()
-                        .set_keep_alive(task_state.config.http1_keep_alive);
-                    TlsAcceptorService::new(config, server.service(service), true)
-                        .serve(upgraded)
-                        .await
-                };
+                let serve_result = task_state
+                    .serve_tls_http_connection(upgraded, config, service, true)
+                    .await;
                 serve_result
                     .or_else(|err| {
                         if served_any.load(Ordering::Relaxed)
@@ -549,7 +538,7 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
     let head_only = request.method() == Method::HEAD;
     match path {
         "/cert" | "/cert.der" | "/mio-ca.cer" | "/cacert.der" => {
-            let der = state.config.ca.certificate_der();
+            let der = state.config.tls.ca.certificate_der();
             let mut resp = Response::new(rama::http::Body::from(if head_only {
                 Vec::new()
             } else {
@@ -567,7 +556,7 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
             Some(resp)
         }
         "/cert.pem" | "/mio-ca.pem" => {
-            let pem = state.config.ca.certificate_pem().into_bytes();
+            let pem = state.config.tls.ca.certificate_pem().into_bytes();
             let mut resp = Response::new(rama::http::Body::from(if head_only {
                 Vec::new()
             } else {
@@ -617,7 +606,7 @@ pub(in crate::server) async fn handle_http_with_ingress(
     allow_origin_form: bool,
 ) -> Response {
     if tunnel.is_none()
-        && !state.config.disable_web_interface
+        && !state.config.http.disable_web_interface
         && let Some(portal_response) = maybe_serve_local_ca_portal(&request, &state)
     {
         return portal_response;
@@ -626,9 +615,10 @@ pub(in crate::server) async fn handle_http_with_ingress(
     if tunnel.is_none()
         && !allow_origin_form
         && request.uri().scheme().is_none()
-        && !state.config.invisible_proxying
+        && !state.config.network.invisible_proxying
         && state
             .config
+            .network
             .redirect_to_host
             .as_deref()
             .map(str::trim)
@@ -643,7 +633,7 @@ pub(in crate::server) async fn handle_http_with_ingress(
     let mut model = match message::request_head_with_fallback(
         &request,
         tunnel.as_deref(),
-        state.config.redirect_to_host.as_deref(),
+        state.config.network.redirect_to_host.as_deref(),
     ) {
         Ok(model) => model,
         Err(error) => {
@@ -660,9 +650,9 @@ pub(in crate::server) async fn handle_http_with_ingress(
     if state.should_drop_out_of_scope(&model.url) {
         return state.error_response(&ProxyError::Dropped);
     }
-    if !state.config.understand_100_continue
-        && !state.config.remove_100_continue_headers
-        && has_expect_100_continue(request.headers())
+    if !state.config.http.understand_100_continue
+        && !state.config.http.remove_100_continue_headers
+        && message::has_header_token(request.headers(), "expect", "100-continue")
     {
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = StatusCode::EXPECTATION_FAILED;
@@ -714,8 +704,8 @@ pub(in crate::server) async fn handle_http_with_ingress(
             if sse::detected_or_in_scope(
                 &response,
                 &record.request,
-                state.config.treat_event_stream_as_streaming,
-                state.config.streaming_scope_matcher.as_ref(),
+                state.config.http.treat_event_stream_as_streaming,
+                state.config.http.streaming_scope_matcher.as_ref(),
             ) =>
         {
             return sse::handle(response, active, ingress_version, cancel, cancel_on_drop).await;
@@ -723,19 +713,20 @@ pub(in crate::server) async fn handle_http_with_ingress(
         Ok((response, deadline)) => {
             let status = response.status().as_u16();
             let version = message::model_version(response.version());
+            let reason_phrase = active.capture_metrics.reason_phrase.clone();
             let headers = message::headers(response.headers());
             async {
                 let (body, trailers) = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
-                    result = tokio::time::timeout_at(deadline, message::body(response.into_body(), state.config.max_body_bytes)) => result.map_err(|_| ProxyError::Timeout)??,
+                    result = tokio::time::timeout_at(deadline, message::body(response.into_body(), state.config.limits.max_body_bytes)) => result.map_err(|_| ProxyError::Timeout)??,
                 };
                 cancel.cancel();
                 record.summary.status = Some(status);
                 record.summary.response_bytes = body.len() as u64;
-                record.response = Some(HttpResponse { status, version, reason_phrase: None, headers, body, trailers });
+                record.response = Some(HttpResponse { status, version, reason_phrase, headers, body, trailers });
                 state.intercept(record, true, None, &active.capture_metrics, active.request_was_intercepted, active.request_was_modified).await?;
-                let response_client_version = if state.config.use_http10_in_responses
+                let response_client_version = if state.config.http.use_http10_in_responses
                     && ingress_version != HttpVersion::Http2
                 {
                     HttpVersion::Http10
@@ -744,11 +735,11 @@ pub(in crate::server) async fn handle_http_with_ingress(
                 };
                 let mut outgoing = message::to_response(
                     record.response.as_ref().expect("upstream response is present"),
-                    state.config.max_body_bytes,
+                    state.config.limits.max_body_bytes,
                     response_client_version,
                     record.request.method.eq_ignore_ascii_case("HEAD"),
                 )?;
-                if state.config.set_response_connection_close
+                if state.config.http.set_response_connection_close
                     && response_client_version != HttpVersion::Http2
                 {
                     outgoing
@@ -766,33 +757,23 @@ pub(in crate::server) async fn handle_http_with_ingress(
     result.unwrap_or_else(|error| state.error_response(&error))
 }
 
-fn has_expect_100_continue(headers: &HeaderMap) -> bool {
-    headers
-        .get_all("expect")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|v| {
-            v.split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
-        })
-}
-
 pub(in crate::server) fn apply_listener_target_overrides(
     model: &mut HttpRequest,
-    config: &ProxyConfig,
+    config: &StaticProxyConfig,
 ) -> Result<(), ProxyError> {
     let redirect_host = config
+        .network
         .redirect_to_host
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty());
-    let redirect_port = config.redirect_to_port.filter(|&p| p > 0);
-    if redirect_host.is_none() && redirect_port.is_none() && !config.force_use_of_tls {
+    let redirect_port = config.network.redirect_to_port.filter(|&p| p > 0);
+    if redirect_host.is_none() && redirect_port.is_none() && !config.tls.force_use_of_tls {
         return Ok(());
     }
     let uri: Uri = model.url.parse().map_err(ProxyError::invalid)?;
     let original_scheme = uri.scheme_str().unwrap_or("http");
-    let effective_scheme = if config.force_use_of_tls {
+    let effective_scheme = if config.tls.force_use_of_tls {
         if original_scheme.eq_ignore_ascii_case("ws") || original_scheme.eq_ignore_ascii_case("wss")
         {
             "wss"
@@ -806,11 +787,7 @@ pub(in crate::server) fn apply_listener_target_overrides(
         .host_str()
         .ok_or_else(|| ProxyError::invalid("缺少请求目标主机"))?;
     let host_raw = redirect_host.unwrap_or(original_host.as_ref());
-    let formatted_host = if host_raw.contains(':') && !host_raw.starts_with('[') && !host_raw.ends_with(']') {
-        format!("[{host_raw}]")
-    } else {
-        host_raw.to_owned()
-    };
+    let formatted_host = crate::route::format_host_for_authority(host_raw);
     let effective_port = redirect_port.or_else(|| uri.port_u16());
     let mut origin_target = rama::bytes::BytesMut::new();
     uri.write_http_origin_form(&mut origin_target)
@@ -825,10 +802,10 @@ pub(in crate::server) fn apply_listener_target_overrides(
 
 pub(in crate::server) fn apply_proxy_misc_request_transforms(
     model: &mut HttpRequest,
-    config: &ProxyConfig,
+    config: &StaticProxyConfig,
     is_websocket: bool,
 ) {
-    if config.strip_proxy_headers {
+    if config.http.strip_proxy_headers {
         model.headers.retain(|header| {
             !header
                 .name
@@ -836,23 +813,23 @@ pub(in crate::server) fn apply_proxy_misc_request_transforms(
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-"))
         });
     }
-    if config.remove_unsupported_accept_encodings {
+    if config.http.remove_unsupported_accept_encodings {
         filter_unsupported_accept_encodings(&mut model.headers);
     }
-    if config.remove_100_continue_headers {
+    if config.http.remove_100_continue_headers {
         message::strip_expect_100_continue_vec(&mut model.headers);
     }
-    if is_websocket && config.strip_sec_websocket_extensions {
+    if is_websocket && config.http.strip_sec_websocket_extensions {
         model
             .headers
             .retain(|header| !header.name.eq_ignore_ascii_case("sec-websocket-extensions"));
     }
     if !is_websocket {
-        if config.use_http10_in_requests {
+        if config.http.use_http10_in_requests {
             model.version = HttpVersion::Http10;
         }
-        if config.set_request_connection_header && model.version != HttpVersion::Http2 {
-            let value = if !config.http1_keep_alive || config.use_http10_in_requests {
+        if config.http.set_request_connection_header && model.version != HttpVersion::Http2 {
+            let value = if !config.http.http1_keep_alive || config.http.use_http10_in_requests {
                 b"close".to_vec()
             } else {
                 b"keep-alive".to_vec()
@@ -939,7 +916,7 @@ pub(in crate::server) async fn process_http(
     let (body, trailers) = tokio::select! {
         biased;
         _ = state.cancel.cancelled() => return Err(ProxyError::Cancelled),
-        result = tokio::time::timeout(state.config.request_timeout, message::body(request.into_body(), state.config.max_body_bytes)) => result.map_err(|_| ProxyError::Timeout)??,
+        result = tokio::time::timeout(state.config.limits.request_timeout, message::body(request.into_body(), state.config.limits.max_body_bytes)) => result.map_err(|_| ProxyError::Timeout)??,
     };
     record.request.body = body;
     record.request.trailers = trailers;
@@ -953,57 +930,20 @@ pub(in crate::server) async fn process_http(
             capture_metrics: CapturedFlowMetrics::default(),
         })
         .await?;
-    (*request_was_intercepted, *request_was_modified) =
-        state.intercept(record, false, None, &CapturedFlowMetrics::default(), false, false).await?;
-    let route = state.resolve_upstream_route_for_url(&record.request.url);
-    let is_https_target = record.request.url.len() >= 8
-        && record.request.url[..8].eq_ignore_ascii_case("https://");
-    let outgoing_http_version = if state.config.use_http10_in_requests {
-        Some(HttpVersion::Http10)
-    } else if !state.config.enable_http2
-        || (is_https_target && !state.config.default_to_http2 && record.request.version != HttpVersion::Http2)
-    {
-        Some(HttpVersion::Http11)
-    } else {
-        None
-    };
-    let config = SendConfig {
-        upstream_route: route,
-        upstream_tls: state.config.upstream_tls.clone(),
-        upstream_tls_options: state.config.upstream_tls_options,
-        max_body_bytes: state.config.max_body_bytes,
-        timeout: state.config.request_timeout,
-        streaming_timeout: state.config.streaming_timeout,
-        http_version: outgoing_http_version,
-        update_content_length: true,
-        normalize_http1_line_endings: true,
-        raw_http1_override: None,
-        http1_keep_alive: state.config.http1_keep_alive && !state.config.use_http10_in_requests,
-        set_connection_keep_alive: state.config.set_request_connection_header
-            && state.config.http1_keep_alive
-            && !state.config.use_http10_in_requests,
-        http2_reuse: state.config.enable_http2,
-        use_connection_pool: state.config.use_connection_pool,
-        allow_http2_alpn_override: false,
-        strip_100_continue_headers: state.config.remove_100_continue_headers,
-        strip_proxy_headers: state.config.strip_proxy_headers,
-        on_server_cert_observed: state.config.on_server_cert_observed.clone(),
-        client_certificates: state.config.client_certificates.clone(),
-        hostname_overrides: state.config.hostname_overrides.clone(),
-        default_to_http2: state.config.default_to_http2,
-        force_streaming_response: state
-            .config
-            .streaming_scope_matcher
-            .as_ref()
-            .is_some_and(|m| m(&record.request.url)),
-        platform_auth_enabled: state.config.platform_auth_enabled,
-        platform_auth_rules: state.config.platform_auth_rules.clone(),
-        upstream_auth_rules: state.config.upstream_auth_rules.clone(),
-        ..SendConfig::default()
-    };
-    let _ = message::to_request_with_config(&record.request, &config)?;
+    (*request_was_intercepted, *request_was_modified) = state
+        .intercept(
+            record,
+            false,
+            None,
+            &CapturedFlowMetrics::default(),
+            false,
+            false,
+        )
+        .await?;
+    let config = state.send_config(&record.request.url, record.request.version, false);
+    message::validate_request_with_config(&record.request, &config)?;
     let outbound_model = record.request.clone();
-    let deadline = tokio::time::Instant::now() + config.timeout;
+    let deadline = tokio::time::Instant::now() + config.limits.timeout;
     let (sender, response) = oneshot::channel();
     // Keep the driver and request budget until cancellation has actually joined the socket.
     state.tasks.spawn(async move {
@@ -1018,24 +958,28 @@ pub(in crate::server) async fn process_http(
                 match result {
                     Ok((resp, timing)) => {
                         let exchange_returned = Instant::now();
-                        let reason_phrase = resp
-                            .extensions()
-                            .get_ref::<rama::http::proto::h1::ext::ReasonPhrase>()
-                            .map(|reason| reason.as_bytes().to_vec());
+                        let reason_phrase = message::reason_phrase(&resp);
                         let (remote_ip, received) = {
-                            let guard = timing
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let guard = crate::lock_unpoison(&timing);
                             (
                                 guard.peer_ip(),
                                 guard.first_response_byte().or(Some(exchange_returned)),
                             )
                         };
-                        let response_received_ms = received.map(|received| received
-                            .saturating_duration_since(attempt_started)
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64);
-                        Ok((resp, CapturedFlowMetrics { remote_ip, response_received_ms, reason_phrase }))
+                        let response_received_ms = received.map(|received| {
+                            received
+                                .saturating_duration_since(attempt_started)
+                                .as_millis()
+                                .min(u64::MAX as u128) as u64
+                        });
+                        Ok((
+                            resp,
+                            CapturedFlowMetrics {
+                                remote_ip,
+                                response_received_ms,
+                                reason_phrase,
+                            },
+                        ))
                     }
                     Err(err) => Err(err),
                 }

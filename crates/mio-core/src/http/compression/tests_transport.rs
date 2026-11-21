@@ -32,10 +32,10 @@ async fn negotiated_http2_content_decoding_preserves_trailers_without_transfer_e
         .unwrap();
     let certificate = ca.certificate_der();
     let mut config = ProxyConfig::new(ca);
-    config.intercept_requests = true;
-    config.request_timeout = Duration::from_secs(2);
-    config.intercept_timeout = Duration::from_secs(2);
-    config.max_body_bytes = 256;
+    config.hooks.intercept_requests = true;
+    config.limits.request_timeout = Duration::from_secs(2);
+    config.limits.intercept_timeout = Duration::from_secs(2);
+    config.limits.max_body_bytes = 256;
     let (events, mut receiver) = mpsc::channel(16);
     let mut proxy = mio_proxy::start(
         config,
@@ -89,17 +89,29 @@ async fn negotiated_http2_content_decoding_preserves_trailers_without_transfer_e
             trailers: vec![],
         },
         SendConfig {
-            upstream_route: UpstreamRoute::Http(ProxyEndpoint {
-                host: "127.0.0.1".into(),
-                port: proxy.address().port(),
-                credentials: None,
-            }),
-            upstream_tls: UpstreamTls::CustomRoots {
-                certificates_der: vec![certificate],
-                include_system: false,
+            network: mio_proxy::SendNetworkConfig {
+                upstream_route: UpstreamRoute::Http(ProxyEndpoint {
+                    host: "127.0.0.1".into(),
+                    port: proxy.address().port(),
+                    credentials: None,
+                }),
+                ..Default::default()
             },
-            http_version: Some(HttpVersion::Http2),
-            timeout: Duration::from_secs(3),
+            tls: mio_proxy::UpstreamTlsConfig {
+                trust: UpstreamTls::CustomRoots {
+                    certificates_der: vec![certificate],
+                    include_system: false,
+                },
+                ..Default::default()
+            },
+            limits: mio_proxy::SendLimits {
+                timeout: Duration::from_secs(3),
+                ..Default::default()
+            },
+            http: mio_proxy::SendHttpConfig {
+                version: Some(HttpVersion::Http2),
+                ..Default::default()
+            },
             ..SendConfig::default()
         },
         cancel.clone(),

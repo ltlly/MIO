@@ -115,7 +115,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
         let mut state = State::new(events, CancellationToken::new()).unwrap();
         state.events.try_send(Event::Stopped).unwrap();
         let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-        config.stop_timeout = Duration::from_millis(2);
+        config.limits.stop_timeout = Duration::from_millis(2);
         let project = state.project;
         let sender = state.proxy_sender.clone();
         let (started, proxy) = oneshot::channel();

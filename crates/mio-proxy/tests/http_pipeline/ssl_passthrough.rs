@@ -63,8 +63,8 @@ async fn ssl_passthrough_delivers_native_origin_certificate_and_stop_proxy_inter
     // Intentionally leave proxy upstream_tls on System (not trusting origin_ca_der) to prove
     // the proxy never terminates or re-handshakes TLS when SSL Pass Through matches!
     let mut config = ProxyConfig::new(mitm_ca);
-    config.request_timeout = DEADLINE;
-    config.ssl_pass_through = Some(Arc::new(move |host, port| {
+    config.limits.request_timeout = DEADLINE;
+    config.hooks.ssl_pass_through = Some(Arc::new(move |host, port| {
         host == "127.0.0.1" && port == origin_port
     }));
     let (events_tx, mut events_rx) = mpsc::channel(16);

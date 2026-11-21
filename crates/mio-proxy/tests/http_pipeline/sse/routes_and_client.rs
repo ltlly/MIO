@@ -10,8 +10,12 @@ async fn authenticated_upstream_routes_stream_sse_without_leaking_credentials() 
             let mut origin = SseOrigin::start(tls.then_some(true), None).await;
             let mut upstream = Upstream::start_at_origin(origin.address, kind, true, false).await;
             let route = upstream.route(proxy_credentials());
-            let (mut proxy, ca, mut events) =
-                start_proxy(&origin, |config| config.upstream_route = route, 64).await;
+            let (mut proxy, ca, mut events) = start_proxy(
+                &origin,
+                |config| config.network.upstream_route = route,
+                64,
+            )
+            .await;
             let url = if tls {
                 origin.url()
             } else {
@@ -90,7 +94,7 @@ async fn resetting_one_h2_sse_body_keeps_its_sibling_usable_and_saves_partial_by
         |config| {
             if let UpstreamTls::CustomRoots {
                 certificates_der, ..
-            } = &mut config.upstream_tls
+            } = &mut config.tls.upstream.trust
             {
                 certificates_der.push(sibling_origin.certificate.clone().unwrap());
             }
@@ -204,17 +208,15 @@ async fn send_streaming_streams_over_h1_h2_and_authenticated_upstream_with_trail
         )
         .await;
         let route = upstream.route(proxy_credentials());
-        let config = SendConfig {
-            upstream_route: route,
-            upstream_tls: origin.trust(),
-            http_version: Some(if h2 {
-                HttpVersion::Http2
-            } else {
-                HttpVersion::Http11
-            }),
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = route;
+        config.tls.trust = origin.trust();
+        config.http.version = Some(if h2 {
+            HttpVersion::Http2
+        } else {
+            HttpVersion::Http11
+        });
+        config.limits.timeout = DEADLINE;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let url = origin.url();

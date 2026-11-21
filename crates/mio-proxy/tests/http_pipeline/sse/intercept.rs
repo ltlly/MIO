@@ -34,8 +34,12 @@ async fn head_intercept(
 #[tokio::test]
 async fn sse_header_intercept_forwards_edits_without_buffering_after_mime_change() {
     let mut origin = SseOrigin::start(None, None).await;
-    let (mut proxy, ca, mut events) =
-        start_proxy(&origin, |config| config.intercept_responses = true, 64).await;
+    let (mut proxy, ca, mut events) = start_proxy(
+        &origin,
+        |config| config.hooks.intercept_responses = true,
+        64,
+    )
+    .await;
     let mut client = SseClient::start(proxy.address(), origin.url(), ca, false, false);
     assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
     let (held, reply) = head_intercept(&mut events).await;
@@ -93,11 +97,11 @@ async fn sse_conditional_predicate_receives_head_only_and_actual_request_flags()
             let (mut proxy, ca, mut events) = start_proxy(
                 &origin,
                 |config| {
-                    config.intercept_requests = true;
-                    config.intercept_responses = true;
-                    config.request_timeout = cpu_budget;
-                    config.max_body_bytes = body_limit;
-                    config.intercept_filter = Some(Arc::new(
+                    config.hooks.intercept_requests = true;
+                    config.hooks.intercept_responses = true;
+                    config.limits.request_timeout = cpu_budget;
+                    config.limits.max_body_bytes = body_limit;
+                    config.hooks.intercept_filter = Some(Arc::new(
                         move |record,
                               response_stage,
                               head_only,
@@ -121,7 +125,11 @@ async fn sse_conditional_predicate_receives_head_only_and_actual_request_flags()
                                 cpu_deadline,
                                 max_body_bytes,
                             ));
-                            Ok(response_stage || intercept_request)
+                            if response_stage || intercept_request {
+                                Ok(InterceptFilterOutcome::Intercept)
+                            } else {
+                                Ok(InterceptFilterOutcome::Bypass)
+                            }
                         },
                     ));
                 },
@@ -245,8 +253,12 @@ async fn sse_conditional_predicate_receives_head_only_and_actual_request_flags()
 async fn sse_header_intercept_rejects_body_trailers_or_provisional_status_and_closes_origin() {
     for edit in ["body", "trailers", "status"] {
         let mut origin = SseOrigin::start(None, None).await;
-        let (mut proxy, ca, mut events) =
-            start_proxy(&origin, |config| config.intercept_responses = true, 64).await;
+        let (mut proxy, ca, mut events) = start_proxy(
+            &origin,
+            |config| config.hooks.intercept_responses = true,
+            64,
+        )
+        .await;
         let mut client = SseClient::start(proxy.address(), origin.url(), ca, false, false);
         assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
         let (held, reply) = head_intercept(&mut events).await;
@@ -299,8 +311,12 @@ async fn sse_header_intercept_drop_or_no_body_status_ends_the_source() {
     for replacement_status in [None, Some(204), Some(304)] {
         let drop_response = replacement_status.is_none();
         let mut origin = SseOrigin::start(None, None).await;
-        let (mut proxy, ca, mut events) =
-            start_proxy(&origin, |config| config.intercept_responses = true, 64).await;
+        let (mut proxy, ca, mut events) = start_proxy(
+            &origin,
+            |config| config.hooks.intercept_responses = true,
+            64,
+        )
+        .await;
         let mut client = SseClient::start(proxy.address(), origin.url(), ca, false, false);
         assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
         let (held, reply) = head_intercept(&mut events).await;

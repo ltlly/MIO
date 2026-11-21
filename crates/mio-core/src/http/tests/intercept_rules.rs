@@ -33,7 +33,8 @@ fn proxy_intercept_default_rules_preserve_static_extension_and_scope_semantics()
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             expected,
             "{url}"
         );
@@ -50,6 +51,7 @@ fn proxy_intercept_default_rules_preserve_static_extension_and_scope_semantics()
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let mut scoped = defaults;
     scoped.request.rules[3].enabled = true;
@@ -87,7 +89,8 @@ fn proxy_intercept_default_rules_preserve_static_extension_and_scope_semantics()
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             expected
         );
     }
@@ -119,7 +122,8 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "left fold is (true OR false) AND false, not true OR (false AND false)"
     );
     settings.request.rules[2].enabled = false;
@@ -136,6 +140,7 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     for rule in &mut settings.request.rules {
         rule.enabled = false;
@@ -152,7 +157,8 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "enabled group with no enabled rows intercepts all"
     );
     settings.request.rules.clear();
@@ -169,6 +175,7 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.request.enabled = false;
     let filter = build_intercept_filter(settings.clone(), crate::TargetScope::default()).unwrap();
@@ -184,6 +191,7 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.request.enabled = true;
     settings.request.rules = vec![
@@ -208,7 +216,8 @@ fn proxy_intercept_rules_left_fold_disabled_and_short_circuit_without_skipping_l
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "skipping unnecessary parameter parsing must still evaluate the final AND"
     );
 }
@@ -325,6 +334,7 @@ fn proxy_intercept_parameter_rules_use_original_data_not_cookies_or_transfer_fra
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     record.request.url = "http://example.com/?name=%ZZ".into();
     assert!(
@@ -339,6 +349,7 @@ fn proxy_intercept_parameter_rules_use_original_data_not_cookies_or_transfer_fra
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     record.request.url = "http://example.com/".into();
     record.request.headers = vec![
@@ -365,6 +376,7 @@ fn proxy_intercept_parameter_rules_use_original_data_not_cookies_or_transfer_fra
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert_eq!(record, unchanged);
     record.request.body = br#"{"name":}"#.to_vec();
@@ -380,6 +392,7 @@ fn proxy_intercept_parameter_rules_use_original_data_not_cookies_or_transfer_fra
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     record.request.body = (0..=crate::intruder::MAX_POSITIONS)
         .map(|index| format!("{index}=value"))

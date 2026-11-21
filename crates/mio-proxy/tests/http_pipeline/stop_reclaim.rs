@@ -27,7 +27,7 @@ async fn stop_reclaims_active_http_https_and_h2_with_silent_origins() {
 async fn stop_is_bounded_while_interception_event_queue_is_full() {
     let origin = Origin::start(None, false).await;
     let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-    config.intercept_requests = true;
+    config.hooks.intercept_requests = true;
     let (events, receiver) = mpsc::channel(1);
     let mut proxy = mio_proxy::start(
         config,

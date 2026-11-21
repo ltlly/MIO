@@ -6,8 +6,8 @@ async fn response_predicate_receives_only_its_own_actual_hold_and_modification()
         let mut origin = Origin::start(None, false).await;
         let callback_timeout = Duration::from_secs(2);
         let (mut proxy, ca, mut events) = proxy_with(&origin, true, |config| {
-            config.request_timeout = callback_timeout;
-            config.max_body_bytes = 128;
+            config.limits.request_timeout = callback_timeout;
+            config.limits.max_body_bytes = 128;
         })
         .await;
         let listener_port = proxy.address().port();
@@ -52,7 +52,11 @@ async fn response_predicate_receives_only_its_own_actual_hold_and_modification()
                         changed,
                         ctx.listener_port,
                     ));
-                    Ok(ctx.listener_port == listener_port && (response_stage || hold_request))
+                    if ctx.listener_port == listener_port && (response_stage || hold_request) {
+                        Ok(InterceptFilterOutcome::Intercept)
+                    } else {
+                        Ok(InterceptFilterOutcome::Bypass)
+                    }
                 },
             )));
             proxy.set_transform(match transform_request {

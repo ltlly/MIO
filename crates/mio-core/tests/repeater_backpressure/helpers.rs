@@ -216,6 +216,7 @@ impl Fixture {
                 run_id: self.run_id,
                 draft: tab.draft.clone(),
                 settings: self.workspace.repeater_settings.clone(),
+                group_send: None,
                 cancel: self.cancel.clone(),
             })
             .await

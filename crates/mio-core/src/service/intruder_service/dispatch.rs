@@ -95,18 +95,17 @@ impl State {
                 .effective_upstream_tls(&workspace.upstream_tls)?;
             let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
             let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-            Ok(SendConfig {
-                timeout: run.timeout,
-                streaming_timeout,
-                http_version: Some(run.version),
-                upstream_route: workspace
-                    .upstream_proxy
-                    .route_for_url_with_tls(&run.target, upstream_tls.clone())?,
-                upstream_tls,
-                client_certificates: self.compiled_client_certs.clone(),
-                hostname_overrides,
-                ..SendConfig::default()
-            })
+            let mut send_cfg = SendConfig::default();
+            send_cfg.network.upstream_route = workspace
+                .upstream_proxy
+                .route_for_url_with_tls(&run.target, upstream_tls.clone())?;
+            send_cfg.network.hostname_overrides = hostname_overrides;
+            send_cfg.tls.trust = upstream_tls;
+            send_cfg.tls.client_certificates = self.compiled_client_certs.clone();
+            send_cfg.limits.timeout = run.timeout;
+            send_cfg.limits.streaming_timeout = streaming_timeout;
+            send_cfg.http.version = Some(run.version);
+            Ok(send_cfg)
         })();
         let config = match config {
             Ok(config) => config,
@@ -250,7 +249,7 @@ impl State {
             // Successful sends record the SDK's receipt time; failures and cancellations keep
             // the full logical elapsed time, including explicit automatic retry waits.
             let started = Instant::now();
-            let max_body_bytes = config.max_body_bytes;
+            let max_body_bytes = config.limits.max_body_bytes;
             let max_net_retries = attack_settings.network_failure_retries.min(10);
             let send_outcome = if max_net_retries == 0
                 && attack_settings.follow_redirects == RepeaterRedirectMode::Never
@@ -366,7 +365,7 @@ impl State {
                                         .upstream_proxy
                                         .route_for_url_with_tls(
                                             &next_origin,
-                                            current_config.upstream_tls.clone(),
+                                            current_config.tls.trust.clone(),
                                         ) {
                                         Ok(route) => route,
                                         Err(err) => {
@@ -375,7 +374,7 @@ impl State {
                                             ));
                                         }
                                     };
-                                    current_config.upstream_route = route;
+                                    current_config.network.upstream_route = route;
                                     current_origin = next_origin;
                                     current_request = next_request;
                                     hop += 1;

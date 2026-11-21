@@ -329,8 +329,8 @@ async fn start_proxy(
     let ca = MitmAuthority::generate().unwrap();
     let certificate = ca.certificate_der();
     let mut config = ProxyConfig::new(ca);
-    config.upstream_tls = origin.trust();
-    config.request_timeout = DEADLINE * 2;
+    config.tls.upstream.trust = origin.trust();
+    config.limits.request_timeout = DEADLINE * 2;
     change(&mut config);
     let (events, receiver) = mpsc::channel(event_capacity);
     let proxy = mio_proxy::start(

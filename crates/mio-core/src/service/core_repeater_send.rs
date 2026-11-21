@@ -54,6 +54,7 @@ impl State {
         run_id: FlowId,
         draft: Draft,
         settings: RepeaterSettings,
+        group_ticket: Option<crate::RepeaterGroupSendTicket>,
         cancel: CancellationToken,
     ) -> Result<()> {
         self.check_project(project)?;
@@ -110,7 +111,6 @@ impl State {
         let upstream_route = upstream_settings
             .to_route_with_tls(upstream_tls.clone())?;
         let request_timeout = Duration::from_secs(settings.request_timeout_secs.clamp(1, 3600));
-        let group_ticket = crate::take_repeater_group_send_ticket(tab_id);
         let group_mode = group_ticket
             .as_ref()
             .map_or(crate::RepeaterGroupSendMode::Default, |t| t.mode);
@@ -212,23 +212,20 @@ impl State {
             let started = Instant::now();
             let default_config = SendConfig::default();
             let deadline = started + request_timeout;
-            let max_body_bytes = default_config.max_body_bytes;
+            let max_body_bytes = default_config.limits.max_body_bytes;
             let mut current_origin = draft.target.clone();
             let mut current_request = request;
-            let macro_send_config = SendConfig {
-                http_version: None,
-                upstream_route: upstream_route.clone(),
-                upstream_tls: upstream_tls.clone(),
-                client_certificates: client_certificates.clone(),
-                hostname_overrides: hostname_overrides.clone(),
-                streaming_timeout,
-                timeout: deadline.saturating_duration_since(Instant::now()),
-                default_to_http2,
-                platform_auth_enabled,
-                platform_auth_rules: platform_auth_rules.clone(),
-                upstream_auth_rules: upstream_auth_rules.clone(),
-                ..SendConfig::default()
-            };
+            let mut macro_send_config = SendConfig::default();
+            macro_send_config.network.upstream_route = upstream_route.clone();
+            macro_send_config.network.hostname_overrides = hostname_overrides.clone();
+            macro_send_config.tls.trust = upstream_tls.clone();
+            macro_send_config.tls.client_certificates = client_certificates.clone();
+            macro_send_config.limits.timeout = deadline.saturating_duration_since(Instant::now());
+            macro_send_config.limits.streaming_timeout = streaming_timeout;
+            macro_send_config.http.default_to_http2 = default_to_http2;
+            macro_send_config.auth.platform_enabled = platform_auth_enabled;
+            macro_send_config.auth.platform_rules = platform_auth_rules.clone();
+            macro_send_config.auth.upstream_rules = upstream_auth_rules.clone();
             let mut request_mutated = match sessions
                 .apply_to_flow_record_with_steps(
                     SessionTool::Repeater,
@@ -360,63 +357,43 @@ impl State {
                     .unwrap_or_else(|| upstream_route.clone());
                 let force_streaming_response =
                     network_http.is_url_in_streaming_scope(&current_request.url);
-                let config = if hop == 0 {
-                    SendConfig {
-                        http_version: Some(current_request.version),
-                        upstream_route: hop_route,
-                        upstream_tls: upstream_tls.clone(),
-                        upstream_tls_options,
-                        client_certificates: client_certificates.clone(),
-                        hostname_overrides: hostname_overrides.clone(),
-                        streaming_timeout,
-                        update_content_length,
-                        normalize_http1_line_endings,
-                        raw_http1_override: first_raw_override.take(),
-                        timeout: remaining,
-                        http1_keep_alive,
-                        http2_reuse,
-                        use_connection_pool,
-                        allow_http2_alpn_override,
-                        strip_100_continue_headers,
-                        on_server_cert_observed: Some(cert_callback.clone()),
-                        default_to_http2,
-                        force_streaming_response,
-                        connection_pool_group_id,
-                        single_packet_barrier: single_packet_barrier.take(),
-                        platform_auth_enabled,
-                        platform_auth_rules: platform_auth_rules.clone(),
-                        upstream_auth_rules: upstream_auth_rules.clone(),
-                        ..SendConfig::default()
-                    }
+                let mut config = SendConfig::default();
+                config.network.upstream_route = hop_route;
+                config.network.hostname_overrides = hostname_overrides.clone();
+                config.tls.trust = upstream_tls.clone();
+                config.tls.options = upstream_tls_options;
+                config.tls.client_certificates = client_certificates.clone();
+                config.tls.on_server_cert_observed = Some(cert_callback.clone());
+                config.limits.timeout = remaining;
+                config.limits.streaming_timeout = streaming_timeout;
+                config.http.version = Some(current_request.version);
+                config.http.update_content_length = update_content_length;
+                config.http.normalize_http1_line_endings = if hop == 0 {
+                    normalize_http1_line_endings
                 } else {
-                    SendConfig {
-                        http_version: Some(current_request.version),
-                        upstream_route: hop_route,
-                        upstream_tls: upstream_tls.clone(),
-                        upstream_tls_options,
-                        client_certificates: client_certificates.clone(),
-                        hostname_overrides: hostname_overrides.clone(),
-                        streaming_timeout,
-                        update_content_length,
-                        normalize_http1_line_endings: true,
-                        raw_http1_override: None,
-                        timeout: remaining,
-                        http1_keep_alive,
-                        http2_reuse,
-                        use_connection_pool,
-                        allow_http2_alpn_override,
-                        strip_100_continue_headers,
-                        on_server_cert_observed: Some(cert_callback.clone()),
-                        default_to_http2,
-                        force_streaming_response,
-                        connection_pool_group_id,
-                        single_packet_barrier: None,
-                        platform_auth_enabled,
-                        platform_auth_rules: platform_auth_rules.clone(),
-                        upstream_auth_rules: upstream_auth_rules.clone(),
-                        ..SendConfig::default()
-                    }
+                    true
                 };
+                config.http.raw_http1_override = if hop == 0 {
+                    first_raw_override.take()
+                } else {
+                    None
+                };
+                config.http.http1_keep_alive = http1_keep_alive;
+                config.http.http2_reuse = http2_reuse;
+                config.http.use_connection_pool = use_connection_pool;
+                config.http.allow_http2_alpn_override = allow_http2_alpn_override;
+                config.http.strip_100_continue_headers = strip_100_continue_headers;
+                config.http.default_to_http2 = default_to_http2;
+                config.http.force_streaming_response = force_streaming_response;
+                config.group.connection_pool_group_id = connection_pool_group_id;
+                config.group.single_packet_barrier = if hop == 0 {
+                    single_packet_barrier.take()
+                } else {
+                    None
+                };
+                config.auth.platform_enabled = platform_auth_enabled;
+                config.auth.platform_rules = platform_auth_rules.clone();
+                config.auth.upstream_rules = upstream_auth_rules.clone();
                 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(50);
                 let mut last_progress_at: Option<Instant> = None;
                 let mut emitted_nonempty_body = false;

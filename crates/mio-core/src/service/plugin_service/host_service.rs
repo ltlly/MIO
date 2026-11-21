@@ -686,19 +686,30 @@ impl State {
         };
         let cancel = call.cancel.clone();
         let config = SendConfig {
-            timeout: call
-                .deadline
-                .saturating_duration_since(tokio::time::Instant::now()),
-            http_version: Some(record.request.version),
-            upstream_tls,
-            upstream_route,
-            client_certificates: self.compiled_client_certs.clone(),
-            hostname_overrides,
+            network: mio_proxy::SendNetworkConfig {
+                upstream_route,
+                hostname_overrides,
+            },
+            tls: mio_proxy::UpstreamTlsConfig {
+                trust: upstream_tls,
+                client_certificates: self.compiled_client_certs.clone(),
+                ..Default::default()
+            },
+            limits: mio_proxy::SendLimits {
+                timeout: call
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now()),
+                ..Default::default()
+            },
+            http: mio_proxy::SendHttpConfig {
+                version: Some(record.request.version),
+                ..Default::default()
+            },
             ..SendConfig::default()
         };
         let flow_id = record.summary.id;
         let sessions = self.sessions.clone();
-        let deadline = Instant::now() + config.timeout;
+        let deadline = Instant::now() + config.limits.timeout;
         let task = tokio::spawn(async move {
             let started = Instant::now();
             if sessions

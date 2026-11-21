@@ -191,6 +191,7 @@ pub(crate) async fn send(
             tab_id: tab.id,
             draft: tab.draft.clone(),
             settings: settings.clone(),
+            group_send: None,
         })
         .await?;
     let Event::SendStarted { draft_revision, .. } = event(client, |event| {

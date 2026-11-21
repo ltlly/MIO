@@ -471,9 +471,9 @@ impl CompiledInterceptRules {
         context: (bool, bool, bool, bool, mio_proxy::InterceptEvalContext<'_>),
         cancel: &tokio_util::sync::CancellationToken,
         limits: (std::time::Instant, usize),
-    ) -> Result<bool> {
+    ) -> Result<mio_proxy::InterceptFilterOutcome> {
         if !self.enabled {
-            return Ok(false);
+            return Ok(mio_proxy::InterceptFilterOutcome::Bypass);
         }
         check_intercept_control(cancel, limits.0)?;
         ensure!(
@@ -490,7 +490,7 @@ impl CompiledInterceptRules {
             {
                 continue;
             }
-            result = Some(intercept_rule_matches(
+            match intercept_rule_matches(
                 (rule, matcher.as_ref()),
                 record,
                 scope,
@@ -498,10 +498,19 @@ impl CompiledInterceptRules {
                 cancel,
                 limits,
                 &mut parameters,
-            )?);
+            )? {
+                intercept_rules::InterceptRuleEval::Matched(matched) => result = Some(matched),
+                intercept_rules::InterceptRuleEval::NeedsTargetIp => {
+                    return Ok(mio_proxy::InterceptFilterOutcome::NeedsTargetIp);
+                }
+            }
             check_intercept_control(cancel, limits.0)?;
         }
         check_intercept_control(cancel, limits.0)?;
-        Ok(result.unwrap_or(true))
+        Ok(if result.unwrap_or(true) {
+            mio_proxy::InterceptFilterOutcome::Intercept
+        } else {
+            mio_proxy::InterceptFilterOutcome::Bypass
+        })
     }
 }

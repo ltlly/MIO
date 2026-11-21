@@ -52,10 +52,6 @@ async fn interception_cancellation_prevents_callbacks_admission_and_preserves_te
                 let cancel = CancellationToken::new();
                 let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
                 let tasks = TaskTracker::new();
-                let (_mode, intercept) = watch::channel(InterceptMode {
-                    requests: true,
-                    responses: false,
-                });
                 let filter_calls = Arc::new(AtomicUsize::new(0));
                 let counted_filter = filter_calls.clone();
                 let filter_cancel = cancel.clone();
@@ -74,8 +70,10 @@ async fn interception_cancellation_prevents_callbacks_admission_and_preserves_te
                         assert!(filter_cancel.is_cancelled());
                         if filter_error {
                             Err(ProxyError::InvalidMessage("cancelled filter error".into()))
+                        } else if should_hold {
+                            Ok(InterceptFilterOutcome::Intercept)
                         } else {
-                            Ok(should_hold)
+                            Ok(InterceptFilterOutcome::Bypass)
                         }
                     },
                 );
@@ -88,31 +86,25 @@ async fn interception_cancellation_prevents_callbacks_admission_and_preserves_te
                     counted_transform.fetch_add(1, Ordering::SeqCst);
                     Ok(false)
                 });
-                let (_processing_tx, processing) =
-                    watch::channel((Some(transformer), Some(filter), None));
-                let (_ws_tx, websocket_transform) = watch::channel(None);
-                let (_ssl_tx, ssl_pass_through) = watch::channel(None);
-                let (_plugin_hooks, plugin_hooks) = watch::channel((None, None));
-                let (_drop_oos_tx, drop_out_of_scope) = watch::channel(None);
                 let mut config = ProxyConfig::new(ca.clone());
-                config.max_connections = 1;
-                config.max_body_bytes = 128;
-                config.request_timeout = Duration::from_secs(2);
-                config.intercept_timeout = Duration::from_millis(100);
+                config.limits.max_connections = 1;
+                config.limits.max_body_bytes = 128;
+                config.limits.request_timeout = Duration::from_secs(2);
+                config.limits.intercept_timeout = Duration::from_millis(100);
+                config.hooks.intercept_requests = true;
+                config.hooks.intercept_filter = Some(filter);
+                config.hooks.flow_transform = Some(transformer);
+                let (static_config, dynamic_init, _) = config.into_parts();
+                let (_dynamic_tx, dynamic) = watch::channel(dynamic_init);
                 let requests = Arc::new(Semaphore::new(1));
                 let terminal_records = TerminalRecords::default();
                 let state = Arc::new(State {
                     project,
                     listener_port: 1,
-                    config,
+                    config: static_config,
                     events,
                     cancel: cancel.clone(),
-                    intercept,
-                    processing,
-                    websocket_transform,
-                    ssl_pass_through,
-                    plugin_hooks,
-                    drop_out_of_scope,
+                    dynamic,
                     tasks: tasks.clone(),
                     requests: requests.clone(),
                     exec: Executor::graceful(shutdown.guard()),

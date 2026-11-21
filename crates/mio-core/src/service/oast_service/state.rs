@@ -151,13 +151,24 @@ impl State {
             .request_timeout_secs
             .clamp(1, 60);
         let send_config = SendConfig {
-            upstream_route,
-            upstream_tls,
-            max_body_bytes: MAX_POLL_BODY_BYTES,
-            timeout: Duration::from_secs(timeout_secs),
-            http_version: Some(HttpVersion::Http11),
-            client_certificates: self.compiled_client_certs.clone(),
-            hostname_overrides,
+            network: mio_proxy::SendNetworkConfig {
+                upstream_route,
+                hostname_overrides,
+            },
+            tls: mio_proxy::UpstreamTlsConfig {
+                trust: upstream_tls,
+                client_certificates: self.compiled_client_certs.clone(),
+                ..Default::default()
+            },
+            limits: mio_proxy::SendLimits {
+                max_body_bytes: MAX_POLL_BODY_BYTES,
+                timeout: Duration::from_secs(timeout_secs),
+                ..Default::default()
+            },
+            http: mio_proxy::SendHttpConfig {
+                version: Some(HttpVersion::Http11),
+                ..Default::default()
+            },
             ..SendConfig::default()
         };
         let request = build_poll_request(

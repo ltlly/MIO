@@ -7,9 +7,9 @@ async fn conditional_filter_errors_retain_details_and_disabled_mode_never_calls_
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = calls.clone();
         let (mut proxy, ca, mut events) = proxy_with(&origin, true, |config| {
-            config.request_timeout = Duration::from_secs(2);
-            config.max_body_bytes = 128;
-            config.intercept_filter = Some(Arc::new(
+            config.limits.request_timeout = Duration::from_secs(2);
+            config.limits.max_body_bytes = 128;
+            config.hooks.intercept_filter = Some(Arc::new(
                 move |_, _, _, _, _, ctx, cancel, (deadline, max_body)| {
                     assert_ne!(ctx.listener_port, 0);
                     assert!(!cancel.is_cancelled());

@@ -4,24 +4,12 @@ mod cancellation;
 mod deadline;
 
 fn handle(runner: JoinHandle<Result<(), ProxyError>>, stop_timeout: Duration) -> ProxyHandle {
-    let (intercept, _) = watch::channel(InterceptMode {
-        requests: false,
-        responses: false,
-    });
-    let (processing, _) = watch::channel((None, None, None));
-    let (websocket_transform, _) = watch::channel(None);
-    let (ssl_pass_through, _) = watch::channel(None);
-    let (plugin_hooks, _) = watch::channel((None, None));
-    let (drop_out_of_scope, _) = watch::channel(None);
+    let (_, dynamic_init, _) = ProxyConfig::new(MitmAuthority::generate().unwrap()).into_parts();
+    let (dynamic, _) = watch::channel(dynamic_init);
     ProxyHandle {
         address: (Ipv4Addr::LOCALHOST, 0).into(),
         cancel: CancellationToken::new(),
-        intercept,
-        processing,
-        websocket_transform,
-        ssl_pass_through,
-        plugin_hooks,
-        drop_out_of_scope,
+        dynamic,
         runner: Some(runner),
         stop_timeout,
         terminal_records: Default::default(),

@@ -26,13 +26,7 @@ pub(crate) fn request_head_with_fallback(
                 fallback_host
                     .map(str::trim)
                     .filter(|host| !host.is_empty())
-                    .map(|host| {
-                        if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
-                            format!("[{host}]")
-                        } else {
-                            host.to_owned()
-                        }
-                    })
+                    .map(crate::route::format_host_for_authority)
             })
             .ok_or_else(|| ProxyError::invalid("缺少请求目标 authority"))?;
         format!(
@@ -63,13 +57,70 @@ pub(crate) fn invalid_request_head(request: &Request) -> HttpRequest {
     }
 }
 
+pub(super) struct HeaderNormOptions {
+    pub update_content_length: bool,
+    pub strip_proxy_headers: bool,
+    pub strip_100_continue: bool,
+    pub preserve_websocket_upgrade: bool,
+    pub strip_ws_extensions: bool,
+}
+
+pub(crate) fn has_header_token(headers: &HeaderMap, name: &str, token: &str) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case(token))
+        })
+}
+
+pub(crate) fn strip_header_token_str(text: &str, token: &str) -> (bool, Option<String>) {
+    let mut removed = false;
+    let remaining: Vec<&str> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| {
+            if part.is_empty() {
+                return false;
+            }
+            if part.eq_ignore_ascii_case(token) {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let replacement = if remaining.is_empty() {
+        None
+    } else {
+        Some(remaining.join(", "))
+    };
+    (removed, replacement)
+}
+
 pub(crate) fn normalize_headers(
     headers: &mut HeaderMap,
     length: usize,
     has_trailers: bool,
     request: bool,
 ) {
-    normalize_headers_with_options(headers, length, has_trailers, request, true, true, false);
+    normalize_headers_with_options(
+        headers,
+        length,
+        has_trailers,
+        request,
+        HeaderNormOptions {
+            update_content_length: true,
+            strip_proxy_headers: true,
+            strip_100_continue: false,
+            preserve_websocket_upgrade: false,
+            strip_ws_extensions: false,
+        },
+    );
 }
 
 pub(super) fn normalize_headers_with_options(
@@ -77,9 +128,7 @@ pub(super) fn normalize_headers_with_options(
     length: usize,
     has_trailers: bool,
     request: bool,
-    update_content_length: bool,
-    strip_proxy_headers: bool,
-    strip_100_continue: bool,
+    opts: HeaderNormOptions,
 ) {
     let nominated: Vec<String> = headers
         .get_all("connection")
@@ -88,14 +137,21 @@ pub(super) fn normalize_headers_with_options(
         .flat_map(|value| value.split(',').map(|name| name.trim().to_owned()))
         .collect();
     for name in nominated {
-        if update_content_length || !name.eq_ignore_ascii_case("content-length") {
+        let keep_upgrade = opts.preserve_websocket_upgrade && name.eq_ignore_ascii_case("upgrade");
+        let keep_cl = !opts.update_content_length && name.eq_ignore_ascii_case("content-length");
+        if !keep_upgrade && !keep_cl {
             headers.remove(name);
         }
     }
-    for name in ["connection", "keep-alive", "transfer-encoding", "upgrade"] {
-        headers.remove(name);
+    let hop_by_hop: &[&str] = if opts.preserve_websocket_upgrade {
+        &["keep-alive", "transfer-encoding"]
+    } else {
+        &["connection", "keep-alive", "transfer-encoding", "upgrade"]
+    };
+    for name in hop_by_hop {
+        headers.remove(*name);
     }
-    if strip_proxy_headers {
+    if opts.strip_proxy_headers {
         headers.remove("proxy-connection");
         if request {
             let proxy_names: Vec<HeaderName> = headers
@@ -112,14 +168,24 @@ pub(super) fn normalize_headers_with_options(
             }
         }
     }
-    if strip_100_continue && request {
+    if opts.strip_100_continue && request {
         strip_expect_100_continue_map(headers);
+    }
+    if opts.preserve_websocket_upgrade {
+        headers.insert("connection", HeaderValue::from_static("Upgrade"));
+        headers.insert("upgrade", HeaderValue::from_static("websocket"));
+        headers.remove("content-length");
+        headers.remove("trailer");
+        if opts.strip_ws_extensions {
+            headers.remove("sec-websocket-extensions");
+        }
+        return;
     }
     if has_trailers {
         headers.remove("content-length");
     } else {
         headers.remove("trailer");
-        if update_content_length {
+        if opts.update_content_length {
             headers.remove("content-length");
             headers.insert("content-length", HeaderValue::from(length));
         }
@@ -137,15 +203,9 @@ fn strip_expect_100_continue_map(headers: &mut HeaderMap) {
             let Ok(text) = value.to_str() else {
                 return Some(value.clone());
             };
-            let remaining: Vec<&str> = text
-                .split(',')
-                .map(str::trim)
-                .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("100-continue"))
-                .collect();
-            if remaining.is_empty() {
-                None
-            } else {
-                HeaderValue::from_str(&remaining.join(", ")).ok()
+            match strip_header_token_str(text, "100-continue").1 {
+                None => None,
+                Some(remaining) => HeaderValue::from_str(&remaining).ok(),
             }
         })
         .collect();
@@ -155,26 +215,26 @@ fn strip_expect_100_continue_map(headers: &mut HeaderMap) {
     }
 }
 
-pub(crate) fn strip_expect_100_continue_vec(headers: &mut Vec<Header>) {
+pub(crate) fn strip_header_token_vec(headers: &mut Vec<Header>, header_name: &str, token: &str) {
     headers.retain_mut(|header| {
-        if !header.name.eq_ignore_ascii_case("expect") {
+        if !header.name.eq_ignore_ascii_case(header_name) {
             return true;
         }
         let Ok(text) = std::str::from_utf8(&header.value) else {
             return true;
         };
-        let remaining: Vec<&str> = text
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("100-continue"))
-            .collect();
-        if remaining.is_empty() {
-            false
-        } else {
-            header.value = remaining.join(", ").into_bytes();
-            true
+        match strip_header_token_str(text, token).1 {
+            None => false,
+            Some(remaining) => {
+                header.value = remaining.into_bytes();
+                true
+            }
         }
     });
+}
+
+pub(crate) fn strip_expect_100_continue_vec(headers: &mut Vec<Header>) {
+    strip_header_token_vec(headers, "expect", "100-continue");
 }
 
 pub(crate) fn outgoing_body(bytes: Vec<u8>, trailers: &[Header]) -> Result<Body, ProxyError> {

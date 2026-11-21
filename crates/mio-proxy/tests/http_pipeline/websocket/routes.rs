@@ -40,8 +40,10 @@ async fn websocket_and_wss_preserve_authenticated_http_https_and_socks_routes() 
             let mut origin = WsOrigin::start(tls.then_some(CertificateKind::Valid)).await;
             let mut upstream = Upstream::start_at_origin(origin.address, kind, true, false).await;
             let route = upstream.route(proxy_credentials());
-            let (mut proxy, ca, _events) =
-                ws_proxy_with(&origin, 32, |config| config.upstream_route = route).await;
+            let (mut proxy, ca, _events) = ws_proxy_with(&origin, 32, |config| {
+                config.network.upstream_route = route;
+            })
+            .await;
             if tls {
                 let authority = format!("localhost:{}", origin.address.port());
                 let client = tls_stream(proxy.address(), &authority, ca, false).await;
@@ -81,7 +83,7 @@ async fn wss_rejects_unknown_ca_wrong_name_and_expired_origin() {
         let mut origin = WsOrigin::start(Some(kind)).await;
         let (mut proxy, ca, mut events) = ws_proxy_with(&origin, 32, |config| {
             if !trust {
-                config.upstream_tls = UpstreamTls::System;
+                config.tls.upstream.trust = UpstreamTls::System;
             }
         })
         .await;
@@ -144,7 +146,7 @@ async fn websocket_server_initiated_and_simultaneous_close_complete_normally() {
 async fn websocket_silent_close_peer_fails_at_bounded_deadline() {
     let mut origin = WsOrigin::start(None).await;
     let (mut proxy, _, mut events) = ws_proxy_with(&origin, 32, |config| {
-        config.stop_timeout = Duration::from_millis(100);
+        config.limits.stop_timeout = Duration::from_millis(100);
     })
     .await;
     let mut client = TcpStream::connect(proxy.address()).await.unwrap();

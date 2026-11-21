@@ -87,14 +87,7 @@ pub(super) fn unpack_pkcs12_to_pem(
                 Ok(stdout) => Ok(stdout),
                 Err(Pkcs12RunError::Failed {
                     stderr: retry_stderr,
-                }) => {
-                    let chosen = if retry_stderr.trim().is_empty() {
-                        &stderr
-                    } else {
-                        &retry_stderr
-                    };
-                    Err(classify_pkcs12_stderr(chosen))
-                }
+                }) => Err(classify_pkcs12_stderr(&retry_stderr)),
                 #[cfg(windows)]
                 Err(Pkcs12RunError::NotFound) => unpack_pkcs12_windows_native(pkcs12_bytes, password),
                 Err(Pkcs12RunError::Fatal(error)) => Err(error),
@@ -419,7 +412,7 @@ fn unpack_pkcs12_windows_native(
                     cert_ref.cb_cert_encoded as usize,
                 )
             };
-            append_pem_block(&mut pem_out, "CERTIFICATE", &STANDARD.encode(der));
+            crate::tls::append_pem_block_b64(&mut pem_out, "CERTIFICATE", &STANDARD.encode(der));
         }
 
         let mut h_key: usize = 0;
@@ -594,28 +587,12 @@ fn unpack_pkcs12_windows_native(
             let pkcs8 = export_res?;
             let mut b64 = ZeroizeBytes(STANDARD.encode(&pkcs8.0).into_bytes());
             let b64_str = std::str::from_utf8(&b64.0).unwrap_or_default();
-            append_pem_block(&mut pem_out, "PRIVATE KEY", b64_str);
+            crate::tls::append_pem_block_b64(&mut pem_out, "PRIVATE KEY", b64_str);
             b64.0.fill(0);
         }
     }
 
     Ok(pem_out.into_bytes())
-}
-
-#[cfg(windows)]
-fn append_pem_block(out: &mut String, label: &str, b64: &str) {
-    out.push_str("-----BEGIN ");
-    out.push_str(label);
-    out.push_str("-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        if let Ok(line) = std::str::from_utf8(chunk) {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out.push_str("-----END ");
-    out.push_str(label);
-    out.push_str("-----\n");
 }
 
 #[cfg(windows)]

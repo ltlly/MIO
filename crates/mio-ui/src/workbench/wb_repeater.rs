@@ -484,22 +484,18 @@ impl Workbench {
         .then(|| mio_core::SinglePacketBarrier::new(ready_sends.len()));
         let pool_group_id = (mode == mio_core::RepeaterGroupSendMode::ParallelSinglePacketAttack)
             .then(|| mio_core::Uuid::new_v4().as_u128());
-        for (tab_id, send) in ready_sends {
-            mio_core::register_repeater_group_send_ticket(
-                tab_id,
-                mio_core::RepeaterGroupSendTicket {
-                    mode,
-                    connection_pool_group_id: pool_group_id,
-                    single_packet_barrier: barrier.clone(),
-                },
-            );
+        for (tab_id, mut send) in ready_sends {
+            send.group_send = Some(mio_core::RepeaterGroupSendTicket {
+                mode,
+                connection_pool_group_id: pool_group_id,
+                single_packet_barrier: barrier.clone(),
+            });
             if self.pending_workspace.is_some() || self.workspace_dirty {
                 self.pending_sends.insert(tab_id, send);
                 dispatched += 1;
             } else if self.enqueue_send(tab_id, send, cx) {
                 dispatched += 1;
             } else {
-                let _ = mio_core::take_repeater_group_send_ticket(tab_id);
                 break;
             }
         }
@@ -695,16 +691,13 @@ impl Workbench {
             else {
                 continue;
             };
-            let send = self.capture_send(draft);
+            let mut send = self.capture_send(draft);
             let step_no = completed + 1;
-            mio_core::register_repeater_group_send_ticket(
-                tab_id,
-                mio_core::RepeaterGroupSendTicket {
-                    mode,
-                    connection_pool_group_id,
-                    single_packet_barrier: None,
-                },
-            );
+            send.group_send = Some(mio_core::RepeaterGroupSendTicket {
+                mode,
+                connection_pool_group_id,
+                single_packet_barrier: None,
+            });
             if self.pending_workspace.is_some() || self.workspace_dirty {
                 self.pending_sends.insert(tab_id, send);
                 SEQUENTIAL_GROUP_QUEUE.with(|slot| {
@@ -726,7 +719,6 @@ impl Workbench {
                 self.status = format!("Repeater 正在顺序发送本组第 {step_no}/{total} 个请求…");
                 return;
             } else {
-                let _ = mio_core::take_repeater_group_send_ticket(tab_id);
                 clear_sequential_group_queue();
                 return;
             }
@@ -892,6 +884,7 @@ impl Workbench {
         PendingSend {
             draft,
             settings: self.workspace.repeater_settings.clone(),
+            group_send: None,
             required_workspace_revision,
         }
     }
@@ -922,6 +915,7 @@ impl Workbench {
                 run_id,
                 draft: send.draft,
                 settings: send.settings,
+                group_send: send.group_send,
                 cancel: cancel.clone(),
             },
             cx,

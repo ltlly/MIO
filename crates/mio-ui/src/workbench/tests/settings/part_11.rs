@@ -189,6 +189,7 @@ fn settings_save_as_success_sends_once_with_activation_settings(cx: &mut TestApp
             run_id,
             draft,
             settings,
+            group_send: _,
             cancel,
         },
     ] = sent.as_slice()

@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    future::Future,
     io::{self, IoSlice},
     net::IpAddr,
     pin::Pin,
@@ -14,10 +13,12 @@ use rama::{
     Layer, Service,
     error::extra::OpaqueError,
     extensions::{Egress, Extension, Extensions, ExtensionsRef},
+    graceful::Shutdown,
     http::{
         Body, Request, Response, Version,
         client::{
-            EasyHttpWebClient, HttpPooledConnectorConfig,
+            EasyHttpConnectorBuilder, EasyHttpWebClient, HttpPooledConnectorConfig,
+            builder::ProxyStage,
             proxy::layer::{SetProxyAuthHttpHeaderLayer, SetProxyAuthHttpHeaderService},
         },
         conn::{H2ClientContextParams, TargetHttpVersion},
@@ -25,7 +26,8 @@ use rama::{
     io::Io,
     net::{
         client::{
-            ConnectionError, ConnectionErrorKind, ConnectorService, EstablishedClientConnection,
+            ConnectRequest, ConnectionError, ConnectionErrorKind, ConnectorService,
+            EstablishedClientConnection,
         },
         stream::SocketInfo,
     },
@@ -39,7 +41,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ObservedCertInfo, ProxyError, UpstreamRoute, message,
     tls::ClientTlsCacheKey,
-    transport::{CancellableConnector, MioProxyConnectorLayer, ResponseTiming, apply_hostname_overrides},
+    transport::{
+        CancellableConnector, MioProxyConnectorLayer, PooledRequestCancelExt, PooledTimingSlotExt,
+        ResolvedPeerIp, ResponseTiming, apply_hostname_overrides,
+    },
 };
 
 use super::SendConfig;
@@ -211,6 +216,27 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RawH1Io<S> {
     }
 }
 
+fn apply_post_tls(
+    conn_ext: &Extensions,
+    observer: Option<(&str, u16, &Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+) {
+    if let Some((host, port, callback)) = observer
+        && let Some(tls_params) = conn_ext.get_ref::<NegotiatedTlsParameters>()
+        && let Some(chain) = &tls_params.peer_certificate_chain
+        && let Some(leaf) = chain.first()
+        && let Ok(info) = crate::tls::parse_observed_cert(host, port, leaf.as_ref())
+    {
+        callback(info);
+    }
+    if force_http10 {
+        conn_ext.insert(TargetHttpVersion(Version::HTTP_10));
+    } else if allow_http2_alpn_override {
+        conn_ext.insert(TargetHttpVersion(Version::HTTP_2));
+    }
+}
+
 #[derive(Clone)]
 struct RawH1Connector<S> {
     inner: S,
@@ -220,6 +246,7 @@ struct RawH1Connector<S> {
     allow_http2_alpn_override: bool,
     cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
     single_packet_barrier: Option<crate::SinglePacketBarrier>,
+    cancel: CancellationToken,
 }
 
 impl<S, Input> Service<Input> for RawH1Connector<S>
@@ -234,19 +261,16 @@ where
     async fn serve(&self, input: Input) -> Result<Self::Output, Self::Error> {
         let EstablishedClientConnection { input, mut conn } =
             Box::pin(self.inner.connect(input)).await?;
-        if let Some((host, port, callback)) = &self.cert_observer
-            && let Some(tls_params) = conn.extensions().get_ref::<NegotiatedTlsParameters>()
-            && let Some(chain) = &tls_params.peer_certificate_chain
-            && let Some(leaf) = chain.first()
-            && let Ok(info) = crate::tls::parse_observed_cert(host, *port, leaf.as_ref())
-        {
-            callback(info);
-        }
-        if self.force_http10 {
-            conn.extensions().insert(TargetHttpVersion(Version::HTTP_10));
-        } else if self.allow_http2_alpn_override {
-            conn.extensions().insert(TargetHttpVersion(Version::HTTP_2));
-        }
+        let observer = self
+            .cert_observer
+            .as_ref()
+            .map(|(h, p, cb)| (h.as_str(), *p, cb));
+        apply_post_tls(
+            conn.extensions(),
+            observer,
+            self.force_http10,
+            self.allow_http2_alpn_override,
+        );
         let is_h2 = conn
             .extensions()
             .get_ref::<TargetHttpVersion>()
@@ -265,18 +289,26 @@ where
                     .map_err(|err| {
                         ConnectionError::transport(err, ConnectionErrorKind::Unavailable)
                     })?;
-                barrier.wait().await;
+                barrier
+                    .wait_or_cancel(&self.cancel)
+                    .await
+                    .map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Unavailable))?;
                 Some((raw.bytes.clone(), split_at))
             }
             (Some(raw), false, maybe_barrier) => {
                 raw.suppressed.store(true, Ordering::Release);
                 if let Some(barrier) = maybe_barrier {
-                    barrier.wait().await;
+                    barrier.wait_or_cancel(&self.cancel).await.map_err(|err| {
+                        ConnectionError::transport(err, ConnectionErrorKind::Unavailable)
+                    })?;
                 }
                 Some((raw.bytes.clone(), 0))
             }
             (_, _, Some(barrier)) => {
-                barrier.wait().await;
+                barrier
+                    .wait_or_cancel(&self.cancel)
+                    .await
+                    .map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Unavailable))?;
                 None
             }
             _ => None,
@@ -349,20 +381,13 @@ where
     async fn serve(&self, input: Input) -> Result<Self::Output, Self::Error> {
         let EstablishedClientConnection { input, conn } =
             Box::pin(self.inner.connect(input)).await?;
-        if let Some(observer) = input.extensions().get_ref::<PooledCertObserverExt>()
-            && let Some(tls_params) = conn.extensions().get_ref::<NegotiatedTlsParameters>()
-            && let Some(chain) = &tls_params.peer_certificate_chain
-            && let Some(leaf) = chain.first()
-            && let Ok(info) =
-                crate::tls::parse_observed_cert(&observer.host, observer.port, leaf.as_ref())
-        {
-            (observer.callback)(info);
-        }
-        if self.force_http10 {
-            conn.extensions().insert(TargetHttpVersion(Version::HTTP_10));
-        } else if self.allow_http2_alpn_override {
-            conn.extensions().insert(TargetHttpVersion(Version::HTTP_2));
-        }
+        let observer = input.extensions().get_ref::<PooledCertObserverExt>();
+        apply_post_tls(
+            conn.extensions(),
+            observer.map(|o| (o.host.as_str(), o.port, &o.callback)),
+            self.force_http10,
+            self.allow_http2_alpn_override,
+        );
         Ok(EstablishedClientConnection { input, conn })
     }
 }
@@ -393,27 +418,52 @@ where
     type Output = S::Output;
     type Error = S::Error;
 
-    fn serve(
-        &self,
-        req: Request<B>,
-    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + '_ {
-        if let Some(timing_ext) = req.extensions().get_ref::<PooledTimingExt>()
-            && timing_ext.is_direct
-            && let Some(egress) = req.extensions().get_ref::<Egress<Extensions>>()
-            && let Some(socket_info) = egress.0.get_ref::<SocketInfo>()
+    async fn serve(&self, req: Request<B>) -> Result<Self::Output, Self::Error> {
+        let _timing_guard = if let Some(timing_ext) = req.extensions().get_ref::<PooledTimingExt>()
         {
-            timing_ext
-                .timing
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_peer_ip(socket_info.peer_addr().ip_addr);
-        }
-        self.inner.serve(req)
+            if let Some(egress) = req.extensions().get_ref::<Egress<Extensions>>() {
+                if timing_ext.is_direct
+                    && let Some(socket_info) = egress.0.get_ref::<SocketInfo>()
+                {
+                    crate::lock_unpoison(&timing_ext.timing)
+                        .set_peer_ip(socket_info.peer_addr().ip_addr);
+                } else if let Some(resolved_ip) = egress.0.get_ref::<ResolvedPeerIp>() {
+                    crate::lock_unpoison(&timing_ext.timing).set_peer_ip(resolved_ip.0);
+                }
+                egress
+                    .0
+                    .get_ref::<PooledTimingSlotExt>()
+                    .map(|slot| slot.0.attach(timing_ext.timing.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Box::pin(self.inner.serve(req)).await
     }
 }
 
 const POOLED_CLIENT_CACHE_LIMIT: usize = 32;
 type PooledClient = BoxService<Request, Response, OpaqueError>;
+
+struct PoolLifecycle {
+    cancel: CancellationToken,
+    _shutdown: Shutdown,
+}
+
+impl Drop for PoolLifecycle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[derive(Clone)]
+struct PooledClientEntry {
+    key: PooledClientKey,
+    client: PooledClient,
+    _lifecycle: Arc<PoolLifecycle>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum PooledRouteKind {
@@ -436,9 +486,198 @@ struct PooledClientKey {
     connection_pool_group_id: Option<u128>,
 }
 
-fn pooled_client_cache() -> &'static Mutex<VecDeque<(PooledClientKey, PooledClient)>> {
-    static CACHE: OnceLock<Mutex<VecDeque<(PooledClientKey, PooledClient)>>> = OnceLock::new();
+fn pooled_client_cache() -> &'static Mutex<VecDeque<PooledClientEntry>> {
+    static CACHE: OnceLock<Mutex<VecDeque<PooledClientEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(POOLED_CLIENT_CACHE_LIMIT)))
+}
+
+#[cfg(test)]
+pub(crate) fn pooled_client_cache_len() -> usize {
+    crate::lock_unpoison(pooled_client_cache()).len()
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn finish_pooled_client<T, const PROXY: bool>(
+    builder: EasyHttpConnectorBuilder<T, ProxyStage<PROXY>>,
+    tls: TlsClientConfig,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    pool_config: HttpPooledConnectorConfig,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError>
+where
+    T: ConnectorService<ConnectRequest, Connection: Io + Unpin + ExtensionsRef>,
+{
+    let client = builder
+        .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
+        .map_connector(|inner| PooledTlsPostConnector {
+            inner,
+            force_http10,
+            allow_http2_alpn_override,
+        })
+        .with_default_http_connector::<Body>(exec)
+        .without_proxy_route_failure_cache()
+        // Erase the nested TLS/proxy/HTTP connector before pooling and route fallback
+        // (matching Rama's with_proxy_route_failure_cache boundary) so pooled futures stay stack-safe.
+        .map_connector(BoxService::new)
+        .try_with_connection_pool(pool_config)
+        .map_err(ProxyError::network)?
+        .build_client::<Body, Body, _>()
+        .with_jit_layer(PooledJitLayer);
+    Ok(BoxService::new(client))
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_pooled_https_proxy_client(
+    tls: TlsClientConfig,
+    proxy_tls: TlsClientConfig,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    overrides: &[(String, IpAddr)],
+    pool_config: HttpPooledConnectorConfig,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError> {
+    let proxy_layer = MioProxyConnectorLayer::new(overrides, None)?;
+    let stage = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: cancel.clone(),
+            timing: None,
+        })
+        .with_default_dns_connector()
+        .with_tls_proxy_support_using_rustls_config(proxy_tls)
+        .with_custom_proxy_connector(proxy_layer);
+    finish_pooled_client(
+        stage,
+        tls,
+        default_http_version,
+        force_http10,
+        allow_http2_alpn_override,
+        pool_config,
+        exec,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_pooled_direct_client(
+    tls: TlsClientConfig,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    pool_config: HttpPooledConnectorConfig,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError> {
+    let stage = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: cancel.clone(),
+            timing: None,
+        })
+        .with_default_dns_connector()
+        .without_tls_proxy_support()
+        .without_proxy_support();
+    finish_pooled_client(
+        stage,
+        tls,
+        default_http_version,
+        force_http10,
+        allow_http2_alpn_override,
+        pool_config,
+        exec,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_pooled_plain_proxy_client(
+    tls: TlsClientConfig,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    overrides: &[(String, IpAddr)],
+    pool_config: HttpPooledConnectorConfig,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError> {
+    let proxy_layer = MioProxyConnectorLayer::new(overrides, None)?;
+    let stage = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: cancel.clone(),
+            timing: None,
+        })
+        .with_default_dns_connector()
+        .without_tls_proxy_support()
+        .with_custom_proxy_connector(proxy_layer);
+    finish_pooled_client(
+        stage,
+        tls,
+        default_http_version,
+        force_http10,
+        allow_http2_alpn_override,
+        pool_config,
+        exec,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_pooled_client_service(
+    tls: TlsClientConfig,
+    proxy_tls: Option<TlsClientConfig>,
+    is_direct: bool,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    overrides: &[(String, IpAddr)],
+    pool_config: HttpPooledConnectorConfig,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError> {
+    if let Some(proxy_tls) = proxy_tls {
+        build_pooled_https_proxy_client(
+            tls,
+            proxy_tls,
+            default_http_version,
+            force_http10,
+            allow_http2_alpn_override,
+            overrides,
+            pool_config,
+            cancel,
+            exec,
+        )
+    } else if is_direct && overrides.is_empty() {
+        build_pooled_direct_client(
+            tls,
+            default_http_version,
+            force_http10,
+            allow_http2_alpn_override,
+            pool_config,
+            cancel,
+            exec,
+        )
+    } else {
+        build_pooled_plain_proxy_client(
+            tls,
+            default_http_version,
+            force_http10,
+            allow_http2_alpn_override,
+            overrides,
+            pool_config,
+            cancel,
+            exec,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -450,17 +689,15 @@ fn get_or_build_pooled_client(
     default_http_version: Version,
     force_http10: bool,
     allow_http2_alpn_override: bool,
-    overrides: Arc<[(String, IpAddr)]>,
-) -> Result<PooledClient, ProxyError> {
+    overrides: &[(String, IpAddr)],
+) -> Result<(PooledClient, Arc<PoolLifecycle>), ProxyError> {
     {
-        let mut cache = pooled_client_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = cache.iter().position(|(cached_key, _)| *cached_key == key) {
+        let mut cache = crate::lock_unpoison(pooled_client_cache());
+        if let Some(index) = cache.iter().position(|entry| entry.key == key) {
             let entry = cache.remove(index).expect("position came from this cache");
-            let client = entry.1.clone();
+            let out = (entry.client.clone(), entry._lifecycle.clone());
             cache.push_back(entry);
-            return Ok(client);
+            return Ok(out);
         }
     }
     let pool_config = HttpPooledConnectorConfig {
@@ -474,95 +711,97 @@ fn get_or_build_pooled_client(
         wait_for_pool_timeout: Some(Duration::from_secs(30)),
         ..HttpPooledConnectorConfig::default()
     };
-    let exec = Executor::default();
-    let client: PooledClient = if let Some(proxy_tls) = proxy_tls {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .with_default_dns_connector()
-            .with_tls_proxy_support_using_rustls_config(proxy_tls)
-            .with_custom_proxy_connector(MioProxyConnectorLayer {
-                overrides,
-                timing: Arc::new(Mutex::new(ResponseTiming::default())),
-            })
-            .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
-            .map_connector(|inner| PooledTlsPostConnector {
-                inner,
-                force_http10,
-                allow_http2_alpn_override,
-            })
-            .with_default_http_connector::<Body>(exec)
-            .without_proxy_route_failure_cache()
-            .try_with_connection_pool(pool_config)
-            .map_err(ProxyError::network)?
-            .build_client::<Body, Body, _>()
-            .with_jit_layer(PooledJitLayer);
-        BoxService::new(client)
-    } else if is_direct && overrides.is_empty() {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .with_default_dns_connector()
-            .without_tls_proxy_support()
-            .without_proxy_support()
-            .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
-            .map_connector(|inner| PooledTlsPostConnector {
-                inner,
-                force_http10,
-                allow_http2_alpn_override,
-            })
-            .with_default_http_connector::<Body>(exec)
-            .without_proxy_route_failure_cache()
-            .try_with_connection_pool(pool_config)
-            .map_err(ProxyError::network)?
-            .build_client::<Body, Body, _>()
-            .with_jit_layer(PooledJitLayer);
-        BoxService::new(client)
-    } else {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .with_default_dns_connector()
-            .without_tls_proxy_support()
-            .with_custom_proxy_connector(MioProxyConnectorLayer {
-                overrides,
-                timing: Arc::new(Mutex::new(ResponseTiming::default())),
-            })
-            .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
-            .map_connector(|inner| PooledTlsPostConnector {
-                inner,
-                force_http10,
-                allow_http2_alpn_override,
-            })
-            .with_default_http_connector::<Body>(exec)
-            .without_proxy_route_failure_cache()
-            .try_with_connection_pool(pool_config)
-            .map_err(ProxyError::network)?
-            .build_client::<Body, Body, _>()
-            .with_jit_layer(PooledJitLayer);
-        BoxService::new(client)
+    let pool_cancel = CancellationToken::new();
+    let pool_shutdown = Shutdown::new(pool_cancel.clone().cancelled_owned());
+    let exec = Executor::graceful(pool_shutdown.guard());
+    let client = build_pooled_client_service(
+        tls,
+        proxy_tls,
+        is_direct,
+        default_http_version,
+        force_http10,
+        allow_http2_alpn_override,
+        overrides,
+        pool_config,
+        pool_cancel.clone(),
+        exec,
+    )?;
+    let lifecycle = Arc::new(PoolLifecycle {
+        cancel: pool_cancel,
+        _shutdown: pool_shutdown,
+    });
+    let entry = PooledClientEntry {
+        key,
+        client,
+        _lifecycle: lifecycle,
     };
-    {
-        let mut cache = pooled_client_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = cache.iter().position(|(cached_key, _)| *cached_key == key) {
-            let entry = cache.remove(index).expect("position came from this cache");
-            let existing = entry.1.clone();
-            cache.push_back(entry);
-            return Ok(existing);
-        }
-        while cache.len() >= POOLED_CLIENT_CACHE_LIMIT {
-            cache.pop_front();
-        }
-        cache.push_back((key, client.clone()));
+    let mut cache = crate::lock_unpoison(pooled_client_cache());
+    if let Some(index) = cache.iter().position(|existing| existing.key == entry.key) {
+        let existing = cache.remove(index).expect("position came from this cache");
+        let out = (existing.client.clone(), existing._lifecycle.clone());
+        cache.push_back(existing);
+        return Ok(out);
     }
-    Ok(client)
+    while cache.len() >= POOLED_CLIENT_CACHE_LIMIT {
+        cache.pop_front();
+    }
+    let out = (entry.client.clone(), entry._lifecycle.clone());
+    cache.push_back(entry);
+    Ok(out)
 }
 
-pub(crate) async fn exchange_with_metrics(
-    mut request: Request,
-    config: &SendConfig,
-    cancel: CancellationToken,
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn finish_direct_client<T>(
+    builder: EasyHttpConnectorBuilder<T, ProxyStage<true>>,
+    tls: TlsClientConfig,
+    default_http_version: Version,
     exec: Executor,
-) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+    raw_h1: Option<message::RawH1Request>,
+    cookie_fields: Option<(Arc<[u8]>, usize)>,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    single_packet_barrier: Option<crate::SinglePacketBarrier>,
+    cancel: CancellationToken,
+) -> PooledClient
+where
+    T: ConnectorService<ConnectRequest, Connection: Io + Unpin + ExtensionsRef>,
+{
+    let client = builder
+        .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
+        .map_connector(|inner| RawH1Connector {
+            inner,
+            raw_h1,
+            cookie_fields,
+            force_http10,
+            allow_http2_alpn_override,
+            cert_observer,
+            single_packet_barrier,
+            cancel,
+        })
+        .with_default_http_connector::<Body>(exec)
+        .without_connection_pool()
+        .build_client::<Body, Body, _>()
+        .with_jit_layer(SetProxyAuthHttpHeaderLayer::new());
+    BoxService::new(client)
+}
+
+struct PreparedExchange {
+    raw_h1: Option<message::RawH1Request>,
+    cookie_fields: Option<(Arc<[u8]>, usize)>,
+    is_direct: bool,
+    is_secure_scheme: bool,
+    tls: TlsClientConfig,
+    destination_tls_key: ClientTlsCacheKey,
+    proxy_tls_and_key: Option<(TlsClientConfig, ClientTlsCacheKey)>,
+    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    default_http_version: Version,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+}
+
+fn prepare_exchange(request: &mut Request, config: &SendConfig) -> Result<PreparedExchange, ProxyError> {
     let raw_h1 = request
         .extensions()
         .get_ref::<message::RawH1Request>()
@@ -601,73 +840,73 @@ pub(crate) async fn exchange_with_metrics(
         };
     let target_host = request.uri().host_str().map(|host| host.into_owned());
     let effective_route = target_host.as_deref().map_or_else(
-        || config.upstream_route.clone(),
-        |host| config.upstream_route.resolve_for_host(host),
+        || config.network.upstream_route.clone(),
+        |host| config.network.upstream_route.resolve_for_host(host),
     );
     let is_direct = matches!(effective_route, UpstreamRoute::Direct);
     request.extensions().insert(effective_route.rama()?);
     request.extensions().insert(H2ClientContextParams {
-        keep_alive_while_idle: Some(config.http2_reuse),
+        keep_alive_while_idle: Some(config.http.http2_reuse),
         ..Default::default()
     });
-    apply_hostname_overrides(request.extensions(), &config.hostname_overrides)?;
-    if let Some(version) = config.http_version {
+    apply_hostname_overrides(request.extensions(), &config.network.hostname_overrides)?;
+    if let Some(version) = config.http.version {
         *request.version_mut() = message::version(version);
     }
-    let force_http10 = config.http_version == Some(HttpVersion::Http10);
-    let allow_http2_alpn_override =
-        config.allow_http2_alpn_override && config.http_version == Some(HttpVersion::Http2);
+    let force_http10 = config.http.version == Some(HttpVersion::Http10);
+    let allow_http2_alpn_override = config.http.allow_http2_alpn_override
+        && config.http.version == Some(HttpVersion::Http2);
     let is_secure_scheme = request.uri().scheme_str().is_some_and(|scheme| {
         scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
     });
     let prefer_http2_by_default = is_secure_scheme
-        && config.default_to_http2
+        && config.http.default_to_http2
         && !force_http10
         && raw_h1.is_none()
         && !request.headers().contains_key("upgrade");
     let tls_alpn_version = if allow_http2_alpn_override || prefer_http2_by_default {
         None
     } else {
-        config.http_version
+        config.http.version
     };
     let client_identity = if is_secure_scheme
         && let Some(host) = target_host.as_deref()
     {
-        crate::select_client_identity(&config.client_certificates, host)
+        crate::select_client_identity(&config.tls.client_certificates, host)
     } else {
         None
     };
     let (tls, destination_tls_key) = if !is_secure_scheme
         && matches!(
-            config.upstream_tls,
+            config.tls.trust,
             crate::UpstreamTls::System | crate::UpstreamTls::Insecure
         ) {
-        config.upstream_tls_options.validate()?;
+        config.tls.options.validate()?;
         (
             TlsClientConfig::default(),
             ClientTlsCacheKey {
-                trust: match config.upstream_tls {
+                trust: match config.tls.trust {
                     crate::UpstreamTls::Insecure => crate::tls::TrustModeKey::Insecure,
                     _ => crate::tls::TrustModeKey::System,
                 },
                 alpn: crate::tls::ClientAlpnMode::from_http_version(tls_alpn_version),
-                options: config.upstream_tls_options,
+                options: config.tls.options,
                 client_cert_sha256: None,
                 store_server_cert_chain: false,
             },
         )
     } else {
-        config.upstream_tls.config_and_key(
+        config.tls.trust.config_and_key(
             tls_alpn_version,
-            &config.upstream_tls_options,
+            &config.tls.options,
             client_identity,
-            config.on_server_cert_observed.is_some(),
+            config.tls.on_server_cert_observed.is_some(),
         )?
     };
     let proxy_tls_and_key = effective_route
-        .https_proxy_tls_config_and_key(&config.client_certificates, &config.upstream_tls_options)?;
+        .https_proxy_tls_config_and_key(&config.tls.client_certificates, &config.tls.options)?;
     let cert_observer = if is_secure_scheme {
-        config.on_server_cert_observed.clone().and_then(|callback| {
+        config.tls.on_server_cert_observed.clone().and_then(|callback| {
             let host = target_host.clone()?;
             let port = request.uri().port_u16().unwrap_or(443);
             Some((host, port, callback))
@@ -682,139 +921,325 @@ pub(crate) async fn exchange_with_metrics(
     } else {
         Version::HTTP_11
     };
+    Ok(PreparedExchange {
+        raw_h1,
+        cookie_fields,
+        is_direct,
+        is_secure_scheme,
+        tls,
+        destination_tls_key,
+        proxy_tls_and_key,
+        cert_observer,
+        default_http_version,
+        force_http10,
+        allow_http2_alpn_override,
+    })
+}
+
+fn map_client_error(err: OpaqueError) -> ProxyError {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+    while let Some(e) = cur {
+        if let Some(proxy_err) = e.downcast_ref::<ProxyError>() {
+            match proxy_err {
+                ProxyError::Cancelled => return ProxyError::Cancelled,
+                ProxyError::Timeout => return ProxyError::Timeout,
+                _ => {}
+            }
+        }
+        cur = e.source();
+    }
+    ProxyError::network(err)
+}
+
+fn attach_pooled_request_extensions(
+    request: &mut Request,
+    prepared: &PreparedExchange,
+    timing: &Arc<Mutex<ResponseTiming>>,
+    cancel: &CancellationToken,
+) {
+    if let Some((host, port, callback)) = &prepared.cert_observer {
+        request.extensions().insert(PooledCertObserverExt {
+            host: host.clone(),
+            port: *port,
+            callback: callback.clone(),
+        });
+    }
+    request.extensions().insert(PooledTimingExt {
+        timing: timing.clone(),
+        is_direct: prepared.is_direct,
+    });
+    request
+        .extensions()
+        .insert(PooledRequestCancelExt(cancel.clone()));
+}
+
+/// Dedicated non-global single-connection pooled client scoped to a single NTLM handshake.
+pub(super) struct EphemeralNtlmClient {
+    client: PooledClient,
+}
+
+impl EphemeralNtlmClient {
+    pub(super) fn for_request(
+        request: &mut Request,
+        config: &SendConfig,
+        cancel: CancellationToken,
+        exec: Executor,
+    ) -> Result<Self, ProxyError> {
+        let prepared = prepare_exchange(request, config)?;
+        let proxy_tls = prepared.proxy_tls_and_key.map(|(tls, _)| tls);
+        let pool_config = HttpPooledConnectorConfig {
+            max_total: 1,
+            max_concurrent_streams: 1,
+            idle_timeout: Some(Duration::from_secs(30)),
+            wait_for_pool_timeout: Some(config.limits.timeout),
+            ..HttpPooledConnectorConfig::default()
+        };
+        let client = build_pooled_client_service(
+            prepared.tls,
+            proxy_tls,
+            prepared.is_direct,
+            prepared.default_http_version,
+            prepared.force_http10,
+            prepared.allow_http2_alpn_override,
+            &config.network.hostname_overrides,
+            pool_config,
+            cancel,
+            exec,
+        )?;
+        Ok(Self { client })
+    }
+
+    pub(super) async fn exchange(
+        &self,
+        mut request: Request,
+        config: &SendConfig,
+        cancel: CancellationToken,
+    ) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+        let prepared = prepare_exchange(&mut request, config)?;
+        let timing = Arc::new(Mutex::new(ResponseTiming::default()));
+        attach_pooled_request_extensions(&mut request, &prepared, &timing, &cancel);
+        if let Some(barrier) = &config.group.single_packet_barrier {
+            barrier.wait_or_cancel(&cancel).await?;
+        }
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
+            result = Box::pin(self.client.serve(request)) => result.map_err(map_client_error)?,
+        };
+        crate::lock_unpoison(&timing).lock();
+        Ok((response, timing))
+    }
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_direct_https_proxy_client(
+    tls: TlsClientConfig,
+    proxy_tls: TlsClientConfig,
+    default_http_version: Version,
+    exec: Executor,
+    raw_h1: Option<message::RawH1Request>,
+    cookie_fields: Option<(Arc<[u8]>, usize)>,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    single_packet_barrier: Option<crate::SinglePacketBarrier>,
+    overrides: &[(String, IpAddr)],
+    timing: Arc<Mutex<ResponseTiming>>,
+    cancel: CancellationToken,
+) -> Result<PooledClient, ProxyError> {
+    let proxy_layer = MioProxyConnectorLayer::new(overrides, Some(timing.clone()))?;
+    let c = cancel.clone();
+    let stage = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: c,
+            timing: Some(timing),
+        })
+        .with_default_dns_connector()
+        .with_tls_proxy_support_using_rustls_config(proxy_tls)
+        .with_custom_proxy_connector(proxy_layer);
+    Ok(finish_direct_client(
+        stage,
+        tls,
+        default_http_version,
+        exec,
+        raw_h1,
+        cookie_fields,
+        force_http10,
+        allow_http2_alpn_override,
+        cert_observer,
+        single_packet_barrier,
+        cancel,
+    ))
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_direct_plain_client(
+    tls: TlsClientConfig,
+    default_http_version: Version,
+    exec: Executor,
+    raw_h1: Option<message::RawH1Request>,
+    cookie_fields: Option<(Arc<[u8]>, usize)>,
+    force_http10: bool,
+    allow_http2_alpn_override: bool,
+    cert_observer: Option<(String, u16, Arc<dyn Fn(ObservedCertInfo) + Send + Sync>)>,
+    single_packet_barrier: Option<crate::SinglePacketBarrier>,
+    overrides: &[(String, IpAddr)],
+    timing: Arc<Mutex<ResponseTiming>>,
+    cancel: CancellationToken,
+) -> Result<PooledClient, ProxyError> {
+    let proxy_layer = MioProxyConnectorLayer::new(overrides, Some(timing.clone()))?;
+    let c = cancel.clone();
+    let stage = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: c,
+            timing: Some(timing),
+        })
+        .with_default_dns_connector()
+        .without_tls_proxy_support()
+        .with_custom_proxy_connector(proxy_layer);
+    Ok(finish_direct_client(
+        stage,
+        tls,
+        default_http_version,
+        exec,
+        raw_h1,
+        cookie_fields,
+        force_http10,
+        allow_http2_alpn_override,
+        cert_observer,
+        single_packet_barrier,
+        cancel,
+    ))
+}
+
+#[inline(never)]
+fn build_direct_client_service(
+    prepared: PreparedExchange,
+    overrides: &[(String, IpAddr)],
+    timing: Arc<Mutex<ResponseTiming>>,
+    single_packet_barrier: Option<crate::SinglePacketBarrier>,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<PooledClient, ProxyError> {
+    if let Some((proxy_tls, _)) = prepared.proxy_tls_and_key {
+        build_direct_https_proxy_client(
+            prepared.tls,
+            proxy_tls,
+            prepared.default_http_version,
+            exec,
+            prepared.raw_h1,
+            prepared.cookie_fields,
+            prepared.force_http10,
+            prepared.allow_http2_alpn_override,
+            prepared.cert_observer,
+            single_packet_barrier,
+            overrides,
+            timing,
+            cancel,
+        )
+    } else {
+        build_direct_plain_client(
+            prepared.tls,
+            prepared.default_http_version,
+            exec,
+            prepared.raw_h1,
+            prepared.cookie_fields,
+            prepared.force_http10,
+            prepared.allow_http2_alpn_override,
+            prepared.cert_observer,
+            single_packet_barrier,
+            overrides,
+            timing,
+            cancel,
+        )
+    }
+}
+
+pub(crate) async fn exchange_with_metrics(
+    mut request: Request,
+    config: &SendConfig,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+    let prepared = prepare_exchange(&mut request, config)?;
     let timing = Arc::new(Mutex::new(ResponseTiming::default()));
 
-    let version_allows_reuse = match config.http_version {
-        Some(HttpVersion::Http2) => config.http2_reuse,
-        Some(_) => config.http1_keep_alive,
-        None => config.http1_keep_alive || config.http2_reuse,
+    let version_allows_reuse = match config.http.version {
+        Some(HttpVersion::Http2) => config.http.http2_reuse,
+        Some(_) => config.http.http1_keep_alive,
+        None => config.http.http1_keep_alive || config.http.http2_reuse,
     };
-    let use_pool = config.use_connection_pool
+    let use_pool = config.http.use_connection_pool
         && version_allows_reuse
-        && raw_h1.is_none()
-        && cookie_fields.is_none()
+        && prepared.raw_h1.is_none()
+        && prepared.cookie_fields.is_none()
         && !request.headers().contains_key("upgrade");
 
     let response = if use_pool {
-        if let Some((host, port, callback)) = cert_observer {
-            request.extensions().insert(PooledCertObserverExt {
-                host,
-                port,
-                callback,
-            });
-        }
-        request.extensions().insert(PooledTimingExt {
-            timing: timing.clone(),
-            is_direct,
-        });
-        let (proxy_tls, route_kind) = match proxy_tls_and_key {
-            Some((proxy_tls, proxy_key)) => (Some(proxy_tls), PooledRouteKind::HttpsProxy(proxy_key)),
-            None if is_direct => (None, PooledRouteKind::Direct),
+        attach_pooled_request_extensions(&mut request, &prepared, &timing, &cancel);
+        let (proxy_tls, route_kind) = match prepared.proxy_tls_and_key {
+            Some((proxy_tls, proxy_key)) => {
+                (Some(proxy_tls), PooledRouteKind::HttpsProxy(proxy_key))
+            }
+            None if prepared.is_direct => (None, PooledRouteKind::Direct),
             None => (None, PooledRouteKind::PlainProxy),
         };
-        let default_http_version_key = if force_http10 {
+        let default_http_version_key = if prepared.force_http10 {
             0
-        } else if allow_http2_alpn_override {
+        } else if prepared.allow_http2_alpn_override {
             2
         } else {
             1
         };
         let pool_key = PooledClientKey {
-            is_plain_http: !is_secure_scheme,
-            destination_tls: destination_tls_key,
+            is_plain_http: !prepared.is_secure_scheme,
+            destination_tls: prepared.destination_tls_key,
             route_kind,
             default_http_version: default_http_version_key,
-            force_http10,
-            allow_http2_alpn_override,
-            http1_keep_alive: config.http1_keep_alive,
-            http2_reuse: config.http2_reuse,
-            hostname_overrides: config.hostname_overrides.to_vec(),
-            connection_pool_group_id: config.connection_pool_group_id,
+            force_http10: prepared.force_http10,
+            allow_http2_alpn_override: prepared.allow_http2_alpn_override,
+            http1_keep_alive: config.http.http1_keep_alive,
+            http2_reuse: config.http.http2_reuse,
+            hostname_overrides: config.network.hostname_overrides.to_vec(),
+            connection_pool_group_id: config.group.connection_pool_group_id,
         };
-        let client = get_or_build_pooled_client(
+        let (client, _lifecycle) = get_or_build_pooled_client(
             pool_key,
-            tls,
+            prepared.tls,
             proxy_tls,
-            is_direct,
-            default_http_version,
-            force_http10,
-            allow_http2_alpn_override,
-            config.hostname_overrides.clone(),
+            prepared.is_direct,
+            prepared.default_http_version,
+            prepared.force_http10,
+            prepared.allow_http2_alpn_override,
+            &config.network.hostname_overrides,
         )?;
-        if let Some(barrier) = &config.single_packet_barrier {
-            barrier.wait().await;
+        if let Some(barrier) = &config.group.single_packet_barrier {
+            barrier.wait_or_cancel(&cancel).await?;
         }
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
-            result = Box::pin(client.serve(request)) => result.map_err(ProxyError::network)?,
+            result = Box::pin(client.serve(request)) => result.map_err(map_client_error)?,
         }
-    } else if let Some((proxy_tls, _)) = proxy_tls_and_key {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .map_connector(|inner| CancellableConnector {
-                inner,
-                cancel,
-                timing: timing.clone(),
-            })
-            .with_default_dns_connector()
-            .with_tls_proxy_support_using_rustls_config(proxy_tls)
-            .with_custom_proxy_connector(MioProxyConnectorLayer {
-                overrides: config.hostname_overrides.clone(),
-                timing: timing.clone(),
-            })
-            .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
-            .map_connector(|inner| RawH1Connector {
-                inner,
-                raw_h1,
-                cookie_fields,
-                force_http10,
-                allow_http2_alpn_override,
-                cert_observer,
-                single_packet_barrier: config.single_packet_barrier.clone(),
-            })
-            .with_default_http_connector::<Body>(exec)
-            .without_connection_pool()
-            .build_client()
-            .with_jit_layer(SetProxyAuthHttpHeaderLayer::new());
-        Box::pin(client.serve(request))
-            .await
-            .map_err(ProxyError::network)?
     } else {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .map_connector(|inner| CancellableConnector {
-                inner,
-                cancel,
-                timing: timing.clone(),
-            })
-            .with_default_dns_connector()
-            .without_tls_proxy_support()
-            .with_custom_proxy_connector(MioProxyConnectorLayer {
-                overrides: config.hostname_overrides.clone(),
-                timing: timing.clone(),
-            })
-            .with_tls_support_using_rustls_and_default_http_version(tls, default_http_version)
-            .map_connector(|inner| RawH1Connector {
-                inner,
-                raw_h1,
-                cookie_fields,
-                force_http10,
-                allow_http2_alpn_override,
-                cert_observer,
-                single_packet_barrier: config.single_packet_barrier.clone(),
-            })
-            .with_default_http_connector::<Body>(exec)
-            .without_connection_pool()
-            .build_client()
-            .with_jit_layer(SetProxyAuthHttpHeaderLayer::new());
+        let client = build_direct_client_service(
+            prepared,
+            &config.network.hostname_overrides,
+            timing.clone(),
+            config.group.single_packet_barrier.clone(),
+            cancel,
+            exec,
+        )?;
         Box::pin(client.serve(request))
             .await
-            .map_err(ProxyError::network)?
+            .map_err(map_client_error)?
     };
-    timing
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lock();
+    crate::lock_unpoison(&timing).lock();
     Ok((response, timing))
 }

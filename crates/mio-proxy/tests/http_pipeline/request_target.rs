@@ -44,6 +44,17 @@ async fn https_send_preserves_request_target_on_h1_and_h2() {
             let sending = async {
                 let mut responses = Vec::new();
                 for path in &paths {
+                    let mut cfg = SendConfig::default();
+                    cfg.tls.trust = UpstreamTls::CustomRoots {
+                        certificates_der: vec![ca.clone()],
+                        include_system: false,
+                    };
+                    cfg.limits.timeout = Duration::from_secs(1);
+                    cfg.http.version = Some(if h2 {
+                        HttpVersion::Http2
+                    } else {
+                        HttpVersion::Http11
+                    });
                     responses.push(
                         mio_proxy::send(
                             HttpRequest {
@@ -58,19 +69,7 @@ async fn https_send_preserves_request_target_on_h1_and_h2() {
                                 body: Vec::new(),
                                 trailers: Vec::new(),
                             },
-                            SendConfig {
-                                upstream_tls: UpstreamTls::CustomRoots {
-                                    certificates_der: vec![ca.clone()],
-                                    include_system: false,
-                                },
-                                timeout: Duration::from_secs(1),
-                                http_version: Some(if h2 {
-                                    HttpVersion::Http2
-                                } else {
-                                    HttpVersion::Http11
-                                }),
-                                ..SendConfig::default()
-                            },
+                            cfg,
                             CancellationToken::new(),
                         )
                         .await,

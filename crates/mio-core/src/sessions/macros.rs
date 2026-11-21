@@ -114,11 +114,11 @@ async fn run_macro_once(
         rules::sync_content_length_if_present(&mut req);
 
         let mut step_config = base_config.clone();
-        step_config.timeout = remaining;
-        step_config.http_version = None;
-        step_config.update_content_length = true;
-        step_config.normalize_http1_line_endings = true;
-        step_config.raw_http1_override = None;
+        step_config.limits.timeout = remaining;
+        step_config.http.version = None;
+        step_config.http.update_content_length = true;
+        step_config.http.normalize_http1_line_endings = true;
+        step_config.http.raw_http1_override = None;
 
         let tokio_deadline = tokio::time::Instant::from_std(deadline);
         let send_res = tokio::time::timeout_at(
@@ -154,7 +154,7 @@ async fn run_macro_once(
             match crate::http::unpack_response(
                 &response,
                 &req.method,
-                step_config.max_body_bytes,
+                step_config.limits.max_body_bytes,
                 cancel,
                 deadline,
             ) {

@@ -23,6 +23,76 @@ use crate::{ProxyError, message};
 
 use super::{SendConfig, WebSocketExchange, exchange};
 
+pub(crate) fn websocket_config(max_body_bytes: usize) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .with_read_buffer_size(4096)
+        .with_write_buffer_size(0)
+        .with_max_write_buffer_size(max_body_bytes.saturating_add(256))
+        .with_max_message_size(max_body_bytes)
+        .with_max_frame_size(max_body_bytes)
+}
+
+pub(super) fn prepare_websocket_send_config(config: &mut SendConfig) {
+    config.http.version = Some(HttpVersion::Http11);
+    config.http.update_content_length = true;
+    config.http.normalize_http1_line_endings = true;
+    config.http.raw_http1_override = None;
+}
+
+pub(super) async fn establish_client_websocket(
+    url: &str,
+    headers: &[Header],
+    config: &SendConfig,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<(HttpRequest, HttpResponse, AsyncWebSocket), ProxyError> {
+    let request = websocket_request(url, headers)?;
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+        result = tokio::time::timeout_at(deadline, async {
+            let handshake_headers = message::header_map(&request.headers)?;
+            let key = handshake_headers
+                .typed_get::<SecWebSocketKey>()
+                .ok_or_else(|| ProxyError::invalid("WebSocket Key 必须是 16 字节随机值的 Base64"))?;
+            let accept = SecWebSocketAccept::try_from(key).map_err(ProxyError::invalid)?;
+            let outgoing = message::to_websocket_upgrade_request(&request, config, true)?;
+            let response = exchange(outgoing, config, cancel.clone(), exec).await?;
+            let mut header_budget = (
+                crate::StreamedResponse::MAX_HEADERS,
+                crate::StreamedResponse::MAX_HEAD_BYTES,
+            );
+            message::consume_header_budget(response.headers(), &mut header_budget)?;
+            validate_websocket_response(
+                &handshake_headers,
+                response.headers(),
+                response.status(),
+                &accept,
+            )?;
+            let response_head = HttpResponse {
+                status: response.status().as_u16(),
+                version: message::model_version(response.version()),
+                reason_phrase: message::reason_phrase(&response),
+                headers: message::headers(response.headers()),
+                body: Vec::new(),
+                trailers: Vec::new(),
+            };
+            let upgraded = handle_upgrade(response.extensions().clone())
+                .await
+                .map_err(ProxyError::network)?;
+            drop(response);
+            let socket = AsyncWebSocket::from_raw_socket(
+                upgraded,
+                Role::Client,
+                Some(websocket_config(config.limits.max_body_bytes)),
+            )
+            .await;
+            Ok((request, response_head, socket))
+        }) => result.unwrap_or(Err(ProxyError::Timeout)),
+    }
+}
+
 pub async fn send_websocket(
     url: &str,
     headers: &[Header],
@@ -31,80 +101,58 @@ pub async fn send_websocket(
     mut config: SendConfig,
     cancel: CancellationToken,
 ) -> Result<WebSocketExchange, ProxyError> {
-    let request = websocket_request(url, headers)?;
-    let outgoing_message = websocket_outgoing_message(kind, &payload, config.max_body_bytes)?;
-    config.http_version = Some(HttpVersion::Http11);
-    config.update_content_length = true;
-    config.normalize_http1_line_endings = true;
-    config.raw_http1_override = None;
+    let outgoing_message = websocket_outgoing_message(kind, &payload, config.limits.max_body_bytes)?;
+    prepare_websocket_send_config(&mut config);
     let cancel = cancel.child_token();
     let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
     let _cancel_on_drop = cancel.clone().drop_guard();
     let exec = Executor::graceful(shutdown.guard());
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let result = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-        result = tokio::time::timeout_at(deadline, async {
-            let mut outgoing = message::to_request_with_config(&request, &config)?;
-            let handshake_headers = message::header_map(&request.headers)?;
-            for name in ["connection", "upgrade", "sec-websocket-version", "sec-websocket-key"] {
-                outgoing.headers_mut().remove(name);
-                for value in handshake_headers.get_all(name).iter() {
-                    outgoing.headers_mut().append(name, value.clone());
-                }
-            }
-            outgoing.headers_mut().remove("content-length");
-            outgoing.headers_mut().remove("sec-websocket-extensions");
-            let key = handshake_headers
-                .typed_get::<SecWebSocketKey>()
-                .ok_or_else(|| ProxyError::invalid("WebSocket Key 必须是 16 字节随机值的 Base64"))?;
-            let accept = SecWebSocketAccept::try_from(key).map_err(ProxyError::invalid)?;
-            let response = exchange(outgoing, &config, cancel.clone(), exec).await?;
-            let mut header_budget = (
-                crate::StreamedResponse::MAX_HEADERS,
-                crate::StreamedResponse::MAX_HEAD_BYTES,
-            );
-            message::consume_header_budget(response.headers(), &mut header_budget)?;
-            validate_websocket_response(&handshake_headers, response.headers(), response.status(), &accept)?;
-            let response_head = HttpResponse {
-                status: response.status().as_u16(),
-                version: message::model_version(response.version()),
-                reason_phrase: None,
-                headers: message::headers(response.headers()),
-                body: Vec::new(),
-                trailers: Vec::new(),
-            };
-            let upgraded = handle_upgrade(response.extensions().clone()).await.map_err(ProxyError::network)?;
-            drop(response);
-            let ws_config = WebSocketConfig::default()
-                .with_read_buffer_size(4096)
-                .with_write_buffer_size(0)
-                .with_max_write_buffer_size(config.max_body_bytes.saturating_add(256))
-                .with_max_message_size(config.max_body_bytes)
-                .with_max_frame_size(config.max_body_bytes);
-            let mut socket = AsyncWebSocket::from_raw_socket(upgraded, Role::Client, Some(ws_config)).await;
-            socket.send(outgoing_message).await.map_err(ProxyError::network)?;
-            let flow_id = Uuid::new_v4();
-            let sent = websocket_record(flow_id, 1, WebSocketDirection::ClientToServer, kind, payload);
-            let received = loop {
-                match socket.next().await {
-                    None | Some(Err(ProtocolError::ResetWithoutClosingHandshake)) => break None,
-                    Some(Err(error)) => return Err(ProxyError::network(error)),
-                    Some(Ok(Message::Ping(_))) => socket.flush().await.map_err(ProxyError::network)?,
-                    Some(Ok(message)) => {
-                        let (kind, payload) = websocket_received_message(message)?;
-                        if kind == WebSocketKind::Close {
+    let deadline = tokio::time::Instant::now() + config.limits.timeout;
+    let result = async {
+        let (request, response_head, mut socket) =
+            establish_client_websocket(url, headers, &config, deadline, cancel.clone(), exec)
+                .await?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+            res = tokio::time::timeout_at(deadline, async {
+                socket.send(outgoing_message).await.map_err(ProxyError::network)?;
+                let flow_id = Uuid::new_v4();
+                let sent =
+                    websocket_record(flow_id, 1, WebSocketDirection::ClientToServer, kind, payload);
+                let received = loop {
+                    match socket.next().await {
+                        None | Some(Err(ProtocolError::ResetWithoutClosingHandshake)) => break None,
+                        Some(Err(error)) => return Err(ProxyError::network(error)),
+                        Some(Ok(Message::Ping(_))) => {
                             socket.flush().await.map_err(ProxyError::network)?;
                         }
-                        break Some(websocket_record(flow_id, 2, WebSocketDirection::ServerToClient, kind, payload));
-                    },
-                }
-            };
-            drop(socket);
-            Ok(WebSocketExchange { request, response: response_head, sent, received })
-        }) => result.unwrap_or(Err(ProxyError::Timeout)),
-    };
+                        Some(Ok(message)) => {
+                            let (kind, payload) = websocket_received_message(message)?;
+                            if kind == WebSocketKind::Close {
+                                socket.flush().await.map_err(ProxyError::network)?;
+                            }
+                            break Some(websocket_record(
+                                flow_id,
+                                2,
+                                WebSocketDirection::ServerToClient,
+                                kind,
+                                payload,
+                            ));
+                        }
+                    }
+                };
+                drop(socket);
+                Ok(WebSocketExchange {
+                    request,
+                    response: response_head,
+                    sent,
+                    received,
+                })
+            }) => res.unwrap_or(Err(ProxyError::Timeout)),
+        }
+    }
+    .await;
     cancel.cancel();
     shutdown.shutdown().await;
     result
@@ -136,8 +184,8 @@ pub(super) fn websocket_request(url: &str, headers: &[Header]) -> Result<HttpReq
     if !headers.contains_key("sec-websocket-key") {
         headers.typed_insert(SecWebSocketKey::random());
     }
-    if !websocket_has_token(&headers, "connection", "upgrade")
-        || !websocket_has_token(&headers, "upgrade", "websocket")
+    if !message::has_header_token(&headers, "connection", "upgrade")
+        || !message::has_header_token(&headers, "upgrade", "websocket")
         || headers.get_all("sec-websocket-version").iter().count() != 1
         || headers["sec-websocket-version"] != "13"
         || headers.get_all("sec-websocket-key").iter().count() != 1
@@ -164,18 +212,6 @@ pub(super) fn websocket_request(url: &str, headers: &[Header]) -> Result<HttpReq
     })
 }
 
-fn websocket_has_token(headers: &rama::http::HeaderMap, name: &str, token: &str) -> bool {
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case(token))
-        })
-}
-
 pub(super) fn validate_websocket_response(
     request_headers: &rama::http::HeaderMap,
     headers: &rama::http::HeaderMap,
@@ -183,8 +219,8 @@ pub(super) fn validate_websocket_response(
     accept: &SecWebSocketAccept,
 ) -> Result<(), ProxyError> {
     if status != StatusCode::SWITCHING_PROTOCOLS
-        || !websocket_has_token(headers, "connection", "upgrade")
-        || !websocket_has_token(headers, "upgrade", "websocket")
+        || !message::has_header_token(headers, "connection", "upgrade")
+        || !message::has_header_token(headers, "upgrade", "websocket")
         || headers.get_all("sec-websocket-accept").iter().count() != 1
         || headers.typed_get::<SecWebSocketAccept>().as_ref() != Some(accept)
     {
@@ -214,11 +250,11 @@ pub(super) fn validate_websocket_response(
     Ok(())
 }
 
-pub(crate) fn websocket_outgoing_message(
+pub(crate) fn validate_websocket_payload(
     kind: WebSocketKind,
     payload: &[u8],
     limit: usize,
-) -> Result<Message, ProxyError> {
+) -> Result<(), ProxyError> {
     if payload.len() > limit {
         return Err(ProxyError::BodyLimit { limit });
     }
@@ -229,10 +265,38 @@ pub(crate) fn websocket_outgoing_message(
     {
         return Err(ProxyError::invalid("WebSocket 控制帧正文不得超过 125 字节"));
     }
+    match kind {
+        WebSocketKind::Text => {
+            std::str::from_utf8(payload).map_err(ProxyError::invalid)?;
+        }
+        WebSocketKind::Close if !payload.is_empty() => {
+            if payload.len() < 2 {
+                return Err(ProxyError::invalid("WebSocket Close 必须包含完整状态码"));
+            }
+            let code = CloseCode::from(u16::from_be_bytes([payload[0], payload[1]]));
+            if !code.is_allowed() {
+                return Err(ProxyError::invalid("WebSocket Close 状态码无效"));
+            }
+            std::str::from_utf8(&payload[2..]).map_err(ProxyError::invalid)?;
+        }
+        WebSocketKind::Binary
+        | WebSocketKind::Ping
+        | WebSocketKind::Pong
+        | WebSocketKind::Close => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn websocket_outgoing_message(
+    kind: WebSocketKind,
+    payload: &[u8],
+    limit: usize,
+) -> Result<Message, ProxyError> {
+    validate_websocket_payload(kind, payload, limit)?;
     Ok(match kind {
         WebSocketKind::Text => Message::Text(
             std::str::from_utf8(payload)
-                .map_err(ProxyError::invalid)?
+                .expect("validated UTF-8 text payload")
                 .into(),
         ),
         WebSocketKind::Binary => Message::Binary(payload.to_vec().into()),
@@ -242,17 +306,11 @@ pub(crate) fn websocket_outgoing_message(
             let close = if payload.is_empty() {
                 None
             } else {
-                if payload.len() < 2 {
-                    return Err(ProxyError::invalid("WebSocket Close 必须包含完整状态码"));
-                }
                 let code = CloseCode::from(u16::from_be_bytes([payload[0], payload[1]]));
-                if !code.is_allowed() {
-                    return Err(ProxyError::invalid("WebSocket Close 状态码无效"));
-                }
                 Some(CloseFrame {
                     code,
                     reason: std::str::from_utf8(&payload[2..])
-                        .map_err(ProxyError::invalid)?
+                        .expect("validated UTF-8 close reason")
                         .into(),
                 })
             };

@@ -92,11 +92,9 @@ async fn repeater_upstream_authentication_rejects_without_direct_fallback() {
                 password: "wrong-secret".into(),
             }),
         ] {
-            let config = SendConfig {
-                upstream_route: upstream.route(credentials),
-                timeout: DEADLINE,
-                ..SendConfig::default()
-            };
+            let mut config = SendConfig::default();
+            config.network.upstream_route = upstream.route(credentials);
+            config.limits.timeout = DEADLINE;
             let result =
                 mio_proxy::send(upstream_request(&origin), config, CancellationToken::new()).await;
             match result {
@@ -114,11 +112,9 @@ async fn repeater_upstream_authentication_rejects_without_direct_fallback() {
                 "authentication failure must not fall back to the reachable origin"
             );
         }
-        let config = SendConfig {
-            upstream_route: upstream.route(proxy_credentials()),
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = upstream.route(proxy_credentials());
+        config.limits.timeout = DEADLINE;
         let response = mio_proxy::send(upstream_request(&origin), config, CancellationToken::new())
             .await
             .unwrap();
@@ -152,11 +148,9 @@ async fn upstream_proxy_and_origin_tls_are_verified_independently() {
         if !trusted && let UpstreamRoute::Https { tls, .. } = &mut route {
             *tls = UpstreamTls::System;
         }
-        let config = SendConfig {
-            upstream_route: route,
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = route;
+        config.limits.timeout = DEADLINE;
         assert!(
             mio_proxy::send(upstream_request(&origin), config, CancellationToken::new())
                 .await
@@ -174,11 +168,9 @@ async fn upstream_proxy_and_origin_tls_are_verified_independently() {
     ] {
         let origin = Origin::start(Some((CertificateKind::Valid, true)), false).await;
         let upstream = Upstream::start(&origin, kind, true, false).await;
-        let config = SendConfig {
-            upstream_route: upstream.route(proxy_credentials()),
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = upstream.route(proxy_credentials());
+        config.limits.timeout = DEADLINE;
         assert!(
             mio_proxy::send(upstream_request(&origin), config, CancellationToken::new())
                 .await
@@ -209,11 +201,9 @@ async fn unavailable_upstream_never_connects_directly() {
         },
         UpstreamRoute::Socks5(endpoint),
     ] {
-        let config = SendConfig {
-            upstream_route: route,
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = route;
+        config.limits.timeout = DEADLINE;
         assert!(
             mio_proxy::send(upstream_request(&origin), config, CancellationToken::new())
                 .await
@@ -233,12 +223,10 @@ async fn cancel_upstream_handshake_closes_actual_socket_without_retry() {
     ] {
         let origin = Origin::start(Some((CertificateKind::Valid, false)), false).await;
         let mut upstream = Upstream::start(&origin, kind, true, true).await;
-        let config = SendConfig {
-            upstream_route: upstream.route(proxy_credentials()),
-            upstream_tls: origin.trust(),
-            timeout: DEADLINE,
-            ..SendConfig::default()
-        };
+        let mut config = SendConfig::default();
+        config.network.upstream_route = upstream.route(proxy_credentials());
+        config.tls.trust = origin.trust();
+        config.limits.timeout = DEADLINE;
         let cancel = CancellationToken::new();
         let task = tokio::spawn(mio_proxy::send(
             upstream_request(&origin),

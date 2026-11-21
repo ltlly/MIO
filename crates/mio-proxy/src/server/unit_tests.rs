@@ -37,29 +37,17 @@ async fn repeated_h2_resets_cannot_accumulate_unbounded_finalizers() {
     let cancel = CancellationToken::new();
     let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
     let tasks = TaskTracker::new();
-    let (_mode, intercept) = watch::channel(InterceptMode {
-        requests: false,
-        responses: false,
-    });
-    let (processing_tx, processing) = watch::channel((None, None, None));
-    let (ws_tx, websocket_transform) = watch::channel(None);
-    let (ssl_tx, ssl_pass_through) = watch::channel(None);
-    let (_plugin_hooks_tx, plugin_hooks) = watch::channel((None, None));
-    let (drop_oos_tx, drop_out_of_scope) = watch::channel(None);
     let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-    config.max_connections = 1;
+    config.limits.max_connections = 1;
+    let (static_config, dynamic_init, _) = config.into_parts();
+    let (dynamic_tx, dynamic) = watch::channel(dynamic_init);
     let state = Arc::new(State {
         project,
         listener_port: 1,
-        config,
+        config: static_config,
         events,
         cancel: cancel.clone(),
-        intercept,
-        processing,
-        websocket_transform,
-        ssl_pass_through,
-        plugin_hooks,
-        drop_out_of_scope,
+        dynamic,
         tasks: tasks.clone(),
         requests: Arc::new(Semaphore::new(1)),
         exec: Executor::graceful(shutdown.guard()),
@@ -148,12 +136,7 @@ async fn repeated_h2_resets_cannot_accumulate_unbounded_finalizers() {
     let mut handle = ProxyHandle {
         address,
         cancel,
-        intercept: _mode,
-        processing: processing_tx,
-        websocket_transform: ws_tx,
-        ssl_pass_through: ssl_tx,
-        plugin_hooks: _plugin_hooks_tx,
-        drop_out_of_scope: drop_oos_tx,
+        dynamic: dynamic_tx,
         runner: None,
         stop_timeout: deadline,
         terminal_records,
@@ -170,14 +153,15 @@ fn listener_target_overrides_and_proxy_misc_transforms_work() {
     use mio_plugin_api::Header;
 
     let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-    config.redirect_to_host = Some("127.0.0.1".into());
-    config.redirect_to_port = Some(9443);
-    config.force_use_of_tls = true;
-    config.strip_proxy_headers = true;
-    config.remove_unsupported_accept_encodings = true;
-    config.remove_100_continue_headers = true;
-    config.use_http10_in_requests = true;
-    config.set_request_connection_header = true;
+    config.network.redirect_to_host = Some("127.0.0.1".into());
+    config.network.redirect_to_port = Some(9443);
+    config.tls.force_use_of_tls = true;
+    config.http.strip_proxy_headers = true;
+    config.http.remove_unsupported_accept_encodings = true;
+    config.http.remove_100_continue_headers = true;
+    config.http.use_http10_in_requests = true;
+    config.http.set_request_connection_header = true;
+    let (static_config, _, _) = config.into_parts();
 
     let mut req = HttpRequest {
         method: "POST".into(),
@@ -209,10 +193,10 @@ fn listener_target_overrides_and_proxy_misc_transforms_work() {
         trailers: Vec::new(),
     };
 
-    listener::apply_listener_target_overrides(&mut req, &config).unwrap();
+    listener::apply_listener_target_overrides(&mut req, &static_config).unwrap();
     assert_eq!(req.url, "https://127.0.0.1:9443/v1/items?a=1");
 
-    listener::apply_proxy_misc_request_transforms(&mut req, &config, false);
+    listener::apply_proxy_misc_request_transforms(&mut req, &static_config, false);
     assert_eq!(req.version, HttpVersion::Http10);
     assert!(!req.headers.iter().any(|h| h.name.to_ascii_lowercase().starts_with("proxy-")));
     assert!(!req.headers.iter().any(|h| h.name.eq_ignore_ascii_case("expect")));
@@ -231,8 +215,9 @@ fn listener_target_overrides_and_proxy_misc_transforms_work() {
 
     // Verify http1_keep_alive + set_request_connection_header preserves Connection: keep-alive outbound
     let mut keepalive_cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
-    keepalive_cfg.http1_keep_alive = true;
-    keepalive_cfg.set_request_connection_header = true;
+    keepalive_cfg.http.http1_keep_alive = true;
+    keepalive_cfg.http.set_request_connection_header = true;
+    let (static_keepalive_cfg, _, _) = keepalive_cfg.into_parts();
     let mut ka_req = HttpRequest {
         method: "GET".into(),
         url: "http://example.com/keep".into(),
@@ -244,15 +229,13 @@ fn listener_target_overrides_and_proxy_misc_transforms_work() {
         body: Vec::new(),
         trailers: Vec::new(),
     };
-    listener::apply_proxy_misc_request_transforms(&mut ka_req, &keepalive_cfg, false);
+    listener::apply_proxy_misc_request_transforms(&mut ka_req, &static_keepalive_cfg, false);
     assert!(ka_req.headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case("connection") && h.value.eq_ignore_ascii_case(b"keep-alive")
     }));
-    let send_cfg = crate::SendConfig {
-        http1_keep_alive: true,
-        set_connection_keep_alive: true,
-        ..Default::default()
-    };
+    let mut send_cfg = crate::SendConfig::default();
+    send_cfg.http.http1_keep_alive = true;
+    send_cfg.http.set_connection_keep_alive = true;
     let wire_req = crate::message::to_request_with_config(&ka_req, &send_cfg).unwrap();
     assert_eq!(
         wire_req.headers().get("connection").and_then(|v| v.to_str().ok()),
@@ -295,12 +278,12 @@ async fn proxy_misc_invisible_drop_scope_web_interface_and_suppress_errors() {
 
     let ca = MitmAuthority::generate().unwrap();
     let mut config = ProxyConfig::new(ca);
-    config.invisible_proxying = true;
-    config.disable_web_interface = true;
-    config.suppress_browser_error_messages = true;
-    config.use_http10_in_responses = true;
-    config.set_response_connection_close = true;
-    config.drop_out_of_scope_fn = Some(Arc::new(|url: &str| url.contains("/blocked")));
+    config.network.invisible_proxying = true;
+    config.http.disable_web_interface = true;
+    config.http.suppress_browser_error_messages = true;
+    config.http.use_http10_in_responses = true;
+    config.http.set_response_connection_close = true;
+    config.hooks.drop_out_of_scope_fn = Some(Arc::new(|url: &str| url.contains("/blocked")));
 
     let project = ProjectKey {
         id: Uuid::new_v4(),
@@ -344,4 +327,93 @@ async fn proxy_misc_invisible_drop_scope_web_interface_and_suppress_errors() {
 
     handle.stop().await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), origin_task).await;
+}
+
+#[test]
+fn proxy_config_to_send_config_preserves_auth_tls_and_http2_for_http_and_websocket() {
+    use crate::{
+        AuthCredentials, HttpAuthScheme, PlatformAuthRuleConfig, ProxyEndpoint, UpstreamAuthRuleConfig,
+        UpstreamRoute, UpstreamTls, UpstreamTlsProtocolMode,
+    };
+    use std::net::IpAddr;
+
+    let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    let proxy_endpoint = ProxyEndpoint {
+        host: "127.0.0.1".into(),
+        port: 8899,
+        credentials: None,
+    };
+    config.network.upstream_route = UpstreamRoute::Http(proxy_endpoint.clone());
+    config.network.hostname_overrides =
+        Arc::from([(String::from("app.lab.invalid"), IpAddr::from([127, 0, 0, 42]))]);
+    config.tls.upstream.trust = UpstreamTls::Insecure;
+    config.tls.upstream.options.protocol_mode = UpstreamTlsProtocolMode::Tls12Only;
+    config.limits.max_body_bytes = 2048;
+    config.limits.request_timeout = Duration::from_secs(9);
+    config.limits.streaming_timeout = Some(Duration::from_secs(17));
+    config.http.default_to_http2 = true;
+    config.http.http1_keep_alive = false;
+    config.http.use_connection_pool = true;
+    config.http.strip_proxy_headers = false;
+    config.auth.platform_enabled = true;
+    config.auth.platform_rules = Arc::from([PlatformAuthRuleConfig {
+        enabled: true,
+        destination_host: "*.lab.invalid".into(),
+        credentials: AuthCredentials {
+            scheme: HttpAuthScheme::Basic,
+            username: "platform-user".into(),
+            password: "platform-secret".into(),
+            ..Default::default()
+        },
+    }]);
+    config.auth.upstream_rules = Arc::from([UpstreamAuthRuleConfig {
+        enabled: true,
+        destination_host: "*".into(),
+        proxy_host: "127.0.0.1".into(),
+        proxy_port: 8899,
+        credentials: AuthCredentials {
+            scheme: HttpAuthScheme::Digest,
+            username: "upstream-user".into(),
+            password: "upstream-secret".into(),
+            ..Default::default()
+        },
+    }]);
+
+    let http_send = config.to_send_config("https://app.lab.invalid/api", HttpVersion::Http2, false);
+    assert!(
+        matches!(&http_send.network.upstream_route, UpstreamRoute::Http(ep) if ep.host == proxy_endpoint.host && ep.port == proxy_endpoint.port)
+    );
+    assert_eq!(http_send.network.hostname_overrides.len(), 1);
+    assert!(matches!(http_send.tls.trust, UpstreamTls::Insecure));
+    assert_eq!(http_send.tls.options.protocol_mode, UpstreamTlsProtocolMode::Tls12Only);
+    assert_eq!(http_send.limits.max_body_bytes, 2048);
+    assert_eq!(http_send.limits.timeout, Duration::from_secs(9));
+    assert_eq!(http_send.limits.streaming_timeout, Some(Duration::from_secs(17)));
+    assert_eq!(http_send.http.version, None);
+    assert!(http_send.http.default_to_http2);
+    assert!(!http_send.http.http1_keep_alive);
+    assert!(http_send.http.use_connection_pool);
+    assert!(!http_send.http.strip_proxy_headers);
+    assert!(http_send.auth.platform_enabled);
+    assert_eq!(http_send.auth.platform_rules.len(), 1);
+    assert_eq!(http_send.auth.upstream_rules.len(), 1);
+
+    let ws_send = config.to_send_config("wss://app.lab.invalid/ws", HttpVersion::Http11, true);
+    assert!(
+        matches!(&ws_send.network.upstream_route, UpstreamRoute::Http(ep) if ep.host == proxy_endpoint.host && ep.port == proxy_endpoint.port)
+    );
+    assert_eq!(ws_send.network.hostname_overrides.len(), 1);
+    assert!(matches!(ws_send.tls.trust, UpstreamTls::Insecure));
+    assert_eq!(ws_send.tls.options.protocol_mode, UpstreamTlsProtocolMode::Tls12Only);
+    assert!(ws_send.auth.platform_enabled);
+    assert_eq!(ws_send.auth.platform_rules.len(), 1);
+    assert_eq!(ws_send.auth.upstream_rules.len(), 1);
+    assert_eq!(ws_send.http.version, Some(HttpVersion::Http11));
+    assert!(ws_send.http.default_to_http2);
+    assert!(ws_send.http.http1_keep_alive);
+
+    config.http.default_to_http2 = false;
+    let h1_fallback =
+        config.to_send_config("https://app.lab.invalid/api", HttpVersion::Http11, false);
+    assert_eq!(h1_fallback.http.version, Some(HttpVersion::Http11));
 }

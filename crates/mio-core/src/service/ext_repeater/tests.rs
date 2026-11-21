@@ -281,6 +281,7 @@ async fn saved_archive_tab_still_requires_an_explicit_target_before_send_and_nev
             tab_id: tab.id,
             draft: tab.draft.clone(),
             settings: workspace.repeater_settings.clone(),
+            group_send: None,
         })
         .await
         .unwrap();

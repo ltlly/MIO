@@ -25,6 +25,10 @@ async fn custom_send_timeout_triggers_timeout_error_and_closes_socket() {
         });
 
         let cancel = CancellationToken::new();
+        let mut cfg = SendConfig::default();
+        cfg.limits.timeout = Duration::from_millis(80);
+        cfg.http.version = Some(HttpVersion::Http11);
+        cfg.http.update_content_length = false;
         let prepared = prepare_send(
             &HttpRequest {
                 method: "POST".into(),
@@ -34,12 +38,7 @@ async fn custom_send_timeout_triggers_timeout_error_and_closes_socket() {
                 body: b"ping".to_vec(),
                 trailers: Vec::new(),
             },
-            SendConfig {
-                timeout: Duration::from_millis(80),
-                http_version: Some(HttpVersion::Http11),
-                update_content_length: false,
-                ..SendConfig::default()
-            },
+            cfg,
         )
         .unwrap();
 
@@ -204,15 +203,13 @@ async fn send_streaming_preserves_partial_bytes_and_closes_socket_on_cancel_time
             let mut first_seen_tx = Some(first_seen_tx);
             let cancel = CancellationToken::new();
             let task_cancel = cancel.clone();
-            let config = SendConfig {
-                timeout: if mode == "timeout" {
-                    Duration::from_millis(120)
-                } else {
-                    Duration::from_secs(4)
-                },
-                max_body_bytes: if mode == "limit" { 6 } else { 1024 },
-                ..SendConfig::default()
+            let mut config = SendConfig::default();
+            config.limits.timeout = if mode == "timeout" {
+                Duration::from_millis(120)
+            } else {
+                Duration::from_secs(4)
             };
+            config.limits.max_body_bytes = if mode == "limit" { 6 } else { 1024 };
             let mut snapshots = Vec::new();
             let task = tokio::spawn(async move {
                 let outcome = send_streaming(

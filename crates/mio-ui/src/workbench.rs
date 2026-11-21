@@ -159,6 +159,7 @@ pub(in crate::workbench) struct RepeaterSend {
 pub(in crate::workbench) struct PendingSend {
     pub(in crate::workbench) draft: Draft,
     pub(in crate::workbench) settings: RepeaterSettings,
+    pub(in crate::workbench) group_send: Option<mio_core::RepeaterGroupSendTicket>,
     pub(in crate::workbench) required_workspace_revision: u64,
 }
 

@@ -143,18 +143,29 @@ impl State {
         let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
         let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
         let send_config = SendConfig {
-            http_version: Some(request.version),
-            upstream_route,
-            upstream_tls,
-            client_certificates: self.compiled_client_certs.clone(),
-            hostname_overrides,
-            timeout: Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600)),
-            streaming_timeout,
-            update_content_length: repeater_settings.update_content_length,
-            normalize_http1_line_endings: repeater_settings.normalize_http1_line_endings,
-            raw_http1_override: (!repeater_settings.normalize_http1_line_endings
-                && config.draft.version != HttpVersion::Http2)
-                .then(|| Arc::<[u8]>::from(config.draft.raw.as_slice())),
+            network: mio_proxy::SendNetworkConfig {
+                upstream_route,
+                hostname_overrides,
+            },
+            tls: mio_proxy::UpstreamTlsConfig {
+                trust: upstream_tls,
+                client_certificates: self.compiled_client_certs.clone(),
+                ..Default::default()
+            },
+            limits: mio_proxy::SendLimits {
+                timeout: Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600)),
+                streaming_timeout,
+                ..Default::default()
+            },
+            http: mio_proxy::SendHttpConfig {
+                version: Some(request.version),
+                update_content_length: repeater_settings.update_content_length,
+                normalize_http1_line_endings: repeater_settings.normalize_http1_line_endings,
+                raw_http1_override: (!repeater_settings.normalize_http1_line_endings
+                    && config.draft.version != HttpVersion::Http2)
+                    .then(|| Arc::<[u8]>::from(config.draft.raw.as_slice())),
+                ..Default::default()
+            },
             ..SendConfig::default()
         };
         let _ = prepare_send(&request, send_config.clone())?;

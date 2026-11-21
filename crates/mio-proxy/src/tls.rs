@@ -13,10 +13,9 @@ use rama::tls::{
     KeyLogIntent, ProtocolVersion,
     client::{ServerVerifyMode, TlsClientConfig},
     rustls::{
-        client::{RustlsClientConfigExt, client_root_certs},
+        client::RustlsClientConfigExt,
         dep::rustls::{self, ServerConfig},
         server::{DynamicConfigProvider, RustlsServerConfigExt},
-        verify::NoServerCertVerifier,
     },
     server::TlsServerConfig,
 };
@@ -38,11 +37,6 @@ const MAX_CUSTOM_CERT_CHAIN_LEN: usize = 16;
 pub(crate) fn shared_crypto_provider() -> &'static Arc<rustls::crypto::CryptoProvider> {
     static PROVIDER: OnceLock<Arc<rustls::crypto::CryptoProvider>> = OnceLock::new();
     PROVIDER.get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
-}
-
-fn shared_system_root_certs() -> &'static Arc<rustls::RootCertStore> {
-    static SYSTEM_ROOTS: OnceLock<Arc<rustls::RootCertStore>> = OnceLock::new();
-    SYSTEM_ROOTS.get_or_init(client_root_certs)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -70,7 +64,7 @@ impl ListenerCertMode {
         match self {
             Self::PerHostCaSigned | Self::SelfSigned => Ok(()),
             Self::SpecificHostname(hostname) => {
-                let normalized = normalize_cert_host(hostname);
+                let normalized = crate::route::normalize_host(hostname);
                 if normalized.is_empty() {
                     return Err(ProxyError::Tls("固定证书主机名不能为空".into()));
                 }
@@ -172,7 +166,7 @@ pub fn parse_observed_cert(
         let _ = write!(sha256_fingerprint, "{byte:02X}");
     }
     Ok(ObservedCertInfo {
-        host: normalize_cert_host(host),
+        host: crate::route::normalize_host(host),
         port,
         subject,
         issuer,
@@ -283,11 +277,6 @@ impl MitmAuthority {
         })
     }
 
-    /// Generates a fresh replacement CA identity with an empty leaf certificate cache.
-    pub fn regenerate() -> Result<Self, ProxyError> {
-        Self::generate()
-    }
-
     pub fn from_der(certificate: Vec<u8>, private_key: Vec<u8>) -> Result<Self, ProxyError> {
         let private_key = PrivateKeyDer::try_from(private_key).map_err(ProxyError::tls)?;
         let issuer =
@@ -354,7 +343,7 @@ impl MitmAuthority {
         host: &str,
         options: &ListenerTlsOptions,
     ) -> Result<TlsServerConfig, ProxyError> {
-        let name = normalize_cert_host(host);
+        let name = crate::route::normalize_host(host);
         let config = self.resolve_rustls_server_config(&name, options).await?;
         let enforce_sni_match = matches!(options.cert_mode, ListenerCertMode::PerHostCaSigned);
         Ok(TlsServerConfig::new().with_dynamic_config(Arc::new(ConnectCertificate {
@@ -373,7 +362,7 @@ impl MitmAuthority {
         TlsServerConfig::new().with_dynamic_config(Arc::new(InvisibleSniCertificate {
             ca: self.clone(),
             options,
-            fallback_host: normalize_cert_host(&fallback_host),
+            fallback_host: crate::route::normalize_host(&fallback_host),
             observed_sni,
         }))
     }
@@ -383,7 +372,7 @@ impl MitmAuthority {
         host: &str,
         options: &ListenerTlsOptions,
     ) -> Result<Arc<ServerConfig>, ProxyError> {
-        let name = normalize_cert_host(host);
+        let name = crate::route::normalize_host(host);
         let cache_identity = match &options.cert_mode {
             ListenerCertMode::PerHostCaSigned => format!("ca:{name}"),
             ListenerCertMode::SelfSigned => {
@@ -391,7 +380,7 @@ impl MitmAuthority {
                 format!("self:{effective}")
             }
             ListenerCertMode::SpecificHostname(specific) => {
-                let normalized = normalize_cert_host(specific);
+                let normalized = crate::route::normalize_host(specific);
                 if normalized.is_empty() {
                     return Err(ProxyError::Tls("固定证书主机名不能为空".into()));
                 }
@@ -447,7 +436,7 @@ impl MitmAuthority {
                     .map_err(ProxyError::tls)?
                 }
                 ListenerCertMode::SpecificHostname(specific) => {
-                    let normalized = normalize_cert_host(&specific);
+                    let normalized = crate::route::normalize_host(&specific);
                     issue_ca_signed_leaf(&issuer, &normalized)?
                 }
                 ListenerCertMode::CustomPem { cert_pem, key_pem } => {
@@ -479,28 +468,59 @@ impl MitmAuthority {
     }
 }
 
-fn normalize_cert_host(host: &str) -> String {
-    host.trim()
-        .trim_end_matches('.')
-        .trim_matches(['[', ']'])
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
+pub(crate) fn append_pem_block_b64(out: &mut String, label: &str, b64: &str) {
+    out.push_str("-----BEGIN ");
+    out.push_str(label);
+    out.push_str("-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        if let Ok(line) = std::str::from_utf8(chunk) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("-----END ");
+    out.push_str(label);
+    out.push_str("-----\n");
 }
 
-fn der_to_pem(der: &[u8], label: &str) -> String {
+pub(crate) fn der_to_pem(der: &[u8], label: &str) -> String {
     let encoded = STANDARD.encode(der);
     let mut pem = String::with_capacity(encoded.len() + label.len() * 2 + 48);
-    pem.push_str("-----BEGIN ");
-    pem.push_str(label);
-    pem.push_str("-----\n");
-    for chunk in encoded.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-        pem.push('\n');
-    }
-    pem.push_str("-----END ");
-    pem.push_str(label);
-    pem.push_str("-----\n");
+    append_pem_block_b64(&mut pem, label, &encoded);
     pem
+}
+
+pub(crate) fn parse_pem_cert_chain_and_key(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    max_chain_len: usize,
+    subject_label: &str,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ProxyError> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| ProxyError::Tls(format!("{subject_label} PEM 证书解析失败：{err}")))?;
+    if certs.is_empty() {
+        return Err(ProxyError::Tls(format!("未找到 {subject_label} PEM 证书")));
+    }
+    if certs.len() > max_chain_len {
+        return Err(ProxyError::Tls(format!(
+            "{subject_label}证书链超过 {max_chain_len} 张上限"
+        )));
+    }
+    let mut keys: Vec<PrivateKeyDer<'static>> = PrivateKeyDer::pem_slice_iter(key_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| ProxyError::Tls(format!("{subject_label} PEM 私钥解析失败：{err}")))?;
+    if keys.is_empty() {
+        return Err(ProxyError::Tls(format!(
+            "未找到受支持的未加密 {subject_label} PEM 私钥"
+        )));
+    }
+    if keys.len() > 1 {
+        return Err(ProxyError::Tls(format!(
+            "{subject_label}证书材料包含多把私钥，请仅提供一把私钥"
+        )));
+    }
+    Ok((certs, keys.pop().expect("checked single key")))
 }
 
 fn parse_server_pem_pair(
@@ -513,29 +533,7 @@ fn parse_server_pem_pair(
     } else {
         key_pem.as_bytes()
     };
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| ProxyError::Tls(format!("PEM 证书解析失败：{err}")))?;
-    if certs.is_empty() {
-        return Err(ProxyError::Tls("未找到 PEM 证书".into()));
-    }
-    if certs.len() > MAX_CUSTOM_CERT_CHAIN_LEN {
-        return Err(ProxyError::Tls(format!(
-            "PEM 证书链超过 {MAX_CUSTOM_CERT_CHAIN_LEN} 张上限"
-        )));
-    }
-    let mut keys: Vec<PrivateKeyDer<'static>> = PrivateKeyDer::pem_slice_iter(key_bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| ProxyError::Tls(format!("PEM 私钥解析失败：{err}")))?;
-    if keys.is_empty() {
-        return Err(ProxyError::Tls("未找到受支持的未加密 PEM 私钥".into()));
-    }
-    if keys.len() > 1 {
-        return Err(ProxyError::Tls(
-            "PEM 材料包含多把私钥，请仅提供一把私钥".into(),
-        ));
-    }
-    Ok((certs, keys.pop().expect("checked single key")))
+    parse_pem_cert_chain_and_key(cert_bytes, key_bytes, MAX_CUSTOM_CERT_CHAIN_LEN, "服务端")
 }
 
 fn issue_ca_signed_leaf(
@@ -626,13 +624,10 @@ impl DynamicConfigProvider for InvisibleSniCertificate {
     ) -> Result<Arc<ServerConfig>, rama::error::BoxError> {
         let sni = hello
             .server_name()
-            .map(normalize_cert_host)
+            .map(crate::route::normalize_host)
             .filter(|name| !name.is_empty());
         if let Some(ref host) = sni {
-            *self
-                .observed_sni
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host.clone());
+            *crate::lock_unpoison(&self.observed_sni) = Some(host.clone());
         }
         let target_host = sni.as_deref().unwrap_or_else(|| {
             if self.fallback_host.is_empty() {
@@ -657,6 +652,41 @@ pub enum UpstreamTls {
         certificates_der: Vec<Vec<u8>>,
         include_system: bool,
     },
+}
+
+pub type ServerCertObservedCallback = Arc<dyn Fn(ObservedCertInfo) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct UpstreamTlsConfig {
+    pub trust: UpstreamTls,
+    pub options: UpstreamTlsOptions,
+    pub client_certificates: Arc<[(crate::ClientCertificateRule, crate::ParsedClientIdentity)]>,
+    pub on_server_cert_observed: Option<ServerCertObservedCallback>,
+}
+
+impl Default for UpstreamTlsConfig {
+    fn default() -> Self {
+        Self {
+            trust: UpstreamTls::System,
+            options: UpstreamTlsOptions::default(),
+            client_certificates: Arc::from([]),
+            on_server_cert_observed: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for UpstreamTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamTlsConfig")
+            .field("trust", &self.trust)
+            .field("options", &self.options)
+            .field("client_certificates_len", &self.client_certificates.len())
+            .field(
+                "on_server_cert_observed_configured",
+                &self.on_server_cert_observed.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl UpstreamTls {
@@ -790,105 +820,63 @@ fn hash_client_identity(identity: &crate::ParsedClientIdentity) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn build_rustls_client_config(
+fn build_tls_client_config(
     trust: &UpstreamTls,
     alpn: ClientAlpnMode,
     options: &UpstreamTlsOptions,
     client_identity: Option<&crate::ParsedClientIdentity>,
-) -> Result<Arc<rustls::ClientConfig>, ProxyError> {
-    let supported_versions = options.resolved_protocol_versions()?;
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(shared_crypto_provider()));
-    let builder = match supported_versions.as_deref() {
-        None => builder.with_safe_default_protocol_versions(),
-        Some(versions) => {
-            let rustls_versions: Vec<&'static rustls::SupportedProtocolVersion> = versions
-                .iter()
-                .filter_map(|v| match *v {
-                    ProtocolVersion::TLSv1_3 => Some(&rustls::version::TLS13),
-                    ProtocolVersion::TLSv1_2 => Some(&rustls::version::TLS12),
-                    _ => None,
-                })
-                .collect();
-            builder.with_protocol_versions(&rustls_versions)
-        }
-    }
-    .map_err(ProxyError::tls)?;
-
-    let builder = match trust {
-        UpstreamTls::System => {
-            builder.with_root_certificates(Arc::clone(shared_system_root_certs()))
-        }
-        UpstreamTls::Insecure => {
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoServerCertVerifier::new()))
-        }
-        UpstreamTls::CustomRoots {
-            certificates_der,
-            include_system,
-        } => {
-            let mut roots = if *include_system {
-                shared_system_root_certs().as_ref().clone()
-            } else {
-                rustls::RootCertStore::empty()
-            };
-            for (index, certificate) in certificates_der.iter().enumerate() {
-                roots
-                    .add(CertificateDer::from(certificate.as_slice()))
-                    .map_err(|error| {
-                        ProxyError::Tls(format!(
-                            "第 {} 个自定义根证书 DER 无效：{error}",
-                            index + 1
-                        ))
-                    })?;
-            }
-            builder.with_root_certificates(Arc::new(roots))
-        }
-    };
-
-    let mut rustls_config = match client_identity {
-        Some(identity) => builder
-            .with_client_auth_cert(identity.certificate_chain().to_vec(), identity.private_key())
-            .map_err(ProxyError::tls)?,
-        None => builder.with_no_client_auth(),
-    };
-    rustls_config.alpn_protocols = match alpn {
-        ClientAlpnMode::Http2 => vec![b"h2".to_vec()],
-        ClientAlpnMode::Http1 => vec![b"http/1.1".to_vec()],
-        ClientAlpnMode::Auto => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-    };
-    if options.disable_session_resume {
-        rustls_config.resumption = rustls::client::Resumption::disabled();
-    }
-    Ok(Arc::new(rustls_config))
-}
-
-fn wrap_cached_rustls_client_config(
-    rustls_config: Arc<rustls::ClientConfig>,
-    alpn: ClientAlpnMode,
     store_server_cert_chain: bool,
-) -> TlsClientConfig {
+) -> Result<TlsClientConfig, ProxyError> {
+    trust.validate()?;
+    let supported_versions = options.resolved_protocol_versions()?;
     let mut config = match alpn {
         ClientAlpnMode::Http2 => TlsClientConfig::new().with_alpn_http_2(),
         ClientAlpnMode::Http1 => TlsClientConfig::new().with_alpn_http_1(),
         ClientAlpnMode::Auto => TlsClientConfig::new().with_alpn_http_auto(),
     }
     .with_keylog(KeyLogIntent::Disabled)
-    .with_server_verify(ServerVerifyMode::Disable)
     .with_store_server_cert_chain(store_server_cert_chain);
-    config = config.with_modify_rustls_config(move |incoming| {
-        let mut cfg = (*rustls_config).clone();
-        if !incoming.alpn_protocols.is_empty() && cfg.alpn_protocols != incoming.alpn_protocols {
-            cfg.alpn_protocols = incoming.alpn_protocols;
+
+    if let Some(versions) = supported_versions {
+        config = config.with_supported_versions(versions);
+    }
+
+    config = match trust {
+        UpstreamTls::System => config.with_server_verify(ServerVerifyMode::Auto),
+        UpstreamTls::Insecure => config.with_server_verify(ServerVerifyMode::Disable),
+        UpstreamTls::CustomRoots {
+            certificates_der,
+            include_system,
+        } => {
+            let anchors: Vec<CertificateDer<'static>> = certificates_der
+                .iter()
+                .map(|cert| CertificateDer::from(cert.clone()))
+                .collect();
+            let config = config.with_server_verify(ServerVerifyMode::Auto);
+            if *include_system {
+                config
+                    .try_with_extra_server_trust_anchors(anchors)
+                    .map_err(ProxyError::tls)?
+            } else {
+                config
+                    .try_with_server_trust_anchors(anchors)
+                    .map_err(ProxyError::tls)?
+            }
         }
-        if !cfg.client_auth_cert_resolver.has_certs()
-            && incoming.client_auth_cert_resolver.has_certs()
-        {
-            cfg.client_auth_cert_resolver = incoming.client_auth_cert_resolver;
-        }
-        Ok(cfg)
-    });
-    config
+    };
+
+    if let Some(identity) = client_identity {
+        config = identity.apply_to_tls_config(config);
+    }
+
+    if options.disable_session_resume {
+        config = config.with_modify_rustls_config(|mut cfg| {
+            cfg.resumption = rustls::client::Resumption::disabled();
+            Ok(cfg)
+        });
+    }
+
+    Ok(config)
 }
 
 fn client_tls_cache() -> &'static std::sync::Mutex<VecDeque<CachedClientTls>> {
@@ -922,18 +910,7 @@ impl UpstreamTls {
                 certificates_der,
                 include_system,
             } => {
-                if certificates_der.is_empty() || certificates_der.len() > 32 {
-                    return Err(ProxyError::Tls(
-                        "自定义信任根列表须包含 1 到 32 个证书".into(),
-                    ));
-                }
-                for certificate in certificates_der {
-                    if certificate.is_empty() || certificate.len() > 64 * 1024 {
-                        return Err(ProxyError::Tls(
-                            "自定义根证书须为非空且不超过 64 KiB 的 DER 编码".into(),
-                        ));
-                    }
-                }
+                self.validate()?;
                 TrustModeKey::CustomRoots {
                     include_system: *include_system,
                     certs_sha256: hash_cert_ders(certificates_der),
@@ -948,9 +925,7 @@ impl UpstreamTls {
             store_server_cert_chain,
         };
         {
-            let mut cache = client_tls_cache()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cache = crate::lock_unpoison(client_tls_cache());
             if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 let entry = cache.remove(index).expect("position came from this cache");
                 let config = entry.tls_config.clone();
@@ -958,13 +933,15 @@ impl UpstreamTls {
                 return Ok((config, key));
             }
         }
-        let rustls_config = build_rustls_client_config(self, alpn, options, client_identity)?;
-        let tls_config =
-            wrap_cached_rustls_client_config(rustls_config, alpn, store_server_cert_chain);
+        let tls_config = build_tls_client_config(
+            self,
+            alpn,
+            options,
+            client_identity,
+            store_server_cert_chain,
+        )?;
         {
-            let mut cache = client_tls_cache()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cache = crate::lock_unpoison(client_tls_cache());
             if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 let entry = cache.remove(index).expect("position came from this cache");
                 let existing = entry.tls_config.clone();
@@ -1005,10 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn ca_regenerate_and_pem_pair_import_roundtrip() {
+    fn ca_generate_and_pem_pair_import_roundtrip() {
         let first = MitmAuthority::generate().unwrap();
-        let regenerated = MitmAuthority::regenerate().unwrap();
-        assert_ne!(first.certificate_der(), regenerated.certificate_der());
+        let second = MitmAuthority::generate().unwrap();
+        assert_ne!(first.certificate_der(), second.certificate_der());
 
         let cert_pem = first.certificate_pem();
         let key_pem = first.private_key_pem();
@@ -1020,7 +997,7 @@ mod tests {
         let imported_combined = MitmAuthority::from_pem_pair(&combined, "").unwrap();
         assert_eq!(imported_combined.certificate_der(), first.certificate_der());
 
-        assert!(MitmAuthority::from_pem_pair(&cert_pem, &regenerated.private_key_pem()).is_err());
+        assert!(MitmAuthority::from_pem_pair(&cert_pem, &second.private_key_pem()).is_err());
         assert!(MitmAuthority::from_pem_pair("not a pem", &key_pem).is_err());
     }
 
@@ -1163,6 +1140,37 @@ mod tests {
             tls_max_version: Some(TlsVersion::Tls12),
         };
         assert!(UpstreamTls::System.config_with_options(None, &invalid).is_err());
+
+        let ca_der = MitmAuthority::generate().unwrap().certificate_der();
+        for (trust, alpn_ver, store_chain) in [
+            (UpstreamTls::System, Some(mio_plugin_api::HttpVersion::Http11), false),
+            (UpstreamTls::Insecure, Some(mio_plugin_api::HttpVersion::Http2), true),
+            (
+                UpstreamTls::CustomRoots {
+                    certificates_der: vec![ca_der.clone()],
+                    include_system: false,
+                },
+                None,
+                true,
+            ),
+            (
+                UpstreamTls::CustomRoots {
+                    certificates_der: vec![ca_der],
+                    include_system: true,
+                },
+                Some(mio_plugin_api::HttpVersion::Http11),
+                false,
+            ),
+        ] {
+            let (native_cfg, _) = trust
+                .config_and_key(alpn_ver, &opts, None, store_chain)
+                .unwrap();
+            let resolved = rustls::ClientConfig::try_from(RustlsTlsConnectorConfig::from_extensions(
+                native_cfg.as_extensions(),
+            ))
+            .unwrap();
+            assert!(!resolved.alpn_protocols.is_empty());
+        }
     }
 
     #[test]

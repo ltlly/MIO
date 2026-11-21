@@ -212,12 +212,11 @@ impl State {
                 .upstream_proxy
                 .to_route_with_tls(upstream_tls.clone())
         {
-            sessions.set_proxy_send_config(SendConfig {
-                upstream_route,
-                upstream_tls,
-                upstream_tls_options: workspace.upstream_tls.to_proxy_tls_options(),
-                ..SendConfig::default()
-            });
+            let mut send_cfg = SendConfig::default();
+            send_cfg.network.upstream_route = upstream_route;
+            send_cfg.tls.trust = upstream_tls;
+            send_cfg.tls.options = workspace.upstream_tls.to_proxy_tls_options();
+            sessions.set_proxy_send_config(send_cfg);
         }
         let (proxy_sender, proxy_events) = mpsc::channel(PROXY_EVENT_CAPACITY);
         let plugin_registry = crate::plugins::PluginRegistryStore::from_env_or_user_preferences(

@@ -1,6 +1,6 @@
 use super::{ActiveFlow, ProxyEvent};
 use crate::{ProxyError, StreamedResponse, message};
-use mio_plugin_api::{Header, HttpRequest, HttpResponse, HttpVersion};
+use mio_plugin_api::{HttpRequest, HttpResponse, HttpVersion};
 use rama::http::{
     Body, HeaderValue, Response, StatusCode,
     body::{CaptureHandle, CaptureLimit, CaptureOutcome, Frame, SizeHint, StreamingBody},
@@ -20,12 +20,7 @@ pub(super) fn detected(response: &Response, request: &HttpRequest) -> bool {
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-            })
+            .is_some_and(crate::streaming::is_event_stream_mime)
 }
 
 pub(super) fn detected_or_in_scope(
@@ -46,28 +41,6 @@ fn has_body(status: u16) -> bool {
     !(100..200).contains(&status) && !matches!(status, 204 | 304)
 }
 
-fn strip_chunked_transfer_encoding(headers: &mut Vec<Header>) {
-    headers.retain_mut(|header| {
-        if !header.name.eq_ignore_ascii_case("transfer-encoding") {
-            return true;
-        }
-        let Ok(text) = std::str::from_utf8(&header.value) else {
-            return true;
-        };
-        let remaining: Vec<&str> = text
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("chunked"))
-            .collect();
-        if remaining.is_empty() {
-            false
-        } else {
-            header.value = remaining.join(", ").into_bytes();
-            true
-        }
-    });
-}
-
 pub(super) async fn handle(
     upstream: Response,
     mut active: ActiveFlow,
@@ -76,7 +49,7 @@ pub(super) async fn handle(
     cancel_on_drop: DropGuard,
 ) -> Response {
     let state = active.state.clone();
-    let response_client_version = if state.config.use_http10_in_responses
+    let response_client_version = if state.config.http.use_http10_in_responses
         && ingress_version != HttpVersion::Http2
     {
         HttpVersion::Http10
@@ -84,19 +57,12 @@ pub(super) async fn handle(
         ingress_version
     };
     let result = async {
-        let was_chunked = upstream
-            .headers()
-            .get_all("transfer-encoding")
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .any(|value| {
-                value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-            });
+        let was_chunked =
+            message::has_header_token(upstream.headers(), "transfer-encoding", "chunked");
+        let reason_phrase = message::reason_phrase(&upstream);
         let mut response_headers = message::headers(upstream.headers());
-        if state.config.strip_chunked_metadata_in_streaming {
-            strip_chunked_transfer_encoding(&mut response_headers);
+        if state.config.http.strip_chunked_metadata_in_streaming {
+            message::strip_header_token_vec(&mut response_headers, "transfer-encoding", "chunked");
         }
         let record = active.record.as_mut().expect("active flow owns its record");
         record.summary.status = Some(upstream.status().as_u16());
@@ -104,7 +70,7 @@ pub(super) async fn handle(
         record.response = Some(HttpResponse {
             status: upstream.status().as_u16(),
             version: message::model_version(upstream.version()),
-            reason_phrase: None,
+            reason_phrase,
             headers: response_headers,
             body: Vec::new(),
             trailers: Vec::new(),
@@ -136,9 +102,13 @@ pub(super) async fn handle(
             .as_ref()
             .expect("upstream response is present");
         if !has_body(model.status) {
-            let mut outgoing =
-                message::to_response(model, state.config.max_body_bytes, response_client_version, false)?;
-            if state.config.set_response_connection_close
+            let mut outgoing = message::to_response(
+                model,
+                state.config.limits.max_body_bytes,
+                response_client_version,
+                false,
+            )?;
+            if state.config.http.set_response_connection_close
                 && response_client_version != HttpVersion::Http2
             {
                 outgoing
@@ -149,15 +119,15 @@ pub(super) async fn handle(
         }
         let mut headers = message::header_map(&model.headers)?;
         message::normalize_headers(&mut headers, 0, true, false);
-        if state.config.set_response_connection_close
+        if state.config.http.set_response_connection_close
             && response_client_version != HttpVersion::Http2
         {
             headers.insert("connection", HeaderValue::from_static("close"));
         }
-        let preserve_chunked = !state.config.strip_chunked_metadata_in_streaming && was_chunked;
+        let preserve_chunked = !state.config.http.strip_chunked_metadata_in_streaming && was_chunked;
         let (body, capture) = capture_with_options(
             upstream.into_body(),
-            state.config.max_body_bytes,
+            state.config.limits.max_body_bytes,
             preserve_chunked,
         );
         let cancel_stream = cancel.clone();
@@ -181,7 +151,7 @@ pub(super) async fn handle(
             response
         }
         Ok((response, Some(capture))) => {
-            let streaming_timeout = state.config.streaming_timeout;
+            let streaming_timeout = state.config.limits.streaming_timeout;
             state.tasks.spawn(async move {
                 let _cancel_on_drop = cancel_on_drop;
                 let result = match streaming_timeout {
@@ -249,11 +219,7 @@ impl Capture {
         let record = active.record.as_mut().expect("active flow owns its record");
         let response = record.response.as_mut().expect("SSE response is present");
         response.body = if let Some(chunked) = self.chunked_body {
-            std::mem::take(
-                &mut *chunked
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
+            std::mem::take(&mut *crate::lock_unpoison(&chunked))
         } else {
             captured.bytes().to_vec()
         };
@@ -293,9 +259,7 @@ impl Capture {
                 Err(ProxyError::Cancelled)
             }
             CaptureOutcome::Error => Err(ProxyError::Network(
-                self.failure
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                crate::lock_unpoison(&self.failure)
                     .take()
                     .unwrap_or_else(|| "SSE 源站正文读取失败".into()),
             )),
@@ -335,9 +299,7 @@ impl StreamingBody for ObservedBody {
         let Some(frame) = ready!(Pin::new(&mut this.body).poll_frame(cx)) else {
             this.ended = true;
             if let Some(chunked) = &this.chunked_body {
-                let mut guard = chunked
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = crate::lock_unpoison(chunked);
                 push_capped(&mut guard, b"0\r\n\r\n", this.chunked_limit);
             }
             return Poll::Ready(None);
@@ -349,9 +311,7 @@ impl StreamingBody for ObservedBody {
             {
                 let mut prefix = String::new();
                 let _ = write!(prefix, "{:x}\r\n", data.len());
-                let mut guard = chunked
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = crate::lock_unpoison(chunked);
                 push_capped(&mut guard, prefix.as_bytes(), this.chunked_limit);
                 push_capped(&mut guard, data, this.chunked_limit);
                 push_capped(&mut guard, b"\r\n", this.chunked_limit);
@@ -377,10 +337,7 @@ impl StreamingBody for ObservedBody {
         });
         if let Err(error) = &frame {
             this.ended = true;
-            *this
-                .failure
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            *crate::lock_unpoison(&this.failure) = Some(error.to_string());
         }
         Poll::Ready(Some(frame))
     }

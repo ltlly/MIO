@@ -71,10 +71,6 @@ async fn interception_cpu_deadline_rejects_late_results_and_overflow_without_adm
             let cancel = CancellationToken::new();
             let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
             let tasks = TaskTracker::new();
-            let (_mode, intercept) = watch::channel(InterceptMode {
-                requests: enabled,
-                responses: false,
-            });
             let calls = Arc::new(AtomicUsize::new(0));
             let counted_calls = calls.clone();
             let expired = Arc::new(AtomicBool::new(false));
@@ -94,8 +90,10 @@ async fn interception_cpu_deadline_rejects_late_results_and_overflow_without_adm
                     observed_expiry.store(Instant::now() >= deadline, Ordering::SeqCst);
                     if filter_error {
                         Err(ProxyError::InvalidMessage("late condition error".into()))
+                    } else if hold {
+                        Ok(InterceptFilterOutcome::Intercept)
                     } else {
-                        Ok(hold)
+                        Ok(InterceptFilterOutcome::Bypass)
                     }
                 },
             );
@@ -124,27 +122,22 @@ async fn interception_cpu_deadline_rejects_late_results_and_overflow_without_adm
                     },
                 )
             });
-            let (_processing_tx, processing) = watch::channel((transformer, Some(filter), None));
-            let (_ws_tx, websocket_transform) = watch::channel(None);
-            let (_ssl_tx, ssl_pass_through) = watch::channel(None);
-            let (_plugin_hooks, plugin_hooks) = watch::channel((None, None));
-            let (_drop_oos_tx, drop_out_of_scope) = watch::channel(None);
             let mut config = ProxyConfig::new(ca.clone());
-            config.max_body_bytes = 128;
-            config.request_timeout = budget;
-            config.intercept_timeout = Duration::from_millis(10);
+            config.limits.max_body_bytes = 128;
+            config.limits.request_timeout = budget;
+            config.limits.intercept_timeout = Duration::from_millis(10);
+            config.hooks.intercept_requests = enabled;
+            config.hooks.flow_transform = transformer;
+            config.hooks.intercept_filter = Some(filter);
+            let (static_config, dynamic_init, _) = config.into_parts();
+            let (_dynamic_tx, dynamic) = watch::channel(dynamic_init);
             let state = Arc::new(State {
                 project,
                 listener_port: 49153,
-                config,
+                config: static_config,
                 events,
                 cancel: cancel.clone(),
-                intercept,
-                processing,
-                websocket_transform,
-                ssl_pass_through,
-                plugin_hooks,
-                drop_out_of_scope,
+                dynamic,
                 tasks: tasks.clone(),
                 requests: Arc::new(Semaphore::new(1)),
                 exec: Executor::graceful(shutdown.guard()),
@@ -232,16 +225,12 @@ async fn response_transform_and_filter_share_the_snapshot_before_capture_backpre
         let cancel = CancellationToken::new();
         let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
         let tasks = TaskTracker::new();
-        let (_mode, intercept) = watch::channel(InterceptMode {
-            requests: false,
-            responses: true,
-        });
         let old_calls = Arc::new(AtomicUsize::new(0));
         let counted_old_calls = old_calls.clone();
         let filter: InterceptFilter = Arc::new(move |_, _, _, _, _, ctx, _, _| {
             assert_eq!(ctx.listener_port, 49153);
             counted_old_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(true)
+            Ok(InterceptFilterOutcome::Intercept)
         });
         let (entered, mut observed_transform) = mpsc::channel(1);
         let transformer: FlowTransform = Arc::new(move |record, response_stage, _, _, _| {
@@ -251,27 +240,22 @@ async fn response_transform_and_filter_share_the_snapshot_before_capture_backpre
             entered.try_send(()).unwrap();
             Ok(true)
         });
-        let (processing_tx, processing) = watch::channel((Some(transformer), Some(filter), None));
-        let (_ws_tx, websocket_transform) = watch::channel(None);
-        let (_ssl_tx, ssl_pass_through) = watch::channel(None);
-        let (_plugin_hooks, plugin_hooks) = watch::channel((None, None));
-        let (_drop_oos_tx, drop_out_of_scope) = watch::channel(None);
         let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-        config.max_body_bytes = 128;
-        config.request_timeout = Duration::from_secs(2);
-        config.intercept_timeout = Duration::from_secs(2);
+        config.limits.max_body_bytes = 128;
+        config.limits.request_timeout = Duration::from_secs(2);
+        config.limits.intercept_timeout = Duration::from_secs(2);
+        config.hooks.intercept_responses = true;
+        config.hooks.flow_transform = Some(transformer);
+        config.hooks.intercept_filter = Some(filter);
+        let (static_config, dynamic_init, _) = config.into_parts();
+        let (dynamic_tx, dynamic) = watch::channel(dynamic_init);
         let state = Arc::new(State {
             project,
             listener_port: 49153,
-            config,
+            config: static_config,
             events,
             cancel: cancel.clone(),
-            intercept,
-            processing,
-            websocket_transform,
-            ssl_pass_through,
-            plugin_hooks,
-            drop_out_of_scope,
+            dynamic,
             tasks: tasks.clone(),
             requests: Arc::new(Semaphore::new(1)),
             exec: Executor::graceful(shutdown.guard()),
@@ -290,10 +274,10 @@ async fn response_transform_and_filter_share_the_snapshot_before_capture_backpre
         assert_eq!(receiver.len(), 1);
         let new_calls = Arc::new(AtomicUsize::new(0));
         let counted_new_calls = new_calls.clone();
-        processing_tx.send_modify(|processing| {
-            processing.1 = Some(Arc::new(move |_, _, _, _, _, _, _, _| {
+        dynamic_tx.send_modify(|dyn_state| {
+            dyn_state.intercept_filter = Some(Arc::new(move |_, _, _, _, _, _, _, _| {
                 counted_new_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(false)
+                Ok(InterceptFilterOutcome::Bypass)
             }));
         });
         let initial = receiver.recv().await.unwrap();

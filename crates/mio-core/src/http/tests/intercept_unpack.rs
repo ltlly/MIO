@@ -38,6 +38,7 @@ fn proxy_intercept_body_preserves_raw_request_and_reports_actual_control_and_una
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         filter(
@@ -51,6 +52,7 @@ fn proxy_intercept_body_preserves_raw_request_and_reports_actual_control_and_una
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert_eq!(record, unchanged);
     assert!(
@@ -169,6 +171,7 @@ fn proxy_message_unpack_settings_transform_real_bodies_before_matching_and_never
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         !matcher(
@@ -182,6 +185,7 @@ fn proxy_message_unpack_settings_transform_real_bodies_before_matching_and_never
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let off = crate::ProxyMessageSettings {
         unpack_compressed_requests: false,
@@ -214,6 +218,7 @@ fn proxy_message_unpack_settings_transform_real_bodies_before_matching_and_never
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let request_transform = build_flow_transform(
         Vec::new(),
@@ -241,6 +246,7 @@ fn proxy_message_unpack_settings_transform_real_bodies_before_matching_and_never
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let mut bad = original.clone();
     bad.response.as_mut().unwrap().body = b"notgzip".to_vec();
@@ -309,6 +315,7 @@ fn proxy_intercept_negative_relations_keep_control_limits_and_missing_response_a
                 (deadline, record.request.body.len()),
             )
             .unwrap()
+            .should_intercept()
         );
         assert!(matches!(
             filter(

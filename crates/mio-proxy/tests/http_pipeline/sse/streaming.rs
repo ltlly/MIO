@@ -135,8 +135,12 @@ async fn exact_sse_capture_limit_still_checks_source_eof_or_overflow_on_http_and
     for h2 in [false, true] {
         for overflow in [false, true] {
             let mut origin = SseOrigin::start(h2.then_some(true), None).await;
-            let (mut proxy, ca, mut events) =
-                start_proxy(&origin, |config| config.max_body_bytes = FIRST.len(), 64).await;
+            let (mut proxy, ca, mut events) = start_proxy(
+                &origin,
+                |config| config.limits.max_body_bytes = FIRST.len(),
+                64,
+            )
+            .await;
             let mut client = SseClient::start(proxy.address(), origin.url(), ca, h2, h2);
             assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
             origin.send(FIRST).await;

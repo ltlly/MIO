@@ -1,5 +1,4 @@
 use super::*;
-use rama::http::ws::Message;
 use std::time::Duration;
 
 impl Drop for InjectorRegistrationGuard {
@@ -29,10 +28,7 @@ impl WebSocketInjectorRegistry {
         flow_id: Uuid,
         sender: mpsc::Sender<InjectRequest>,
     ) -> InjectorRegistrationGuard {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = crate::lock_unpoison(&self.inner);
         let token = inner.next_token;
         inner.next_token = inner.next_token.wrapping_add(1);
         inner
@@ -46,44 +42,22 @@ impl WebSocketInjectorRegistry {
     }
 
     pub fn contains(&self, flow_id: Uuid) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::lock_unpoison(&self.inner)
             .entries
             .get(&flow_id)
             .is_some_and(|entry| !entry.sender.is_closed())
     }
 
-    pub(in crate::server) async fn inject(
-        &self,
-        flow_id: Uuid,
-        message: Message,
-        timeout: Duration,
-    ) -> Result<(), ProxyError> {
-        let (kind, payload) = client::websocket_received_message(message)?;
-        self.inject_directed(
-            flow_id,
-            WebSocketDirection::ClientToServer,
-            kind,
-            payload,
-            timeout,
-        )
-        .await
-        .map(|_| ())
-    }
-
-    pub async fn inject_directed(
+    async fn send_inject_request(
         &self,
         flow_id: Uuid,
         direction: WebSocketDirection,
         kind: WebSocketKind,
         payload: Vec<u8>,
+        message: Option<Message>,
         timeout: Duration,
     ) -> Result<WebSocketMessage, ProxyError> {
-        let sender = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let sender = crate::lock_unpoison(&self.inner)
             .entries
             .get(&flow_id)
             .map(|injector| injector.sender.clone())
@@ -96,6 +70,7 @@ impl WebSocketInjectorRegistry {
                 direction,
                 kind,
                 payload,
+                message,
                 reply,
             }),
         )
@@ -109,19 +84,38 @@ impl WebSocketInjectorRegistry {
         }
     }
 
+    pub(in crate::server) async fn inject_with_limit(
+        &self,
+        flow_id: Uuid,
+        direction: WebSocketDirection,
+        kind: WebSocketKind,
+        payload: Vec<u8>,
+        max_body_bytes: usize,
+        timeout: Duration,
+    ) -> Result<WebSocketMessage, ProxyError> {
+        let message = client::websocket_outgoing_message(kind, &payload, max_body_bytes)?;
+        self.send_inject_request(flow_id, direction, kind, payload, Some(message), timeout)
+            .await
+    }
+
+    pub async fn inject_directed(
+        &self,
+        flow_id: Uuid,
+        direction: WebSocketDirection,
+        kind: WebSocketKind,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<WebSocketMessage, ProxyError> {
+        self.send_inject_request(flow_id, direction, kind, payload, None, timeout)
+            .await
+    }
+
     pub fn remove(&self, flow_id: Uuid) {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entries
-            .remove(&flow_id);
+        crate::lock_unpoison(&self.inner).entries.remove(&flow_id);
     }
 
     fn remove_matching(&self, flow_id: Uuid, token: u64) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = crate::lock_unpoison(&self.inner);
         if inner
             .entries
             .get(&flow_id)

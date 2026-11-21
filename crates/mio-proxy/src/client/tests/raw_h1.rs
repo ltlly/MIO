@@ -44,11 +44,9 @@ async fn disabled_update_content_length_preserves_manual_and_omitted_headers_on_
                         body: b"abcd".to_vec(),
                         trailers: Vec::new(),
                     };
-                    let config = SendConfig {
-                        http_version: Some(version),
-                        update_content_length: false,
-                        ..SendConfig::default()
-                    };
+                    let mut config = SendConfig::default();
+                    config.http.version = Some(version);
+                    config.http.update_content_length = false;
                     let response = if version == HttpVersion::Http11 {
                         send(request, config, CancellationToken::new()).await.unwrap()
                     } else {
@@ -274,13 +272,16 @@ async fn raw_http1_override_keeps_lf_on_wire_and_default_normalizes() {
                 body: b"body".to_vec(),
                 trailers: Vec::new(),
             };
-            let response = prepare_send(&request, SendConfig {
-                http_version: Some(HttpVersion::Http11),
-                update_content_length: update_cl,
-                normalize_http1_line_endings: normalize,
-                raw_http1_override: Some(raw),
-                ..SendConfig::default()
-            }).unwrap().send(CancellationToken::new()).await.unwrap();
+            let mut cfg = SendConfig::default();
+            cfg.http.version = Some(HttpVersion::Http11);
+            cfg.http.update_content_length = update_cl;
+            cfg.http.normalize_http1_line_endings = normalize;
+            cfg.http.raw_http1_override = Some(raw);
+            let response = prepare_send(&request, cfg)
+                .unwrap()
+                .send(CancellationToken::new())
+                .await
+                .unwrap();
             assert_eq!(response.body, b"ok");
             origin.await.unwrap();
         }
@@ -333,33 +334,27 @@ async fn raw_http1_override_preserves_chunked_trailers_proxy_route_and_rejects_m
                 value: b"yes".to_vec(),
             }],
         };
-        let config = SendConfig {
-            upstream_route: UpstreamRoute::Http(ProxyEndpoint {
-                host: proxy_addr.ip().to_string(),
-                port: proxy_addr.port(),
-                credentials: Some(ProxyCredentials {
-                    username: "proxy".into(),
-                    password: "secret".into(),
-                }),
+        let mut config = SendConfig::default();
+        config.network.upstream_route = UpstreamRoute::Http(ProxyEndpoint {
+            host: proxy_addr.ip().to_string(),
+            port: proxy_addr.port(),
+            credentials: Some(ProxyCredentials {
+                username: "proxy".into(),
+                password: "secret".into(),
             }),
-            http_version: Some(HttpVersion::Http11),
-            normalize_http1_line_endings: false,
-            raw_http1_override: Some(raw.clone()),
-            ..SendConfig::default()
-        };
+        });
+        config.http.version = Some(HttpVersion::Http11);
+        config.http.normalize_http1_line_endings = false;
+        config.http.raw_http1_override = Some(raw.clone());
         for bad_raw in [
             b"POST /escaped HTTP/1.1\nHost: example.com:8080\nProxy-Authorization: Basic aG9zdDpsZWFr\nTransfer-Encoding: chunked\n\n2;ext=1\r\nab\r\n2\r\ncd\r\n0\r\nX-End: yes\n\r\n".as_slice(),
             b"POST /chunked HTTP/1.1\nHost: example.com:8080\nTransfer-Encoding: chunked\n\n2;ext=1\r\nab\r\n2\r\ncd\r\n0\r\nX-End: yes\n\r\n".as_slice(),
             b"POST /chunked HTTP/1.1\nHost: example.com:8080\nProxy-Authorization: Basic aG9zdDpsZWFr\nTransfer-Encoding: chunked\n\n2;ext=1\r\nab\r\n2\r\nxx\r\n0\r\nX-End: yes\n\r\n".as_slice(),
         ] {
+            let mut bad_cfg = config.clone();
+            bad_cfg.http.raw_http1_override = Some(Arc::from(bad_raw));
             assert!(matches!(
-                prepare_send(
-                    &request,
-                    SendConfig {
-                        raw_http1_override: Some(Arc::from(bad_raw)),
-                        ..config.clone()
-                    }
-                ),
+                prepare_send(&request, bad_cfg),
                 Err(ProxyError::InvalidMessage(_))
             ));
         }

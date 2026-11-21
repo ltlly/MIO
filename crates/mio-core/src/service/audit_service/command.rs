@@ -576,21 +576,21 @@ impl State {
             .route_for_url_with_tls(&request.url, upstream_tls.clone())?;
         let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
         let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-        let send_config = SendConfig {
-            http_version: Some(request.version),
-            upstream_route,
-            upstream_tls,
-            client_certificates: self.compiled_client_certs.clone(),
-            hostname_overrides,
-            timeout: Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600)),
-            streaming_timeout,
-            update_content_length: repeater_settings.update_content_length,
-            normalize_http1_line_endings: repeater_settings.normalize_http1_line_endings,
-            raw_http1_override: (!repeater_settings.normalize_http1_line_endings
-                && draft.version != mio_plugin_api::HttpVersion::Http2)
-                .then(|| Arc::<[u8]>::from(draft.raw.as_slice())),
-            ..SendConfig::default()
-        };
+        let mut send_config = SendConfig::default();
+        send_config.network.upstream_route = upstream_route;
+        send_config.network.hostname_overrides = hostname_overrides;
+        send_config.tls.trust = upstream_tls;
+        send_config.tls.client_certificates = self.compiled_client_certs.clone();
+        send_config.limits.timeout =
+            Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600));
+        send_config.limits.streaming_timeout = streaming_timeout;
+        send_config.http.version = Some(request.version);
+        send_config.http.update_content_length = repeater_settings.update_content_length;
+        send_config.http.normalize_http1_line_endings =
+            repeater_settings.normalize_http1_line_endings;
+        send_config.http.raw_http1_override = (!repeater_settings.normalize_http1_line_endings
+            && draft.version != mio_plugin_api::HttpVersion::Http2)
+            .then(|| Arc::<[u8]>::from(draft.raw.as_slice()));
         let _ = prepare_send(&request, send_config.clone())?;
         let insertion_points = if mode == AuditTaskMode::PassiveAndActive {
             extract_insertion_points(&request)

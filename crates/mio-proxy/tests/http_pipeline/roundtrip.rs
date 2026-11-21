@@ -158,7 +158,7 @@ async fn rejects_unknown_ca_wrong_name_and_expired_origin() {
         let certificate = ca.certificate_der();
         let mut config = ProxyConfig::new(ca);
         if trusted {
-            config.upstream_tls = origin.trust();
+            config.tls.upstream.trust = origin.trust();
         }
         let (tx, mut events) = mpsc::channel(16);
         let mut proxy = mio_proxy::start(

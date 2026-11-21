@@ -57,8 +57,8 @@ pub(super) async fn collect_active_targets(
     }
 
     let mut crawl_cfg = config.clone();
-    crawl_cfg.raw_http1_override = None;
-    crawl_cfg.update_content_length = true;
+    crawl_cfg.http.raw_http1_override = None;
+    crawl_cfg.http.update_content_length = true;
     let crawl_bounds = CrawlConfig {
         max_depth: 2,
         max_requests: 16,

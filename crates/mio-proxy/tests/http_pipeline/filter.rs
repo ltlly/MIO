@@ -64,9 +64,14 @@ async fn conditional_filter_matches_before_accept_and_hot_update_does_not_releas
                     .lock()
                     .unwrap()
                     .push((response_stage, ctx.listener_port));
-                Ok(usize::from(ctx.listener_port) == captured_listener_port.load(Ordering::SeqCst)
+                if usize::from(ctx.listener_port) == captured_listener_port.load(Ordering::SeqCst)
                     && !response_stage
-                    && captured_hold_requests.load(Ordering::SeqCst))
+                    && captured_hold_requests.load(Ordering::SeqCst)
+                {
+                    Ok(InterceptFilterOutcome::Intercept)
+                } else {
+                    Ok(InterceptFilterOutcome::Bypass)
+                }
             },
         );
         let retired_filter = Arc::downgrade(&initial_filter);
@@ -87,11 +92,11 @@ async fn conditional_filter_matches_before_accept_and_hot_update_does_not_releas
         );
         let retired_transform = Arc::downgrade(&initial_transform);
         let (mut proxy, ca, mut events) = proxy_with(&origin, true, |config| {
-            assert_eq!(config.listen.port(), 0);
-            config.request_timeout = callback_timeout;
-            config.max_body_bytes = 128;
-            config.intercept_filter = Some(initial_filter);
-            config.flow_transform = Some(initial_transform);
+            assert_eq!(config.network.listen.port(), 0);
+            config.limits.request_timeout = callback_timeout;
+            config.limits.max_body_bytes = 128;
+            config.hooks.intercept_filter = Some(initial_filter);
+            config.hooks.flow_transform = Some(initial_transform);
         })
         .await;
         let listener_port = proxy.address().port();
@@ -160,7 +165,9 @@ async fn conditional_filter_matches_before_accept_and_hot_update_does_not_releas
                 (false, listener_port),
             ]
         );
-        proxy.set_intercept_filter(Some(Arc::new(|_, _, _, _, _, _, _, _| Ok(false))));
+        proxy.set_intercept_filter(Some(Arc::new(|_, _, _, _, _, _, _, _| {
+            Ok(InterceptFilterOutcome::Bypass)
+        })));
         let barrier_url = format!("{}?barrier=1", origin.url());
         let barrier_response = client(proxy.address(), barrier_url.clone(), ca, false, false).await;
         assert_eq!(barrier_response.status, 200);

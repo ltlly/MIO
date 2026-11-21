@@ -67,10 +67,8 @@ async fn repeater_cancel_closes_silent_origin_and_does_not_retry_post() {
 #[tokio::test]
 async fn body_limit_fails_instead_of_truncating_and_sending() {
     let origin = Origin::start(None, false).await;
-    let config = SendConfig {
-        max_body_bytes: 2,
-        ..SendConfig::default()
-    };
+    let mut config = SendConfig::default();
+    config.limits.max_body_bytes = 2;
     let result = mio_proxy::send(
         HttpRequest {
             method: "POST".into(),

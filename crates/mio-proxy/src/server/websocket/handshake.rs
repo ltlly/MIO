@@ -1,18 +1,7 @@
 use super::*;
+use crate::SendConfig;
 use mio_plugin_api::HttpRequest;
 use rama::http::{HeaderMap, HeaderName, headers::SecWebSocketKey};
-
-pub(super) fn has_token(headers: &HeaderMap, name: &str, token: &str) -> bool {
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case(token))
-        })
-}
 
 #[cfg(test)]
 pub(super) fn request_handshake(
@@ -35,8 +24,8 @@ pub(super) fn request_handshake_with_options(
         ));
     }
     let headers = message::header_map(&request.headers)?;
-    if !has_token(&headers, "connection", "upgrade")
-        || !has_token(&headers, "upgrade", "websocket")
+    if !message::has_header_token(&headers, "connection", "upgrade")
+        || !message::has_header_token(&headers, "upgrade", "websocket")
         || headers.get_all("sec-websocket-version").iter().count() != 1
         || headers
             .get("sec-websocket-version")
@@ -72,8 +61,8 @@ pub(super) fn request_handshake_with_options(
 
 impl Handshake {
     pub(super) fn validate_response(&self, headers: &HeaderMap) -> Result<(), ProxyError> {
-        if !has_token(headers, "connection", "upgrade")
-            || !has_token(headers, "upgrade", "websocket")
+        if !message::has_header_token(headers, "connection", "upgrade")
+            || !message::has_header_token(headers, "upgrade", "websocket")
             || headers.get_all("sec-websocket-accept").iter().count() != 1
             || headers.typed_get::<SecWebSocketAccept>().as_ref() != Some(&self.accept)
         {
@@ -103,6 +92,35 @@ impl Handshake {
     }
 }
 
+fn normalized_http_url(url: &str) -> String {
+    if let Some((scheme, target)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("ws") {
+            return format!("http://{target}");
+        }
+        if scheme.eq_ignore_ascii_case("wss") {
+            return format!("https://{target}");
+        }
+    }
+    url.to_owned()
+}
+
+pub(in crate::server) fn validate_outgoing_request(
+    request: &HttpRequest,
+    max: usize,
+    strip_extensions: bool,
+) -> Result<(), ProxyError> {
+    let _ = request_handshake_with_options(request, strip_extensions)?;
+    let normalized = HttpRequest {
+        method: request.method.clone(),
+        url: normalized_http_url(&request.url),
+        version: request.version,
+        headers: request.headers.clone(),
+        body: Vec::new(),
+        trailers: Vec::new(),
+    };
+    message::validate_request(&normalized, max)
+}
+
 #[cfg(test)]
 pub(in crate::server) fn outgoing_request(
     request: &HttpRequest,
@@ -116,44 +134,17 @@ pub(in crate::server) fn outgoing_request_with_options(
     max: usize,
     strip_extensions: bool,
 ) -> Result<(Request, Handshake), ProxyError> {
-    let (headers, handshake) = request_handshake_with_options(request, strip_extensions)?;
-    let mut request = request.clone();
-    if let Some((scheme, target)) = request.url.split_once("://") {
-        if scheme.eq_ignore_ascii_case("ws") {
-            request.url = format!("http://{target}");
-        } else if scheme.eq_ignore_ascii_case("wss") {
-            request.url = format!("https://{target}");
-        }
-    }
-    let mut outgoing = message::to_request(&request, max)?;
-    outgoing
-        .headers_mut()
-        .insert("connection", HeaderValue::from_static("Upgrade"));
-    outgoing
-        .headers_mut()
-        .insert("upgrade", HeaderValue::from_static("websocket"));
-    outgoing
-        .headers_mut()
-        .insert("sec-websocket-version", HeaderValue::from_static("13"));
-    outgoing
-        .headers_mut()
-        .insert("sec-websocket-key", headers["sec-websocket-key"].clone());
-    outgoing.headers_mut().remove("sec-websocket-protocol");
-    for protocol in headers.get_all("sec-websocket-protocol").iter() {
-        outgoing
-            .headers_mut()
-            .append("sec-websocket-protocol", protocol.clone());
-    }
-    if strip_extensions {
-        outgoing.headers_mut().remove("sec-websocket-extensions");
-    } else {
-        outgoing.headers_mut().remove("sec-websocket-extensions");
-        for ext in headers.get_all("sec-websocket-extensions").iter() {
-            outgoing
-                .headers_mut()
-                .append("sec-websocket-extensions", ext.clone());
-        }
-    }
-    outgoing.headers_mut().remove("content-length");
+    let (_, handshake) = request_handshake_with_options(request, strip_extensions)?;
+    let normalized = HttpRequest {
+        method: request.method.clone(),
+        url: normalized_http_url(&request.url),
+        version: request.version,
+        headers: request.headers.clone(),
+        body: Vec::new(),
+        trailers: Vec::new(),
+    };
+    let mut cfg = SendConfig::default();
+    cfg.limits.max_body_bytes = max;
+    let outgoing = message::to_websocket_upgrade_request(&normalized, &cfg, strip_extensions)?;
     Ok((outgoing, handshake))
 }

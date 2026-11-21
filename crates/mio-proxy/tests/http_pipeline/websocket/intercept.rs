@@ -5,8 +5,8 @@ use std::sync::Mutex;
 async fn websocket_handshake_request_and_response_interception_forward_real_edits() {
     let mut origin = WsOrigin::start(None).await;
     let (mut proxy, _, mut events) = ws_proxy_with(&origin, 32, |config| {
-        config.intercept_requests = true;
-        config.intercept_responses = true;
+        config.hooks.intercept_requests = true;
+        config.hooks.intercept_responses = true;
     })
     .await;
     let address = proxy.address();
@@ -68,11 +68,11 @@ async fn websocket_conditional_predicate_shares_the_actual_handshake_flags() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let captured = seen.clone();
         let (mut proxy, _, mut events) = ws_proxy_with(&origin, 32, |config| {
-            config.intercept_requests = true;
-            config.intercept_responses = true;
-            config.request_timeout = cpu_budget;
-            config.max_body_bytes = body_limit;
-            config.intercept_filter = Some(Arc::new(
+            config.hooks.intercept_requests = true;
+            config.hooks.intercept_responses = true;
+            config.limits.request_timeout = cpu_budget;
+            config.limits.max_body_bytes = body_limit;
+            config.hooks.intercept_filter = Some(Arc::new(
                 move |_,
                       response_stage,
                       head_only,
@@ -89,7 +89,7 @@ async fn websocket_conditional_predicate_shares_the_actual_handshake_flags() {
                         cpu_deadline,
                         max_body_bytes,
                     ));
-                    Ok(true)
+                    Ok(InterceptFilterOutcome::Intercept)
                 },
             ));
         })

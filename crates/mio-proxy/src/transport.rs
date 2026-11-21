@@ -1,14 +1,13 @@
 use rama::{
-    Layer,
-    Service,
+    Layer, Service,
     dns::client::{
         GlobalDnsResolver,
         resolver::{BoxDnsAddressResolver, DnsAddressResolver, DnsAddresssResolverOverwrite},
     },
     error::{BoxError, BoxErrorExt as _},
-    extensions::{Extensions, ExtensionsRef},
+    extensions::{Extension, Extensions, ExtensionsRef},
     http::client::{
-        MaybeProxiedConnection, ProxyConnector, ProxyConnectorLayer,
+        EasyHttpWebClient, MaybeProxiedConnection, ProxyConnector, ProxyConnectorLayer,
         proxy::layer::HttpProxyConnectorLayer,
     },
     io::{GracefulIo, Io},
@@ -16,13 +15,14 @@ use rama::{
         AuthorityInputExt, ConnectorTargetInputExt, Protocol, ProtocolInputExt,
         address::{Domain, DomainTrie, Host, HostWithPort},
         client::{
-            ConnectionError, ConnectionErrorKind, ConnectorService, ConnectorTarget,
-            EstablishedClientConnection, ProxyRoute,
+            ConnectRequest, ConnectionError, ConnectionErrorKind, ConnectorService,
+            ConnectorTarget, EstablishedClientConnection, ProxyRoute,
         },
         stream::SocketInfo,
         user::ProxyCredential,
     },
     proxy::socks5::{Socks5Client, Socks5ProxyConnectorLayer},
+    tls::client::TlsClientConfig,
 };
 use std::{
     io::{self, IoSlice},
@@ -37,18 +37,27 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::ProxyError;
 
-pub fn build_dns_resolver(overrides: &[(String, IpAddr)]) -> Result<BoxDnsAddressResolver, ProxyError> {
-    if overrides.is_empty() {
-        return Ok(GlobalDnsResolver::new().into_box_dns_address_resolver());
-    }
+pub(crate) fn build_hostname_override_trie(
+    overrides: &[(String, IpAddr)],
+) -> Result<DomainTrie<IpAddr>, ProxyError> {
     let mut trie = DomainTrie::<IpAddr>::new();
     for (hostname, ip) in overrides {
-        let clean = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+        let clean = crate::route::normalize_host(hostname);
         let domain: Domain = clean
             .parse()
             .map_err(|_| ProxyError::invalid(format!("主机名解析覆盖域名无效：{hostname}")))?;
         trie.insert_domain(domain, *ip);
     }
+    Ok(trie)
+}
+
+pub fn build_dns_resolver(
+    overrides: &[(String, IpAddr)],
+) -> Result<BoxDnsAddressResolver, ProxyError> {
+    if overrides.is_empty() {
+        return Ok(GlobalDnsResolver::new().into_box_dns_address_resolver());
+    }
+    let trie = build_hostname_override_trie(overrides)?;
     Ok((trie, GlobalDnsResolver::new()).into_box_dns_address_resolver())
 }
 
@@ -59,14 +68,7 @@ pub(crate) fn apply_hostname_overrides(
     if overrides.is_empty() {
         return Ok(());
     }
-    let mut trie = DomainTrie::<IpAddr>::new();
-    for (hostname, ip) in overrides {
-        let clean = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
-        let domain: Domain = clean
-            .parse()
-            .map_err(|_| ProxyError::invalid(format!("主机名解析覆盖域名无效：{hostname}")))?;
-        trie.insert_domain(domain, *ip);
-    }
+    let trie = build_hostname_override_trie(overrides)?;
     extensions.insert(DnsAddresssResolverOverwrite::new(trie));
     Ok(())
 }
@@ -75,25 +77,71 @@ pub(crate) fn resolve_hostname_override(
     overrides: &[(String, IpAddr)],
     host: &str,
 ) -> Option<IpAddr> {
-    let clean = host.trim().trim_matches(['[', ']']).trim_end_matches('.');
-    overrides
-        .iter()
-        .find(|(pattern, _)| pattern.trim().trim_end_matches('.').eq_ignore_ascii_case(clean))
-        .map(|(_, ip)| *ip)
+    if overrides.is_empty() {
+        return None;
+    }
+    let clean = crate::route::normalize_host(host);
+    let domain: Domain = clean.parse().ok()?;
+    let trie = build_hostname_override_trie(overrides).ok()?;
+    trie.get_value(&domain).copied()
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResolvedPeerIp(pub IpAddr);
+
+impl Extension for ResolvedPeerIp {}
+
+#[derive(Clone)]
+pub(crate) struct PooledTimingSlotExt(pub TimingSlot);
+
+impl std::fmt::Debug for PooledTimingSlotExt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledTimingSlotExt").finish_non_exhaustive()
+    }
+}
+
+impl Extension for PooledTimingSlotExt {}
+
+#[derive(Clone)]
+pub(crate) struct PooledRequestCancelExt(pub CancellationToken);
+
+impl std::fmt::Debug for PooledRequestCancelExt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledRequestCancelExt").finish_non_exhaustive()
+    }
+}
+
+impl Extension for PooledRequestCancelExt {}
 
 #[derive(Clone, Default)]
 pub(crate) struct MioProxyConnectorLayer {
-    pub overrides: Arc<[(String, IpAddr)]>,
-    pub timing: Arc<Mutex<ResponseTiming>>,
+    overrides_trie: Option<Arc<DomainTrie<IpAddr>>>,
+    timing: Option<Arc<Mutex<ResponseTiming>>>,
+}
+
+impl MioProxyConnectorLayer {
+    pub(crate) fn new(
+        overrides: &[(String, IpAddr)],
+        timing: Option<Arc<Mutex<ResponseTiming>>>,
+    ) -> Result<Self, ProxyError> {
+        let overrides_trie = if overrides.is_empty() {
+            None
+        } else {
+            Some(Arc::new(build_hostname_override_trie(overrides)?))
+        };
+        Ok(Self {
+            overrides_trie,
+            timing,
+        })
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct MioProxyConnector<S> {
     inner: S,
     fallback: ProxyConnector<S>,
-    overrides: Arc<[(String, IpAddr)]>,
-    timing: Arc<Mutex<ResponseTiming>>,
+    overrides_trie: Option<Arc<DomainTrie<IpAddr>>>,
+    timing: Option<Arc<Mutex<ResponseTiming>>>,
 }
 
 impl<S: Clone> Layer<S> for MioProxyConnectorLayer {
@@ -108,7 +156,7 @@ impl<S: Clone> Layer<S> for MioProxyConnectorLayer {
         MioProxyConnector {
             inner,
             fallback,
-            overrides: self.overrides.clone(),
+            overrides_trie: self.overrides_trie.clone(),
             timing: self.timing.clone(),
         }
     }
@@ -123,15 +171,9 @@ where
     type Error = ConnectionError;
 
     async fn serve(&self, input: Input) -> Result<Self::Output, Self::Error> {
-        let is_socks_local_dns = matches!(
-            input.extensions().get_ref::<ProxyRoute>(),
-            Some(ProxyRoute::Proxy(addr)) if addr.protocol == Some(Protocol::SOCKS5)
-        );
-        if !is_socks_local_dns {
-            return self.fallback.serve(input).await;
-        }
-        let Some(ProxyRoute::Proxy(proxy_info)) = input.extensions().get_ref::<ProxyRoute>().cloned() else {
-            unreachable!()
+        let proxy_info = match input.extensions().get_ref::<ProxyRoute>().cloned() {
+            Some(ProxyRoute::Proxy(addr)) if addr.protocol == Some(Protocol::SOCKS5) => addr,
+            _ => return self.fallback.serve(input).await,
         };
         let authority = input.authority().ok_or_else(|| {
             ConnectionError::local(
@@ -147,7 +189,11 @@ where
         };
         if let Host::Name(domain) = &connect_authority.host {
             let domain_str = domain.as_str();
-            let resolved_ip = if let Some(ip) = resolve_hostname_override(&self.overrides, domain_str) {
+            let resolved_ip = if let Some(ip) = self
+                .overrides_trie
+                .as_ref()
+                .and_then(|trie| trie.get_value(domain).copied())
+            {
                 ip
             } else {
                 let mut addrs = tokio::net::lookup_host((domain_str, connect_authority.port))
@@ -159,7 +205,7 @@ where
                     .ok_or_else(|| {
                         ConnectionError::transport(
                             BoxError::from_static_str(
-                            "socks5 local-dns lookup returned no addresses",
+                                "socks5 local-dns lookup returned no addresses",
                             ),
                             ConnectionErrorKind::Unavailable,
                         )
@@ -167,11 +213,12 @@ where
             };
             connect_authority = HostWithPort::new(Host::Address(resolved_ip), connect_authority.port);
         }
-        if let Host::Address(ip) = connect_authority.host {
-            self.timing
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_peer_ip(ip);
+        let resolved_ip = match connect_authority.host {
+            Host::Address(ip) => Some(ip),
+            _ => None,
+        };
+        if let (Some(ip), Some(timing)) = (resolved_ip, &self.timing) {
+            crate::lock_unpoison(timing).set_peer_ip(ip);
         }
         input
             .extensions()
@@ -181,6 +228,9 @@ where
             .connect(input)
             .await
             .map_err(|err| err.context("establish connection to socks5 proxy"))?;
+        if let Some(ip) = resolved_ip {
+            conn.extensions().insert(ResolvedPeerIp(ip));
+        }
         let mut client = Socks5Client::new();
         if let Some(ProxyCredential::Basic(basic)) = &proxy_info.credential {
             client.set_auth(basic.clone());
@@ -244,20 +294,116 @@ impl ResponseTiming {
     }
 }
 
-pub(crate) struct TimingIo<S> {
-    inner: S,
+#[derive(Clone)]
+struct AttachedTiming {
+    timing: Arc<Mutex<ResponseTiming>>,
+    armed: bool,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TimingSlot {
+    active: Arc<Mutex<Vec<AttachedTiming>>>,
+}
+
+pub(crate) struct TimingAttachGuard {
+    slot: TimingSlot,
     timing: Arc<Mutex<ResponseTiming>>,
 }
 
+impl Drop for TimingAttachGuard {
+    fn drop(&mut self) {
+        let mut active = crate::lock_unpoison(&self.slot.active);
+        if let Some(pos) = active
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.timing, &self.timing))
+        {
+            active.remove(pos);
+        }
+    }
+}
+
+impl TimingSlot {
+    pub(crate) fn attach(&self, timing: Arc<Mutex<ResponseTiming>>) -> TimingAttachGuard {
+        crate::lock_unpoison(&self.active).push(AttachedTiming {
+            timing: timing.clone(),
+            armed: false,
+        });
+        TimingAttachGuard {
+            slot: self.clone(),
+            timing,
+        }
+    }
+
+    fn on_write(&self) {
+        let mut active = crate::lock_unpoison(&self.active);
+        for entry in active.iter_mut() {
+            if !entry.armed {
+                entry.armed = true;
+                crate::lock_unpoison(&entry.timing).reset_read();
+            }
+        }
+    }
+
+    fn on_read(&self) {
+        let active = crate::lock_unpoison(&self.active);
+        for entry in active.iter() {
+            if entry.armed {
+                crate::lock_unpoison(&entry.timing).record_read();
+            }
+        }
+    }
+}
+
+enum TimingTarget {
+    Direct(Arc<Mutex<ResponseTiming>>),
+    Pooled(TimingSlot),
+}
+
+impl TimingTarget {
+    fn on_read(&self) {
+        match self {
+            Self::Direct(timing) => crate::lock_unpoison(timing).record_read(),
+            Self::Pooled(slot) => slot.on_read(),
+        }
+    }
+
+    fn on_write(&self) {
+        match self {
+            Self::Direct(timing) => crate::lock_unpoison(timing).reset_read(),
+            Self::Pooled(slot) => slot.on_write(),
+        }
+    }
+}
+
+pub(crate) struct TimingIo<S> {
+    inner: S,
+    target: TimingTarget,
+}
+
 impl<S> TimingIo<S> {
-    fn new(inner: S, timing: Arc<Mutex<ResponseTiming>>) -> Self {
-        Self { inner, timing }
+    fn direct(inner: S, timing: Arc<Mutex<ResponseTiming>>) -> Self {
+        Self {
+            inner,
+            target: TimingTarget::Direct(timing),
+        }
+    }
+
+    fn pooled(inner: S, slot: TimingSlot) -> Self {
+        Self {
+            inner,
+            target: TimingTarget::Pooled(slot),
+        }
     }
 
     fn project_inner(self: Pin<&mut Self>) -> Pin<&mut S> {
-        // SAFETY: `inner` is never moved out of `self`, so projecting into it
-        // preserves the pinning guarantee of the wrapped connection.
-        unsafe { self.map_unchecked_mut(|this| &mut this.inner) }
+        self.project_parts().0
+    }
+
+    fn project_parts(self: Pin<&mut Self>) -> (Pin<&mut S>, &TimingTarget) {
+        // SAFETY: `inner` is never moved out of `self`, so re-pinning `&mut this.inner`
+        // preserves the structural pinning invariant while allowing shared access to `target`.
+        let this = unsafe { self.get_unchecked_mut() };
+        (unsafe { Pin::new_unchecked(&mut this.inner) }, &this.target)
     }
 }
 
@@ -274,12 +420,12 @@ impl<S: AsyncRead> AsyncRead for TimingIo<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
-        let timing = Arc::clone(&self.timing);
-        let result = self.project_inner().poll_read(cx, buf);
+        let (inner, target) = self.project_parts();
+        let result = inner.poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = &result
             && buf.filled().len() > before
         {
-            timing.lock().unwrap().record_read();
+            target.on_read();
         }
         result
     }
@@ -291,12 +437,12 @@ impl<S: AsyncWrite> AsyncWrite for TimingIo<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let timing = Arc::clone(&self.timing);
-        let result = self.project_inner().poll_write(cx, buf);
+        let (inner, target) = self.project_parts();
+        let result = inner.poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = &result
             && *n > 0
         {
-            timing.lock().unwrap().reset_read();
+            target.on_write();
         }
         result
     }
@@ -314,12 +460,12 @@ impl<S: AsyncWrite> AsyncWrite for TimingIo<S> {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        let timing = Arc::clone(&self.timing);
-        let result = self.project_inner().poll_write_vectored(cx, bufs);
+        let (inner, target) = self.project_parts();
+        let result = inner.poll_write_vectored(cx, bufs);
         if let Poll::Ready(Ok(n)) = &result
             && *n > 0
         {
-            timing.lock().unwrap().reset_read();
+            target.on_write();
         }
         result
     }
@@ -334,7 +480,7 @@ impl<S: AsyncWrite> AsyncWrite for TimingIo<S> {
 pub(crate) struct CancellableConnector<S> {
     pub inner: S,
     pub cancel: CancellationToken,
-    pub timing: Arc<Mutex<ResponseTiming>>,
+    pub timing: Option<Arc<Mutex<ResponseTiming>>>,
 }
 
 impl<S, Input> Service<Input> for CancellableConnector<S>
@@ -350,23 +496,110 @@ where
     type Error = ConnectionError;
 
     async fn serve(&self, input: Input) -> Result<Self::Output, Self::Error> {
-        let EstablishedClientConnection { input, conn } = self.inner.connect(input).await?;
+        let req_cancel = input
+            .extensions()
+            .get_ref::<PooledRequestCancelExt>()
+            .map(|ext| ext.0.clone());
+        let EstablishedClientConnection { input, conn } = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                return Err(ConnectionError::transport(
+                    ProxyError::Cancelled,
+                    ConnectionErrorKind::Unavailable,
+                ));
+            }
+            _ = async {
+                match &req_cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                return Err(ConnectionError::transport(
+                    ProxyError::Cancelled,
+                    ConnectionErrorKind::Unavailable,
+                ));
+            }
+            res = self.inner.connect(input) => res?,
+        };
         let is_direct = matches!(
             input.extensions().get_ref::<ProxyRoute>(),
             None | Some(ProxyRoute::Direct)
         );
-        if is_direct && let Some(socket_info) = conn.extensions().get_ref::<SocketInfo>() {
-            self.timing
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_peer_ip(socket_info.peer_addr().ip_addr);
-        }
+        let peer_ip = is_direct
+            .then(|| conn.extensions().get_ref::<SocketInfo>())
+            .flatten()
+            .map(|info| info.peer_addr().ip_addr);
+        let timed_conn = match &self.timing {
+            Some(timing) => {
+                if let Some(ip) = peer_ip {
+                    crate::lock_unpoison(timing).set_peer_ip(ip);
+                }
+                TimingIo::direct(conn, timing.clone())
+            }
+            None => {
+                let slot = TimingSlot::default();
+                conn.extensions().insert(PooledTimingSlotExt(slot.clone()));
+                TimingIo::pooled(conn, slot)
+            }
+        };
         Ok(EstablishedClientConnection {
             input,
-            conn: GracefulIo::new(
-                Box::pin(self.cancel.clone().cancelled_owned()),
-                TimingIo::new(conn, self.timing.clone()),
-            ),
+            conn: GracefulIo::new(Box::pin(self.cancel.clone().cancelled_owned()), timed_conn),
         })
+    }
+}
+
+pub(crate) fn build_passthrough_connector(
+    proxy_tls: TlsClientConfig,
+    overrides: &[(String, IpAddr)],
+    cancel: CancellationToken,
+) -> Result<
+    impl ConnectorService<ConnectRequest, Connection: Io + Unpin + ExtensionsRef>,
+    ProxyError,
+> {
+    let proxy_layer = MioProxyConnectorLayer::new(overrides, None)?;
+    Ok(EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .map_connector(move |inner| CancellableConnector {
+            inner,
+            cancel: cancel.clone(),
+            timing: None,
+        })
+        .with_default_dns_connector()
+        .with_tls_proxy_support_using_rustls_config(proxy_tls)
+        .with_custom_proxy_connector(proxy_layer)
+        .build_connector())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_hostname_override_matches_exact_and_wildcard_domains_via_trie() {
+        let exact_ip = IpAddr::from([127, 0, 0, 10]);
+        let wild_ip = IpAddr::from([127, 0, 0, 20]);
+        let overrides = [
+            (String::from("exact.lab.invalid"), exact_ip),
+            (String::from("*.wild.lab.invalid"), wild_ip),
+        ];
+
+        assert_eq!(
+            resolve_hostname_override(&overrides, "exact.lab.invalid"),
+            Some(exact_ip)
+        );
+        assert_eq!(
+            resolve_hostname_override(&overrides, "EXACT.LAB.INVALID."),
+            Some(exact_ip)
+        );
+        assert_eq!(
+            resolve_hostname_override(&overrides, "api.wild.lab.invalid"),
+            Some(wild_ip)
+        );
+        assert_eq!(
+            resolve_hostname_override(&overrides, "nested.api.wild.lab.invalid"),
+            Some(wild_ip)
+        );
+        assert_eq!(resolve_hostname_override(&overrides, "other.lab.invalid"), None);
     }
 }

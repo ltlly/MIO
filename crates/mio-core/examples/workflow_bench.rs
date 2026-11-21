@@ -184,6 +184,7 @@ fn run_workflow(cfg: &WorkflowConfig) -> Result<WorkflowReport> {
                 run_id: Uuid::new_v4(),
                 draft: http_draft,
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await?;
@@ -203,6 +204,7 @@ fn run_workflow(cfg: &WorkflowConfig) -> Result<WorkflowReport> {
                 run_id: Uuid::new_v4(),
                 draft: sse_draft,
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await?;

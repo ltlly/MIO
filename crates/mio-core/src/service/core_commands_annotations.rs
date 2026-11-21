@@ -247,11 +247,20 @@ impl State {
                 run_id,
                 draft,
                 settings,
+                group_send,
                 cancel,
             } => {
                 let revision = draft.revision;
                 if let Err(error) = self
-                    .begin_send(project, tab_id, run_id, draft, settings, cancel)
+                    .begin_send(
+                        project,
+                        tab_id,
+                        run_id,
+                        draft,
+                        settings,
+                        group_send,
+                        cancel,
+                    )
                     .await
                 {
                     self.emit(Event::SendRejected {

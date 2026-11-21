@@ -240,7 +240,7 @@ pub(super) async fn proxy_with_route(
     upstream_route: UpstreamRoute,
 ) -> (mio_proxy::ProxyHandle, Vec<u8>, mpsc::Receiver<ProxyEvent>) {
     proxy_with(origin, intercept, |config| {
-        config.upstream_route = upstream_route;
+        config.network.upstream_route = upstream_route;
     })
     .await
 }
@@ -253,10 +253,10 @@ pub(super) async fn proxy_with(
     let ca = MitmAuthority::generate().unwrap();
     let certificate = ca.certificate_der();
     let mut config = ProxyConfig::new(ca);
-    config.upstream_tls = origin.trust();
-    config.intercept_requests = intercept;
-    config.intercept_responses = intercept;
-    config.request_timeout = DEADLINE;
+    config.tls.upstream.trust = origin.trust();
+    config.hooks.intercept_requests = intercept;
+    config.hooks.intercept_responses = intercept;
+    config.limits.request_timeout = DEADLINE;
     configure(&mut config);
     let (events, receiver) = mpsc::channel(64);
     let handle = mio_proxy::start(

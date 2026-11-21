@@ -37,8 +37,8 @@ async fn run_tls_trust_test() {
         let target = format!("https://127.0.0.1:{}/workspace-tls", address.port());
         let forwarded_target = format!("http://{address}/workspace-tls");
         let mut config = ProxyConfig::new(fixture_ca);
-        config.request_timeout = Duration::from_secs(2);
-        config.stop_timeout = Duration::from_secs(2);
+        config.limits.request_timeout = Duration::from_secs(2);
+        config.limits.stop_timeout = Duration::from_secs(2);
         let (fixture_events, _fixture_receiver) = mpsc::channel(64);
         let mut fixture_proxy = mio_proxy::start(
             config,
@@ -157,6 +157,7 @@ async fn run_tls_trust_test() {
                 run_id,
                 draft: draft.clone(),
                 settings: RepeaterSettings { request_timeout_secs: 2, ..RepeaterSettings::default() },
+                group_send: None,
                 cancel: CancellationToken::new(),
             }).await.unwrap();
             let completion = state.jobs.join_next().await.unwrap().unwrap();
@@ -186,18 +187,30 @@ async fn run_tls_trust_test() {
             let client_send = tokio::spawn(mio_proxy::send(
                 request.clone(),
                 SendConfig {
-                    upstream_route: mio_proxy::UpstreamRoute::Http(mio_proxy::ProxyEndpoint {
-                        host: "127.0.0.1".into(),
-                        port: product_address.port(),
-                        credentials: None,
-                    }),
-                    upstream_tls: mio_proxy::UpstreamTls::CustomRoots {
-                        certificates_der: vec![product_ca_der.clone()],
-                        include_system: false,
+                    network: mio_proxy::SendNetworkConfig {
+                        upstream_route: mio_proxy::UpstreamRoute::Http(mio_proxy::ProxyEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: product_address.port(),
+                            credentials: None,
+                        }),
+                        ..Default::default()
                     },
-                    timeout: Duration::from_secs(2),
-                    max_body_bytes: 1024,
-                    http_version: Some(HttpVersion::Http11),
+                    tls: mio_proxy::UpstreamTlsConfig {
+                        trust: mio_proxy::UpstreamTls::CustomRoots {
+                            certificates_der: vec![product_ca_der.clone()],
+                            include_system: false,
+                        },
+                        ..Default::default()
+                    },
+                    limits: mio_proxy::SendLimits {
+                        max_body_bytes: 1024,
+                        timeout: Duration::from_secs(2),
+                        ..Default::default()
+                    },
+                    http: mio_proxy::SendHttpConfig {
+                        version: Some(HttpVersion::Http11),
+                        ..Default::default()
+                    },
                     ..SendConfig::default()
                 },
                 CancellationToken::new(),

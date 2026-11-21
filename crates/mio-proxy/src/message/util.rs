@@ -1,5 +1,6 @@
 use crate::ProxyError;
 use mio_plugin_api::{Header, HttpVersion};
+use rama::extensions::ExtensionsRef;
 use rama::http::{Body, HeaderMap, HeaderName, HeaderValue, Version, body::util::BodyExt};
 
 pub(crate) fn version(version: HttpVersion) -> Version {
@@ -16,6 +17,15 @@ pub(crate) fn model_version(version: Version) -> HttpVersion {
         Version::HTTP_2 => HttpVersion::Http2,
         _ => HttpVersion::Http11,
     }
+}
+
+pub(crate) fn reason_phrase(response: &rama::http::Response) -> Option<Vec<u8>> {
+    response
+        .extensions()
+        .get_ref::<rama::http::proto::h1::ext::ReasonPhrase>()
+        .map(|reason| reason.as_bytes())
+        .filter(|bytes| !bytes.is_empty())
+        .map(<[u8]>::to_vec)
 }
 
 pub(crate) fn headers(headers: &HeaderMap) -> Vec<Header> {

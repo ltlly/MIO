@@ -632,13 +632,11 @@ async fn http_get_bytes(
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        let cfg = SendConfig {
-            upstream_route,
-            timeout,
-            max_body_bytes,
-            use_connection_pool: false,
-            ..SendConfig::default()
-        };
+        let mut cfg = SendConfig::default();
+        cfg.network.upstream_route = upstream_route;
+        cfg.limits.timeout = timeout;
+        cfg.limits.max_body_bytes = max_body_bytes;
+        cfg.http.use_connection_pool = false;
         let resp = mio_proxy::send(req, cfg, cancel.clone())
             .await
             .map_err(|e| anyhow!("请求更新服务器失败：{e}"))?;

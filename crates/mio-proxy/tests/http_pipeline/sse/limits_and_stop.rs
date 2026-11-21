@@ -5,7 +5,7 @@ async fn overlimit_sse_preserves_a_bounded_prefix_but_fails_the_actual_stream() 
         let mut origin = SseOrigin::start(h2.then_some(true), None).await;
         let limit = FIRST.len() + 2;
         let (mut proxy, ca, mut events) =
-            start_proxy(&origin, |config| config.max_body_bytes = limit, 64).await;
+            start_proxy(&origin, |config| config.limits.max_body_bytes = limit, 64).await;
         let mut client = SseClient::start(proxy.address(), origin.url(), ca, h2, h2);
         assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
         origin.send(FIRST).await;
@@ -138,7 +138,7 @@ async fn sse_trailers_preserve_duplicates_at_client_and_in_the_capture() {
 async fn stopping_sse_with_a_full_event_queue_recovers_the_partial_terminal_record() {
     let mut origin = SseOrigin::start(None, None).await;
     let (mut proxy, ca, mut events) =
-        start_proxy(&origin, |config| config.max_connections = 1, 1).await;
+        start_proxy(&origin, |config| config.limits.max_connections = 1, 1).await;
     let mut client = SseClient::start(proxy.address(), origin.url(), ca, false, false);
     assert!(matches!(origin.next().await, OriginEvent::Request { .. }));
     let initial = match events.recv().await.unwrap() {
@@ -307,7 +307,7 @@ async fn established_sse_is_not_killed_by_the_response_header_deadline() {
     let header_deadline = Duration::from_millis(250);
     let (mut proxy, ca, mut events) = start_proxy(
         &origin,
-        |config| config.request_timeout = header_deadline,
+        |config| config.limits.request_timeout = header_deadline,
         64,
     )
     .await;

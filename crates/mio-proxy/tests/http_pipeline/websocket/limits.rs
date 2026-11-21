@@ -154,7 +154,7 @@ async fn websocket_rejects_invalid_and_oversized_messages_without_partial_forwar
     for bytes in [oversized, fragments, unmasked, invalid_utf8] {
         let mut origin = WsOrigin::start(None).await;
         let (mut proxy, _, mut events) =
-            ws_proxy_with(&origin, 32, |config| config.max_body_bytes = 32).await;
+            ws_proxy_with(&origin, 32, |config| config.limits.max_body_bytes = 32).await;
         let mut client = TcpStream::connect(proxy.address()).await.unwrap();
         let response = ws_handshake(&mut client, &origin.url()).await;
         assert!(response.starts_with(b"HTTP/1.1 101"));

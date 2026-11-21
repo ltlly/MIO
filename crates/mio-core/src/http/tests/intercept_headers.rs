@@ -32,6 +32,7 @@ fn proxy_intercept_response_parameter_relationships_use_the_real_request_even_fo
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert_eq!(record, unchanged);
     record.request.body.clear();
@@ -47,7 +48,8 @@ fn proxy_intercept_response_parameter_relationships_use_the_real_request_even_fo
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "response payload cannot substitute for request parameters"
     );
     settings.response.rules[0].relationship = DoesNotContainParameters;
@@ -64,6 +66,7 @@ fn proxy_intercept_response_parameter_relationships_use_the_real_request_even_fo
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     record
         .request
@@ -103,6 +106,7 @@ fn proxy_intercept_response_parameter_relationships_use_the_real_request_even_fo
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.enabled = false;
     let off = build_intercept_filter(settings.clone(), crate::TargetScope::default()).unwrap();
@@ -118,6 +122,7 @@ fn proxy_intercept_response_parameter_relationships_use_the_real_request_even_fo
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.enabled = true;
     settings.response.rules.remove(0);
@@ -195,6 +200,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.enabled = true;
     settings.response.rules = vec![interception_rule(
@@ -217,6 +223,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     for pattern in [r"^x-binary: \xFF$", "^X-Binary: kept$"] {
         settings.request.rules[0].condition = pattern.into();
@@ -235,6 +242,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
                 limits
             )
             .unwrap()
+            .should_intercept()
         );
         assert!(
             bytes(
@@ -248,6 +256,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
                 limits
             )
             .unwrap()
+            .should_intercept()
         );
     }
     assert_eq!(record, unchanged);
@@ -268,6 +277,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         !negative(
@@ -281,6 +291,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.request.rules[0].condition = "^X-Test: missing$".into();
     settings.response.rules[0].condition = "^X-Test: missing$".into();
@@ -297,6 +308,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         absent(
@@ -310,6 +322,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     for malformed_tail in [
         Header {
@@ -382,6 +395,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.enabled = true;
     settings.response.rules = vec![
@@ -400,7 +414,8 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "SSE/header-only matching uses real header/status without pretending its body is available"
     );
     record.response = None;
@@ -436,6 +451,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         filter(
@@ -449,6 +465,7 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         filter(
@@ -462,5 +479,6 @@ fn proxy_intercept_header_regex_keeps_duplicate_binary_values_and_response_field
             limits
         )
         .unwrap()
+        .should_intercept()
     );
 }

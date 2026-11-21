@@ -61,6 +61,7 @@ async fn rejected_send_recovery_never_registers_history_or_opens_a_socket() {
             run_id,
             draft: tab.draft.clone(),
             settings: RepeaterSettings::default(),
+            group_send: None,
             cancel: CancellationToken::new(),
         })
         .await

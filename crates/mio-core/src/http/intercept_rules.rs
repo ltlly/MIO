@@ -1,5 +1,10 @@
 use super::*;
 
+pub(super) enum InterceptRuleEval {
+    Matched(bool),
+    NeedsTargetIp,
+}
+
 pub(super) fn intercept_rule_matches<'a>(
     condition: (&crate::ProxyInterceptRule, Option<&regex::bytes::Regex>),
     record: &'a FlowRecord,
@@ -8,7 +13,7 @@ pub(super) fn intercept_rule_matches<'a>(
     cancel: &tokio_util::sync::CancellationToken,
     limits: (std::time::Instant, usize),
     parameters: &mut Option<InterceptParameters<'a>>,
-) -> Result<bool> {
+) -> Result<InterceptRuleEval> {
     use crate::ProxyInterceptRelation::*;
     use crate::ProxyInterceptType::*;
     let (rule, matcher) = condition;
@@ -55,13 +60,15 @@ pub(super) fn intercept_rule_matches<'a>(
                     )
                 }
                 IpAddress => {
-                    let ip = extra_conditions::normalize_ip_candidate(eval_ctx.target_ip)
+                    let Some(ip) = extra_conditions::normalize_ip_candidate(eval_ctx.target_ip)
                         .or_else(|| {
                             url::Url::parse(&record.request.url).ok().and_then(|url| {
                                 extra_conditions::normalize_ip_candidate(url.host_str())
                             })
                         })
-                        .context("目标 IP 尚未确定；未按负向条件自动放行")?;
+                    else {
+                        return Ok(InterceptRuleEval::NeedsTargetIp);
+                    };
                     matcher.is_match(ip.as_bytes())
                 }
                 HttpMethod => matcher.is_match(record.request.method.as_bytes()),
@@ -245,7 +252,7 @@ pub(super) fn intercept_rule_matches<'a>(
             }
         }
     };
-    Ok(
+    Ok(InterceptRuleEval::Matched(
         if matches!(
             rule.relationship,
             DoesNotMatch
@@ -260,5 +267,5 @@ pub(super) fn intercept_rule_matches<'a>(
         } else {
             matched
         },
-    )
+    ))
 }

@@ -62,12 +62,9 @@ impl State {
         capture: CapturedFlow,
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) {
-        let mut records = self
-            .terminal_records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut records = crate::lock_unpoison(&self.terminal_records);
         // Retaining its unique request permit bounds this mailbox by max_connections.
-        debug_assert!(records.len() < self.config.max_connections);
+        debug_assert!(records.len() < self.config.limits.max_connections);
         records.push(TerminalRecord {
             capture,
             _permit: permit,

@@ -16,6 +16,17 @@ const REP_GENERAL_FAILURE: u8 = 0x01;
 const REP_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 const REP_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 
+fn is_benign_pre_handshake_io(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
 pub(super) async fn peek_first_byte(
     stream: &tokio::net::TcpStream,
     timeout: Duration,
@@ -29,6 +40,7 @@ pub(super) async fn peek_first_byte(
             match res {
                 Ok(Ok(1)) => Ok(Some(first[0])),
                 Ok(Ok(_)) => Ok(None),
+                Ok(Err(err)) if is_benign_pre_handshake_io(&err) => Ok(None),
                 Ok(Err(err)) => Err(ProxyError::network(err)),
                 Err(_) => Err(ProxyError::Timeout),
             }
@@ -48,11 +60,34 @@ pub(super) async fn serve_socks5(
     let handshake = tokio::select! {
         biased;
         _ = state.cancel.cancelled() => return,
-        res = tokio::time::timeout(state.config.request_timeout, accept_connect(&mut stream)) => res,
+        res = tokio::time::timeout(state.config.limits.request_timeout, accept_connect(&mut stream)) => res,
     };
     let (host, port, authority) = match handshake {
         Ok(Ok(target)) => target,
-        _ => return,
+        Ok(Err(error)) => {
+            let failed = HttpRequest {
+                method: "CONNECT".into(),
+                url: format!("socks5://127.0.0.1:{}", state.listener_port),
+                version: HttpVersion::Http11,
+                headers: Vec::new(),
+                body: Vec::new(),
+                trailers: Vec::new(),
+            };
+            state.failure(failed, &error).await;
+            return;
+        }
+        Err(_) => {
+            let failed = HttpRequest {
+                method: "CONNECT".into(),
+                url: format!("socks5://127.0.0.1:{}", state.listener_port),
+                version: HttpVersion::Http11,
+                headers: Vec::new(),
+                body: Vec::new(),
+                trailers: Vec::new(),
+            };
+            state.failure(failed, &ProxyError::Timeout).await;
+            return;
+        }
     };
 
     let failed_request = HttpRequest {
@@ -64,16 +99,19 @@ pub(super) async fn serve_socks5(
         trailers: Vec::new(),
     };
 
-    let mut sniff = [0u8; 1];
-    let sniffed = tokio::select! {
-        biased;
-        _ = state.cancel.cancelled() => return,
-        res = tokio::time::timeout(state.config.request_timeout, stream.peek(&mut sniff)) => res,
-    };
-    let is_tls = match sniffed {
-        Ok(Ok(1)) => sniff[0] == 0x16,
-        Ok(Ok(_)) => return,
-        Ok(Err(_)) | Err(_) => return,
+    let is_tls = match peek_first_byte(
+        &stream,
+        state.config.limits.request_timeout,
+        &state.cancel,
+    )
+    .await
+    {
+        Ok(Some(byte)) => byte == TLS_CLIENT_HELLO_LEAD_BYTE,
+        Ok(None) | Err(ProxyError::Cancelled) => return,
+        Err(error) => {
+            state.failure(failed_request, &error).await;
+            return;
+        }
     };
 
     if is_tls {
@@ -90,9 +128,10 @@ pub(super) async fn serve_socks5(
 
         let tls_options = state.listener_tls_options();
         let config = match tokio::time::timeout(
-            state.config.request_timeout,
+            state.config.limits.request_timeout,
             state
                 .config
+                .tls
                 .ca
                 .server_config_with_options(&host, &tls_options),
         )
@@ -129,26 +168,9 @@ pub(super) async fn serve_socks5(
         let failure_state = state.clone();
         let failure_host = host.clone();
         let run = async {
-            let serve_result = if state.config.enable_http2 {
-                let mut server = HttpServer::auto(state.exec.clone());
-                server
-                    .http1_mut()
-                    .set_keep_alive(state.config.http1_keep_alive);
-                server.h2_mut().set_max_concurrent_streams(
-                    state.config.max_connections.min(u32::MAX as usize) as u32,
-                );
-                TlsAcceptorService::new(config, server.service(service), false)
-                    .serve(io)
-                    .await
-            } else {
-                let mut server = HttpServer::new_http1(state.exec.clone());
-                server
-                    .http1_mut()
-                    .set_keep_alive(state.config.http1_keep_alive);
-                TlsAcceptorService::new(config, server.service(service), false)
-                    .serve(io)
-                    .await
-            };
+            let serve_result = state
+                .serve_tls_http_connection(io, config, service, false)
+                .await;
             serve_result
                 .or_else(|err| {
                     if served_any.load(Ordering::Relaxed)
@@ -193,30 +215,7 @@ pub(super) async fn serve_socks5(
                 )
             }
         });
-        if state.config.enable_http2 {
-            let mut server = HttpServer::auto(state.exec.clone());
-            server
-                .http1_mut()
-                .set_keep_alive(state.config.http1_keep_alive);
-            server.h2_mut().set_max_concurrent_streams(
-                state.config.max_connections.min(u32::MAX as usize) as u32,
-            );
-            tokio::select! {
-                biased;
-                _ = state.cancel.cancelled() => {},
-                _ = server.serve(io, service) => {},
-            }
-        } else {
-            let mut server = HttpServer::new_http1(state.exec.clone());
-            server
-                .http1_mut()
-                .set_keep_alive(state.config.http1_keep_alive);
-            tokio::select! {
-                biased;
-                _ = state.cancel.cancelled() => {},
-                _ = server.serve(io, service) => {},
-            }
-        }
+        state.serve_http_connection(io, service).await;
     }
 }
 

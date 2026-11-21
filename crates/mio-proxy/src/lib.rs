@@ -4,22 +4,23 @@ pub mod auth;
 mod capture;
 mod client;
 pub mod client_tls;
+pub mod group_send;
 mod message;
 mod route;
 mod server;
+pub mod streaming;
 mod tls;
 mod transport;
 
 pub use auth::{
-    AuthCredentials, DigestChallenge, HttpAuthScheme, NtlmType2Challenge, PlatformAuthRuleConfig,
-    RepeaterGroupSendMode, RepeaterGroupSendTicket, SinglePacketBarrier, StreamingScopeMatcher,
-    UpstreamAuthRuleConfig, build_basic_authorization_value, build_ntlm_type1_header_value,
-    build_ntlm_type3_header_value, clear_repeater_group_send_tickets,
-    register_repeater_group_send_ticket, take_repeater_group_send_ticket,
+    AuthConfig, AuthCredentials, DigestChallenge, HttpAuthScheme, NtlmType2Challenge,
+    PlatformAuthRuleConfig, UpstreamAuthRuleConfig, build_basic_authorization_value,
+    build_ntlm_type1_header_value, build_ntlm_type3_header_value,
 };
 pub use capture::{CapturedFlow, CapturedFlowMetrics, StreamedResponse};
 pub use client::{
-    PreparedSend, SendConfig, SendMetrics, SendStreamOutcome, WebSocketExchange, WebSocketSession,
+    PreparedSend, SendConfig, SendGroupConfig, SendHttpConfig, SendLimits, SendMetrics,
+    SendNetworkConfig, SendStreamOutcome, WebSocketExchange, WebSocketSession,
     connect_websocket_session, prepare_send, send, send_streaming, send_websocket,
 };
 pub use client_tls::{
@@ -27,17 +28,21 @@ pub use client_tls::{
     MAX_CLIENT_CERT_BYTES, MAX_CLIENT_CERT_PASSWORD_BYTES, ParsedClientIdentity, matches_host,
     resolve_client_identity, select_client_identity, select_client_rule,
 };
+pub use group_send::{RepeaterGroupSendMode, RepeaterGroupSendTicket, SinglePacketBarrier};
 pub use route::{ProxyCredentials, ProxyEndpoint, UpstreamRoute, matches_bypass_host};
 pub use server::{
-    AsyncFlowHook, AsyncWebSocketHook, BoxHookFuture, ClientTlsFailureCallback, DropOutOfScopeFn,
-    FlowHookDecision, FlowTransform, InterceptDecision, InterceptEvalContext, InterceptFilter,
-    ProxyConfig, ProxyEvent, ProxyHandle, ServerCertObservedCallback, SslPassThroughMatcher,
-    UpstreamRouteResolver, WebSocketHookDecision, WebSocketInjectorRegistry,
+    AnnotationChecker, AsyncFlowHook, AsyncWebSocketHook, BoxHookFuture, ClientTlsFailureCallback,
+    DropOutOfScopeFn, FlowHookDecision, FlowTransform, InterceptDecision, InterceptEvalContext,
+    InterceptFilter, InterceptFilterOutcome, ProxyConfig, ProxyEvent, ProxyHandle, ProxyHooks,
+    ProxyHttpConfig, ProxyLimits, ProxyNetworkConfig, ProxySharedResources, ProxyTlsConfig,
+    SslPassThroughMatcher, UpstreamRouteResolver, WebSocketHookDecision, WebSocketInjectorRegistry,
     WebSocketInterceptDecision, WebSocketInterceptFilter, WebSocketTransform, start,
 };
+pub use streaming::StreamingScopeMatcher;
 pub use tls::{
-    ListenerCertMode, ListenerTlsProtocols, MitmAuthority, ObservedCertInfo, TlsVersion,
-    UpstreamTls, UpstreamTlsOptions, UpstreamTlsProtocolMode, parse_observed_cert,
+    ListenerCertMode, ListenerTlsProtocols, MitmAuthority, ObservedCertInfo,
+    ServerCertObservedCallback, TlsVersion, UpstreamTls, UpstreamTlsConfig, UpstreamTlsOptions,
+    UpstreamTlsProtocolMode, parse_observed_cert,
 };
 pub use transport::build_dns_resolver;
 
@@ -85,4 +90,8 @@ pub(crate) fn now_unix_ms() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+pub(crate) fn lock_unpoison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }

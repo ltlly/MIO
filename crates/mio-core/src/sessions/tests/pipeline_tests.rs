@@ -247,6 +247,7 @@ async fn proxy_repeater_and_intruder_pipelines_inject_sessions_and_fail_closed_w
                 run_id: rep_run_1,
                 draft: rep_draft.clone(),
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await
@@ -346,6 +347,7 @@ async fn proxy_repeater_and_intruder_pipelines_inject_sessions_and_fail_closed_w
                 run_id: Uuid::new_v4(),
                 draft: rep_draft.clone(),
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await
@@ -441,6 +443,7 @@ async fn proxy_repeater_and_intruder_pipelines_inject_sessions_and_fail_closed_w
                 run_id: Uuid::new_v4(),
                 draft: rep_draft,
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await

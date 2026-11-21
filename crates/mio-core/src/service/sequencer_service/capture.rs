@@ -39,7 +39,7 @@ pub(super) async fn run_capture(
             let request_cancel = cancel.child_token();
             let sessions = sessions.clone();
             requests.spawn(async move {
-                let deadline = Instant::now() + request_config.timeout;
+                let deadline = Instant::now() + request_config.limits.timeout;
                 if let Err(err) = sessions
                     .apply_before_send(
                         crate::SessionTool::Sequencer,
@@ -222,13 +222,13 @@ async fn decoded_response(
     }
     let response = response.clone();
     let method = request.method.clone();
-    let max_body_bytes = config.max_body_bytes;
-    let deadline = Instant::now() + config.timeout;
+    let max_body_bytes = config.limits.max_body_bytes;
+    let deadline = Instant::now() + config.limits.timeout;
     let cancel = cancel.clone();
     let worker = tokio::task::spawn_blocking(move || {
         http::unpack_response(&response, &method, max_body_bytes, &cancel, deadline)
     });
-    match timeout_at(TokioInstant::now() + config.timeout, worker).await {
+    match timeout_at(TokioInstant::now() + config.limits.timeout, worker).await {
         Ok(Ok(Ok(Some(response)))) => Some(response),
         _ => None,
     }

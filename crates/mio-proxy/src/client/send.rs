@@ -1,32 +1,35 @@
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
-use mio_plugin_api::{HttpRequest, HttpResponse};
+use mio_plugin_api::{HttpRequest, HttpResponse, HttpVersion};
 use rama::{
-    extensions::ExtensionsRef,
     graceful::Shutdown,
-    http::{Response, body::util::BodyExt},
+    http::{Request, Response, body::util::BodyExt},
     rt::Executor,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProxyError, message};
+use crate::{ProxyError, message, transport::ResponseTiming};
 
 use super::{
-    PreparedSend, SendConfig, SendInput, SendMetrics, SendStreamOutcome, exchange,
-    exchange_with_metrics,
+    PreparedPayload, PreparedSend, SendConfig, SendInput, SendMetrics, SendStreamOutcome,
+    exchange::EphemeralNtlmClient, exchange_with_metrics,
 };
 
 pub(crate) fn find_matching_platform_auth<'a>(
     url: &str,
     config: &'a SendConfig,
 ) -> Option<&'a crate::PlatformAuthRuleConfig> {
-    if !config.platform_auth_enabled || config.platform_auth_rules.is_empty() {
+    if !config.auth.platform_enabled || config.auth.platform_rules.is_empty() {
         return None;
     }
     let uri: rama::net::uri::Uri = url.parse().ok()?;
     let host = uri.host_str()?;
     config
-        .platform_auth_rules
+        .auth
+        .platform_rules
         .iter()
         .find(|rule| rule.matches_host(&host))
 }
@@ -35,13 +38,14 @@ pub(crate) fn find_matching_upstream_auth<'a>(
     url: &str,
     config: &'a SendConfig,
 ) -> Option<&'a crate::UpstreamAuthRuleConfig> {
-    if config.upstream_auth_rules.is_empty() {
+    if config.auth.upstream_rules.is_empty() {
         return None;
     }
     let uri: rama::net::uri::Uri = url.parse().ok()?;
     let host = uri.host_str()?;
     config
-        .upstream_auth_rules
+        .auth
+        .upstream_rules
         .iter()
         .find(|rule| rule.matches_destination(&host))
 }
@@ -50,7 +54,6 @@ pub(crate) fn apply_preemptive_auth_to_model(
     request: &mut HttpRequest,
     config: &SendConfig,
 ) -> bool {
-    let mut mutated = false;
     if let Some(rule) = find_matching_platform_auth(&request.url, config)
         && rule.credentials.scheme == crate::HttpAuthScheme::Basic
         && !request
@@ -63,46 +66,189 @@ pub(crate) fn apply_preemptive_auth_to_model(
             &rule.credentials.password,
         );
         crate::auth::set_or_replace_header(&mut request.headers, "Authorization", val);
-        mutated = true;
+        return true;
     }
-    if let Some(rule) = find_matching_upstream_auth(&request.url, config)
-        && rule.credentials.scheme == crate::HttpAuthScheme::Basic
-        && !request
+    false
+}
+
+fn resolve_preemptive_proxy_auth(request: &HttpRequest, config: &SendConfig) -> Option<String> {
+    let rule = find_matching_upstream_auth(&request.url, config)?;
+    if rule.credentials.scheme != crate::HttpAuthScheme::Basic
+        || request
             .headers
             .iter()
             .any(|h| h.name.eq_ignore_ascii_case("proxy-authorization"))
     {
-        let val = crate::build_basic_authorization_value(
-            &rule.credentials.username,
-            &rule.credentials.password,
-        );
-        crate::auth::set_or_replace_header(&mut request.headers, "Proxy-Authorization", val);
-        mutated = true;
+        return None;
     }
-    mutated
+    Some(crate::build_basic_authorization_value(
+        &rule.credentials.username,
+        &rule.credentials.password,
+    ))
+}
+
+fn build_request_with_proxy_auth(
+    model: &HttpRequest,
+    config: &SendConfig,
+    proxy_auth: Option<&str>,
+) -> Result<Request, ProxyError> {
+    let mut req = message::to_request_with_config(model, config)?;
+    if let Some(val) = proxy_auth {
+        let header_val =
+            rama::http::header::HeaderValue::from_str(val).map_err(ProxyError::invalid)?;
+        req.headers_mut()
+            .insert(rama::http::header::PROXY_AUTHORIZATION, header_val);
+    }
+    Ok(req)
 }
 
 async fn drain_auth_challenge_body(
     mut body: rama::http::Body,
     deadline: tokio::time::Instant,
+    cancel: &CancellationToken,
+    require_complete: bool,
 ) -> Result<(), ProxyError> {
     const AUTH_CHALLENGE_DRAIN_LIMIT: usize = 256 * 1024;
     let mut drained = 0usize;
     loop {
-        match tokio::time::timeout_at(deadline, body.frame()).await {
-            Ok(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    drained = drained.saturating_add(data.len());
-                    if drained > AUTH_CHALLENGE_DRAIN_LIMIT {
-                        return Ok(());
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
+            frame = tokio::time::timeout_at(deadline, body.frame()) => match frame {
+                Ok(Some(Ok(frame))) => {
+                    if let Some(data) = frame.data_ref() {
+                        drained = drained.saturating_add(data.len());
+                        if drained > AUTH_CHALLENGE_DRAIN_LIMIT {
+                            if require_complete {
+                                return Err(ProxyError::BodyLimit {
+                                    limit: AUTH_CHALLENGE_DRAIN_LIMIT,
+                                });
+                            }
+                            return Ok(());
+                        }
                     }
                 }
-            }
-            Ok(Some(Err(err))) => return Err(ProxyError::network(err)),
-            Ok(None) => return Ok(()),
-            Err(_) => return Err(ProxyError::Timeout),
+                Ok(Some(Err(err))) => return Err(ProxyError::network(err)),
+                Ok(None) => return Ok(()),
+                Err(_) => return Err(ProxyError::Timeout),
+            },
         }
     }
+}
+
+async fn exchange_before_deadline(
+    request: Request,
+    config: &SendConfig,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+        res = tokio::time::timeout_at(
+            deadline,
+            Box::pin(exchange_with_metrics(request, config, cancel.clone(), exec)),
+        ) => res.map_err(|_| ProxyError::Timeout)?,
+    }
+}
+
+async fn ephemeral_exchange_before_deadline(
+    client: &EphemeralNtlmClient,
+    request: Request,
+    config: &SendConfig,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+        res = tokio::time::timeout_at(
+            deadline,
+            Box::pin(client.exchange(request, config, cancel.clone())),
+        ) => res.map_err(|_| ProxyError::Timeout)?,
+    }
+}
+
+fn collect_header_values(response: &Response, name: &str) -> Vec<String> {
+    response
+        .headers()
+        .get_all(name)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.trim().to_owned())
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exchange_ntlm_handshake(
+    model: &mut HttpRequest,
+    config: &SendConfig,
+    creds: &crate::AuthCredentials,
+    is_proxy: bool,
+    proxy_auth_header: &mut Option<String>,
+    auth_hdr_name: &str,
+    challenge_hdr_name: &str,
+    is_v2: bool,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+    exec: Executor,
+) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
+    let mut ntlm_config = config.clone();
+    ntlm_config.http.raw_http1_override = None;
+    ntlm_config.http.http1_keep_alive = true;
+    ntlm_config.http.http2_reuse = false;
+    ntlm_config.http.default_to_http2 = false;
+    if ntlm_config.http.version != Some(HttpVersion::Http10) {
+        ntlm_config.http.version = Some(HttpVersion::Http11);
+    }
+    let type1_val = crate::build_ntlm_type1_header_value(&creds.domain, &creds.workstation);
+    if is_proxy {
+        *proxy_auth_header = Some(type1_val);
+    } else {
+        crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type1_val);
+    }
+    let mut type1_req =
+        build_request_with_proxy_auth(model, &ntlm_config, proxy_auth_header.as_deref())?;
+    let ntlm_client = EphemeralNtlmClient::for_request(
+        &mut type1_req,
+        &ntlm_config,
+        cancel.clone(),
+        exec,
+    )?;
+    let (type2_resp, type2_timing) = ephemeral_exchange_before_deadline(
+        &ntlm_client,
+        type1_req,
+        &ntlm_config,
+        deadline,
+        cancel.clone(),
+    )
+    .await?;
+    let type2_headers = collect_header_values(&type2_resp, challenge_hdr_name);
+    let Some(type2_chal) = type2_headers
+        .iter()
+        .find_map(|raw| crate::NtlmType2Challenge::parse_from_header(raw).ok())
+    else {
+        return Ok((type2_resp, type2_timing));
+    };
+    drain_auth_challenge_body(type2_resp.into_body(), deadline, &cancel, true).await?;
+    let (_, client_challenge, timestamp_100ns) = crate::auth::next_cnonce_and_challenge();
+    let type3_val = crate::build_ntlm_type3_header_value(
+        &type2_chal,
+        creds,
+        is_v2,
+        client_challenge,
+        timestamp_100ns,
+    );
+    if is_proxy {
+        *proxy_auth_header = Some(type3_val);
+    } else {
+        crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type3_val);
+    }
+    let type3_req =
+        build_request_with_proxy_auth(model, &ntlm_config, proxy_auth_header.as_deref())?;
+    ephemeral_exchange_before_deadline(&ntlm_client, type3_req, &ntlm_config, deadline, cancel)
+        .await
 }
 
 pub(crate) async fn exchange_model_with_auth(
@@ -111,23 +257,22 @@ pub(crate) async fn exchange_model_with_auth(
     deadline: tokio::time::Instant,
     cancel: CancellationToken,
     exec: Executor,
-) -> Result<(Response, std::sync::Arc<std::sync::Mutex<crate::transport::ResponseTiming>>), ProxyError> {
+) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
     let mut config = base_config.clone();
-    if apply_preemptive_auth_to_model(&mut model, &config) {
-        config.raw_http1_override = None;
+    let mut proxy_auth_header = resolve_preemptive_proxy_auth(&model, &config);
+    if apply_preemptive_auth_to_model(&mut model, &config) || proxy_auth_header.is_some() {
+        config.http.raw_http1_override = None;
     }
-    let initial_req = message::to_request_with_config(&model, &config)?;
-    let (mut response, mut timing) = tokio::time::timeout_at(
+    let initial_req =
+        build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
+    let (mut response, mut timing) = exchange_before_deadline(
+        initial_req,
+        &config,
         deadline,
-        Box::pin(exchange_with_metrics(
-            initial_req,
-            &config,
-            cancel.clone(),
-            exec.clone(),
-        )),
+        cancel.clone(),
+        exec.clone(),
     )
-    .await
-    .map_err(|_| ProxyError::Timeout)??;
+    .await?;
 
     for _step in 0..2 {
         let status = response.status().as_u16();
@@ -154,42 +299,47 @@ pub(crate) async fn exchange_model_with_auth(
         } else {
             "Authorization"
         };
-        let challenges: Vec<String> = response
-            .headers()
-            .get_all(challenge_hdr_name)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| s.trim().to_owned())
-            .collect();
+        let challenges = collect_header_values(&response, challenge_hdr_name);
         if challenges.is_empty() {
             break;
         }
         match creds.scheme {
             crate::HttpAuthScheme::None => break,
             crate::HttpAuthScheme::Basic => {
-                if model
-                    .headers
-                    .iter()
-                    .any(|h| h.name.eq_ignore_ascii_case(auth_hdr_name))
-                {
+                let already_sent = if is_proxy {
+                    proxy_auth_header.is_some()
+                        || (!config.http.strip_proxy_headers
+                            && model
+                                .headers
+                                .iter()
+                                .any(|h| h.name.eq_ignore_ascii_case("proxy-authorization")))
+                } else {
+                    model
+                        .headers
+                        .iter()
+                        .any(|h| h.name.eq_ignore_ascii_case(auth_hdr_name))
+                };
+                if already_sent {
                     break;
                 }
-                drain_auth_challenge_body(response.into_body(), deadline).await?;
+                drain_auth_challenge_body(response.into_body(), deadline, &cancel, false).await?;
                 let val = crate::build_basic_authorization_value(&creds.username, &creds.password);
-                crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
-                config.raw_http1_override = None;
-                let retry_req = message::to_request_with_config(&model, &config)?;
-                (response, timing) = tokio::time::timeout_at(
+                if is_proxy {
+                    proxy_auth_header = Some(val);
+                } else {
+                    crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
+                }
+                config.http.raw_http1_override = None;
+                let retry_req =
+                    build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
+                (response, timing) = exchange_before_deadline(
+                    retry_req,
+                    &config,
                     deadline,
-                    Box::pin(exchange_with_metrics(
-                        retry_req,
-                        &config,
-                        cancel.clone(),
-                        exec.clone(),
-                    )),
+                    cancel.clone(),
+                    exec.clone(),
                 )
-                .await
-                .map_err(|_| ProxyError::Timeout)??;
+                .await?;
             }
             crate::HttpAuthScheme::Digest => {
                 let Some(digest_chal) = challenges
@@ -198,7 +348,7 @@ pub(crate) async fn exchange_model_with_auth(
                 else {
                     break;
                 };
-                drain_auth_challenge_body(response.into_body(), deadline).await?;
+                drain_auth_challenge_body(response.into_body(), deadline, &cancel, false).await?;
                 let (cnonce, _, _) = crate::auth::next_cnonce_and_challenge();
                 let uri_path = crate::auth::request_uri_path_and_query(&model.url);
                 let val = digest_chal.build_authorization_value(
@@ -209,99 +359,94 @@ pub(crate) async fn exchange_model_with_auth(
                     &model.body,
                     1,
                     &cnonce,
-                )?;
-                crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
-                config.raw_http1_override = None;
-                let retry_req = message::to_request_with_config(&model, &config)?;
-                (response, timing) = tokio::time::timeout_at(
+                );
+                if is_proxy {
+                    proxy_auth_header = Some(val);
+                } else {
+                    crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
+                }
+                config.http.raw_http1_override = None;
+                let retry_req =
+                    build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
+                (response, timing) = exchange_before_deadline(
+                    retry_req,
+                    &config,
                     deadline,
-                    Box::pin(exchange_with_metrics(
-                        retry_req,
-                        &config,
-                        cancel.clone(),
-                        exec.clone(),
-                    )),
+                    cancel.clone(),
+                    exec.clone(),
                 )
-                .await
-                .map_err(|_| ProxyError::Timeout)??;
+                .await?;
                 break;
             }
             crate::HttpAuthScheme::NtlmV1 | crate::HttpAuthScheme::NtlmV2 => {
                 let is_v2 = creds.scheme == crate::HttpAuthScheme::NtlmV2;
-                config.raw_http1_override = None;
-                config.use_connection_pool = true;
-                config.http1_keep_alive = true;
-                if config.connection_pool_group_id.is_none() {
-                    config.connection_pool_group_id = Some(mio_plugin_api::Uuid::new_v4().as_u128());
-                }
-                let type2_chal = if let Some(chal) = challenges
+                if let Some(type2_chal) = challenges
                     .iter()
                     .find_map(|raw| crate::NtlmType2Challenge::parse_from_header(raw).ok())
                 {
-                    drain_auth_challenge_body(response.into_body(), deadline).await?;
-                    chal
-                } else if challenges
-                    .iter()
-                    .any(|raw| raw.eq_ignore_ascii_case("ntlm") || raw.starts_with("NTLM") || raw.starts_with("ntlm"))
-                {
-                    drain_auth_challenge_body(response.into_body(), deadline).await?;
-                    let type1_val =
-                        crate::build_ntlm_type1_header_value(&creds.domain, &creds.workstation);
-                    crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type1_val);
-                    let type1_req = message::to_request_with_config(&model, &config)?;
-                    let (type2_resp, type2_timing) = tokio::time::timeout_at(
+                    drain_auth_challenge_body(
+                        response.into_body(),
                         deadline,
-                        Box::pin(exchange_with_metrics(
-                            type1_req,
-                            &config,
-                            cancel.clone(),
-                            exec.clone(),
-                        )),
+                        &cancel,
+                        config.http.use_connection_pool,
                     )
-                    .await
-                    .map_err(|_| ProxyError::Timeout)??;
-                    let type2_headers: Vec<String> = type2_resp
-                        .headers()
-                        .get_all(challenge_hdr_name)
-                        .iter()
-                        .filter_map(|v| v.to_str().ok())
-                        .map(|s| s.trim().to_owned())
-                        .collect();
-                    let Some(chal) = type2_headers
-                        .iter()
-                        .find_map(|raw| crate::NtlmType2Challenge::parse_from_header(raw).ok())
-                    else {
-                        response = type2_resp;
-                        timing = type2_timing;
-                        break;
-                    };
-                    drain_auth_challenge_body(type2_resp.into_body(), deadline).await?;
-                    chal
-                } else {
-                    break;
-                };
-                let (_, client_challenge, timestamp_100ns) =
-                    crate::auth::next_cnonce_and_challenge();
-                let type3_val = crate::build_ntlm_type3_header_value(
-                    &type2_chal,
-                    &creds,
-                    is_v2,
-                    client_challenge,
-                    timestamp_100ns,
-                )?;
-                crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type3_val);
-                let type3_req = message::to_request_with_config(&model, &config)?;
-                (response, timing) = tokio::time::timeout_at(
-                    deadline,
-                    Box::pin(exchange_with_metrics(
+                    .await?;
+                    let (_, client_challenge, timestamp_100ns) =
+                        crate::auth::next_cnonce_and_challenge();
+                    let type3_val = crate::build_ntlm_type3_header_value(
+                        &type2_chal,
+                        &creds,
+                        is_v2,
+                        client_challenge,
+                        timestamp_100ns,
+                    );
+                    if is_proxy {
+                        proxy_auth_header = Some(type3_val);
+                    } else {
+                        crate::auth::set_or_replace_header(
+                            &mut model.headers,
+                            auth_hdr_name,
+                            type3_val,
+                        );
+                    }
+                    config.http.raw_http1_override = None;
+                    let type3_req = build_request_with_proxy_auth(
+                        &model,
+                        &config,
+                        proxy_auth_header.as_deref(),
+                    )?;
+                    (response, timing) = exchange_before_deadline(
                         type3_req,
                         &config,
+                        deadline,
                         cancel.clone(),
                         exec.clone(),
-                    )),
-                )
-                .await
-                .map_err(|_| ProxyError::Timeout)??;
+                    )
+                    .await?;
+                    break;
+                }
+                if !challenges.iter().any(|raw| {
+                    raw.eq_ignore_ascii_case("ntlm")
+                        || raw.starts_with("NTLM")
+                        || raw.starts_with("ntlm")
+                }) {
+                    break;
+                }
+                drain_auth_challenge_body(response.into_body(), deadline, &cancel, false).await?;
+                (response, timing) = Box::pin(exchange_ntlm_handshake(
+                    &mut model,
+                    &config,
+                    &creds,
+                    is_proxy,
+                    &mut proxy_auth_header,
+                    auth_hdr_name,
+                    challenge_hdr_name,
+                    is_v2,
+                    deadline,
+                    cancel.clone(),
+                    exec.clone(),
+                ))
+                .await?;
                 break;
             }
         }
@@ -309,25 +454,44 @@ pub(crate) async fn exchange_model_with_auth(
     Ok((response, timing))
 }
 
-pub fn prepare_send(request: &HttpRequest, config: SendConfig) -> Result<PreparedSend, ProxyError> {
-    Ok(PreparedSend {
-        request: message::to_request_with_config(request, &config)?,
-        config,
-    })
+pub fn prepare_send(
+    request: &HttpRequest,
+    mut config: SendConfig,
+) -> Result<PreparedSend, ProxyError> {
+    if config.auth.is_active() {
+        let mut model = request.clone();
+        if apply_preemptive_auth_to_model(&mut model, &config)
+            || resolve_preemptive_proxy_auth(&model, &config).is_some()
+        {
+            config.http.raw_http1_override = None;
+        }
+        message::validate_request_with_config(&model, &config)?;
+        Ok(PreparedSend {
+            payload: PreparedPayload::WithAuth(model),
+            config,
+        })
+    } else {
+        Ok(PreparedSend {
+            payload: PreparedPayload::Ready(message::to_request_with_config(request, &config)?),
+            config,
+        })
+    }
 }
 
 impl PreparedSend {
+    fn into_input(self) -> SendInput {
+        match self.payload {
+            PreparedPayload::Ready(req) => SendInput::Prepared(req),
+            PreparedPayload::WithAuth(model) => SendInput::Message(model),
+        }
+    }
+
     /// Sends once and retains the original cancellation and SDK-drain ownership contract.
     pub async fn send(self, cancel: CancellationToken) -> Result<HttpResponse, ProxyError> {
         let cancel = cancel.child_token();
         let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
-        send_owned(
-            SendInput::Prepared(self.request),
-            self.config,
-            cancel,
-            shutdown,
-        )
-        .await
+        let config = self.config.clone();
+        send_owned(self.into_input(), config, cancel, shutdown).await
     }
 
     /// Sends once and reports the first-byte response latency alongside the response.
@@ -337,13 +501,8 @@ impl PreparedSend {
     ) -> Result<SendMetrics, ProxyError> {
         let cancel = cancel.child_token();
         let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
-        send_owned_with_metrics(
-            SendInput::Prepared(self.request),
-            self.config,
-            cancel,
-            shutdown,
-        )
-        .await
+        let config = self.config.clone();
+        send_owned_metrics(self.into_input(), config, cancel, shutdown).await
     }
 }
 
@@ -369,7 +528,7 @@ pub async fn send_streaming(
     let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
     let _cancel_on_drop = cancel.clone().drop_guard();
     let exec = Executor::graceful(shutdown.guard());
-    let deadline = tokio::time::Instant::now() + config.timeout;
+    let deadline = tokio::time::Instant::now() + config.limits.timeout;
     let response = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(ProxyError::Cancelled),
@@ -402,18 +561,19 @@ pub async fn send_streaming(
     let mut acc = HttpResponse {
         status: response.status().as_u16(),
         version: message::model_version(response.version()),
-        reason_phrase: None,
+        reason_phrase: message::reason_phrase(&response),
         headers: message::headers(response.headers()),
         body: Vec::new(),
         trailers: Vec::new(),
     };
     on_progress(&acc);
-    let is_streaming_response = config.force_streaming_response || is_streaming_headers(&acc.headers);
-    let body_deadline = match (is_streaming_response, config.streaming_timeout) {
-        (true, Some(limit)) if limit.is_zero() => None,
-        (true, Some(limit)) => Some(tokio::time::Instant::now() + limit),
-        _ => Some(deadline),
-    };
+    let is_streaming_response = config.http.force_streaming_response
+        || crate::streaming::is_streaming_headers(&acc.headers);
+    let body_deadline = crate::streaming::response_body_deadline(
+        is_streaming_response,
+        config.limits.streaming_timeout,
+        deadline,
+    );
     let mut body = response.into_body();
     let mut error = None;
     loop {
@@ -445,13 +605,13 @@ pub async fn send_streaming(
                 },
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => {
-                        let remaining = config.max_body_bytes.saturating_sub(acc.body.len());
+                        let remaining = config.limits.max_body_bytes.saturating_sub(acc.body.len());
                         if data.len() > remaining {
                             if remaining > 0 {
                                 acc.body.extend_from_slice(&data[..remaining]);
                                 on_progress(&acc);
                             }
-                            error = Some(ProxyError::BodyLimit { limit: config.max_body_bytes });
+                            error = Some(ProxyError::BodyLimit { limit: config.limits.max_body_bytes });
                             break;
                         }
                         acc.body.extend_from_slice(&data);
@@ -486,30 +646,12 @@ pub(super) async fn send_owned(
     cancel: CancellationToken,
     shutdown: Shutdown,
 ) -> Result<HttpResponse, ProxyError> {
-    let _cancel_on_drop = cancel.clone().drop_guard();
-    let exec = Executor::graceful(shutdown.guard());
-    let result = if config.streaming_timeout.is_some() {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-            result = send_once_with_streaming_timeout(input, &config, cancel.clone(), exec) => result,
-        }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-            result = tokio::time::timeout(config.timeout, send_once(input, &config, cancel.clone(), exec)) => {
-                result.unwrap_or(Err(ProxyError::Timeout))
-            }
-        }
-    };
-    cancel.cancel();
-    // Stop deadlines belong to the owner; returning early would forget unjoined SDK workers.
-    shutdown.shutdown().await;
-    result
+    send_owned_metrics(input, config, cancel, shutdown)
+        .await
+        .map(|metrics| metrics.response)
 }
 
-async fn send_owned_with_metrics(
+async fn send_owned_metrics(
     input: SendInput,
     config: SendConfig,
     cancel: CancellationToken,
@@ -517,217 +659,62 @@ async fn send_owned_with_metrics(
 ) -> Result<SendMetrics, ProxyError> {
     let _cancel_on_drop = cancel.clone().drop_guard();
     let exec = Executor::graceful(shutdown.guard());
-    let result = if config.streaming_timeout.is_some() {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-            result = send_once_with_metrics_and_streaming_timeout(input, &config, cancel.clone(), exec) => result,
-        }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-            result = tokio::time::timeout(config.timeout, send_once_with_metrics(input, &config, cancel.clone(), exec)) => {
-                result.unwrap_or(Err(ProxyError::Timeout))
-            }
-        }
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+        result = send_once_metrics(input, &config, cancel.clone(), exec) => result,
     };
     cancel.cancel();
+    // Stop deadlines belong to the owner; returning early would forget unjoined SDK workers.
     shutdown.shutdown().await;
     result
 }
 
-fn is_streaming_headers(headers: &[mio_plugin_api::Header]) -> bool {
-    let is_event_stream = headers
-        .iter()
-        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
-        .and_then(|header| std::str::from_utf8(&header.value).ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-        });
-    if is_event_stream {
-        return true;
-    }
-    let has_content_length = headers
-        .iter()
-        .any(|header| header.name.eq_ignore_ascii_case("content-length"));
-    let is_chunked = headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
-        .filter_map(|header| std::str::from_utf8(&header.value).ok())
-        .any(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-        });
-    !has_content_length && is_chunked
-}
-
-fn is_streaming_response_head(response: &Response) -> bool {
-    let is_event_stream = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-        });
-    if is_event_stream {
-        return true;
-    }
-    let has_content_length = response.headers().contains_key("content-length");
-    let is_chunked = response
-        .headers()
-        .get_all("transfer-encoding")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-        });
-    !has_content_length && is_chunked
-}
-
-async fn send_once_with_streaming_timeout(
-    input: SendInput,
-    config: &SendConfig,
-    cancel: CancellationToken,
-    exec: Executor,
-) -> Result<HttpResponse, ProxyError> {
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let response = match input {
-        SendInput::Message(model) => {
-            exchange_model_with_auth(model, config, deadline, cancel, exec)
-                .await?
-                .0
-        }
-        SendInput::Prepared(request) => {
-            tokio::time::timeout_at(deadline, Box::pin(exchange(request, config, cancel, exec)))
-                .await
-                .map_err(|_| ProxyError::Timeout)??
-        }
-    };
-    let is_streaming = config.force_streaming_response || is_streaming_response_head(&response);
-    let body_deadline = match (is_streaming, config.streaming_timeout) {
-        (true, Some(limit)) if limit.is_zero() => None,
-        (true, Some(limit)) => Some(tokio::time::Instant::now() + limit),
-        _ => Some(deadline),
-    };
-    match body_deadline {
-        Some(dl) => tokio::time::timeout_at(dl, collect_response(response, config.max_body_bytes))
-            .await
-            .map_err(|_| ProxyError::Timeout)?,
-        None => collect_response(response, config.max_body_bytes).await,
-    }
-}
-
-async fn send_once_with_metrics_and_streaming_timeout(
+async fn send_once_metrics(
     input: SendInput,
     config: &SendConfig,
     cancel: CancellationToken,
     exec: Executor,
 ) -> Result<SendMetrics, ProxyError> {
     let attempt_started = Instant::now();
-    let deadline = tokio::time::Instant::now() + config.timeout;
+    let deadline = tokio::time::Instant::now() + config.limits.timeout;
     let (response, timing) = match input {
         SendInput::Message(model) => {
             exchange_model_with_auth(model, config, deadline, cancel, exec).await?
         }
-        SendInput::Prepared(request) => tokio::time::timeout_at(
+        SendInput::Prepared(request) => {
+            exchange_before_deadline(request, config, deadline, cancel, exec).await?
+        }
+    };
+    let exchange_returned = Instant::now();
+    let is_streaming = config.http.force_streaming_response
+        || crate::streaming::is_streaming_response_head(&response);
+    let body_deadline = if config.limits.streaming_timeout.is_some() {
+        crate::streaming::response_body_deadline(
+            is_streaming,
+            config.limits.streaming_timeout,
             deadline,
-            Box::pin(exchange_with_metrics(request, config, cancel, exec)),
+        )
+    } else {
+        Some(deadline)
+    };
+    let response = match body_deadline {
+        Some(dl) => tokio::time::timeout_at(
+            dl,
+            collect_response(response, config.limits.max_body_bytes),
         )
         .await
         .map_err(|_| ProxyError::Timeout)??,
+        None => collect_response(response, config.limits.max_body_bytes).await?,
     };
-    let exchange_returned = Instant::now();
-    let reason_phrase = response
-        .extensions()
-        .get_ref::<rama::http::proto::h1::ext::ReasonPhrase>()
-        .map(|reason| reason.as_bytes().to_vec());
-    let is_streaming = config.force_streaming_response || is_streaming_response_head(&response);
-    let body_deadline = match (is_streaming, config.streaming_timeout) {
-        (true, Some(limit)) if limit.is_zero() => None,
-        (true, Some(limit)) => Some(tokio::time::Instant::now() + limit),
-        _ => Some(deadline),
-    };
-    let response = match body_deadline {
-        Some(dl) => tokio::time::timeout_at(dl, collect_response(response, config.max_body_bytes))
-            .await
-            .map_err(|_| ProxyError::Timeout)??,
-        None => collect_response(response, config.max_body_bytes).await?,
-    };
-    let received = timing
-        .lock()
-        .unwrap()
+    let received = crate::lock_unpoison(&timing)
         .first_response_byte()
         .unwrap_or(exchange_returned);
     let response_received_ms = received
         .saturating_duration_since(attempt_started)
         .as_millis()
         .min(u64::MAX as u128) as u64;
-    Ok(SendMetrics {
-        response,
-        response_received_ms,
-        reason_phrase,
-    })
-}
-
-async fn send_once(
-    input: SendInput,
-    config: &SendConfig,
-    cancel: CancellationToken,
-    exec: Executor,
-) -> Result<HttpResponse, ProxyError> {
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let response = match input {
-        SendInput::Message(model) => {
-            exchange_model_with_auth(model, config, deadline, cancel, exec)
-                .await?
-                .0
-        }
-        SendInput::Prepared(request) => Box::pin(exchange(request, config, cancel, exec)).await?,
-    };
-    collect_response(response, config.max_body_bytes).await
-}
-
-async fn send_once_with_metrics(
-    input: SendInput,
-    config: &SendConfig,
-    cancel: CancellationToken,
-    exec: Executor,
-) -> Result<SendMetrics, ProxyError> {
-    let attempt_started = Instant::now();
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let (response, timing) = match input {
-        SendInput::Message(model) => {
-            exchange_model_with_auth(model, config, deadline, cancel, exec).await?
-        }
-        SendInput::Prepared(request) => {
-            Box::pin(exchange_with_metrics(request, config, cancel, exec)).await?
-        }
-    };
-    let exchange_returned = Instant::now();
-    let reason_phrase = response
-        .extensions()
-        .get_ref::<rama::http::proto::h1::ext::ReasonPhrase>()
-        .map(|reason| reason.as_bytes().to_vec());
-    let response = collect_response(response, config.max_body_bytes).await?;
-    let received = timing
-        .lock()
-        .unwrap()
-        .first_response_byte()
-        .unwrap_or(exchange_returned);
-    let response_received_ms = received
-        .saturating_duration_since(attempt_started)
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    let reason_phrase = response.reason_phrase.clone();
     Ok(SendMetrics {
         response,
         response_received_ms,
@@ -746,6 +733,7 @@ pub(super) async fn collect_response(
     message::consume_header_budget(response.headers(), &mut header_budget)?;
     let status = response.status().as_u16();
     let version = message::model_version(response.version());
+    let reason_phrase = message::reason_phrase(&response);
     let headers = message::headers(response.headers());
     let (body, trailers) =
         message::body_with_header_budget(response.into_body(), max_body_bytes, Some(header_budget))
@@ -753,7 +741,7 @@ pub(super) async fn collect_response(
     Ok(HttpResponse {
         status,
         version,
-        reason_phrase: None,
+        reason_phrase,
         headers,
         body,
         trailers,

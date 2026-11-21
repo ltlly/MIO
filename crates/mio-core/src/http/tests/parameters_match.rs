@@ -63,7 +63,8 @@ fn proxy_intercept_param_name_and_value_match_query_form_multipart_and_exclude_j
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             expected,
             "request {match_type:?} {relation:?} {condition:?}"
         );
@@ -78,7 +79,8 @@ fn proxy_intercept_param_name_and_value_match_query_form_multipart_and_exclude_j
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             expected,
             "response {match_type:?} {relation:?} {condition:?}"
         );
@@ -294,6 +296,7 @@ fn proxy_intercept_param_rules_propagate_malformed_limits_and_collaborate_with_r
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let unpack = build_flow_transform(
         Vec::new(),
@@ -318,6 +321,7 @@ fn proxy_intercept_param_rules_propagate_malformed_limits_and_collaborate_with_r
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     let mut oversized_url = interception_record();
     oversized_url.request.url = format!("http://example.com/fixture?a={}", "x".repeat(MAX_HEAD));

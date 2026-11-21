@@ -1,21 +1,12 @@
 use std::time::Duration;
 
 use mio_plugin_api::{
-    Header, HttpRequest, HttpResponse, HttpVersion, Uuid, WebSocketDirection, WebSocketKind,
-    WebSocketMessage,
+    Header, HttpRequest, HttpResponse, Uuid, WebSocketDirection, WebSocketKind, WebSocketMessage,
 };
 use rama::{
-    extensions::ExtensionsRef,
     futures::{SinkExt, StreamExt},
     graceful::Shutdown,
-    http::{
-        headers::{HeaderMapExt, SecWebSocketAccept, SecWebSocketKey},
-        io::upgrade::handle_upgrade,
-        ws::{
-            AsyncWebSocket, Message, ProtocolError,
-            protocol::{Role, WebSocketConfig},
-        },
-    },
+    http::ws::{AsyncWebSocket, Message, ProtocolError},
     rt::Executor,
 };
 use tokio::{
@@ -24,20 +15,25 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProxyError, message};
+use crate::ProxyError;
 
 use super::{
-    SendConfig, exchange,
+    SendConfig,
     websocket::{
-        validate_websocket_response, websocket_outgoing_message, websocket_received_message,
-        websocket_record, websocket_request,
+        establish_client_websocket, prepare_websocket_send_config, websocket_outgoing_message,
+        websocket_received_message, websocket_record,
     },
 };
 
 type SessionReply = oneshot::Sender<Result<WebSocketMessage, ProxyError>>;
 
 enum SessionCommand {
-    Send(WebSocketKind, Vec<u8>, SessionReply),
+    Send {
+        kind: WebSocketKind,
+        payload: Vec<u8>,
+        message: Message,
+        reply: SessionReply,
+    },
     Disconnect(oneshot::Sender<Result<(), ProxyError>>),
 }
 
@@ -95,14 +91,22 @@ impl WebSocketSession {
         if cancel.is_cancelled() || self.cancel.is_cancelled() {
             return Err(ProxyError::Cancelled);
         }
-        let _ = websocket_outgoing_message(kind, &payload, self.max_body_bytes)?;
+        let message = websocket_outgoing_message(kind, &payload, self.max_body_bytes)?;
         let (reply, receive) = oneshot::channel();
         let deadline = tokio::time::Instant::now() + self.request_timeout;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
             _ = self.cancel.cancelled() => return Err(ProxyError::Cancelled),
-            sent = tokio::time::timeout_at(deadline, self.outgoing.send(SessionCommand::Send(kind, payload, reply))) => {
+            sent = tokio::time::timeout_at(
+                deadline,
+                self.outgoing.send(SessionCommand::Send {
+                    kind,
+                    payload,
+                    message,
+                    reply,
+                }),
+            ) => {
                 sent.map_err(|_| ProxyError::Timeout)?
                     .map_err(|_| ProxyError::network("WebSocket 会话已断开"))?;
             }
@@ -123,6 +127,7 @@ impl WebSocketSession {
     }
 
     pub async fn disconnect(&mut self) -> Result<(), ProxyError> {
+        let mut close_outcome: Option<Result<(), ProxyError>> = None;
         if !self.outgoing.is_closed() && !self.cancel.is_cancelled() {
             let (reply, receive) = oneshot::channel();
             if tokio::time::timeout(
@@ -132,17 +137,22 @@ impl WebSocketSession {
             .await
             .is_ok_and(|sent| sent.is_ok())
             {
-                let _ = tokio::time::timeout(SESSION_CLOSE_TIMEOUT, receive).await;
+                close_outcome = match tokio::time::timeout(SESSION_CLOSE_TIMEOUT, receive).await {
+                    Ok(Ok(outcome)) => Some(outcome),
+                    Ok(Err(_)) => None,
+                    Err(_) => Some(Err(ProxyError::Timeout)),
+                };
             }
         }
         self.cancel.cancel();
         let Some(driver) = self.driver.as_mut() else {
-            return Ok(());
+            return close_outcome.unwrap_or(Ok(()));
         };
         match tokio::time::timeout(SESSION_CLOSE_TIMEOUT, driver).await {
             Ok(result) => {
                 self.driver.take();
-                result.map_err(ProxyError::network)
+                result.map_err(ProxyError::network)?;
+                close_outcome.unwrap_or(Ok(()))
             }
             Err(_) => Err(ProxyError::StopDeadline),
         }
@@ -161,67 +171,27 @@ pub async fn connect_websocket_session(
     mut config: SendConfig,
     cancel: CancellationToken,
 ) -> Result<WebSocketSession, ProxyError> {
-    if config.max_body_bytes == 0 || config.timeout.is_zero() {
+    if config.limits.max_body_bytes == 0 || config.limits.timeout.is_zero() {
         return Err(ProxyError::invalid(
             "WebSocket 会话正文预算与请求期限必须大于零",
         ));
     }
-    let request = websocket_request(url, headers)?;
-    config.http_version = Some(HttpVersion::Http11);
-    config.update_content_length = true;
-    config.normalize_http1_line_endings = true;
-    config.raw_http1_override = None;
+    prepare_websocket_send_config(&mut config);
     let session_cancel = cancel.child_token();
     let shutdown = Shutdown::new(session_cancel.clone().cancelled_owned());
     let cancel_on_drop = session_cancel.clone().drop_guard();
     let exec = Executor::graceful(shutdown.guard());
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let handshake = tokio::select! {
-        biased;
-        _ = session_cancel.cancelled() => Err(ProxyError::Cancelled),
-        result = tokio::time::timeout_at(deadline, async {
-            let mut outgoing = message::to_request_with_config(&request, &config)?;
-            let handshake_headers = message::header_map(&request.headers)?;
-            for name in ["connection", "upgrade", "sec-websocket-version", "sec-websocket-key"] {
-                outgoing.headers_mut().remove(name);
-                for value in handshake_headers.get_all(name).iter() {
-                    outgoing.headers_mut().append(name, value.clone());
-                }
-            }
-            outgoing.headers_mut().remove("content-length");
-            outgoing.headers_mut().remove("sec-websocket-extensions");
-            let key = handshake_headers
-                .typed_get::<SecWebSocketKey>()
-                .ok_or_else(|| ProxyError::invalid("WebSocket Key 必须是 16 字节随机值的 Base64"))?;
-            let accept = SecWebSocketAccept::try_from(key).map_err(ProxyError::invalid)?;
-            let response = exchange(outgoing, &config, session_cancel.clone(), exec).await?;
-            let mut header_budget = (
-                crate::StreamedResponse::MAX_HEADERS,
-                crate::StreamedResponse::MAX_HEAD_BYTES,
-            );
-            message::consume_header_budget(response.headers(), &mut header_budget)?;
-            validate_websocket_response(&handshake_headers, response.headers(), response.status(), &accept)?;
-            let response_head = HttpResponse {
-                status: response.status().as_u16(),
-                version: message::model_version(response.version()),
-                reason_phrase: None,
-                headers: message::headers(response.headers()),
-                body: Vec::new(),
-                trailers: Vec::new(),
-            };
-            let upgraded = handle_upgrade(response.extensions().clone()).await.map_err(ProxyError::network)?;
-            drop(response);
-            let ws_config = WebSocketConfig::default()
-                .with_read_buffer_size(4096)
-                .with_write_buffer_size(0)
-                .with_max_write_buffer_size(config.max_body_bytes.saturating_add(256))
-                .with_max_message_size(config.max_body_bytes)
-                .with_max_frame_size(config.max_body_bytes);
-            let socket = AsyncWebSocket::from_raw_socket(upgraded, Role::Client, Some(ws_config)).await;
-            Ok((response_head, socket))
-        }) => result.unwrap_or(Err(ProxyError::Timeout)),
-    };
-    let (response, socket) = match handshake {
+    let deadline = tokio::time::Instant::now() + config.limits.timeout;
+    let (request, response, socket) = match establish_client_websocket(
+        url,
+        headers,
+        &config,
+        deadline,
+        session_cancel.clone(),
+        exec,
+    )
+    .await
+    {
         Ok(established) => established,
         Err(error) => {
             drop(cancel_on_drop);
@@ -230,8 +200,8 @@ pub async fn connect_websocket_session(
         }
     };
     let flow_id = Uuid::new_v4();
-    let max_body_bytes = config.max_body_bytes;
-    let request_timeout = config.timeout;
+    let max_body_bytes = config.limits.max_body_bytes;
+    let request_timeout = config.limits.timeout;
     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
     let (incoming_tx, incoming_rx) = mpsc::channel(64);
     let driver_cancel = session_cancel.clone();
@@ -240,7 +210,6 @@ pub async fn connect_websocket_session(
         drive_websocket_session(
             socket,
             flow_id,
-            max_body_bytes,
             request_timeout,
             outgoing_rx,
             incoming_tx,
@@ -266,7 +235,6 @@ pub async fn connect_websocket_session(
 async fn drive_websocket_session(
     mut socket: AsyncWebSocket,
     flow_id: Uuid,
-    max_body_bytes: usize,
     request_timeout: Duration,
     mut outgoing: mpsc::Receiver<SessionCommand>,
     incoming: mpsc::Sender<Result<WebSocketMessage, ProxyError>>,
@@ -283,20 +251,17 @@ async fn drive_websocket_session(
             _ = cancel.cancelled() => break,
             command = outgoing.recv() => match command {
                 None => break,
-                Some(SessionCommand::Send(kind, payload, reply)) => {
-                    let outcome = match websocket_outgoing_message(kind, &payload, max_body_bytes) {
-                        Ok(message) => match tokio::time::timeout(request_timeout, socket.send(message)).await {
-                            Ok(Ok(())) => Ok(websocket_record(
-                                flow_id,
-                                next_seq(),
-                                WebSocketDirection::ClientToServer,
-                                kind,
-                                payload,
-                            )),
-                            Ok(Err(error)) => Err(ProxyError::network(error)),
-                            Err(_) => Err(ProxyError::Timeout),
-                        },
-                        Err(error) => Err(error),
+                Some(SessionCommand::Send { kind, payload, message, reply }) => {
+                    let outcome = match tokio::time::timeout(request_timeout, socket.send(message)).await {
+                        Ok(Ok(())) => Ok(websocket_record(
+                            flow_id,
+                            next_seq(),
+                            WebSocketDirection::ClientToServer,
+                            kind,
+                            payload,
+                        )),
+                        Ok(Err(error)) => Err(ProxyError::network(error)),
+                        Err(_) => Err(ProxyError::Timeout),
                     };
                     let sent_close = outcome.is_ok() && kind == WebSocketKind::Close;
                     let fatal = matches!(
@@ -305,14 +270,17 @@ async fn drive_websocket_session(
                     );
                     let _ = reply.send(outcome);
                     if sent_close {
-                        let _ = drain_session_close(
+                        if let Err(error) = drain_session_close(
                             &mut socket,
                             flow_id,
                             &mut next_seq,
                             &incoming,
                             &cancel,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = incoming.try_send(Err(error));
+                        }
                         break;
                     }
                     if fatal {
@@ -431,21 +399,25 @@ async fn drain_session_close(
             Some(Err(error)) => return Err(ProxyError::network(error)),
             Some(Ok(message)) => {
                 if matches!(message, Message::Ping(_) | Message::Close(_)) {
-                    let _ = tokio::time::timeout_at(deadline, socket.flush()).await;
-                }
-                if let Ok((kind, payload)) = websocket_received_message(message) {
-                    let is_close = kind == WebSocketKind::Close;
-                    let record = websocket_record(
-                        flow_id,
-                        next_seq(),
-                        WebSocketDirection::ServerToClient,
-                        kind,
-                        payload,
-                    );
-                    let _ = incoming.try_send(Ok(record));
-                    if is_close {
-                        return Ok(());
+                    match tokio::time::timeout_at(deadline, socket.flush()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) if error.is_connection_error() => return Ok(()),
+                        Ok(Err(error)) => return Err(ProxyError::network(error)),
+                        Err(_) => return Err(ProxyError::Timeout),
                     }
+                }
+                let (kind, payload) = websocket_received_message(message)?;
+                let is_close = kind == WebSocketKind::Close;
+                let record = websocket_record(
+                    flow_id,
+                    next_seq(),
+                    WebSocketDirection::ServerToClient,
+                    kind,
+                    payload,
+                );
+                let _ = incoming.try_send(Ok(record));
+                if is_close {
+                    return Ok(());
                 }
             }
         }

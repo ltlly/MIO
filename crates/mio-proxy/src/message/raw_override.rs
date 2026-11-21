@@ -148,9 +148,11 @@ pub(super) fn build_raw_h1_from_override(
     version: HttpVersion,
     config: &SendConfig,
 ) -> Result<Arc<[u8]>, ProxyError> {
-    if matches!(version, HttpVersion::Http2) {
-        return Err(ProxyError::invalid("原始 HTTP/1 发送不接受 HTTP/2"));
-    }
+    let version_suffix: &[u8] = match version {
+        HttpVersion::Http10 => b" HTTP/1.0",
+        HttpVersion::Http11 => b" HTTP/1.1",
+        HttpVersion::Http2 => return Err(ProxyError::invalid("原始 HTTP/1 发送不接受 HTTP/2")),
+    };
     let (first_line, first_ending, mut cursor) = next_raw_line(raw_override)
         .ok_or_else(|| ProxyError::invalid("原始 HTTP/1 报文缺少请求行"))?;
     let first_str = std::str::from_utf8(first_line)
@@ -200,7 +202,7 @@ pub(super) fn build_raw_h1_from_override(
         }
     }
     let should_update_cl =
-        config.update_content_length && request.trailers.is_empty() && !transfer_encoding_chunked;
+        config.http.update_content_length && request.trailers.is_empty() && !transfer_encoding_chunked;
     let expected_cl = request.body.len().to_string().into_bytes();
     let mut expected_raw_headers: Vec<(String, Vec<u8>)> =
         Vec::with_capacity(raw_headers.len() + 1);
@@ -233,8 +235,8 @@ pub(super) fn build_raw_h1_from_override(
     )?;
 
     let effective_route = uri.host_str().map_or_else(
-        || config.upstream_route.clone(),
-        |host| config.upstream_route.resolve_for_host(&host),
+        || config.network.upstream_route.clone(),
+        |host| config.network.upstream_route.resolve_for_host(&host),
     );
     let route = effective_route.rama()?;
     let via_http_proxy = matches!(
@@ -252,11 +254,7 @@ pub(super) fn build_raw_h1_from_override(
     out.extend_from_slice(method.as_str().as_bytes());
     out.push(b' ');
     out.extend_from_slice(target);
-    out.extend_from_slice(match version {
-        HttpVersion::Http10 => b" HTTP/1.0",
-        HttpVersion::Http11 => b" HTTP/1.1",
-        HttpVersion::Http2 => unreachable!(),
-    });
+    out.extend_from_slice(version_suffix);
     out.extend_from_slice(first_ending);
 
     let nominated: Vec<String> = raw_headers
@@ -271,29 +269,41 @@ pub(super) fn build_raw_h1_from_override(
     for header in &raw_headers {
         let is_nominated = nominated.iter().any(|nom| {
             header.name.eq_ignore_ascii_case(nom)
-                && (config.update_content_length || !nom.eq_ignore_ascii_case("content-length"))
+                && (config.http.update_content_length
+                    || !nom.eq_ignore_ascii_case("content-length"))
         });
-        let is_proxy_header = config.strip_proxy_headers
+        let is_proxy_header = config.http.strip_proxy_headers
             && header
                 .name
                 .get(..6)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-"));
-        let is_stripped_expect = config.strip_100_continue_headers
-            && header.name.eq_ignore_ascii_case("expect")
-            && header.value.eq_ignore_ascii_case(b"100-continue");
         let is_hop_by_hop = ["connection", "keep-alive", "upgrade"]
             .iter()
             .any(|name| header.name.eq_ignore_ascii_case(name))
             || is_proxy_header
-            || is_stripped_expect
             || (!transfer_encoding_chunked
                 && header.name.eq_ignore_ascii_case("transfer-encoding"))
             || (request.trailers.is_empty() && header.name.eq_ignore_ascii_case("trailer"))
             || ((!request.trailers.is_empty() || transfer_encoding_chunked)
-                && config.update_content_length
+                && config.http.update_content_length
                 && header.name.eq_ignore_ascii_case("content-length"));
         if is_nominated || is_hop_by_hop {
             continue;
+        }
+        if config.http.strip_100_continue_headers
+            && header.name.eq_ignore_ascii_case("expect")
+            && let Ok(text) = std::str::from_utf8(header.value)
+        {
+            let (removed, remaining) = super::body::strip_header_token_str(text, "100-continue");
+            if removed {
+                if let Some(remaining) = remaining {
+                    out.extend_from_slice(header.name.as_bytes());
+                    out.extend_from_slice(b": ");
+                    out.extend_from_slice(remaining.as_bytes());
+                    out.extend_from_slice(header.ending);
+                }
+                continue;
+            }
         }
         if header.name.eq_ignore_ascii_case("host") {
             has_host = true;
@@ -337,7 +347,7 @@ pub(super) fn build_raw_h1_from_override(
             out.extend_from_slice(blank_ending);
         }
     }
-    if !config.http1_keep_alive {
+    if !config.http.http1_keep_alive {
         out.extend_from_slice(b"Connection: close");
         out.extend_from_slice(blank_ending);
     }

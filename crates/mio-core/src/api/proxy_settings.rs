@@ -6,8 +6,7 @@ pub use crate::store::target_site_map::SiteMapItem;
 pub use mio_proxy::{
     AuthCredentials, DigestChallenge, HttpAuthScheme, NtlmType2Challenge, PlatformAuthRuleConfig,
     RepeaterGroupSendMode, RepeaterGroupSendTicket, SinglePacketBarrier, StreamingScopeMatcher,
-    UpstreamAuthRuleConfig, clear_repeater_group_send_tickets, register_repeater_group_send_ticket,
-    take_repeater_group_send_ticket,
+    UpstreamAuthRuleConfig,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

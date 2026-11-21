@@ -67,16 +67,10 @@ async fn literal_backslash_send_fails_before_connect() {
         for path in DRAFT_ONLY_PATHS {
             let raw = format!("GET {path} HTTP/1.1\r\n\r\n");
             let request = parse_request(raw.as_bytes(), &target, HttpVersion::Http11).unwrap();
+            let mut cfg = mio_proxy::SendConfig::default();
+            cfg.limits.timeout = Duration::from_secs(1);
             results.push(
-                mio_proxy::send(
-                    request,
-                    mio_proxy::SendConfig {
-                        timeout: Duration::from_secs(1),
-                        ..mio_proxy::SendConfig::default()
-                    },
-                    CancellationToken::new(),
-                )
-                .await,
+                mio_proxy::send(request, cfg, CancellationToken::new()).await,
             );
         }
         let incoming = listener.into_std().unwrap().accept();
@@ -127,17 +121,11 @@ async fn loopback_receives_unmodified_request_targets() {
                     let raw = format!("GET {request_target} HTTP/1.1\r\n\r\n");
                     let request =
                         parse_request(raw.as_bytes(), &target, HttpVersion::Http11).unwrap();
+                    let mut cfg = mio_proxy::SendConfig::default();
+                    cfg.limits.timeout = Duration::from_secs(1);
+                    cfg.http.version = Some(HttpVersion::Http11);
                     responses.push(
-                        mio_proxy::send(
-                            request,
-                            mio_proxy::SendConfig {
-                                timeout: Duration::from_secs(1),
-                                http_version: Some(HttpVersion::Http11),
-                                ..mio_proxy::SendConfig::default()
-                            },
-                            CancellationToken::new(),
-                        )
-                        .await,
+                        mio_proxy::send(request, cfg, CancellationToken::new()).await,
                     );
                 }
             }
@@ -286,9 +274,14 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
             &record, false, false, false, false, peer_v6, &cancel, limits
         )
         .unwrap()
+        .should_intercept()
     );
-    assert!(ip_filter(&record, true, true, false, false, peer_v6, &cancel, limits).unwrap());
     assert!(
+        ip_filter(&record, true, true, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
+    assert_eq!(
         ip_filter(
             &record,
             true,
@@ -299,9 +292,8 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
             &cancel,
             limits
         )
-        .unwrap_err()
-        .to_string()
-        .contains("目标 IP 尚未确定"),
+        .unwrap(),
+        mio_proxy::InterceptFilterOutcome::NeedsTargetIp,
         "DoesNotMatch must not auto-forward when target IP is unresolved"
     );
     record.request.url = "http://[::ffff:127.0.0.1]:8080/fixture".into();
@@ -317,6 +309,7 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
             limits
         )
         .unwrap()
+        .should_intercept()
     );
 
     let mut mime_settings = crate::ProxyInterceptionSettings::default();
@@ -327,7 +320,11 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
     let resp = record.response.as_mut().unwrap();
     resp.headers.clear();
     resp.body = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
-    assert!(mime_filter(&record, true, false, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        mime_filter(&record, true, false, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
     assert!(mime_filter(&record, true, true, false, false, peer_v6, &cancel, limits).is_err());
     mime_settings.response.rules[0].relationship = DoesNotMatch;
     let mime_neg =
@@ -342,11 +339,19 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
         name: "Content-Type".into(),
         value: b"text/html; charset=utf-8".to_vec(),
     }];
-    assert!(mime_neg(&record, true, true, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        mime_neg(&record, true, true, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
     mime_settings.response.rules[0].relationship = Matches;
     mime_settings.response.rules[0].condition = "^html$".into();
     let html_mime = build_intercept_filter(mime_settings, crate::TargetScope::default()).unwrap();
-    assert!(html_mime(&record, true, true, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        html_mime(&record, true, true, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
 
     let mut title_settings = crate::ProxyInterceptionSettings::default();
     title_settings.response.enabled = true;
@@ -361,7 +366,11 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
         build_intercept_filter(title_settings.clone(), crate::TargetScope::default()).unwrap();
     record.response.as_mut().unwrap().body =
         b"<html><head><TITLE>\n  A &amp; B   &#20013;&#25991;\t</title></head></html>".to_vec();
-    assert!(title_filter(&record, true, false, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        title_filter(&record, true, false, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
     title_settings.response.rules[0].relationship = DoesNotMatch;
     let title_neg = build_intercept_filter(title_settings, crate::TargetScope::default()).unwrap();
     assert!(
@@ -399,7 +408,11 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
         was_annotated: true,
         ..peer_v6
     };
-    assert!(!ann(&record, true, true, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        !ann(&record, true, true, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
     assert!(
         ann(
             &record,
@@ -412,8 +425,13 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
             limits
         )
         .unwrap()
+        .should_intercept()
     );
-    assert!(unann(&record, true, true, false, false, peer_v6, &cancel, limits).unwrap());
+    assert!(
+        unann(&record, true, true, false, false, peer_v6, &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
     assert!(
         !unann(
             &record,
@@ -426,5 +444,6 @@ fn proxy_intercept_extra_conditions_validate_stage_and_evaluate_ip_mime_title_an
             limits
         )
         .unwrap()
+        .should_intercept()
     );
 }

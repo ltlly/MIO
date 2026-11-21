@@ -47,7 +47,8 @@ fn proxy_intercept_param_rules_sniff_valid_json_xml_without_counting_their_body_
                             &cancel,
                             limits,
                         )
-                        .unwrap(),
+                        .unwrap()
+                        .should_intercept(),
                         "{content_type:?} valid structure must not become generic parameters"
                     );
                 }

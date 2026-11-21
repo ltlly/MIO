@@ -66,9 +66,15 @@ async fn held_send(state: &mut State) -> HeldSend {
         let response = mio_proxy::send(
             record.request.clone(),
             SendConfig {
-                max_body_bytes: 1024,
-                timeout: Duration::from_secs(2),
-                http_version: Some(HttpVersion::Http11),
+                limits: mio_proxy::SendLimits {
+                    max_body_bytes: 1024,
+                    timeout: Duration::from_secs(2),
+                    ..Default::default()
+                },
+                http: mio_proxy::SendHttpConfig {
+                    version: Some(HttpVersion::Http11),
+                    ..Default::default()
+                },
                 ..SendConfig::default()
             },
             task_cancel,
@@ -241,6 +247,7 @@ async fn controlled_response_send(
                 unpack_compressed_responses: send_unpack,
                 ..RepeaterSettings::default()
             },
+            group_send: None,
         })
         .await
         .unwrap();

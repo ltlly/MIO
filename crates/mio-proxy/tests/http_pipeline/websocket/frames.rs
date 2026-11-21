@@ -111,7 +111,7 @@ async fn websocket_observations_preserve_identity_order_and_payload_without_fabr
 async fn websocket_message_interception_edits_drops_single_frame_and_passes_control_frames() {
     let mut origin = WsOrigin::start(None).await;
     let (mut proxy, _, mut events) = ws_proxy_with(&origin, 64, |config| {
-        config.websocket_intercept_filter = Some(Arc::new(|_, _, _| Ok(true)));
+        config.hooks.websocket_intercept_filter = Some(Arc::new(|_, _, _| Ok(true)));
     })
     .await;
     let mut client = TcpStream::connect(proxy.address()).await.unwrap();

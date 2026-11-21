@@ -2,94 +2,18 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use mio_plugin_api::{Header, HttpResponse, Uuid};
+use mio_plugin_api::{Header, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{ProxyError, matches_bypass_host};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RepeaterGroupSendMode {
-    #[default]
-    Default,
-    SequentialSingleConnection,
-    SequentialSeparateConnections,
-    ParallelSinglePacketAttack,
-    ParallelSeparateConnections,
-}
-
-#[derive(Clone)]
-pub struct SinglePacketBarrier {
-    barrier: Arc<tokio::sync::Barrier>,
-    group_size: usize,
-}
-
-impl std::fmt::Debug for SinglePacketBarrier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SinglePacketBarrier")
-            .field("group_size", &self.group_size)
-            .finish()
-    }
-}
-
-impl SinglePacketBarrier {
-    pub fn new(group_size: usize) -> Self {
-        let size = group_size.max(1);
-        Self {
-            barrier: Arc::new(tokio::sync::Barrier::new(size)),
-            group_size: size,
-        }
-    }
-
-    pub fn group_size(&self) -> usize {
-        self.group_size
-    }
-
-    pub async fn wait(&self) {
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.barrier.wait()).await;
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RepeaterGroupSendTicket {
-    pub mode: RepeaterGroupSendMode,
-    pub connection_pool_group_id: Option<u128>,
-    pub single_packet_barrier: Option<SinglePacketBarrier>,
-}
-
-fn group_send_ticket_registry() -> &'static Mutex<HashMap<Uuid, RepeaterGroupSendTicket>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<Uuid, RepeaterGroupSendTicket>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub fn register_repeater_group_send_ticket(tab_id: Uuid, ticket: RepeaterGroupSendTicket) {
-    group_send_ticket_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(tab_id, ticket);
-}
-
-pub fn take_repeater_group_send_ticket(tab_id: Uuid) -> Option<RepeaterGroupSendTicket> {
-    group_send_ticket_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&tab_id)
-}
-
-pub fn clear_repeater_group_send_tickets() {
-    group_send_ticket_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +108,19 @@ impl UpstreamAuthRuleConfig {
     }
 }
 
-pub type StreamingScopeMatcher = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub platform_enabled: bool,
+    pub platform_rules: Arc<[PlatformAuthRuleConfig]>,
+    pub upstream_rules: Arc<[UpstreamAuthRuleConfig]>,
+}
+
+impl AuthConfig {
+    pub fn is_active(&self) -> bool {
+        (self.platform_enabled && !self.platform_rules.is_empty())
+            || !self.upstream_rules.is_empty()
+    }
+}
 
 pub fn to_hex_lower(bytes: &[u8]) -> String {
     hex::encode(bytes)
@@ -529,7 +465,7 @@ impl DigestChallenge {
         body: &[u8],
         nc: u32,
         cnonce: &str,
-    ) -> Result<String, ProxyError> {
+    ) -> String {
         let is_sha256 = self.algorithm.starts_with("SHA-256");
         let is_sess = self.algorithm.ends_with("-SESS");
         let hash_fn = |input: &[u8]| -> String {
@@ -580,7 +516,7 @@ impl DigestChallenge {
                 escape_quoted(cnonce)
             );
         }
-        Ok(header)
+        header
     }
 }
 
@@ -757,7 +693,7 @@ pub fn build_ntlm_type3_header_value(
     is_v2: bool,
     client_challenge: [u8; 8],
     timestamp_100ns: u64,
-) -> Result<String, ProxyError> {
+) -> String {
     let (lm_response, nt_response) = if is_v2 {
         let response_key_nt = ntowfv2(&creds.password, &creds.username, &creds.domain);
         let mut blob = Vec::with_capacity(32 + challenge.target_info.len());
@@ -853,7 +789,7 @@ pub fn build_ntlm_type3_header_value(
     msg.extend_from_slice(&ws_bytes);
     msg.extend_from_slice(&lm_response);
     msg.extend_from_slice(&nt_response);
-    Ok(format!("NTLM {}", BASE64.encode(&msg)))
+    format!("NTLM {}", BASE64.encode(&msg))
 }
 
 static AUTH_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -939,26 +875,30 @@ mod tests {
         .unwrap();
         assert_eq!(challenge.realm, "testrealm@host.com");
         assert_eq!(challenge.qop.as_deref(), Some("auth"));
-        let header = challenge
-            .build_authorization_value(
-                "Mufasa",
-                "Circle Of Life",
-                "GET",
-                "/dir/index.html",
-                b"",
-                1,
-                "0a4f113b",
-            )
-            .unwrap();
+        let header = challenge.build_authorization_value(
+            "Mufasa",
+            "Circle Of Life",
+            "GET",
+            "/dir/index.html",
+            b"",
+            1,
+            "0a4f113b",
+        );
         assert!(header.contains(r#"response="6629fae49393a05397450978507c4ef1""#));
 
         let sha256_chal = DigestChallenge::parse_from_header(
             r#"Digest realm="api", qop="auth", algorithm=SHA-256, nonce="abc123""#,
         )
         .unwrap();
-        let sha_hdr = sha256_chal
-            .build_authorization_value("alice", "secret", "POST", "/v1/login", b"{}", 1, "cn1")
-            .unwrap();
+        let sha_hdr = sha256_chal.build_authorization_value(
+            "alice",
+            "secret",
+            "POST",
+            "/v1/login",
+            b"{}",
+            1,
+            "cn1",
+        );
         assert!(sha_hdr.contains("algorithm=SHA-256"));
         assert!(sha_hdr.contains("response=\""));
     }
@@ -995,9 +935,9 @@ mod tests {
             workstation: "COMPUTER".into(),
         };
         let type3_v1 =
-            build_ntlm_type3_header_value(&parsed, &creds, false, [0xaa; 8], 130_000_000_000).unwrap();
+            build_ntlm_type3_header_value(&parsed, &creds, false, [0xaa; 8], 130_000_000_000);
         let type3_v2 =
-            build_ntlm_type3_header_value(&parsed, &creds, true, [0xaa; 8], 130_000_000_000).unwrap();
+            build_ntlm_type3_header_value(&parsed, &creds, true, [0xaa; 8], 130_000_000_000);
         assert!(type3_v1.starts_with("NTLM ") && type3_v2.starts_with("NTLM "));
         assert_ne!(type3_v1, type3_v2);
     }

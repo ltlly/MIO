@@ -25,7 +25,7 @@ async fn latest_chinese_draft_send_save_reopen_and_stale_project_rejection() {
         let sent_revision = draft.revision;
         workspace.revision += 1;
         client.commands.send(Command::SaveWorkspace { project, workspace: workspace.clone() }).await.unwrap();
-        client.commands.send(Command::Send { run_id: mio_core::Uuid::new_v4(), cancel: tokio_util::sync::CancellationToken::new(), project, tab_id: id, draft, settings: workspace.repeater_settings.clone() }).await.unwrap();
+        client.commands.send(Command::Send { run_id: mio_core::Uuid::new_v4(), cancel: tokio_util::sync::CancellationToken::new(), project, tab_id: id, draft, settings: workspace.repeater_settings.clone(), group_send: None }).await.unwrap();
         let finished = event(&mut client, |e| matches!(e, Event::SendFinished { .. })).await;
         let flow_id = match finished {
             Event::SendFinished { tab_id, record, draft_revision, .. } => {
@@ -125,6 +125,7 @@ async fn in_flight_cancel_waits_for_origin_eof_and_never_retries() {
                 project,
                 tab_id,
                 draft: draft.clone(),
+                group_send: None,
             })
             .await
             .unwrap();
@@ -149,6 +150,7 @@ async fn in_flight_cancel_waits_for_origin_eof_and_never_retries() {
                 project,
                 tab_id,
                 draft,
+                group_send: None,
             })
             .await
             .unwrap();
@@ -221,6 +223,7 @@ async fn quiesce_finishes_network_before_saving_the_last_flow_link() {
                 project,
                 tab_id,
                 draft: draft.clone(),
+                group_send: None,
             })
             .await
             .unwrap();
@@ -253,6 +256,7 @@ async fn quiesce_finishes_network_before_saving_the_last_flow_link() {
                 project,
                 tab_id,
                 draft,
+                group_send: None,
             })
             .await
             .unwrap();

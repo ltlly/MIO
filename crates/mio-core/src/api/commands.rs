@@ -348,6 +348,8 @@ pub enum Command {
         draft: Draft,
         /// Frozen at Send activation, independently of later project defaults.
         settings: RepeaterSettings,
+        /// Optional Repeater group-send mode/barrier metadata for grouped dispatch.
+        group_send: Option<RepeaterGroupSendTicket>,
         /// Out-of-band cancellation remains effective before SendStarted is delivered.
         cancel: tokio_util::sync::CancellationToken,
     },

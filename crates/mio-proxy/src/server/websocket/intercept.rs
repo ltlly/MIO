@@ -1,92 +1,69 @@
-use super::relay::now_unix_ms;
+use super::relay::RelayLeg;
 use super::*;
-use crate::server::{InterceptMode, WebSocketHookDecision, WebSocketInterceptDecision};
-use rama::{
-    futures::{
-        StreamExt,
-        stream::{SplitSink, SplitStream},
-    },
-    http::ws::{AsyncWebSocket, Message},
-};
-use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
-};
-use tokio::sync::Mutex as AsyncMutex;
+use crate::server::{DynamicProxyState, WebSocketHookDecision, WebSocketInterceptDecision};
+use rama::{futures::StreamExt, http::ws::Message};
+use std::{sync::atomic::Ordering, time::Instant};
+use tokio::sync::oneshot;
 
-impl Relay<'_> {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn intercept_or_forward(
+struct HookStageOutcome {
+    working_bytes: Vec<u8>,
+    hook_modified: bool,
+    force_intercept: bool,
+}
+
+impl RelayLeg<'_> {
+    async fn apply_hooks_and_transform(
         &self,
-        message: Message,
-        direction: WebSocketDirection,
-        upgrade_request: &mio_plugin_api::HttpRequest,
-        reader: &mut SplitStream<AsyncWebSocket>,
-        writer: &AsyncMutex<SplitSink<AsyncWebSocket, Message>>,
-        source_closed: &AtomicBool,
-        destination_closed: &AtomicBool,
-        queued: &mut VecDeque<Message>,
-        reader_eof: &mut bool,
-    ) -> Result<(), ProxyError> {
-        let (kind, original_bytes) = match &message {
-            Message::Text(text) => (WebSocketKind::Text, text.as_bytes().to_vec()),
-            Message::Binary(bytes) => (WebSocketKind::Binary, bytes.to_vec()),
-            _ => unreachable!("only data messages reach WebSocket interception"),
-        };
-        let id = Uuid::new_v4();
-        let mut working_bytes = original_bytes.clone();
+        id: Uuid,
+        kind: WebSocketKind,
+        original_bytes: &[u8],
+    ) -> Result<Option<HookStageOutcome>, ProxyError> {
+        let mut working_bytes = original_bytes.to_vec();
         let mut hook_modified = false;
         let mut force_intercept = false;
         if let Some(next) =
-            self.apply_ws_transform(direction, kind, upgrade_request, &working_bytes)?
+            self.relay
+                .apply_ws_transform(self.direction, kind, self.upgrade_request, &working_bytes)?
             && next != original_bytes
         {
             hook_modified = true;
             working_bytes = next;
         }
-        let (_, ws_hook) = self.state.plugin_hooks.borrow().clone();
+        let ws_hook = self.relay.state.dynamic.borrow().async_websocket_hook.clone();
         if let Some(hook) = ws_hook {
             let deadline = Instant::now()
-                .checked_add(self.state.config.request_timeout)
+                .checked_add(self.relay.state.config.limits.request_timeout)
                 .ok_or(ProxyError::Timeout)?;
             let decision = tokio::select! {
                 biased;
-                _ = self.state.cancel.cancelled() => return Err(ProxyError::Cancelled),
+                _ = self.relay.state.cancel.cancelled() => return Err(ProxyError::Cancelled),
                 res = tokio::time::timeout_at(
                     tokio::time::Instant::from_std(deadline),
                     hook(
-                        self.flow_id,
+                        self.relay.flow_id,
                         id,
-                        upgrade_request.url.clone(),
-                        direction,
+                        self.upgrade_request.url.clone(),
+                        self.direction,
                         kind,
                         working_bytes.clone(),
-                        self.state.cancel.child_token(),
+                        self.relay.state.cancel.child_token(),
                         deadline,
                     ),
                 ) => res.map_err(|_| ProxyError::Timeout)??,
             };
+            let max_bytes = self.relay.state.config.limits.max_body_bytes;
             match decision {
                 WebSocketHookDecision::Pass => {}
-                WebSocketHookDecision::Drop => return Ok(()),
+                WebSocketHookDecision::Drop => return Ok(None),
                 WebSocketHookDecision::Modify(next) => {
-                    client::websocket_outgoing_message(
-                        kind,
-                        &next,
-                        self.state.config.max_body_bytes,
-                    )?;
+                    client::validate_websocket_payload(kind, &next, max_bytes)?;
                     if next != original_bytes {
                         hook_modified = true;
                         working_bytes = next;
                     }
                 }
                 WebSocketHookDecision::ForceIntercept(Some(next)) => {
-                    client::websocket_outgoing_message(
-                        kind,
-                        &next,
-                        self.state.config.max_body_bytes,
-                    )?;
+                    client::validate_websocket_payload(kind, &next, max_bytes)?;
                     if next != original_bytes {
                         hook_modified = true;
                         working_bytes = next;
@@ -96,209 +73,206 @@ impl Relay<'_> {
                 WebSocketHookDecision::ForceIntercept(None) => force_intercept = true,
             }
         }
-        if self.closing.is_cancelled() {
-            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-            self.emit_message(
+        Ok(Some(HookStageOutcome {
+            working_bytes,
+            hook_modified,
+            force_intercept,
+        }))
+    }
+
+    async fn wait_for_intercept_decision(
+        &mut self,
+        force_intercept: bool,
+        mut receive: oneshot::Receiver<WebSocketInterceptDecision>,
+    ) -> Result<Option<WebSocketInterceptDecision>, ProxyError> {
+        let mut dynamic_rx = self.relay.state.dynamic.clone();
+        let master_enabled =
+            |state: &DynamicProxyState| state.intercept.requests || state.intercept.responses;
+        let timeout = tokio::time::sleep(self.relay.state.config.limits.intercept_timeout);
+        tokio::pin!(timeout);
+        loop {
+            if self.relay.state.cancel.is_cancelled() {
+                return Err(ProxyError::Cancelled);
+            }
+            if self.relay.closing.is_cancelled()
+                || (!force_intercept && !master_enabled(&dynamic_rx.borrow_and_update()))
+            {
+                return Ok(None);
+            }
+            tokio::select! {
+                biased;
+                _ = self.relay.state.cancel.cancelled() => return Err(ProxyError::Cancelled),
+                _ = &mut timeout => return Err(ProxyError::Timeout),
+                changed = dynamic_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(ProxyError::Cancelled);
+                    }
+                }
+                decision = &mut receive => {
+                    return decision.map(Some).map_err(|_| ProxyError::EventConsumerClosed);
+                }
+                next = self.reader.next(), if !self.reader_eof && self.queued.len() < MAX_QUEUED_DATA_MESSAGES => {
+                    match next {
+                        Some(Ok(Message::Frame(_))) => {
+                            return Err(ProxyError::Network("WebSocket SDK 返回了未解码帧".into()));
+                        }
+                        Some(Ok(next_message @ (Message::Close(_) | Message::Ping(_) | Message::Pong(_)))) => {
+                            self.handle_control(next_message).await?;
+                            if self.relay.closing.is_cancelled() {
+                                return Ok(None);
+                            }
+                        }
+                        Some(Ok(next_message)) => self.queued.push_back(next_message),
+                        Some(Err(error)) => return Err(ProxyError::network(error)),
+                        None => self.reader_eof = true,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn emit_and_forward_frame(
+        &self,
+        record: WebSocketMessage,
+        original_payload: Option<Vec<u8>>,
+        outgoing: Message,
+    ) -> Result<(), ProxyError> {
+        self.relay.emit_message(record, original_payload).await?;
+        if !self.relay.closing.is_cancelled() {
+            self.relay
+                .send_message(self.writer, outgoing, false, self.destination_closed)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn intercept_or_forward(&mut self, message: Message) -> Result<(), ProxyError> {
+        let (kind, original_bytes) = match &message {
+            Message::Text(text) => (WebSocketKind::Text, text.as_bytes().to_vec()),
+            Message::Binary(bytes) => (WebSocketKind::Binary, bytes.to_vec()),
+            _ => unreachable!("only data messages reach WebSocket interception"),
+        };
+        let id = Uuid::new_v4();
+        let Some(HookStageOutcome {
+            working_bytes,
+            hook_modified,
+            force_intercept,
+        }) = self
+            .apply_hooks_and_transform(id, kind, &original_bytes)
+            .await?
+        else {
+            return Ok(());
+        };
+        if self.relay.closing.is_cancelled() {
+            let record = WebSocketMessage {
                 id,
-                sequence,
-                now_unix_ms(),
-                direction,
+                revision: 1,
+                flow_id: self.relay.flow_id,
+                sequence: self.relay.sequence.fetch_add(1, Ordering::Relaxed),
+                direction: self.direction,
                 kind,
-                working_bytes.clone(),
-                hook_modified.then_some(original_bytes),
-            )
-            .await?;
+                payload: working_bytes,
+                observed_unix_ms: crate::now_unix_ms(),
+            };
+            self.relay
+                .emit_message(record, hook_modified.then_some(original_bytes))
+                .await?;
             return Ok(());
         }
         let should_intercept =
-            force_intercept || self.should_intercept(direction, upgrade_request)?;
+            force_intercept || self.relay.should_intercept(self.direction, self.upgrade_request)?;
+        let sequence = self.relay.sequence.fetch_add(1, Ordering::Relaxed);
+        let observed_unix_ms = crate::now_unix_ms();
+        let max_bytes = self.relay.state.config.limits.max_body_bytes;
         if !should_intercept {
-            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-            if hook_modified {
-                let outgoing = client::websocket_outgoing_message(
-                    kind,
-                    &working_bytes,
-                    self.state.config.max_body_bytes,
-                )?;
-                self.emit_message(
-                    id,
-                    sequence,
-                    now_unix_ms(),
-                    direction,
-                    kind,
-                    working_bytes,
-                    Some(original_bytes),
-                )
-                .await?;
-                self.send_message(writer, outgoing, false, destination_closed)
-                    .await?;
+            let outgoing = if hook_modified {
+                client::websocket_outgoing_message(kind, &working_bytes, max_bytes)?
             } else {
-                self.emit_message(
-                    id,
-                    sequence,
-                    now_unix_ms(),
-                    direction,
-                    kind,
-                    working_bytes,
-                    None,
+                message
+            };
+            let record = WebSocketMessage {
+                id,
+                revision: 1,
+                flow_id: self.relay.flow_id,
+                sequence,
+                direction: self.direction,
+                kind,
+                payload: working_bytes,
+                observed_unix_ms,
+            };
+            return self
+                .emit_and_forward_frame(
+                    record,
+                    hook_modified.then_some(original_bytes),
+                    outgoing,
                 )
-                .await?;
-                self.send_message(writer, message, false, destination_closed)
-                    .await?;
-            }
-            return Ok(());
+                .await;
         }
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let observed_unix_ms = now_unix_ms();
         let record = WebSocketMessage {
             id,
             revision: 1,
-            flow_id: self.flow_id,
+            flow_id: self.relay.flow_id,
             sequence,
-            direction,
+            direction: self.direction,
             kind,
             payload: working_bytes.clone(),
             observed_unix_ms,
         };
-        let (reply, mut receive) = tokio::sync::oneshot::channel();
-        self.state
+        let (reply, receive) = oneshot::channel();
+        self.relay
+            .state
             .emit(ProxyEvent::WebSocketIntercepted {
-                project: self.state.project,
-                url: upgrade_request.url.clone(),
+                project: self.relay.state.project,
+                url: self.upgrade_request.url.clone(),
                 record,
-                listener_port: self.state.listener_port,
+                listener_port: self.relay.state.listener_port,
                 reply,
             })
             .await?;
-        let mut mode = self.state.intercept.clone();
-        let master_enabled = |mode: InterceptMode| mode.requests || mode.responses;
-        let timeout = tokio::time::sleep(self.state.config.intercept_timeout);
-        tokio::pin!(timeout);
-        let outcome: Result<Option<WebSocketInterceptDecision>, ProxyError> = loop {
-            if self.state.cancel.is_cancelled() {
-                break Err(ProxyError::Cancelled);
-            }
-            if self.closing.is_cancelled()
-                || (!force_intercept && !master_enabled(*mode.borrow_and_update()))
-            {
-                break Ok(None);
-            }
-            tokio::select! {
-                biased;
-                _ = self.state.cancel.cancelled() => break Err(ProxyError::Cancelled),
-                _ = &mut timeout => break Err(ProxyError::Timeout),
-                changed = mode.changed() => {
-                    if changed.is_err() {
-                        break Err(ProxyError::Cancelled);
-                    }
-                }
-                decision = &mut receive => {
-                    break match decision {
-                        Ok(decision) => Ok(Some(decision)),
-                        Err(_) => Err(ProxyError::EventConsumerClosed),
-                    };
-                }
-                next = reader.next(), if !*reader_eof && queued.len() < MAX_QUEUED_DATA_MESSAGES => {
-                    match next {
-                        Some(result) => match result {
-                            Ok(next_message) => match next_message {
-                                Message::Frame(_) => {
-                                    break Err(ProxyError::Network("WebSocket SDK 返回了未解码帧".into()));
-                                }
-                                next_message @ (Message::Close(_) | Message::Ping(_) | Message::Pong(_)) => {
-                                    self.handle_control(
-                                        next_message,
-                                        writer,
-                                        source_closed,
-                                        destination_closed,
-                                        direction,
-                                    )
-                                    .await?;
-                                    if self.closing.is_cancelled() {
-                                        break Ok(None);
-                                    }
-                                }
-                                next_message => queued.push_back(next_message),
-                            },
-                            Err(error) => break Err(ProxyError::network(error)),
-                        },
-                        None => *reader_eof = true,
-                    }
-                }
-            }
-        };
+        let outcome = self
+            .wait_for_intercept_decision(force_intercept, receive)
+            .await;
         match outcome {
             Ok(Some(WebSocketInterceptDecision::Drop)) => Ok(()),
             Ok(Some(WebSocketInterceptDecision::Forward(payload))) => {
-                if payload.len() > self.state.config.max_body_bytes {
-                    return Err(ProxyError::BodyLimit {
-                        limit: self.state.config.max_body_bytes,
-                    });
-                }
-                let forwarded = match kind {
-                    WebSocketKind::Text => Message::Text(
-                        std::str::from_utf8(&payload)
-                            .map_err(ProxyError::invalid)?
-                            .into(),
-                    ),
-                    WebSocketKind::Binary => Message::Binary(payload.clone().into()),
-                    _ => unreachable!("only data messages reach WebSocket interception"),
-                };
-                let original_payload = if payload == original_bytes {
-                    None
-                } else {
-                    Some(original_bytes)
-                };
-                self.emit_message(
+                let forwarded = client::websocket_outgoing_message(kind, &payload, max_bytes)?;
+                let original_payload = (payload != original_bytes).then_some(original_bytes);
+                let record = WebSocketMessage {
                     id,
+                    revision: 1,
+                    flow_id: self.relay.flow_id,
                     sequence,
-                    observed_unix_ms,
-                    direction,
+                    direction: self.direction,
                     kind,
                     payload,
-                    original_payload,
-                )
-                .await?;
-                if !self.closing.is_cancelled() {
-                    self.send_message(writer, forwarded, false, destination_closed)
-                        .await?;
-                }
-                Ok(())
+                    observed_unix_ms,
+                };
+                self.emit_and_forward_frame(record, original_payload, forwarded)
+                    .await
             }
             Ok(None) => {
-                self.emit_resolved(id).await?;
+                self.relay.emit_resolved(id).await?;
                 let outgoing = if hook_modified {
-                    client::websocket_outgoing_message(
-                        kind,
-                        &working_bytes,
-                        self.state.config.max_body_bytes,
-                    )?
+                    client::websocket_outgoing_message(kind, &working_bytes, max_bytes)?
                 } else {
                     message
                 };
-                let original_payload = if working_bytes == original_bytes {
-                    None
-                } else {
-                    Some(original_bytes)
-                };
-                self.emit_message(
+                let original_payload = (working_bytes != original_bytes).then_some(original_bytes);
+                let record = WebSocketMessage {
                     id,
+                    revision: 1,
+                    flow_id: self.relay.flow_id,
                     sequence,
-                    observed_unix_ms,
-                    direction,
+                    direction: self.direction,
                     kind,
-                    working_bytes,
-                    original_payload,
-                )
-                .await?;
-                if !self.closing.is_cancelled() {
-                    self.send_message(writer, outgoing, false, destination_closed)
-                        .await?;
-                }
-                Ok(())
+                    payload: working_bytes,
+                    observed_unix_ms,
+                };
+                self.emit_and_forward_frame(record, original_payload, outgoing)
+                    .await
             }
             Err(error) => {
-                let _ = self.emit_resolved(id).await;
+                let _ = self.relay.emit_resolved(id).await;
                 Err(error)
             }
         }

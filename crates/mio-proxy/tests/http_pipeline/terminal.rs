@@ -5,7 +5,7 @@ async fn stop_retains_terminal_request_when_events_are_full_or_closed() {
     for close_consumer in [false, true] {
         let mut origin = Origin::start(None, true).await;
         let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
-        config.max_connections = 1;
+        config.limits.max_connections = 1;
         let (sender, receiver) = mpsc::channel(1);
         let mut receiver = Some(receiver);
         let mut proxy = mio_proxy::start(

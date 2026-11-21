@@ -106,6 +106,7 @@ fn settings_save_as_success_preserves_plugin_commit_and_sends_once(cx: &mut Test
             run_id,
             draft,
             settings: sent_settings,
+            group_send: _,
             cancel,
         },
     ] = released.as_slice()

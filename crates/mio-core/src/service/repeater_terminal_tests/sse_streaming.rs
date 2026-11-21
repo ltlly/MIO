@@ -60,6 +60,7 @@ async fn repeater_sse_streaming_progress_and_cancel_preserve_partial_response_ac
                 run_id,
                 draft: draft.clone(),
                 settings: RepeaterSettings::default(),
+                group_send: None,
                 cancel: CancellationToken::new(),
             })
             .await

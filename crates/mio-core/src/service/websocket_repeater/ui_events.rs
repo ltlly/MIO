@@ -171,11 +171,19 @@ impl State {
                 .clamp(1, 3600),
         );
         Ok(SendConfig {
-            upstream_route,
-            upstream_tls,
-            client_certificates,
-            hostname_overrides,
-            timeout,
+            network: mio_proxy::SendNetworkConfig {
+                upstream_route,
+                hostname_overrides,
+            },
+            tls: mio_proxy::UpstreamTlsConfig {
+                trust: upstream_tls,
+                client_certificates,
+                ..Default::default()
+            },
+            limits: mio_proxy::SendLimits {
+                timeout,
+                ..Default::default()
+            },
             ..SendConfig::default()
         })
     }

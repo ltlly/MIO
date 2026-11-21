@@ -224,8 +224,8 @@ async fn intruder_workspace_tls_trust_is_used_by_actual_send_and_strictly_reject
         let target = format!("https://127.0.0.1:{}/tls-root", address.port());
         let forwarded_target = format!("http://{address}/intruder");
         let mut config = mio_proxy::ProxyConfig::new(ca);
-        config.request_timeout = Duration::from_secs(2);
-        config.stop_timeout = Duration::from_secs(2);
+        config.limits.request_timeout = Duration::from_secs(2);
+        config.limits.stop_timeout = Duration::from_secs(2);
         let (proxy_events, _proxy_receiver) = mpsc::channel(64);
         let mut fixture_proxy = mio_proxy::start(config, ProjectKey { id: Uuid::new_v4(), generation: 1 }, proxy_events).await.unwrap();
         fixture_proxy.set_transform(Some(std::sync::Arc::new(move |record, response, _, cancel, (deadline, max)| {

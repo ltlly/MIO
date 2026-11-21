@@ -68,19 +68,32 @@ pub enum UpstreamRoute {
     },
 }
 
+pub(crate) fn strip_host_brackets(raw: &str) -> &str {
+    raw.trim().trim_matches(['[', ']'])
+}
+
+pub(crate) fn normalize_host(raw: &str) -> String {
+    strip_host_brackets(raw.trim().trim_end_matches('.'))
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+pub(crate) fn format_host_for_authority(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        format!("[{trimmed}]")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Matches a target host against a SOCKS bypass host pattern.
 ///
 /// Supports exact hosts/IPs (`localhost`, `127.0.0.1`, `::1`), leading-dot suffixes
 /// (`.corp.local`), subdomain wildcards (`*.corp.local`), and glob wildcards (`192.168.*`, `dev-?.local`).
 pub fn matches_bypass_host(pattern: &str, host: &str) -> bool {
-    let normalize = |raw: &str| {
-        raw.trim()
-            .trim_matches(['[', ']'])
-            .trim_end_matches('.')
-            .to_ascii_lowercase()
-    };
-    let pat = normalize(pattern);
-    let target = normalize(host);
+    let pat = normalize_host(pattern);
+    let target = normalize_host(host);
     if pat.is_empty() || target.is_empty() {
         return false;
     }

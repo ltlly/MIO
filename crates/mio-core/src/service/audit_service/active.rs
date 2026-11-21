@@ -63,13 +63,13 @@ pub(super) async fn maybe_unpack_response(
     }
     let cloned = response.clone();
     let method = request.method.clone();
-    let max_body = config.max_body_bytes;
-    let deadline = Instant::now() + config.timeout;
+    let max_body = config.limits.max_body_bytes;
+    let deadline = Instant::now() + config.limits.timeout;
     let cancel = cancel.clone();
     let worker = tokio::task::spawn_blocking(move || {
         http::unpack_response(&cloned, &method, max_body, &cancel, deadline)
     });
-    match timeout_at(TokioInstant::now() + config.timeout, worker).await {
+    match timeout_at(TokioInstant::now() + config.limits.timeout, worker).await {
         Ok(Ok(Ok(Some(unpacked)))) => unpacked,
         _ => response,
     }
@@ -142,7 +142,7 @@ pub(super) async fn run_scan(
     }
     let base_started_ms = now_unix_ms();
     let base_timer = Instant::now();
-    let base_deadline = base_timer + config.timeout;
+    let base_deadline = base_timer + config.limits.timeout;
     if let Err(err) = sessions
         .apply_before_send(
             crate::SessionTool::Scanner,
@@ -299,8 +299,8 @@ pub(super) async fn run_scan(
     }
 
     let mut probe_config = config.clone();
-    probe_config.raw_http1_override = None;
-    probe_config.update_content_length = true;
+    probe_config.http.raw_http1_override = None;
+    probe_config.http.update_content_length = true;
     let semaphore = Arc::new(Semaphore::new(ACTIVE_CONCURRENCY));
     let mut probes = JoinSet::<ProbeOutcome>::new();
 
@@ -406,7 +406,7 @@ pub(super) async fn run_scan(
                             &mut probe_req,
                             &cfg,
                             &child_cancel,
-                            timer + cfg.timeout,
+                            timer + cfg.limits.timeout,
                         )
                         .await
                         .is_err()

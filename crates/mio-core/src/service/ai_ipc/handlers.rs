@@ -902,16 +902,14 @@ async fn execute_ipc_repeater_send(
     };
     let started = std::time::Instant::now();
     let deadline = started + timeout;
-    let send_config = mio_proxy::SendConfig {
-        http_version: Some(request.version),
-        upstream_route,
-        upstream_tls,
-        hostname_overrides,
-        streaming_timeout,
-        client_certificates,
-        timeout,
-        ..mio_proxy::SendConfig::default()
-    };
+    let mut send_config = mio_proxy::SendConfig::default();
+    send_config.network.upstream_route = upstream_route;
+    send_config.network.hostname_overrides = hostname_overrides;
+    send_config.tls.trust = upstream_tls;
+    send_config.tls.client_certificates = client_certificates;
+    send_config.limits.timeout = timeout;
+    send_config.limits.streaming_timeout = streaming_timeout;
+    send_config.http.version = Some(request.version);
     let (changed, steps) = match sessions
         .apply_to_flow_record_with_steps(
             SessionTool::Repeater,
@@ -975,7 +973,7 @@ async fn execute_ipc_repeater_send(
     let unpacked = if settings.unpack_compressed_responses {
         let resp_for_unpack = response.clone();
         let method_for_unpack = record.request.method.clone();
-        let max_body = send_config.max_body_bytes;
+        let max_body = send_config.limits.max_body_bytes;
         let cancel_for_unpack = cancel.clone();
         tokio::task::spawn_blocking(move || {
             crate::http::unpack_response(

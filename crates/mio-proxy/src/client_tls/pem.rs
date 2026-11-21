@@ -1,6 +1,6 @@
 use super::*;
 use rama::{
-    crypto::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    crypto::pki_types::{CertificateDer, PrivateKeyDer},
     tls::{
         client::{ClientAuth, ClientAuthData, TlsClientConfig},
         rustls::dep::rustls,
@@ -52,7 +52,12 @@ impl ParsedClientIdentity {
         } else {
             private_key_pem
         };
-        let (certs, key) = parse_pem_materials(certificate_pem, key_source)?;
+        let (certs, key) = crate::tls::parse_pem_cert_chain_and_key(
+            certificate_pem,
+            key_source,
+            MAX_CLIENT_CERT_CHAIN_LEN,
+            "客户端",
+        )?;
         validate_and_build_identity(certs, key)
     }
 
@@ -70,7 +75,12 @@ impl ParsedClientIdentity {
             return Err(ProxyError::invalid("PKCS#12 口令无效或包含换行符／空字节"));
         }
         let pem_output = ZeroizeBytes(unpack_pkcs12_to_pem(pkcs12_bytes, password)?);
-        let (mut certs, key) = parse_pem_materials(&pem_output.0, &pem_output.0)?;
+        let (mut certs, key) = crate::tls::parse_pem_cert_chain_and_key(
+            &pem_output.0,
+            &pem_output.0,
+            MAX_CLIENT_CERT_CHAIN_LEN,
+            "客户端",
+        )?;
         reorder_pkcs12_leaf(&mut certs, &key)?;
         validate_and_build_identity(certs, key)
     }
@@ -99,37 +109,6 @@ impl ParsedClientIdentity {
     }
 }
 
-fn parse_pem_materials(
-    cert_pem: &[u8],
-    key_pem: &[u8],
-) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ProxyError> {
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ProxyError::Tls(format!("客户端 PEM 证书解析失败：{error}")))?;
-    if certs.is_empty() {
-        return Err(ProxyError::Tls("未找到 PEM 客户端证书".into()));
-    }
-    if certs.len() > MAX_CLIENT_CERT_CHAIN_LEN {
-        return Err(ProxyError::Tls(format!(
-            "客户端证书链超过 {MAX_CLIENT_CERT_CHAIN_LEN} 张上限"
-        )));
-    }
-    let mut keys: Vec<PrivateKeyDer<'static>> = PrivateKeyDer::pem_slice_iter(key_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ProxyError::Tls(format!("客户端 PEM 私钥解析失败：{error}")))?;
-    if keys.is_empty() {
-        return Err(ProxyError::Tls(
-            "未找到受支持的未加密 PEM 客户端私钥".into(),
-        ));
-    }
-    if keys.len() > 1 {
-        return Err(ProxyError::Tls(
-            "客户端证书材料包含多把私钥，未猜测使用哪一把".into(),
-        ));
-    }
-    Ok((certs, keys.pop().expect("checked single key")))
-}
-
 fn reorder_pkcs12_leaf(
     certs: &mut Vec<CertificateDer<'static>>,
     private_key: &PrivateKeyDer<'static>,
@@ -137,7 +116,7 @@ fn reorder_pkcs12_leaf(
     if certs.len() <= 1 {
         return Ok(());
     }
-    let provider = rustls::crypto::ring::default_provider();
+    let provider = crate::tls::shared_crypto_provider();
     let signing_key = provider
         .key_provider
         .load_private_key(private_key.clone_key())
@@ -191,14 +170,13 @@ fn validate_and_build_identity(
         }
     }
 
-    let provider = rustls::crypto::ring::default_provider();
+    let provider = crate::tls::shared_crypto_provider();
     let certified_key =
-        rustls::sign::CertifiedKey::from_der(certs.clone(), private_key.clone_key(), &provider)
+        rustls::sign::CertifiedKey::from_der(certs.clone(), private_key.clone_key(), provider)
             .map_err(|error| ProxyError::Tls(format!("客户端证书与私钥加载失败：{error}")))?;
     certified_key
         .keys_match()
         .map_err(|error| ProxyError::Tls(format!("客户端证书公钥与私钥不匹配：{error}")))?;
-    let _ = rustls::sign::SingleCertAndKey::from(certified_key);
 
     let cert_count = certs.len();
     Ok(ParsedClientIdentity {

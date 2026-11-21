@@ -45,7 +45,8 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             secure
         );
         assert_eq!(
@@ -59,7 +60,8 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
                 &cancel,
                 limits
             )
-            .unwrap(),
+            .unwrap()
+            .should_intercept(),
             !secure
         );
         assert_eq!(record, unchanged);
@@ -124,6 +126,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         !port(
@@ -137,6 +140,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         !port(
@@ -150,6 +154,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         port(
@@ -163,6 +168,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         port(
@@ -211,6 +217,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.request.enabled = false;
     settings.response.enabled = false;
@@ -227,6 +234,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert!(
         !off(
@@ -240,6 +248,7 @@ fn proxy_intercept_protocol_uses_target_scheme_and_listener_rule_uses_bound_port
             limits
         )
         .unwrap()
+        .should_intercept()
     );
 }
 
@@ -303,6 +312,7 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
                 limits
             )
             .unwrap()
+            .should_intercept()
         );
         assert!(
             filter(
@@ -316,6 +326,7 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
                 limits
             )
             .unwrap()
+            .should_intercept()
         );
     }
     let mut settings = crate::ProxyInterceptionSettings::default();
@@ -340,6 +351,7 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.rules[0].relationship = ResponseDoesNotMatch;
     let negated = build_intercept_filter(settings.clone(), crate::TargetScope::default()).unwrap();
@@ -355,6 +367,7 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     settings.response.rules[0].match_type = CookieName;
     settings.response.rules[0].relationship = ResponseMatches;
@@ -372,7 +385,8 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
             &cancel,
             limits
         )
-        .unwrap(),
+        .unwrap()
+        .should_intercept(),
         "Set-Cookie attributes are not additional response cookies"
     );
     settings.response.rules[0].relationship = RequestDoesNotMatch;
@@ -391,6 +405,7 @@ fn proxy_intercept_cookie_sides_preserve_quoted_binary_duplicates_and_validate_a
             limits
         )
         .unwrap()
+        .should_intercept()
     );
     assert_eq!(record, unchanged);
     record.request.headers[0].value = (0..257)
