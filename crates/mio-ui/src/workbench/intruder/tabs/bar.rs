@@ -27,6 +27,7 @@ const INTRUDER_GROUP_PALETTE: &[(u8, u32, &str)] = &[
 ];
 
 impl Workbench {
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_tab_bar(
         &self,
         window: &mut Window,
@@ -48,98 +49,15 @@ impl Workbench {
         }
         for group in &self.workspace.intruder.groups {
             let id = group.id;
-            let group_rename = self
-                .intruder
-                .rename
-                .as_ref()
-                .filter(|rename| rename.is_group && rename.id == id);
-            let group_rename_width = group_rename.filter(|_| !vertical).map(|rename| {
-                let value = rename.input.read(cx).value();
-                let run = window.text_style().to_run(value.len());
-                let width = window
-                    .text_system()
-                    .shape_line(value, theme::ui_font_size(), &[run], None)
-                    .width;
-                (width + theme::scaled_px(36.)).clamp(theme::scaled_px(64.), theme::scaled_px(220.))
-            });
-            let group_bg: gpui_kit::Hsla = if group.color.is_some() {
-                crate::workbench::tab_groups::group_color(group.color)
-            } else {
-                rgb(if theme::is_dark() { 0x35383d } else { 0xe7e7e7 }).into()
-            };
-            let has_custom_color = group.color.is_some();
-            let group_weak = cx.weak_entity();
-            items.push(
-                div()
-                    .id(SharedString::from(format!("intruder-group-{id}")))
-                    .test_support()
-                    .px(px(9.))
-                    .min_h(theme::scaled_px(28.).max(px(26.)))
-                    .when(!vertical, |this| this.rounded(px(4.)))
-                    .when(vertical, |this| {
-                        this.w_full().rounded(px(5.)).px(px(8.)).mt(px(4.))
-                    })
-                    .when_some(group_rename_width, |this, width| this.w(width))
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .bg(group_bg)
-                    .when(has_custom_color, |this| this.text_color(rgb(0x1f2328)))
-                    .text_size(theme::scaled_px(12.))
-                    .font_weight(if vertical {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .cursor_pointer()
-                    .child(match group_rename {
-                        Some(rename) => div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                Input::new(&rename.input)
-                                    .small()
-                                    .appearance(false)
-                                    .px_0()
-                                    .aria_label("重命名 Intruder 分组"),
-                            )
-                            .into_any_element(),
-                        None => div()
-                            .truncate()
-                            .child(format!(
-                                "{} {}",
-                                if group.collapsed { "▸" } else { "▾" },
-                                group.title
-                            ))
-                            .into_any_element(),
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.transition.is_some()
-                            || this
-                                .intruder
-                                .rename
-                                .as_ref()
-                                .is_some_and(|rename| rename.is_group && rename.id == id)
-                        {
-                            return;
-                        }
-                        if let Some(group) = this
-                            .workspace
-                            .intruder
-                            .groups
-                            .iter_mut()
-                            .find(|group| group.id == id)
-                        {
-                            group.collapsed = !group.collapsed;
-                            this.save_workspace(cx);
-                            cx.notify();
-                        }
-                    }))
-                    .context_menu(move |menu, window, cx| {
-                        intruder_group_menu(group_weak.clone(), id, menu, window, cx)
-                    })
-                    .into_any_element(),
-            );
+            items.push(self.render_intruder_group_pill(
+                id,
+                &group.title,
+                group.color,
+                group.collapsed,
+                vertical,
+                window,
+                cx,
+            ));
             if !group.collapsed {
                 for tab in self
                     .workspace
@@ -333,6 +251,104 @@ impl Workbench {
         }
     }
 
+    #[inline(never)]
+    fn render_intruder_group_pill(
+        &self,
+        id: Uuid,
+        title: &str,
+        color: Option<u8>,
+        collapsed: bool,
+        vertical: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let group_rename = self
+            .intruder
+            .rename
+            .as_ref()
+            .filter(|rename| rename.is_group && rename.id == id);
+        let group_rename_width = group_rename.filter(|_| !vertical).map(|rename| {
+            let value = rename.input.read(cx).value();
+            let run = window.text_style().to_run(value.len());
+            let width = window
+                .text_system()
+                .shape_line(value, theme::ui_font_size(), &[run], None)
+                .width;
+            (width + theme::scaled_px(36.)).clamp(theme::scaled_px(64.), theme::scaled_px(220.))
+        });
+        let group_bg: gpui_kit::Hsla = if color.is_some() {
+            crate::workbench::tab_groups::group_color(color)
+        } else {
+            rgb(if theme::is_dark() { 0x35383d } else { 0xe7e7e7 }).into()
+        };
+        let has_custom_color = color.is_some();
+        let group_weak = cx.weak_entity();
+        let pill_label = format!("{} {}", if collapsed { "▸" } else { "▾" }, title);
+        div()
+            .id(SharedString::from(format!("intruder-group-{id}")))
+            .test_support()
+            .px(px(9.))
+            .min_h(theme::scaled_px(28.).max(px(26.)))
+            .when(!vertical, |this| this.rounded(px(4.)))
+            .when(vertical, |this| {
+                this.w_full().rounded(px(5.)).px(px(8.)).mt(px(4.))
+            })
+            .when_some(group_rename_width, |this, width| this.w(width))
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .bg(group_bg)
+            .when(has_custom_color, |this| this.text_color(rgb(0x1f2328)))
+            .text_size(theme::scaled_px(12.))
+            .font_weight(if vertical {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
+            .cursor_pointer()
+            .child(match group_rename {
+                Some(rename) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        Input::new(&rename.input)
+                            .small()
+                            .appearance(false)
+                            .px_0()
+                            .aria_label("重命名 Intruder 分组"),
+                    )
+                    .into_any_element(),
+                None => div().truncate().child(pill_label).into_any_element(),
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.transition.is_some()
+                    || this
+                        .intruder
+                        .rename
+                        .as_ref()
+                        .is_some_and(|rename| rename.is_group && rename.id == id)
+                {
+                    return;
+                }
+                if let Some(group) = this
+                    .workspace
+                    .intruder
+                    .groups
+                    .iter_mut()
+                    .find(|group| group.id == id)
+                {
+                    group.collapsed = !group.collapsed;
+                    this.save_workspace(cx);
+                    cx.notify();
+                }
+            }))
+            .context_menu(move |menu, window, cx| {
+                intruder_group_menu(group_weak.clone(), id, menu, window, cx)
+            })
+            .into_any_element()
+    }
+
+    #[inline(never)]
     fn render_intruder_tab(
         &self,
         tab: &IntruderTab,
@@ -548,6 +564,7 @@ impl Workbench {
     }
 }
 
+#[inline(never)]
 fn intruder_tab_menu(
     view: WeakEntity<Workbench>,
     id: TabId,
@@ -726,6 +743,7 @@ fn intruder_tab_menu(
     })
 }
 
+#[inline(never)]
 fn intruder_group_menu(
     view: WeakEntity<Workbench>,
     group_id: Uuid,

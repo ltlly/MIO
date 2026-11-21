@@ -10,10 +10,24 @@ impl NativePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.replace_with_sync(snapshot, editor_bases, None, &[], window, cx)
+    }
+
+    pub(crate) fn replace_with_sync(
+        &mut self,
+        snapshot: Arc<PanelSnapshot>,
+        editor_bases: &[EditorSnapshot],
+        synced_ui_seq: Option<u64>,
+        rejected_ui_seqs: &[u64],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         snapshot.validate()?;
         if snapshot.revision < self.snapshot.revision {
             return Err("忽略已过期的插件面板。".into());
         }
+        let newer_revision = snapshot.revision > self.snapshot.revision;
+        let sync_cutoff = synced_ui_seq.unwrap_or(u64::MAX);
         let mut nodes = Vec::new();
         walk(snapshot.root.as_ref().unwrap(), &mut nodes);
         let ids: HashSet<_> = nodes.iter().map(|node| node.id).collect();
@@ -145,14 +159,43 @@ impl NativePanel {
                 }
                 node::Kind::VirtualTable(table) => {
                     if let Some(state) = self.tables.get_mut(&node.id) {
-                        state.viewport_revision =
-                            state.viewport_revision.max(table.viewport_revision);
+                        state.next_viewport_revision =
+                            state.next_viewport_revision.max(table.viewport_revision);
+                        let prev_active = state.active_viewport_revision();
+                        state.confirmed_viewport_revision = table.viewport_revision;
+                        state.pending_viewports.retain(|&(rev, offset, seq)| {
+                            rev > table.viewport_revision
+                                && (offset == 0 || offset < table.total_rows)
+                                && seq > sync_cutoff
+                                && !rejected_ui_seqs.contains(&seq)
+                        });
+                        if let Some(&(rev, offset, seq)) = state.pending_viewports.last() {
+                            state.requested_offset = Some(offset);
+                            state.requested_viewport = Some((rev, seq, false));
+                        } else if let Some(req_offset) = state.requested_offset {
+                            let target_arrived = table.offset == req_offset;
+                            let out_of_range = req_offset > 0 && req_offset >= table.total_rows;
+                            let (req_rev, req_seq, loading_snapshot_seen) =
+                                state.requested_viewport.unwrap_or((prev_active, 0, false));
+                            let rejected = req_seq != 0 && rejected_ui_seqs.contains(&req_seq);
+                            let worker_published_loading = loading_snapshot_seen || newer_revision;
+                            let awaiting_async_page = worker_published_loading
+                                && table.viewport_revision == req_rev
+                                && !target_arrived
+                                && !out_of_range
+                                && !rejected;
+                            if awaiting_async_page {
+                                if newer_revision && !loading_snapshot_seen {
+                                    state.requested_viewport = Some((req_rev, req_seq, true));
+                                }
+                            } else {
+                                state.requested_offset = None;
+                                state.requested_viewport = None;
+                            }
+                        }
                         state
                             .selected
                             .retain(|id| table.rows.iter().any(|row| &row.id == id));
-                        if state.requested_offset == Some(table.offset) {
-                            state.requested_offset = None;
-                        }
                     } else {
                         let filter =
                             cx.new(|cx| InputState::new(window, cx).placeholder("筛选此表格"));
@@ -189,8 +232,11 @@ impl NativePanel {
                                 focus,
                                 scroll: UniformListScrollHandle::new(),
                                 horizontal: ScrollHandle::new(),
-                                viewport_revision: table.viewport_revision,
+                                next_viewport_revision: table.viewport_revision,
+                                confirmed_viewport_revision: table.viewport_revision,
+                                pending_viewports: Vec::new(),
                                 requested_offset: None,
+                                requested_viewport: None,
                                 _subscription: subscription,
                                 _focus_subscriptions: vec![focused, blurred],
                             },
@@ -247,22 +293,94 @@ impl NativePanel {
         self.tables.retain(|id, _| ids.contains(id));
         self.drawings.retain(|id, _| ids.contains(id));
         self.geometry.retain(|id, _| ids.contains(id));
-        self.tabs.retain(|id, active| {
-            snapshot.root.as_ref().unwrap().find(*id).is_some_and(|node| matches!(&node.kind, Some(node::Kind::Tabs(tabs)) if tabs.active != *active && tabs.tabs.iter().any(|tab| tab.content.as_ref().is_some_and(|node| node.id == *active))))
-        });
-        self.splits.retain(|id, fraction| {
-            snapshot.root.as_ref().unwrap().find(*id).is_some_and(|node| matches!(&node.kind, Some(node::Kind::Split(split)) if split.fraction != *fraction))
-        });
-        self.checkboxes.retain(|id, checked| {
-            snapshot.root.as_ref().unwrap().find(*id).is_some_and(
-                |node| matches!(&node.kind, Some(node::Kind::Checkbox(c)) if c.checked != *checked),
-            )
-        });
-        self.selects.retain(|id, index| {
-            snapshot.root.as_ref().unwrap().find(*id).is_some_and(|node| {
-                matches!(&node.kind, Some(node::Kind::Select(s)) if s.selected_index != *index && (*index as usize) < s.options.len())
-            })
-        });
+        if newer_revision {
+            let old_root = self.snapshot.root.as_ref();
+            let new_root = snapshot.root.as_ref();
+            retain_semantic_overlays(
+                &mut self.tabs,
+                sync_cutoff,
+                rejected_ui_seqs,
+                old_root,
+                new_root,
+                |old_node, new_node, &tab_id| {
+                    matches!(
+                        (&old_node.kind, &new_node.kind),
+                        (Some(node::Kind::Tabs(old_t)), Some(node::Kind::Tabs(new_t)))
+                            if old_t
+                                .tabs
+                                .iter()
+                                .find_map(|t| {
+                                    t.content
+                                        .as_ref()
+                                        .is_some_and(|c| c.id == tab_id)
+                                        .then_some(t.title.as_str())
+                                })
+                                .is_some_and(|old_title| {
+                                    new_t.tabs.iter().any(|t| {
+                                        t.content.as_ref().is_some_and(|c| c.id == tab_id)
+                                            && t.title == old_title
+                                    })
+                                })
+                    )
+                },
+            );
+            retain_semantic_overlays(
+                &mut self.splits,
+                sync_cutoff,
+                rejected_ui_seqs,
+                old_root,
+                new_root,
+                |old_node, new_node, _| {
+                    matches!(
+                        (&old_node.kind, &new_node.kind),
+                        (Some(node::Kind::Split(old_s)), Some(node::Kind::Split(new_s)))
+                            if old_s.axis == new_s.axis
+                    )
+                },
+            );
+            retain_semantic_overlays(
+                &mut self.checkboxes,
+                sync_cutoff,
+                rejected_ui_seqs,
+                old_root,
+                new_root,
+                |old_node, new_node, _| {
+                    matches!(
+                        (&old_node.kind, &new_node.kind),
+                        (
+                            Some(node::Kind::Checkbox(old_c)),
+                            Some(node::Kind::Checkbox(new_c))
+                        ) if new_c.enabled && old_c.label == new_c.label
+                    )
+                },
+            );
+            retain_semantic_overlays(
+                &mut self.selects,
+                sync_cutoff,
+                rejected_ui_seqs,
+                old_root,
+                new_root,
+                |old_node, new_node, &idx| {
+                    matches!(
+                        (&old_node.kind, &new_node.kind),
+                        (
+                            Some(node::Kind::Select(old_s)),
+                            Some(node::Kind::Select(new_s))
+                        ) if new_s.enabled
+                            && old_s.label == new_s.label
+                            && new_s
+                                .options
+                                .get(idx as usize)
+                                .is_some_and(|opt| old_s.options.get(idx as usize) == Some(opt))
+                    )
+                },
+            );
+        } else {
+            prune_overlays(&mut self.tabs, sync_cutoff, rejected_ui_seqs);
+            prune_overlays(&mut self.splits, sync_cutoff, rejected_ui_seqs);
+            prune_overlays(&mut self.checkboxes, sync_cutoff, rejected_ui_seqs);
+            prune_overlays(&mut self.selects, sync_cutoff, rejected_ui_seqs);
+        }
         if let Some(capture) = self.capture
             && !self.drawings.get(&capture.node_id).is_some_and(|drawing| {
                 drawing
@@ -399,7 +517,7 @@ impl NativePanel {
                 self.visible_nodes(split.second.as_ref().unwrap(), output);
             }
             node::Kind::Tabs(tabs) => {
-                let active = self.tabs.get(&node.id).copied().unwrap_or(tabs.active);
+                let active = latest_overlay(&self.tabs, node.id).unwrap_or(tabs.active);
                 if let Some(child) = tabs
                     .tabs
                     .iter()
@@ -412,4 +530,28 @@ impl NativePanel {
             _ => {}
         }
     }
+}
+
+fn retain_semantic_overlays<V>(
+    map: &mut HashMap<u64, Vec<(V, u64)>>,
+    sync_cutoff: u64,
+    rejected_ui_seqs: &[u64],
+    old_root: Option<&Node>,
+    new_root: Option<&Node>,
+    mut valid_target: impl FnMut(&Node, &Node, &V) -> bool,
+) {
+    map.retain(|&node_id, history| {
+        let Some((old_node, new_node)) = old_root
+            .and_then(|r| r.find(node_id))
+            .zip(new_root.and_then(|r| r.find(node_id)))
+        else {
+            return false;
+        };
+        history.retain(|(value, seq)| {
+            *seq > sync_cutoff
+                && !rejected_ui_seqs.contains(seq)
+                && valid_target(old_node, new_node, value)
+        });
+        !history.is_empty()
+    });
 }

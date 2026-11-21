@@ -33,6 +33,33 @@ impl Node {
         }
     }
 
+    pub(super) fn collect_ids(&self, out: &mut HashSet<u64>) {
+        out.insert(self.id);
+        match &self.kind {
+            Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
+                for child in &c.children {
+                    child.collect_ids(out);
+                }
+            }
+            Some(node::Kind::Split(s)) => {
+                if let Some(first) = &s.first {
+                    first.collect_ids(out);
+                }
+                if let Some(second) = &s.second {
+                    second.collect_ids(out);
+                }
+            }
+            Some(node::Kind::Tabs(t)) => {
+                for tab in &t.tabs {
+                    if let Some(content) = &tab.content {
+                        content.collect_ids(out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn editors<'a>(&'a self, output: &mut Vec<(u64, &'a Editor)>) {
         match &self.kind {
             Some(node::Kind::Editor(editor)) => output.push((self.id, editor)),
@@ -60,34 +87,38 @@ impl Node {
         }
     }
 
-    pub(super) fn preserve_table_revisions(&self, next_root: &Node) -> Result<(), String> {
+    pub(super) fn preserve_table_revisions_with(
+        &self,
+        next_root: &Node,
+        allow_vp: &mut impl FnMut(u64, &VirtualTable, &VirtualTable) -> bool,
+    ) -> Result<(), String> {
         if let Some(node::Kind::VirtualTable(previous)) = &self.kind
             && let Some(node::Kind::VirtualTable(next)) =
                 next_root.find(self.id).and_then(|node| node.kind.as_ref())
         {
             check(
-                next.viewport_revision >= previous.viewport_revision,
+                allow_vp(self.id, previous, next),
                 "表格 viewport revision 已过期；需要重新同步",
             )?;
         }
         match &self.kind {
             Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
                 for node in &c.children {
-                    node.preserve_table_revisions(next_root)?;
+                    node.preserve_table_revisions_with(next_root, allow_vp)?;
                 }
             }
             Some(node::Kind::Split(split)) => {
                 if let Some(node) = &split.first {
-                    node.preserve_table_revisions(next_root)?;
+                    node.preserve_table_revisions_with(next_root, allow_vp)?;
                 }
                 if let Some(node) = &split.second {
-                    node.preserve_table_revisions(next_root)?;
+                    node.preserve_table_revisions_with(next_root, allow_vp)?;
                 }
             }
             Some(node::Kind::Tabs(tabs)) => {
                 for tab in &tabs.tabs {
                     if let Some(node) = &tab.content {
-                        node.preserve_table_revisions(next_root)?;
+                        node.preserve_table_revisions_with(next_root, allow_vp)?;
                     }
                 }
             }

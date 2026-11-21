@@ -382,6 +382,7 @@ async fn sandbox_worker_drives_envelope_hooks_and_matches_packaged_wasm_asset() 
         module,
         writes,
         wire_tx,
+        std::sync::Arc::new(crate::plugins::OutboundWriteClaims::default()),
         cancel.clone(),
     );
 

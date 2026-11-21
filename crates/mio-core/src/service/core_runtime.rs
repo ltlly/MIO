@@ -38,6 +38,7 @@ impl Runtime {
         let worker_cancel = cancel.clone();
         let worker = thread::Builder::new()
             .name("mio-services".into())
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(
@@ -72,7 +73,7 @@ impl Runtime {
                             }
                         }
                         let _ = ready.send(Ok::<_, String>(()));
-                        let result = runtime.block_on(state.run(receiver));
+                        let result = runtime.block_on(Box::pin(state.run(receiver)));
                         runtime.shutdown_timeout(Duration::from_secs(5));
                         result
                     }

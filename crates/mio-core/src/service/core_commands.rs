@@ -10,6 +10,8 @@ impl State {
             | Command::SetUserPreferences { .. }
             | Command::SetUserWorkbenchPreferences { .. }
             | Command::SetUserStartupPreferences { .. }
+            | Command::RemoveRecentProject { .. }
+            | Command::PruneMissingRecentProjects { .. }
             | Command::SetUserTlsCertificates { .. }
             | Command::InspectExternal { .. }
             | Command::ConvertExternal { .. }
@@ -29,7 +31,9 @@ impl State {
             | Command::Collaborator(_)
             | Command::QuerySiteMap { .. }
             | Command::AddSiteMapEntry { .. }
-            | Command::ReadSiteMapEntry { .. } => self.command_prefs_ext_tools(command).await?,
+            | Command::ReadSiteMapEntry { .. } => {
+                Box::pin(self.command_prefs_ext_tools(command)).await?
+            }
             Command::Quiesce { .. }
             | Command::Resume { .. }
             | Command::StartProject { .. }
@@ -106,6 +110,8 @@ pub(super) fn command_context(
         Command::SetUserPreferences { .. } => ("set_user_preferences", None),
         Command::SetUserWorkbenchPreferences { .. } => ("set_user_workbench_preferences", None),
         Command::SetUserStartupPreferences { .. } => ("set_user_startup_preferences", None),
+        Command::RemoveRecentProject { .. } => ("remove_recent_project", None),
+        Command::PruneMissingRecentProjects { .. } => ("prune_missing_recent_projects", None),
         Command::SetUserTlsCertificates { .. } => ("set_user_tls_certificates", None),
         Command::InspectExternal { project, .. } => ("inspect_ext", Some(*project)),
         Command::ConvertExternal { project, .. } => ("convert_ext", Some(*project)),

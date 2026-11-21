@@ -33,6 +33,7 @@ impl Settings {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn add_draft_rule_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_draft_rule_action_with_jar_opts(true, true, window, cx);
     }

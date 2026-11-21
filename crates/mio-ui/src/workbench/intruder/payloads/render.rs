@@ -18,6 +18,7 @@ fn payloads_header() -> gpui_kit::Div {
 }
 
 impl Workbench {
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_payloads(
         &self,
         id: TabId,
@@ -67,6 +68,57 @@ impl Workbench {
                 )
                 .into_any_element();
         }
+        let editable = self.transition.is_none() && !editors.loading_payloads;
+        div()
+            .id("intruder-payloads-panel")
+            .test_support()
+            .size_full()
+            .bg(theme::surface())
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .child(payloads_header())
+            .child(self.render_intruder_payloads_top_controls(
+                id,
+                spec,
+                editors,
+                positions,
+                editable,
+                cx,
+            ))
+            .child(self.render_intruder_payloads_list_section(
+                id,
+                spec,
+                editors,
+                editable,
+                cx,
+            ))
+            .child(self.render_intruder_numbers_section(id, editors, editable, cx))
+            .child(self.render_intruder_processing_section(id, editable, cx))
+            .child(self.render_intruder_generators_cards(id, editable, cx))
+            .when(editors.loading_payloads, |this| {
+                this.child(
+                    div()
+                        .px(px(14.))
+                        .pb(px(10.))
+                        .text_size(theme::scaled_px(12.))
+                        .text_color(theme::muted_foreground())
+                        .child("正在读取 payload 文件…"),
+                )
+            })
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_intruder_payloads_top_controls(
+        &self,
+        id: TabId,
+        spec: &IntruderSpec,
+        editors: &IntruderEditors,
+        positions: usize,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = editors.payload_position;
         let weak = cx.weak_entity();
         let position_count = payload_set_count(spec, positions);
@@ -103,83 +155,7 @@ impl Workbench {
                     )
                 })
         });
-        let values = displayed_payloads(spec, editors);
-        let count = values.map(<[_]>::len);
-        let weak = cx.weak_entity();
-        let list = uniform_list(
-            "intruder-payload-list",
-            count.unwrap_or(0),
-            move |range, _, cx| {
-                let Some(entity) = weak.upgrade() else {
-                    return Vec::new();
-                };
-                let view = entity.read(cx);
-                let Some(tab) = view.workspace.intruder.tabs.iter().find(|tab| tab.id == id) else {
-                    return Vec::new();
-                };
-                let Some(editors) = view.intruder.editors.get(&id) else {
-                    return Vec::new();
-                };
-                let Some(values) = displayed_payloads(&tab.spec, editors) else {
-                    return Vec::new();
-                };
-                range
-                    .filter_map(|index| {
-                        values.get(index).map(|value| (index, payload_label(value)))
-                    })
-                    .map(|(index, label)| {
-                        let click_weak = weak.clone();
-                        let right_weak = weak.clone();
-                        let menu_weak = weak.clone();
-                        div()
-                            .id(("intruder-payload", index))
-                            .test_support()
-                            .h(theme::row_height())
-                            .flex()
-                            .items_center()
-                            .px(px(6.))
-                            .truncate()
-                            .border_b_1()
-                            .border_color(theme::border().opacity(0.45))
-                            .bg(if editors.payload_selection.contains(&index) {
-                                theme::selected()
-                            } else {
-                                theme::surface()
-                            })
-                            .child(label)
-                            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                                let _ = right_weak.update(cx, |view, cx| {
-                                    if let Some(editors) = view.intruder.editors.get_mut(&id)
-                                        && !editors.payload_selection.contains(&index)
-                                    {
-                                        editors.payload_selection.clear();
-                                        editors.payload_selection.insert(index);
-                                        cx.notify();
-                                    }
-                                });
-                            })
-                            .on_click(move |event: &ClickEvent, _, cx| {
-                                let _ = click_weak.update(cx, |view, cx| {
-                                    if let Some(editors) = view.intruder.editors.get_mut(&id) {
-                                        if !event.modifiers().secondary(cx) {
-                                            editors.payload_selection.clear();
-                                        }
-                                        if !editors.payload_selection.insert(index) {
-                                            editors.payload_selection.remove(&index);
-                                        }
-                                    }
-                                    cx.notify();
-                                });
-                            })
-                            .context_menu(move |menu, _, cx| {
-                                intruder_payload_row_menu(menu_weak.clone(), id, index, menu, cx)
-                            })
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .size_full();
-        let editable = self.transition.is_none() && !editors.loading_payloads;
+        let count = displayed_payloads(spec, editors).map(<[_]>::len);
         let current_payload_type = self.current_intruder_payload_type(id, editors);
         let type_weak = cx.weak_entity();
         let payload_type_dropdown = button(
@@ -210,15 +186,10 @@ impl Workbench {
             count.map_or_else(|| "各位置不同".into(), |count| count.to_string());
         let request_count_text = payload_request_count(spec, positions)
             .map_or_else(|| "配置尚未完整".into(), |count| count.to_string());
+
         div()
-            .id("intruder-payloads-panel")
-            .test_support()
-            .size_full()
-            .bg(theme::surface())
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .child(payloads_header())
             .child(
                 div()
                     .px(px(14.))
@@ -348,6 +319,98 @@ impl Workbench {
                             .child(current_payload_type.description()),
                     ),
             )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_intruder_payloads_list_section(
+        &self,
+        id: TabId,
+        spec: &IntruderSpec,
+        editors: &IntruderEditors,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let values = displayed_payloads(spec, editors);
+        let count = values.map(<[_]>::len);
+        let weak = cx.weak_entity();
+        let list = uniform_list(
+            "intruder-payload-list",
+            count.unwrap_or(0),
+            move |range, _, cx| {
+                let Some(entity) = weak.upgrade() else {
+                    return Vec::new();
+                };
+                let view = entity.read(cx);
+                let Some(tab) = view.workspace.intruder.tabs.iter().find(|tab| tab.id == id) else {
+                    return Vec::new();
+                };
+                let Some(editors) = view.intruder.editors.get(&id) else {
+                    return Vec::new();
+                };
+                let Some(values) = displayed_payloads(&tab.spec, editors) else {
+                    return Vec::new();
+                };
+                range
+                    .filter_map(|index| {
+                        values.get(index).map(|value| (index, payload_label(value)))
+                    })
+                    .map(|(index, label)| {
+                        let click_weak = weak.clone();
+                        let right_weak = weak.clone();
+                        let menu_weak = weak.clone();
+                        div()
+                            .id(("intruder-payload", index))
+                            .test_support()
+                            .h(theme::row_height())
+                            .flex()
+                            .items_center()
+                            .px(px(6.))
+                            .truncate()
+                            .border_b_1()
+                            .border_color(theme::border().opacity(0.45))
+                            .bg(if editors.payload_selection.contains(&index) {
+                                theme::selected()
+                            } else {
+                                theme::surface()
+                            })
+                            .child(label)
+                            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                                let _ = right_weak.update(cx, |view, cx| {
+                                    if let Some(editors) = view.intruder.editors.get_mut(&id)
+                                        && !editors.payload_selection.contains(&index)
+                                    {
+                                        editors.payload_selection.clear();
+                                        editors.payload_selection.insert(index);
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .on_click(move |event: &ClickEvent, _, cx| {
+                                let _ = click_weak.update(cx, |view, cx| {
+                                    if let Some(editors) = view.intruder.editors.get_mut(&id) {
+                                        if !event.modifiers().secondary(cx) {
+                                            editors.payload_selection.clear();
+                                        }
+                                        if !editors.payload_selection.insert(index) {
+                                            editors.payload_selection.remove(&index);
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .context_menu(move |menu, _, cx| {
+                                intruder_payload_row_menu(menu_weak.clone(), id, index, menu, cx)
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .size_full();
+
+        div()
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .px(px(14.))
@@ -473,23 +536,11 @@ impl Workbench {
                         ),
                     ),
             )
-            .child(self.render_intruder_numbers_section(id, editors, editable, cx))
-            .child(self.render_intruder_processing_section(id, editable, cx))
-            .child(self.render_intruder_generators_cards(id, editable, cx))
-            .when(editors.loading_payloads, |this| {
-                this.child(
-                    div()
-                        .px(px(14.))
-                        .pb(px(10.))
-                        .text_size(theme::scaled_px(12.))
-                        .text_color(theme::muted_foreground())
-                        .child("正在读取 payload 文件…"),
-                )
-            })
             .into_any_element()
     }
 }
 
+#[inline(never)]
 fn intruder_payload_row_menu(
     view: WeakEntity<Workbench>,
     id: TabId,

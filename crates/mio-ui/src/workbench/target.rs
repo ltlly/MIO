@@ -131,7 +131,6 @@ pub(in crate::workbench) enum BranchItemAction {
     PassiveScan,
     DiscoverContent,
     SimulateManualTesting,
-    SendToRepeater,
     SendToIntruder,
 }
 

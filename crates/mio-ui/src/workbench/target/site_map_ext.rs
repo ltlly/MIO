@@ -915,9 +915,6 @@ impl Workbench {
             BranchItemAction::SimulateManualTesting => {
                 self.start_target_crawl_task("模拟手动测试", draft, window, cx);
             }
-            BranchItemAction::SendToRepeater => {
-                self.send_target_history_transfer(false, window, cx)
-            }
             BranchItemAction::SendToIntruder => self.send_target_history_transfer(true, window, cx),
         }
     }
@@ -950,7 +947,7 @@ impl Workbench {
                 .map(|node| node.url_prefix.clone())
                 .unwrap_or_else(|| prefix.to_owned());
             match action {
-                BranchItemAction::SendToRepeater | BranchItemAction::SendToIntruder => {
+                BranchItemAction::SendToIntruder => {
                     self.fail("该站点分支下尚无已捕获的请求记录。", cx);
                 }
                 _ => {
@@ -960,19 +957,10 @@ impl Workbench {
             }
             return;
         };
-        if matches!(
-            action,
-            BranchItemAction::SendToRepeater | BranchItemAction::SendToIntruder
-        ) {
+        if action == BranchItemAction::SendToIntruder {
             self.select_target_row(&row, window, cx);
             if let Some(entry) = self.target_transfer_entry(&row) {
-                self.begin_history_transfer(
-                    None,
-                    vec![entry],
-                    action == BranchItemAction::SendToIntruder,
-                    window,
-                    cx,
-                );
+                self.begin_history_transfer(None, vec![entry], true, window, cx);
             } else {
                 self.fail("所选分支首项没有可转送的请求。", cx);
             }
@@ -990,7 +978,7 @@ impl Workbench {
                         self.execute_branch_action_with_draft(draft, action, window, cx);
                     }
                 }
-                BranchItemAction::SendToRepeater | BranchItemAction::SendToIntruder => {}
+                BranchItemAction::SendToIntruder => {}
             }
             return;
         }
@@ -1058,18 +1046,9 @@ impl Workbench {
             })
             .cloned();
         if let Some(row) = has_history_row {
-            if matches!(
-                action,
-                BranchItemAction::SendToRepeater | BranchItemAction::SendToIntruder
-            ) {
+            if action == BranchItemAction::SendToIntruder {
                 if let Some(entry) = self.target_transfer_entry(&row) {
-                    self.begin_history_transfer(
-                        None,
-                        vec![entry],
-                        action == BranchItemAction::SendToIntruder,
-                        window,
-                        cx,
-                    );
+                    self.begin_history_transfer(None, vec![entry], true, window, cx);
                 }
                 return;
             }
@@ -1163,47 +1142,6 @@ impl Workbench {
         self.error = None;
         self.status = format!("已提取并复制 {count} 条链接到剪贴板。");
         cx.notify();
-    }
-
-    pub(in crate::workbench) fn copy_selected_target_har(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.transition.is_some() || self.project.is_none() || !self.backend_available() {
-            return;
-        }
-        let Some(selected_id) = self.target_pane.selected_id else {
-            self.fail("请先在站点地图中选择一条记录。", cx);
-            return;
-        };
-        let HistoryEntryId::Live(flow_id) = selected_id else {
-            self.fail("仅支持将实时流量记录复制为 HAR (JSON)。", cx);
-            return;
-        };
-        let Some(record) = self
-            .target_pane
-            .selected_live_record
-            .as_deref()
-            .filter(|r| r.summary.id == flow_id)
-            .or_else(|| self.detail.as_deref().filter(|r| r.summary.id == flow_id))
-        else {
-            self.fail("正在读取站点地图流量详情，请稍后重试复制为 HAR (JSON)。", cx);
-            return;
-        };
-        match mio_core::export_flows_to_har(std::slice::from_ref(record))
-            .map_err(|err| err.to_string())
-            .and_then(|bytes| {
-                String::from_utf8(bytes).map_err(|err| format!("HAR JSON 编码异常：{err}"))
-            })
-        {
-            Ok(har_json) => {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(har_json));
-                self.error = None;
-                self.status = "已复制 HAR (JSON) 到剪贴板。".into();
-                cx.notify();
-            }
-            Err(err) => self.fail(err, cx),
-        }
     }
 
     pub(in crate::workbench) fn set_target_row_highlight(

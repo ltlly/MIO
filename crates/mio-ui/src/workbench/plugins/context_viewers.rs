@@ -323,6 +323,7 @@ impl Workbench {
             return;
         };
         let panel = instance.panel.clone();
+        let expected_panel = Some(panel.read(cx).commit_snapshot());
         let editor = match panel.update(cx, |panel, cx| panel.capture_editor(document, window, cx))
         {
             Ok(editor) => editor,
@@ -339,6 +340,7 @@ impl Workbench {
                     revision,
                     request,
                     editor: editor.clone(),
+                    expected_panel,
                 },
                 Operation::CommitContext {
                     owner,

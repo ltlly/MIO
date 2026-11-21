@@ -249,3 +249,312 @@ async fn startup_wizard_real_clicks_distinguish_unremembered_mru_from_remembered
     });
     let _ = operation_id;
 }
+
+#[gpui_kit::test]
+async fn startup_wizard_remove_selected_and_prune_missing_recent_projects(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let live_path = dir.path().join("live.mio");
+    std::fs::write(&live_path, b"live").unwrap();
+    let missing_path = dir.path().join("missing.mio");
+
+    let mut fx = fixture(cx, vec![tab("1")], 16);
+    let window = fx.window;
+    let view = fx.view.clone();
+
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |wb, cx| {
+                wb.init_startup_wizard(None, window, cx);
+                let prefs = UserPreferences {
+                    revision: 2,
+                    recent_projects: vec![
+                        mio_core::RecentProject {
+                            name: "live".into(),
+                            path: live_path.clone(),
+                            last_accessed_unix_ms: 2_000,
+                        },
+                        mio_core::RecentProject {
+                            name: "missing".into(),
+                            path: missing_path.clone(),
+                            last_accessed_unix_ms: 1_000,
+                        },
+                    ],
+                    ..UserPreferences::default()
+                };
+                wb.user_preferences.confirmed = Some(prefs);
+                wb.sync_startup_wizard_preferences(cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+    drain(&mut fx.commands);
+
+    cx.read(|cx| {
+        let wizard = view.read(cx).startup_wizard.as_ref().unwrap();
+        let delegate = wizard.recent_table.read(cx).delegate();
+        assert_eq!(delegate.missing_count(), 1);
+        assert!(delegate.is_missing(&missing_path));
+        assert!(!delegate.is_missing(&live_path));
+    });
+
+    // Select row 0 (live) and click "移除选中".
+    click(window, ("wizard-recent-project-row", 0_usize), cx);
+    click(window, "wizard-remove-recent", cx);
+
+    let remove_cmd = drain(&mut fx.commands)
+        .into_iter()
+        .find(|c| matches!(c, Command::RemoveRecentProject { .. }))
+        .expect("expected RemoveRecentProject command");
+    let Command::RemoveRecentProject {
+        operation_id: rem_op,
+        expected_revision: 2,
+        path: rem_path,
+    } = remove_cmd
+    else {
+        unreachable!()
+    };
+    assert_eq!(rem_path, live_path);
+
+    fx.events
+        .try_send(Event::UserPreferencesSaved {
+            operation_id: rem_op,
+            result: Ok(UserPreferences {
+                revision: 3,
+                recent_projects: vec![mio_core::RecentProject {
+                    name: "missing".into(),
+                    path: missing_path.clone(),
+                    last_accessed_unix_ms: 1_000,
+                }],
+                ..UserPreferences::default()
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Now select the missing row into open_file_input and click "清理失效项目".
+    click(window, ("wizard-recent-project-row", 0_usize), cx);
+    click(window, "wizard-prune-recent", cx);
+
+    let prune_cmd = drain(&mut fx.commands)
+        .into_iter()
+        .find(|c| matches!(c, Command::PruneMissingRecentProjects { .. }))
+        .expect("expected PruneMissingRecentProjects command");
+    let Command::PruneMissingRecentProjects {
+        operation_id: prune_op,
+        expected_revision: 3,
+    } = prune_cmd
+    else {
+        unreachable!()
+    };
+
+    fx.events
+        .try_send(Event::UserPreferencesSaved {
+            operation_id: prune_op,
+            result: Ok(UserPreferences {
+                revision: 4,
+                recent_projects: Vec::new(),
+                ..UserPreferences::default()
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let wb = view.read(cx);
+        let wizard = wb.startup_wizard.as_ref().unwrap();
+        assert_eq!(wizard.recent_table.read(cx).delegate().rows.len(), 0);
+        assert_eq!(wizard.recent_table.read(cx).delegate().missing_count(), 0);
+        assert_eq!(wizard.open_file_input.read(cx).value().as_ref(), "");
+        assert_eq!(wb.user_preferences.confirmed.as_ref().unwrap().revision, 4);
+    });
+}
+
+#[gpui_kit::test]
+fn startup_wizard_failed_remove_preserves_input_and_sync_preserves_selection_by_path(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path_a = dir.path().join("a.mio");
+    let path_b = dir.path().join("b.mio");
+    std::fs::write(&path_a, b"a").unwrap();
+    std::fs::write(&path_b, b"b").unwrap();
+
+    let mut fx = fixture(cx, vec![tab("1")], 16);
+    let (window, view) = (fx.window, fx.view.clone());
+
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |wb, cx| {
+                wb.init_startup_wizard(None, window, cx);
+                wb.user_preferences.confirmed = Some(UserPreferences {
+                    revision: 5,
+                    recent_projects: vec![
+                        mio_core::RecentProject {
+                            name: "A".into(),
+                            path: path_a.clone(),
+                            last_accessed_unix_ms: 2_000,
+                        },
+                        mio_core::RecentProject {
+                            name: "B".into(),
+                            path: path_b.clone(),
+                            last_accessed_unix_ms: 1_000,
+                        },
+                    ],
+                    ..UserPreferences::default()
+                });
+                wb.sync_startup_wizard_preferences(cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+    drain(&mut fx.commands);
+
+    // Select row 0 ("A"), verify open_file_input has path_a, then trigger remove that FAILS.
+    click(window, ("wizard-recent-project-row", 0_usize), cx);
+    click(window, "wizard-remove-recent", cx);
+    let rem_op = drain(&mut fx.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::RemoveRecentProject { operation_id, .. } => Some(operation_id),
+            _ => None,
+        })
+        .expect("expected RemoveRecentProject");
+
+    // While waiting or upon save failure, open_file_input MUST NOT be cleared.
+    cx.read(|cx| {
+        let wiz = view.read(cx).startup_wizard.as_ref().unwrap();
+        assert_eq!(
+            wiz.open_file_input.read(cx).value().as_ref(),
+            path_a.to_string_lossy().as_ref()
+        );
+    });
+
+    fx.events
+        .try_send(Event::UserPreferencesSaved {
+            operation_id: rem_op,
+            result: Err("写入失败".into()),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let wiz = view.read(cx).startup_wizard.as_ref().unwrap();
+        assert_eq!(
+            wiz.open_file_input.read(cx).value().as_ref(),
+            path_a.to_string_lossy().as_ref(),
+            "open_file_input must stay preserved when RemoveRecentProject fails"
+        );
+    });
+
+    // Now select row 1 ("B"), type a custom path into open_file_input, and remove "A" ->
+    // "B" shifts to row 0 silently WITHOUT overwriting open_file_input.
+    let custom_path = dir.path().join("custom.mio").to_string_lossy().into_owned();
+    click(window, ("wizard-recent-project-row", 1_usize), cx);
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |wb, cx| {
+                let wiz = wb.startup_wizard.as_mut().unwrap();
+                wiz.open_file_input
+                    .update(cx, |s, cx| s.set_value(custom_path.clone(), window, cx));
+                wb.remove_wizard_recent_path(path_a.clone(), window, cx);
+            });
+        })
+        .unwrap();
+    let rem_a_op = drain(&mut fx.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::RemoveRecentProject { operation_id, .. } => Some(operation_id),
+            _ => None,
+        })
+        .unwrap();
+    fx.events
+        .try_send(Event::UserPreferencesSaved {
+            operation_id: rem_a_op,
+            result: Ok(UserPreferences {
+                revision: 6,
+                recent_projects: vec![
+                    mio_core::RecentProject {
+                        name: "A".into(),
+                        path: path_a.clone(),
+                        last_accessed_unix_ms: 2_000,
+                    },
+                    mio_core::RecentProject {
+                        name: "B".into(),
+                        path: path_b.clone(),
+                        last_accessed_unix_ms: 1_000,
+                    },
+                ],
+                ..UserPreferences::default()
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Verify sorting by Name descending keeps "B" selected at row 0 without overwriting open_file_input.
+    window
+        .update(cx, |_, window, cx| {
+            let table = view
+                .read(cx)
+                .startup_wizard
+                .as_ref()
+                .unwrap()
+                .recent_table
+                .clone();
+            table.update(cx, |t, cx| {
+                t.sort_column(
+                    0,
+                    gpui_kit::component::table::ColumnSort::Descending,
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let wiz = view.read(cx).startup_wizard.as_ref().unwrap();
+        let table = wiz.recent_table.read(cx);
+        let sel = table.selected_row().expect("B should stay selected across sort");
+        assert_eq!(table.delegate().rows[sel].path, path_b);
+        assert_eq!(wiz.open_file_input.read(cx).value().as_ref(), custom_path);
+    });
+
+    // Finally remove "A" for real -> "B" moves to row 0 and custom open_file_input remains intact.
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |wb, cx| {
+                wb.remove_wizard_recent_path(path_a.clone(), window, cx)
+            });
+        })
+        .unwrap();
+    let rem_a2_op = drain(&mut fx.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::RemoveRecentProject { operation_id, .. } => Some(operation_id),
+            _ => None,
+        })
+        .unwrap();
+    fx.events
+        .try_send(Event::UserPreferencesSaved {
+            operation_id: rem_a2_op,
+            result: Ok(UserPreferences {
+                revision: 7,
+                recent_projects: vec![mio_core::RecentProject {
+                    name: "B".into(),
+                    path: path_b.clone(),
+                    last_accessed_unix_ms: 1_000,
+                }],
+                ..UserPreferences::default()
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let wiz = view.read(cx).startup_wizard.as_ref().unwrap();
+        let table = wiz.recent_table.read(cx);
+        let sel = table.selected_row().expect("B should remain selected");
+        assert_eq!(table.delegate().rows[sel].path, path_b);
+        assert_eq!(wiz.open_file_input.read(cx).value().as_ref(), custom_path);
+    });
+}

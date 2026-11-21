@@ -349,6 +349,9 @@ impl Workbench {
         let Some(entry) = table.read(cx).delegate().rows.get(row).cloned() else {
             return;
         };
+        table.update(cx, |state, _| {
+            state.delegate_mut().selected_path = Some(entry.path.clone());
+        });
         if open_input.update(cx, |state, cx| {
             state.marked_text_range(window, cx).is_some()
         }) {
@@ -430,6 +433,187 @@ impl Workbench {
                     wizard.syncing_inputs = false;
                 }
             }
+        }
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn remove_selected_wizard_recent(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(wizard) = &self.startup_wizard else {
+            return;
+        };
+        if wizard.step != WizardStep::Step1 || wizard.cancel_confirm_open {
+            return;
+        }
+        let table = wizard.recent_table.clone();
+        let selected_path = table.read(cx).selected_row().and_then(|row| {
+            table
+                .read(cx)
+                .delegate()
+                .rows
+                .get(row)
+                .map(|entry| entry.path.clone())
+        });
+        let Some(path) = selected_path else {
+            return;
+        };
+        self.remove_wizard_recent_path(path, window, cx);
+    }
+
+    pub(in crate::workbench) fn remove_wizard_recent_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.backend_available() || self.file_picker_pending() {
+            return;
+        }
+        if self
+            .startup_wizard
+            .as_ref()
+            .is_some_and(|w| w.pending_recent_save.is_some() || w.step != WizardStep::Step1)
+        {
+            return;
+        }
+        let Some(expected_revision) = self
+            .user_preferences
+            .confirmed
+            .as_ref()
+            .map(|prefs| prefs.revision)
+        else {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = Some("用户偏好尚未加载完成，请稍后重试。".into());
+            }
+            cx.notify();
+            return;
+        };
+        let open_input = self
+            .startup_wizard
+            .as_ref()
+            .map(|w| w.open_file_input.clone());
+        let previous_paths = self
+            .user_preferences
+            .confirmed
+            .as_ref()
+            .map(|prefs| {
+                prefs
+                    .recent_projects
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(ref open_input) = open_input
+            && open_input.update(cx, |s, cx| s.marked_text_range(window, cx).is_some())
+        {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = Some(editing::COMPOSITION_PENDING.into());
+            }
+            cx.notify();
+            return;
+        }
+        let operation_id = Uuid::new_v4();
+        if !self.enqueue(
+            Command::RemoveRecentProject {
+                operation_id,
+                expected_revision,
+                path: path.clone(),
+            },
+            cx,
+        ) {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = self
+                    .error
+                    .clone()
+                    .or_else(|| Some("未能发送移除最近项目命令。".into()));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(wizard) = &mut self.startup_wizard {
+            wizard.pending_recent_save = Some(PendingRecentSave {
+                operation_id,
+                expected_revision,
+                label: "移除选中最近项目",
+                removed_path: Some(path),
+                previous_paths,
+            });
+            wizard.error = None;
+        }
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn prune_missing_wizard_recent(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.backend_available() || self.file_picker_pending() {
+            return;
+        }
+        if self
+            .startup_wizard
+            .as_ref()
+            .is_some_and(|w| w.pending_recent_save.is_some() || w.step != WizardStep::Step1)
+        {
+            return;
+        }
+        let Some(confirmed) = self.user_preferences.confirmed.as_ref() else {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = Some("用户偏好尚未加载完成，请稍后重试。".into());
+            }
+            cx.notify();
+            return;
+        };
+        let expected_revision = confirmed.revision;
+        let previous_paths: Vec<PathBuf> = confirmed
+            .recent_projects
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        let open_input = self
+            .startup_wizard
+            .as_ref()
+            .map(|w| w.open_file_input.clone());
+        if let Some(open_input) = &open_input
+            && open_input.update(cx, |s, cx| s.marked_text_range(window, cx).is_some())
+        {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = Some(editing::COMPOSITION_PENDING.into());
+            }
+            cx.notify();
+            return;
+        }
+        let operation_id = Uuid::new_v4();
+        if !self.enqueue(
+            Command::PruneMissingRecentProjects {
+                operation_id,
+                expected_revision,
+            },
+            cx,
+        ) {
+            if let Some(wizard) = &mut self.startup_wizard {
+                wizard.error = self
+                    .error
+                    .clone()
+                    .or_else(|| Some("未能发送清理失效最近项目命令。".into()));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(wizard) = &mut self.startup_wizard {
+            wizard.pending_recent_save = Some(PendingRecentSave {
+                operation_id,
+                expected_revision,
+                label: "清理失效最近项目",
+                removed_path: None,
+                previous_paths,
+            });
+            wizard.error = None;
         }
         cx.notify();
     }

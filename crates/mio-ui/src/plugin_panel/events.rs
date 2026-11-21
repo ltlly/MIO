@@ -30,13 +30,29 @@ impl NativePanel {
         document.pending_rebase = false;
     }
 
+    pub(in crate::plugin_panel) fn next_ui_seq(&mut self) -> u64 {
+        self.next_ui_seq = self.next_ui_seq.saturating_add(1);
+        self.next_ui_seq
+    }
+
     pub(in crate::plugin_panel) fn emit(
         &mut self,
         node_id: u64,
         event: ui_event::Event,
         cx: &mut Context<Self>,
     ) {
-        self.dispatch(
+        self.emit_with_seq(node_id, 0, event, cx);
+    }
+
+    pub(in crate::plugin_panel) fn emit_with_seq(
+        &mut self,
+        node_id: u64,
+        seq: u64,
+        event: ui_event::Event,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch_with_seq(
+            seq,
             UiEvent {
                 node_id,
                 event: Some(event),
@@ -47,9 +63,19 @@ impl NativePanel {
     }
 
     pub(in crate::plugin_panel) fn dispatch(&mut self, event: UiEvent, cx: &mut Context<Self>) {
+        self.dispatch_with_seq(0, event, cx);
+    }
+
+    pub(in crate::plugin_panel) fn dispatch_with_seq(
+        &mut self,
+        seq: u64,
+        event: UiEvent,
+        cx: &mut Context<Self>,
+    ) {
         if self.enabled {
             cx.emit(PanelEvent::Ui {
                 revision: self.snapshot.revision,
+                seq,
                 event,
             });
             cx.notify();
@@ -309,8 +335,9 @@ impl NativePanel {
             (position.y - bounds.origin.y).as_f32() / bounds.size.height.as_f32().max(1.)
         }
         .clamp(0.05, 0.95);
-        self.splits.insert(resize.node_id, fraction);
-        self.emit(resize.node_id, ui_event::Event::SplitResized(fraction), cx);
+        let seq = self.next_ui_seq();
+        push_overlay(&mut self.splits, resize.node_id, fraction, seq);
+        self.emit_with_seq(resize.node_id, seq, ui_event::Event::SplitResized(fraction), cx);
     }
 
     pub(in crate::plugin_panel) fn key(
@@ -322,9 +349,11 @@ impl NativePanel {
         if event.keystroke.key == "escape" {
             self.cancel_pointer(cx);
             if let Some(resize) = self.resize.take() {
-                self.splits.insert(resize.node_id, resize.original);
-                self.emit(
+                let seq = self.next_ui_seq();
+                push_overlay(&mut self.splits, resize.node_id, resize.original, seq);
+                self.emit_with_seq(
                     resize.node_id,
+                    seq,
                     ui_event::Event::SplitResized(resize.original),
                     cx,
                 );

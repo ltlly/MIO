@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::{
-    input::{Editor, Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     resizable::{resizable_panel, v_resizable},
 };

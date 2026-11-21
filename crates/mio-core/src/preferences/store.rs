@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, ensure};
 
 use super::{
@@ -165,6 +167,19 @@ impl PreferencesStore {
         self.apply(|current| next_recent_preferences(current, name, path, last_accessed_unix_ms))
     }
 
+    pub(crate) fn remove_recent(
+        &mut self,
+        expected: u64,
+        path: &Path,
+    ) -> Result<UserPreferences> {
+        let target = path.to_path_buf();
+        self.apply(|current| next_removed_recent_preferences(current, expected, &target))
+    }
+
+    pub(crate) fn prune_missing_recent(&mut self, expected: u64) -> Result<UserPreferences> {
+        self.apply(|current| next_pruned_recent_preferences(current, expected))
+    }
+
     fn apply(
         &mut self,
         update: impl FnOnce(&UserPreferences) -> Result<UserPreferences>,
@@ -258,6 +273,62 @@ fn next_recent_preferences(
     }
     recent_projects.sort_by_key(|entry| std::cmp::Reverse(entry.last_accessed_unix_ms));
     recent_projects.truncate(MAX_RECENT_PROJECTS);
+    Ok(UserPreferences {
+        version: VERSION,
+        revision,
+        recent_projects,
+        ..current.clone()
+    })
+}
+
+fn next_removed_recent_preferences(
+    current: &UserPreferences,
+    expected: u64,
+    path: &Path,
+) -> Result<UserPreferences> {
+    ensure!(
+        current.revision == expected,
+        "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
+    );
+    let revision = expected
+        .checked_add(1)
+        .context("用户偏好 revision 已耗尽")?;
+    let recent_projects = current
+        .recent_projects
+        .iter()
+        .filter(|entry| entry.path != path)
+        .cloned()
+        .collect();
+    Ok(UserPreferences {
+        version: VERSION,
+        revision,
+        recent_projects,
+        ..current.clone()
+    })
+}
+
+fn next_pruned_recent_preferences(
+    current: &UserPreferences,
+    expected: u64,
+) -> Result<UserPreferences> {
+    ensure!(
+        current.revision == expected,
+        "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
+    );
+    let revision = expected
+        .checked_add(1)
+        .context("用户偏好 revision 已耗尽")?;
+    let recent_projects = current
+        .recent_projects
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                std::fs::metadata(&entry.path),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+        .cloned()
+        .collect();
     Ok(UserPreferences {
         version: VERSION,
         revision,

@@ -1,24 +1,5 @@
 use super::*;
 
-fn open_select(settings: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
-    cx.update_window(settings, |_, window, cx| {
-        window.render_frame(cx);
-        window.click(id, cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    let expanded = cx
-        .update_window(settings, |_, window, cx| {
-            window.render_frame(cx);
-            window.find(id).expanded() == Some(true)
-        })
-        .unwrap();
-    if !expanded {
-        cx.simulate_keystrokes(settings, "enter");
-        cx.run_until_parked();
-    }
-}
-
 #[gpui_kit::test]
 fn repeater_settings_normalize_line_endings_and_redirect_modes_persist_and_reset(
     cx: &mut TestAppContext,

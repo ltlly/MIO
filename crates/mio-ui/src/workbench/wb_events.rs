@@ -79,7 +79,7 @@ impl Workbench {
                 operation_id,
                 result,
             } => {
-                if !self.receive_startup_wizard_preferences_saved(operation_id, &result, cx) {
+                if !self.receive_startup_wizard_preferences_saved(operation_id, &result, window, cx) {
                     self.receive_user_preferences_saved(operation_id, result, cx);
                 }
                 self.sync_startup_wizard_preferences(cx);

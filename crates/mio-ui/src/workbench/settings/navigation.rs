@@ -192,17 +192,6 @@ pub(super) fn project_scope_badge_with_id(id: &'static str) -> impl IntoElement 
         .aria_label("项目设置")
 }
 
-pub(super) fn user_scope_badge_plain() -> impl IntoElement {
-    scope_badge_pill("用户设置")
-}
-
-pub(super) fn user_scope_badge_with_id(id: &'static str) -> impl IntoElement {
-    scope_badge_pill("用户设置")
-        .id(id)
-        .test_support()
-        .aria_label("用户设置")
-}
-
 pub(super) fn settings_section_heading(
     id: impl Into<gpui_kit::ElementId>,
     title: &'static str,
@@ -369,25 +358,6 @@ pub(super) fn settings_gear_icon_button(
         .disabled(disabled)
         .child(
             Icon::new(gpui_kit::assets::IconName::Settings)
-                .size(px(21.))
-                .text_color(settings_icon_color()),
-        )
-}
-
-pub(super) fn settings_reset_icon_button(
-    id: impl Into<gpui_kit::ElementId>,
-    tooltip: &'static str,
-    disabled: bool,
-) -> Button {
-    Button::new(id)
-        .accessibility_label("恢复默认设置")
-        .tooltip(tooltip)
-        .size(px(22.))
-        .p_0()
-        .ghost()
-        .disabled(disabled)
-        .child(
-            Icon::new(gpui_kit::assets::IconName::RotateCcw)
                 .size(px(21.))
                 .text_color(settings_icon_color()),
         )

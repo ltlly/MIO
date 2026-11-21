@@ -53,6 +53,7 @@ async fn application_independent_editors_publish_opened_content_and_commit_lates
                 selection_start: 0,
                 selection_end: 0,
             },
+            expected_panel: None,
         })
         .await;
     let PluginOutcome::Committed { request, .. } = app.outcome(op).await.unwrap() else {

@@ -145,10 +145,9 @@ impl Workbench {
                     ))
                     .child(
                         div().flex_1().min_h_0().child(
-                            Editor::new(editors.request.state())
+                            editing::message_editor(editors.request.state())
                                 .readonly(editors.request.is_readonly_preview())
                                 .size_full()
-                                .bordered(false)
                                 .context_menu(self.request_context_menu(
                                     editors.request.state().clone(),
                                     false,
@@ -381,10 +380,9 @@ impl Workbench {
                 .child(self.message_header(request_id, "Request", request.view, cx))
                 .child(
                     div().flex_1().min_h_0().child(
-                        Editor::new(request.state())
+                        editing::message_editor(request.state())
                             .readonly(true)
                             .size_full()
-                            .bordered(false)
                             .context_menu(self.request_context_menu(request.state().clone(), true))
                             .aria_label("请求消息编辑器"),
                     ),
@@ -414,10 +412,9 @@ impl Workbench {
                 .child(self.message_header(response_id, "Response", response.view, cx))
                 .child(
                     div().flex_1().min_h_0().child(
-                        Editor::new(response.state())
+                        editing::message_editor(response.state())
                             .readonly(true)
                             .size_full()
-                            .bordered(false)
                             .context_menu(self.request_context_menu(response.state().clone(), true))
                             .aria_label("响应消息编辑器"),
                     ),

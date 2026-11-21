@@ -99,6 +99,7 @@ async fn call_service(
         .plugin_service(ServiceRequest {
             identity: f.identity,
             plugin_id: f.plugin_id.clone(),
+            panel_id: protocol::PANEL_ID,
             request_id,
             deadline: tokio::time::Instant::now() + Duration::from_secs(5),
             operation,
@@ -431,6 +432,7 @@ async fn v14_broker_and_host_enforce_permissions() {
                 label: "nope".into(),
             },
         )),
+        parent_request_id: 0,
     };
     assert_eq!(
         broker.authorize(&env, call).unwrap_err().code,

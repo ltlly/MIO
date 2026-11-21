@@ -20,6 +20,7 @@ pub(super) fn session(lab: &Lab) -> WorkerSession<io::Cursor<Vec<u8>>, io::Sink>
             max_frame_bytes: MAX_FRAME_BYTES as u32,
             max_operation_ms: 5000,
             granted_permissions: vec![],
+            host_minor: PROTOCOL_MINOR,
         }),
         duration,
     );
@@ -41,6 +42,7 @@ pub(super) fn session(lab: &Lab) -> WorkerSession<io::Cursor<Vec<u8>>, io::Sink>
             plugin_version: "0.1.0".into(),
             required_components: vec![],
             panel: Some(lab.snapshot()),
+            supports_panel_multiplexing: false,
         },
     )
     .unwrap()
@@ -270,4 +272,26 @@ fn late_flow_detail_cannot_replace_a_new_open_request() {
     .unwrap();
     assert_eq!(lab.context.as_ref().unwrap().resource, new_resource);
     assert_eq!(lab.context.as_ref().unwrap().revision, 9);
+}
+
+#[test]
+fn query_history_error_advances_viewport_revision_to_supersede_loading_state() {
+    let mut lab = Lab::new();
+    let mut session = session(&lab);
+    lab.viewport_revision = 5;
+    lab.pending
+        .insert(9, PendingService::History { viewport_revision: 5 });
+    lab.host_result(
+        &mut session,
+        9,
+        HostResult {
+            outcome: Some(host_result::Outcome::Error(Failure {
+                code: ErrorCode::Deadline as i32,
+                message: "history timeout".into(),
+            })),
+        },
+    )
+    .unwrap();
+    assert!(lab.error);
+    assert_eq!(lab.viewport_revision, 6);
 }

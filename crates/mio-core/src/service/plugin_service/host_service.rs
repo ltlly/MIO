@@ -47,11 +47,38 @@ impl State {
             ..
         } = &call.operation
         {
-            ensure!(
-                instance.resources.get(tab_id) == Some(expected_revision),
-                "插件资源 handle 已撤权或版本过期"
-            );
+            if call.panel_id == protocol::PANEL_ID {
+                ensure!(
+                    instance.resources.get(tab_id) == Some(expected_revision),
+                    "插件资源 handle 已撤权或版本过期"
+                );
+            } else {
+                let virtual_id = self
+                    .plugins
+                    .panel_routes
+                    .get(&(call.identity.instance_id, call.panel_id))
+                    .context("多路复用子面板已关闭")?;
+                let child = self
+                    .plugins
+                    .multiplexed
+                    .get(virtual_id)
+                    .context("多路复用子面板不存在")?;
+                ensure!(
+                    child.resources.get(tab_id) == Some(expected_revision),
+                    "多路复用子面板资源 handle 已撤权或版本过期"
+                );
+            }
             self.plugin_tab(*tab_id, *expected_revision)?;
+        } else if call.panel_id != protocol::PANEL_ID {
+            let virtual_id = self
+                .plugins
+                .panel_routes
+                .get(&(call.identity.instance_id, call.panel_id))
+                .context("多路复用子面板已关闭")?;
+            ensure!(
+                self.plugins.multiplexed.contains_key(virtual_id),
+                "多路复用子面板不存在"
+            );
         }
         Ok(())
     }

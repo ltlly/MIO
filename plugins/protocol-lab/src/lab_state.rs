@@ -215,6 +215,10 @@ impl Lab {
         let Some(pending) = self.pending.remove(&id) else {
             return Err(io::Error::other("未知宿主结果 ID"));
         };
+        let history_viewport = match &pending {
+            PendingService::History { viewport_revision } => Some(*viewport_revision),
+            _ => None,
+        };
         if matches!(pending, PendingService::Send { .. }) {
             self.sending = false;
         }
@@ -370,6 +374,9 @@ impl Lab {
         })();
         self.error = result.is_err();
         if let Err(error) = result {
+            if history_viewport == Some(self.viewport_revision) {
+                self.viewport_revision = self.viewport_revision.saturating_add(1);
+            }
             self.status = error;
         }
         self.publish(session, 0)

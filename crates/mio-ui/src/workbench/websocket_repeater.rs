@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui_kit::component::{
     button::ButtonVariants,
-    input::{Editor, Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, PopupMenuItem},
     resizable::{resizable_panel, v_resizable},
 };

@@ -1,4 +1,4 @@
-use std::{future::Future, path::{Path, PathBuf}, pin::Pin, task::Poll};
+use std::{collections::HashSet, future::Future, path::{Path, PathBuf}, pin::Pin, task::Poll};
 
 use mio_plugin_api::{
     panel::PanelSnapshot,
@@ -14,11 +14,21 @@ use crate::plugins::{
 };
 
 const MAX_INSTANCES: usize = 16;
-const MAX_OPERATIONS: usize = 32;
+const MAX_CHILD_EDITORS: usize = 64;
+const MAX_OPERATIONS: usize = 64;
 const MAX_NETWORK: usize = 16;
 const MAX_WORKSPACE_REQUESTS: usize = 32;
 const MAX_RESOURCES: usize = 64;
 type CallKey = (Uuid, u64);
+
+struct MultiplexedChild {
+    source_instance: Uuid,
+    panel_id: u64,
+    primary_resource: Uuid,
+    info: LoadedPlugin,
+    panel: std::sync::Arc<PanelSnapshot>,
+    resources: HashMap<Uuid, u64>,
+}
 
 struct Instance {
     worker: PluginSupervisor,
@@ -87,9 +97,13 @@ struct Operation {
     report: bool,
     cleanup_failed: bool,
     background_passive: bool,
+    is_suite_start: bool,
+    is_child_start: bool,
     replaces_existing: bool,
     autoload_plugin_id: Option<String>,
     binding: Option<(TabId, u64, Option<u64>)>,
+    multiplexed_cleanup_on_fail: Option<Uuid>,
+    closing_panel: Option<(Uuid, u64)>,
 }
 
 struct Network {
@@ -176,6 +190,7 @@ enum Output {
     },
     Retired {
         retired: Vec<Retired>,
+        retired_multiplexed: Vec<ChannelIdentity>,
         candidate: Option<Box<Candidate>>,
         disabled: Option<ChannelIdentity>,
         uninstalled_plugin_id: Option<String>,
@@ -208,6 +223,10 @@ pub(super) struct PluginState {
     auto_reload_timer: Option<Pin<Box<tokio::time::Sleep>>>,
     inspections: HashMap<Uuid, VerifiedPackage>,
     instances: HashMap<Uuid, Instance>,
+    multiplexed: HashMap<Uuid, MultiplexedChild>,
+    panel_routes: HashMap<(Uuid, u64), Uuid>,
+    closing_panels: HashSet<(Uuid, u64)>,
+    next_panel_id: u64,
     order: Vec<Uuid>,
     context_viewers: HashMap<Uuid, (Uuid, u64, bool)>,
     operations: HashMap<Uuid, Operation>,
@@ -234,6 +253,8 @@ mod payloads;
 mod state;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_multiplex;
 #[cfg(test)]
 mod tests_r4;
 #[cfg(test)]

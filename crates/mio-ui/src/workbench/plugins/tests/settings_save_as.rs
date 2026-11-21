@@ -201,6 +201,7 @@ fn ordinary_settings_save_as_abandons_plugin_commit(
                         instance_id,
                         panel_revision,
                         event,
+                        ..
                     },
                 ..
             } => {

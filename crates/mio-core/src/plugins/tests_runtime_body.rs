@@ -33,11 +33,16 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
     };
     running
         .control(
-            Control::Event(UiEvent {
-                node_id: 1,
-                event: Some(panel::ui_event::Event::EditorChanged(changed.clone())),
-                editors: vec![],
-            }),
+            Control::Event {
+                panel_id: protocol::PANEL_ID,
+                event: UiEvent {
+                    node_id: 1,
+                    event: Some(panel::ui_event::Event::EditorChanged(changed.clone())),
+                    editors: vec![],
+                },
+                expected_snapshot: None,
+                event_seq: 0,
+            },
             &outgoing,
         )
         .await
@@ -50,11 +55,16 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
     };
     running
         .control(
-            Control::Event(UiEvent {
-                node_id: 2,
-                event: Some(panel::ui_event::Event::Click(panel::Empty {})),
-                editors: vec![clicked.clone()],
-            }),
+            Control::Event {
+                panel_id: protocol::PANEL_ID,
+                event: UiEvent {
+                    node_id: 2,
+                    event: Some(panel::ui_event::Event::Click(panel::Empty {})),
+                    editors: vec![clicked.clone()],
+                },
+                expected_snapshot: None,
+                event_seq: 0,
+            },
             &outgoing,
         )
         .await
@@ -122,7 +132,7 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
     let resync = wire.try_recv().unwrap();
     assert!(
         running
-            .accept_panel_response(resync.request_id)
+            .accept_panel_response(protocol::PANEL_ID, resync.request_id, Instant::now())
             .unwrap()
             .is_empty()
     );
@@ -142,6 +152,7 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
             expected_revision: 1,
             request: Some(request().into()),
         })),
+        parent_request_id: 0,
     };
     let call_envelope = Envelope::new(
         running.identity,
@@ -172,6 +183,8 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     running
         .control(
             Control::Commit {
+                panel_id: protocol::PANEL_ID,
+                op_id: Uuid::new_v4(),
                 request: CommitEditor {
                     resource_id: resource.as_bytes().to_vec(),
                     message_revision: 1,
@@ -183,6 +196,8 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
                         ..Default::default()
                     }),
                 },
+                cancelled: CancellationToken::new(),
+                expected_snapshot: None,
                 reply,
             },
             &outgoing,
@@ -194,6 +209,7 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     running
         .control(
             Control::Open {
+                panel_id: protocol::PANEL_ID,
                 id: resource,
                 revision: 2,
                 read_only: false,
@@ -209,14 +225,27 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     running
         .control(
             Control::Revoke {
+                panel_id: protocol::PANEL_ID,
                 id: resource,
+                remove_panel: false,
                 reply,
             },
             &outgoing,
         )
         .await
         .unwrap();
-    let closing = wire.try_recv().unwrap();
+    let mut closing = None;
+    let mut cancelled_ids = Vec::new();
+    while let Ok(frame) = wire.try_recv() {
+        match frame.body {
+            Some(envelope::Body::Cancel(cancel)) => cancelled_ids.push(cancel.request_id),
+            Some(envelope::Body::CloseRequest(_)) => closing = Some(frame),
+            other => panic!("unexpected frame during revoke: {other:?}"),
+        }
+    }
+    assert!(cancelled_ids.contains(&committing.request_id));
+    assert!(cancelled_ids.contains(&opening.request_id));
+    let closing = closing.expect("revoke must emit CloseRequest");
     assert!(opened.try_recv().unwrap().is_err());
     assert!(committed.try_recv().unwrap().is_err());
     assert!(running.active_resource.is_none());
@@ -263,6 +292,7 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     running
         .control(
             Control::Open {
+                panel_id: protocol::PANEL_ID,
                 id: resource,
                 revision: 1,
                 read_only: false,

@@ -353,10 +353,9 @@ impl Workbench {
             .child(self.message_header("ws-repeater-history", "历史消息", editors.history.view, cx))
             .child(
                 div().flex_1().min_h_0().child(
-                    Editor::new(editors.history.state())
+                    editing::message_editor(editors.history.state())
                         .readonly(true)
                         .size_full()
-                        .bordered(false)
                         .context_menu(
                             self.request_context_menu(editors.history.state().clone(), true),
                         )
@@ -758,10 +757,9 @@ impl Workbench {
                     ))
                     .child(
                         div().flex_1().min_h_0().child(
-                            Editor::new(editors.draft.state())
+                            editing::message_editor(editors.draft.state())
                                 .readonly(!can_operate || editors.draft.is_readonly_preview())
                                 .size_full()
-                                .bordered(false)
                                 .context_menu(self.request_context_menu(
                                     editors.draft.state().clone(),
                                     !can_operate || editors.draft.is_readonly_preview(),

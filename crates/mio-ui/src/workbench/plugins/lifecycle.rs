@@ -19,10 +19,15 @@ impl Workbench {
                 self.pending_workspace = None;
                 self.workspace_dirty = true;
             }
-            Operation::Event { instance, node_id } => {
+            Operation::Event {
+                instance,
+                node_id,
+                event_seq,
+            } => {
                 if let Some(view) = self.extensions.instance(instance) {
-                    view.panel
-                        .update(cx, |panel, cx| panel.event_failed(Some(node_id), error, cx));
+                    view.panel.update(cx, |panel, cx| {
+                        panel.event_failed_with_seq(Some(node_id), Some(event_seq), error, cx)
+                    });
                 }
             }
             Operation::Rebind { instance, .. } => {

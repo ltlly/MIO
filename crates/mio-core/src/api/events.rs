@@ -217,6 +217,8 @@ pub enum Event {
         identity: protocol::ChannelIdentity,
         snapshot: Arc<panel::PanelSnapshot>,
         editor_bases: Vec<panel::EditorSnapshot>,
+        synced_ui_seq: Option<u64>,
+        rejected_ui_seqs: Vec<u64>,
     },
     PluginDiagnostic {
         identity: protocol::ChannelIdentity,

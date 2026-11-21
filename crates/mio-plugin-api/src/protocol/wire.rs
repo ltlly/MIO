@@ -39,6 +39,16 @@ impl Envelope {
         }
     }
 
+    pub fn with_panel_id(mut self, panel_id: u64) -> Self {
+        self.panel_id = panel_id;
+        self
+    }
+
+    pub fn with_minor(mut self, minor: u32) -> Self {
+        self.minor = minor;
+        self
+    }
+
     pub fn identity(&self) -> Result<ChannelIdentity, String> {
         if self.project_generation == 0 {
             return Err("project generation 不能为零".into());
@@ -58,7 +68,7 @@ impl Envelope {
         }
         self.identity()?;
         if self.request_id == 0
-            || self.panel_id != PANEL_ID
+            || self.panel_id == 0
             || self.deadline_unix_ms == 0
             || self.body.is_none()
         {
@@ -237,7 +247,11 @@ impl Envelope {
         Ok(())
     }
 
-    pub fn check_channel(
+    pub fn is_expired(&self) -> bool {
+        self.deadline_unix_ms <= unix_ms()
+    }
+
+    pub fn check_channel_header(
         &self,
         identity: ChannelIdentity,
         previous_sequence: u64,
@@ -249,7 +263,16 @@ impl Envelope {
         if self.request_id <= previous_sequence {
             return Err("重复或乱序插件消息".into());
         }
-        if self.deadline_unix_ms <= unix_ms() {
+        Ok(())
+    }
+
+    pub fn check_channel(
+        &self,
+        identity: ChannelIdentity,
+        previous_sequence: u64,
+    ) -> Result<(), String> {
+        self.check_channel_header(identity, previous_sequence)?;
+        if self.is_expired() {
             return Err("插件消息 deadline 已过期".into());
         }
         Ok(())
@@ -330,12 +353,17 @@ pub struct WorkerSession<R, W> {
     writer: W,
     pub identity: ChannelIdentity,
     pub grants: Vec<Permission>,
+    negotiated_minor: u32,
     incoming_sequence: u64,
     outgoing_sequence: u64,
     timeout: Duration,
 }
 
 impl<R: Read, W: Write> WorkerSession<R, W> {
+    pub fn negotiated_minor(&self) -> u32 {
+        self.negotiated_minor
+    }
+
     pub fn accept(mut reader: R, mut writer: W, registration: Register) -> io::Result<Self> {
         let hello = read_frame(&mut reader)?;
         let identity = hello.identity().map_err(invalid)?;
@@ -346,6 +374,7 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
         if limits.max_frame_bytes as usize != MAX_FRAME_BYTES || limits.max_operation_ms == 0 {
             return Err(invalid("宿主协议限额不兼容"));
         }
+        let negotiated_minor = limits.host_minor.max(hello.minor).min(PROTOCOL_MINOR);
         let grants = limits
             .granted_permissions
             .iter()
@@ -364,13 +393,17 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             registration.panel.as_ref().unwrap().revision,
             envelope::Body::Register(registration),
             timeout,
-        );
+        )
+        .with_minor(negotiated_minor);
         register.in_reply_to = hello.request_id;
         write_frame(&mut writer, &register)?;
         let ready = read_frame(&mut reader)?;
         ready
             .check_channel(identity, hello.request_id)
             .map_err(invalid)?;
+        if ready.minor > negotiated_minor {
+            return Err(invalid("宿主 Ready 协议版本超过协商上限"));
+        }
         if ready.in_reply_to != 1 || !matches!(ready.body, Some(envelope::Body::Ready(_))) {
             return Err(invalid("宿主未确认插件注册"));
         }
@@ -379,6 +412,7 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             writer,
             identity,
             grants,
+            negotiated_minor,
             incoming_sequence: ready.request_id,
             outgoing_sequence: 1,
             timeout,
@@ -388,14 +422,27 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
     pub fn receive(&mut self) -> io::Result<Envelope> {
         let envelope = read_frame(&mut self.reader)?;
         envelope
-            .check_channel(self.identity, self.incoming_sequence)
+            .check_channel_header(self.identity, self.incoming_sequence)
             .map_err(invalid)?;
+        if envelope.minor > self.negotiated_minor {
+            return Err(invalid("宿主消息协议版本超过协商上限"));
+        }
         self.incoming_sequence = envelope.request_id;
         Ok(envelope)
     }
 
     pub fn send(
         &mut self,
+        body: envelope::Body,
+        revision: u64,
+        in_reply_to: u64,
+    ) -> io::Result<u64> {
+        self.send_on_panel(PANEL_ID, body, revision, in_reply_to)
+    }
+
+    pub fn send_on_panel(
+        &mut self,
+        panel_id: u64,
         body: envelope::Body,
         revision: u64,
         in_reply_to: u64,
@@ -410,7 +457,9 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             revision,
             body,
             self.timeout,
-        );
+        )
+        .with_minor(self.negotiated_minor)
+        .with_panel_id(panel_id);
         envelope.in_reply_to = in_reply_to;
         write_frame(&mut self.writer, &envelope)?;
         Ok(self.outgoing_sequence)

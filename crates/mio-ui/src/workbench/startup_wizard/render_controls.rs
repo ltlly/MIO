@@ -152,11 +152,12 @@ pub(super) fn wizard_vertical_scrollbar<H: ScrollbarHandle + Clone>(
 
 pub(super) fn wizard_neutral_button(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     tooltip: Option<&'static str>,
     enabled: bool,
     size: WizardButtonSize,
 ) -> Button {
+    let label: SharedString = label.into();
     let dark = theme::is_dark();
     let (bg, hover_bg, border, fg): (Hsla, Hsla, Hsla, Hsla) = if enabled {
         if dark {
@@ -203,7 +204,7 @@ pub(super) fn wizard_neutral_button(
             b.hover(move |s| s.bg(hover_bg).border_color(border).text_color(fg))
         })
         .disabled(!enabled)
-        .accessibility_label(label)
+        .accessibility_label(label.clone())
         .when_some(tooltip, |b, tip| b.tooltip(tip))
         .child(
             div()

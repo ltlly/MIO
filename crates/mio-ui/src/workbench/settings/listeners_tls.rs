@@ -1,5 +1,5 @@
 use gpui_kit::accesskit::Role;
-use gpui_kit::base::{Checkbox, CheckboxIndicator, Switch as BaseSwitch, SwitchThumb, SwitchTrack};
+use gpui_kit::base::{Checkbox, CheckboxIndicator};
 use gpui_kit::component::{Icon, IconName, button::ButtonVariants, table::TableDelegate};
 use gpui_kit::{ClickEvent, FontWeight, Hsla, Pixels};
 use mio_core::ClientCertificateFormat;
@@ -261,10 +261,6 @@ fn mio_icon_color() -> Hsla {
     rgb(if theme::is_dark() { 0xdfe1e5 } else { 0x1e1e1e }).into()
 }
 
-pub(super) fn mio_table_header_bg() -> Hsla {
-    rgb(if theme::is_dark() { 0x2b2e33 } else { 0xeaeaea }).into()
-}
-
 pub(super) fn mio_table_border() -> Hsla {
     rgb(if theme::is_dark() { 0x45494e } else { 0xd0d0d0 }).into()
 }
@@ -435,67 +431,6 @@ pub(super) fn mio_desc_row_with_reset(
         )
 }
 
-pub(super) fn mio_override_card(
-    id: &'static str,
-    checked: bool,
-    enabled: bool,
-    on_change: impl Fn(&bool, &mut Window, &mut App) + 'static,
-) -> gpui_kit::Div {
-    let dark = theme::is_dark();
-    let track_bg: Hsla = if checked {
-        settings_blue()
-    } else {
-        rgb(if dark { 0x4f535b } else { 0xb5b5b5 }).into()
-    };
-    let thumb_bg: Hsla = if checked {
-        rgb(0xffffff).into()
-    } else {
-        rgb(if dark { 0xd4d4d4 } else { 0x262626 }).into()
-    };
-    let label = "仅为当前项目覆盖选项";
-    div()
-        .ml(px(32.))
-        .px(px(12.))
-        .py(px(8.))
-        .rounded(px(3.))
-        .border_1()
-        .border_color(mio_table_border())
-        .bg(theme::surface())
-        .child(
-            BaseSwitch::new(id)
-                .checked(checked)
-                .disabled(!enabled)
-                .accessibility_label(label)
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .when(!enabled, |this| this.opacity(0.5))
-                .on_change(move |next, _, window, cx| on_change(&next, window, cx))
-                .child(
-                    SwitchTrack::new(SharedString::from(format!("{id}-track")))
-                        .checked(checked)
-                        .disabled(!enabled)
-                        .w(px(24.))
-                        .h(px(13.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .p(px(2.))
-                        .bg(track_bg)
-                        .child(
-                            SwitchThumb::new(checked)
-                                .disabled(!enabled)
-                                .size(px(9.))
-                                .rounded_full()
-                                .bg(thumb_bg)
-                                .when(checked, |this| this.ml(px(11.))),
-                        ),
-                )
-                .child(div().text_color(theme::foreground()).child(label)),
-        )
-}
-
 pub(super) fn mio_action_button(
     id: impl Into<gpui_kit::ElementId>,
     label: impl Into<SharedString>,
@@ -566,18 +501,6 @@ pub(super) fn mio_table_frame<D: TableDelegate>(
                 ),
         )
         .child(mio_right_triangle())
-}
-
-pub(super) fn mio_table_th(label: impl Into<SharedString>, _width: Pixels) -> gpui_kit::Div {
-    div()
-        .size_full()
-        .px(px(7.))
-        .flex()
-        .items_center()
-        .font_weight(FontWeight::NORMAL)
-        .text_color(theme::foreground())
-        .text_size(theme::scaled_px(12.5))
-        .child(div().min_w_0().flex_1().truncate().child(label.into()))
 }
 
 pub(super) fn mio_table_td_text(text: impl Into<SharedString>) -> gpui_kit::Div {

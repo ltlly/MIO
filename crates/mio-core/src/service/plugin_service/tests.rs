@@ -157,8 +157,11 @@ async fn opened_completion_cannot_publish_the_handshake_panel_ahead_of_its_updat
     f.queue
         .send(PluginEvent::Panel {
             identity: f.identity,
+            panel_id: protocol::PANEL_ID,
             snapshot: f.latest.clone(),
             editor_bases: vec![],
+            synced_ui_seq: 0,
+            rejected_ui_seqs: vec![],
         })
         .await
         .unwrap();
@@ -219,24 +222,36 @@ async fn queued_older_panels_cannot_regress_content_or_discard_diagnostics() {
     f.state
         .plugin_signal(Signal::Worker(PluginEvent::Panel {
             identity: f.identity,
+            panel_id: protocol::PANEL_ID,
             snapshot: f.latest.clone(),
             editor_bases: editor_bases.clone(),
+            synced_ui_seq: 3,
+            rejected_ui_seqs: vec![5],
         }))
         .await;
     assert!(matches!(
         f.events.try_recv().unwrap(),
-        Event::PluginPanel { editor_bases: bases, .. } if bases == editor_bases
+        Event::PluginPanel {
+            editor_bases: bases,
+            synced_ui_seq: Some(3),
+            rejected_ui_seqs,
+            ..
+        } if bases == editor_bases && rejected_ui_seqs == [5]
     ));
     f.state
         .plugin_signal(Signal::Worker(PluginEvent::Panel {
             identity: f.identity,
+            panel_id: protocol::PANEL_ID,
             snapshot: f.initial,
             editor_bases: vec![],
+            synced_ui_seq: 0,
+            rejected_ui_seqs: vec![],
         }))
         .await;
     f.state
         .plugin_signal(Signal::Worker(PluginEvent::Error {
             identity: f.identity,
+            panel_id: protocol::PANEL_ID,
             failure: Failure::new(ErrorCode::Invalid, "causal diagnostic"),
         }))
         .await;
@@ -341,5 +356,76 @@ async fn closing_many_tabs_schedules_one_revoke_job_per_instance() {
         f.state.plugins.jobs.len(),
         1,
         "bulk tab closure must not allocate one background job per resource"
+    );
+}
+
+#[tokio::test]
+async fn plugin_panel_synced_updates_same_revision_and_ignores_older() {
+    let mut f = fixture();
+    let mut updated = f.latest.as_ref().clone();
+    if let Some(node::Kind::Editor(editor)) = updated.root.as_mut().unwrap().kind.as_mut() {
+        editor.contents = b"synced-same-rev".to_vec();
+    }
+    let updated = Arc::new(updated);
+
+    f.state
+        .plugin_signal(Signal::Worker(PluginEvent::Panel {
+            identity: f.identity,
+            panel_id: protocol::PANEL_ID,
+            snapshot: f.latest.clone(),
+            editor_bases: vec![],
+            synced_ui_seq: 1,
+            rejected_ui_seqs: vec![],
+        }))
+        .await;
+    assert!(matches!(
+        f.events.try_recv().unwrap(),
+        Event::PluginPanel {
+            snapshot,
+            synced_ui_seq: Some(1),
+            rejected_ui_seqs,
+            ..
+        } if snapshot == f.latest && rejected_ui_seqs.is_empty()
+    ));
+
+    // Older revision PanelSynced must be ignored.
+    f.state
+        .plugin_signal(Signal::Worker(PluginEvent::PanelSynced {
+            identity: f.identity,
+            panel_id: protocol::PANEL_ID,
+            snapshot: f.initial.clone(),
+            synced_ui_seq: 1,
+            rejected_ui_seqs: vec![],
+        }))
+        .await;
+    assert!(f.events.try_recv().is_err());
+    assert_eq!(
+        f.state.plugins.instances[&f.identity.instance_id].panel,
+        f.latest
+    );
+
+    // Same revision PanelSynced must update cached panel and notify UI with synced_ui_seq & rejected_ui_seqs.
+    f.state
+        .plugin_signal(Signal::Worker(PluginEvent::PanelSynced {
+            identity: f.identity,
+            panel_id: protocol::PANEL_ID,
+            snapshot: updated.clone(),
+            synced_ui_seq: 7,
+            rejected_ui_seqs: vec![9, 11],
+        }))
+        .await;
+    assert!(matches!(
+        f.events.try_recv().unwrap(),
+        Event::PluginPanel {
+            snapshot,
+            editor_bases,
+            synced_ui_seq: Some(7),
+            rejected_ui_seqs,
+            ..
+        } if snapshot == updated && editor_bases.is_empty() && rejected_ui_seqs == [9, 11]
+    ));
+    assert_eq!(
+        f.state.plugins.instances[&f.identity.instance_id].panel,
+        updated
     );
 }

@@ -73,10 +73,9 @@ impl Workbench {
                     .child(if is_response {
                         self.render_response_editor_body(prefix, editor, cx)
                     } else {
-                        Editor::new(editor.state())
+                        editing::message_editor(editor.state())
                             .readonly(true)
                             .size_full()
-                            .bordered(false)
                             .context_menu(self.request_context_menu(editor.state().clone(), true))
                             .aria_label(aria)
                             .into_any_element()
@@ -151,10 +150,9 @@ impl Workbench {
                     .min_h_0()
                     .bg(theme::surface())
                     .child(
-                        Editor::new(pane.scan_request_editor.state())
+                        editing::message_editor(pane.scan_request_editor.state())
                             .readonly(readonly || pane.scan_request_editor.is_readonly_preview())
                             .size_full()
-                            .bordered(false)
                             .context_menu(self.request_context_menu(
                                 pane.scan_request_editor.state().clone(),
                                 readonly,

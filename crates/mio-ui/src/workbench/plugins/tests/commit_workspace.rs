@@ -36,6 +36,8 @@ fn correlated_panel_event_reaches_the_native_editor_before_outer_send(cx: &mut T
             identity: info.identity,
             snapshot,
             editor_bases: vec![base],
+            synced_ui_seq: None,
+            rejected_ui_seqs: vec![],
         })
         .unwrap();
     cx.run_until_parked();

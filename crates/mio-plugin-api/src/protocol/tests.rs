@@ -120,7 +120,7 @@ fn envelope_checks_forgery_generation_and_replay() {
 
 #[test]
 fn v13_preferences_response_editor_and_context_menu_frames_validate_limits() {
-    assert_eq!(PROTOCOL_MINOR, 4);
+    assert_eq!(PROTOCOL_MINOR, 5);
     let identity = ChannelIdentity {
         instance_id: Uuid::new_v4(),
         project: ProjectKey {
@@ -133,6 +133,7 @@ fn v13_preferences_response_editor_and_context_menu_frames_validate_limits() {
             key: "theme".into(),
             value: b"dark".to_vec(),
         })),
+        parent_request_id: 9,
     };
     let decoded_call = HostCall::decode_bytes(&pref_set.encode_to_vec()).unwrap();
     assert_eq!(decoded_call, pref_set);
@@ -411,6 +412,7 @@ fn v14_plugin_host_calls_and_results_roundtrip_and_validate() {
     for op in ops {
         let call = HostCall {
             operation: Some(op.clone()),
+            parent_request_id: 0,
         };
         let decoded = HostCall::decode_bytes(&call.encode_to_vec()).unwrap();
         assert_eq!(decoded, call);
@@ -484,4 +486,197 @@ fn v14_plugin_host_calls_and_results_roundtrip_and_validate() {
         })),
     };
     assert!(bad_color.validate().is_err());
+}
+
+#[test]
+fn v15_panel_multiplexing_envelope_and_register_wire_compatibility() {
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let panel_two = Envelope::new(
+        identity,
+        1,
+        3,
+        envelope::Body::Ack(Empty {}),
+        Duration::from_secs(1),
+    )
+    .with_panel_id(2);
+    panel_two.validate().unwrap();
+    let encoded = encode_frame(&panel_two).unwrap();
+    let decoded = read_frame(&mut encoded.as_slice()).unwrap();
+    assert_eq!(decoded.panel_id, 2);
+
+    let bad_zero = Envelope::new(
+        identity,
+        2,
+        1,
+        envelope::Body::Ack(Empty {}),
+        Duration::from_secs(1),
+    )
+    .with_panel_id(0);
+    assert!(bad_zero.validate().is_err());
+
+    let reg = Register {
+        plugin_id: "lab.multiplex".into(),
+        plugin_version: "1.0.0".into(),
+        required_components: vec![Component::Text as i32],
+        panel: Some(PanelSnapshot {
+            revision: 1,
+            title: "Lab".into(),
+            root: Some(crate::panel::Node::new(
+                1,
+                "Lab",
+                crate::panel::node::Kind::Text(crate::panel::Text {
+                    text: "ok".into(),
+                    tone: 0,
+                }),
+            )),
+        }),
+        supports_panel_multiplexing: true,
+    };
+    let reg_bytes = reg.encode_to_vec();
+    let decoded_reg = Register::decode(reg_bytes.as_slice()).unwrap();
+    assert!(decoded_reg.supports_panel_multiplexing);
+
+    let legacy_reg = Register {
+        supports_panel_multiplexing: false,
+        ..reg
+    };
+    let legacy_decoded = Register::decode(legacy_reg.encode_to_vec().as_slice()).unwrap();
+    assert!(!legacy_decoded.supports_panel_multiplexing);
+}
+
+#[test]
+fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let dur = Duration::from_secs(5);
+
+    // 1. Legacy v1.4 host (hello.minor = 4, host_minor = 0) -> new v1.5 WorkerSession downgrades to 4.
+    let v14_hello = Envelope::new(
+        identity,
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![],
+            host_minor: 0,
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_HANDSHAKE_MINOR);
+    let mut v14_ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur)
+        .with_minor(LEGACY_HANDSHAKE_MINOR);
+    v14_ready.in_reply_to = 1;
+    let mut host_to_worker = encode_frame(&v14_hello).unwrap();
+    host_to_worker.extend(encode_frame(&v14_ready).unwrap());
+    let mut worker_out = Vec::new();
+    let reg = Register {
+        plugin_id: "lab.compat".into(),
+        plugin_version: "1.0.0".into(),
+        required_components: vec![Component::Text as i32],
+        panel: Some(PanelSnapshot {
+            revision: 1,
+            title: "Lab".into(),
+            root: Some(crate::panel::Node::new(
+                1,
+                "Lab",
+                crate::panel::node::Kind::Text(crate::panel::Text {
+                    text: "ok".into(),
+                    tone: 0,
+                }),
+            )),
+        }),
+        supports_panel_multiplexing: true,
+    };
+    let mut session =
+        WorkerSession::accept(std::io::Cursor::new(host_to_worker), &mut worker_out, reg.clone())
+            .unwrap();
+    assert_eq!(session.negotiated_minor(), 4);
+    session
+        .send_on_panel(PANEL_ID, envelope::Body::Ack(Empty {}), 1, 0)
+        .unwrap();
+    drop(session);
+    let mut cursor = std::io::Cursor::new(worker_out);
+    let sent_reg = read_frame(&mut cursor).unwrap();
+    let sent_ack = read_frame(&mut cursor).unwrap();
+    assert_eq!(sent_reg.minor, 4);
+    assert_eq!(sent_ack.minor, 4);
+
+    // 2. New v1.5 host (envelope.minor = 4, host_minor = 5) -> new v1.5 WorkerSession negotiates 5.
+    let v15_hello = Envelope::new(
+        identity,
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![],
+            host_minor: PROTOCOL_MINOR,
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_HANDSHAKE_MINOR);
+    let mut v15_ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur);
+    v15_ready.in_reply_to = 1;
+    let mut host_to_worker = encode_frame(&v15_hello).unwrap();
+    host_to_worker.extend(encode_frame(&v15_ready).unwrap());
+    // An expired inbound frame arrives with sequence 3, followed by a valid sequence 4 frame.
+    let mut expired_in = Envelope::new(identity, 3, 1, envelope::Body::Shutdown(Empty {}), dur);
+    expired_in.deadline_unix_ms = 1;
+    let valid_next = Envelope::new(identity, 4, 1, envelope::Body::Shutdown(Empty {}), dur);
+    host_to_worker.extend(encode_frame(&expired_in).unwrap());
+    host_to_worker.extend(encode_frame(&valid_next).unwrap());
+    let mut worker_out = Vec::new();
+    let mut session =
+        WorkerSession::accept(std::io::Cursor::new(host_to_worker), &mut worker_out, reg.clone())
+            .unwrap();
+    assert_eq!(session.negotiated_minor(), 5);
+    let r1 = session.receive().unwrap();
+    assert!(r1.is_expired());
+    assert_eq!(r1.request_id, 3);
+    let r2 = session.receive().unwrap();
+    assert!(!r2.is_expired());
+    assert_eq!(r2.request_id, 4);
+    drop(session);
+    let sent_reg = read_frame(&mut std::io::Cursor::new(worker_out)).unwrap();
+    assert_eq!(sent_reg.minor, 5);
+
+    // 3. After negotiating v1.4, Ready or subsequent inbound frame claiming v1.5 must be rejected.
+    let mut bad_ready =
+        Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur).with_minor(5);
+    bad_ready.in_reply_to = 1;
+    let mut bad_handshake = encode_frame(&v14_hello).unwrap();
+    bad_handshake.extend(encode_frame(&bad_ready).unwrap());
+    let mut bad_out = Vec::new();
+    assert!(
+        WorkerSession::accept(
+            std::io::Cursor::new(bad_handshake),
+            &mut bad_out,
+            reg.clone()
+        )
+        .is_err()
+    );
+
+    let mut good_v14 = encode_frame(&v14_hello).unwrap();
+    good_v14.extend(encode_frame(&v14_ready).unwrap());
+    good_v14.extend(
+        encode_frame(&Envelope::new(identity, 3, 1, envelope::Body::Shutdown(Empty {}), dur).with_minor(5))
+            .unwrap(),
+    );
+    let mut downgraded_out = Vec::new();
+    let mut downgraded =
+        WorkerSession::accept(std::io::Cursor::new(good_v14), &mut downgraded_out, reg).unwrap();
+    assert_eq!(downgraded.negotiated_minor(), 4);
+    assert!(downgraded.receive().is_err());
 }

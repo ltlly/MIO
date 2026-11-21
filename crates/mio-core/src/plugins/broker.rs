@@ -212,6 +212,7 @@ impl ServiceResult {
 pub struct ServiceRequest {
     pub identity: ChannelIdentity,
     pub plugin_id: String,
+    pub panel_id: u64,
     pub request_id: u64,
     pub deadline: Instant,
     pub operation: ServiceOperation,
@@ -222,13 +223,29 @@ pub struct ServiceRequest {
 pub enum PluginEvent {
     Panel {
         identity: ChannelIdentity,
+        panel_id: u64,
         snapshot: Arc<PanelSnapshot>,
         /// Native input associated with this exact response, never inferred from worker revision.
         editor_bases: Vec<EditorSnapshot>,
+        synced_ui_seq: u64,
+        rejected_ui_seqs: Vec<u64>,
+    },
+    /// Same-revision optimistic rollback sync after a UI request is rejected or retracted.
+    PanelSynced {
+        identity: ChannelIdentity,
+        panel_id: u64,
+        snapshot: Arc<PanelSnapshot>,
+        synced_ui_seq: u64,
+        rejected_ui_seqs: Vec<u64>,
     },
     Error {
         identity: ChannelIdentity,
+        panel_id: u64,
         failure: Failure,
+    },
+    PanelClosed {
+        identity: ChannelIdentity,
+        panel_id: u64,
     },
     Stopped {
         identity: ChannelIdentity,
@@ -239,7 +256,9 @@ pub struct PermissionBroker {
     identity: ChannelIdentity,
     pub(super) grants: BTreeSet<Permission>,
     pub(super) resources: HashMap<Uuid, ResourceBinding>,
+    pub(super) panel_resources: HashMap<(u64, Uuid), ResourceBinding>,
     reserved_resources: usize,
+    reserved_panel_resources: usize,
 }
 
 impl PermissionBroker {
@@ -248,62 +267,127 @@ impl PermissionBroker {
             identity,
             grants: grants.into_iter().collect(),
             resources: HashMap::new(),
+            panel_resources: HashMap::new(),
             reserved_resources: 0,
+            reserved_panel_resources: 0,
         }
     }
 
-    fn check_resource(&self, id: Uuid, revision: u64) -> Result<()> {
+    fn check_resource_on_panel(&self, panel_id: u64, id: Uuid, revision: u64) -> Result<()> {
         ensure!(!id.is_nil() && revision != 0, "资源身份或 revision 无效");
-        ensure!(
-            self.resources.contains_key(&id) || self.resources.len() + self.reserved_resources < 64,
-            "插件资源 handle 超过限额"
-        );
+        if panel_id == protocol::PANEL_ID {
+            ensure!(
+                self.resources.contains_key(&id) || self.resources.len() + self.reserved_resources < 64,
+                "插件资源 handle 超过限额"
+            );
+        } else {
+            ensure!(
+                self.panel_resources.contains_key(&(panel_id, id))
+                    || self.panel_resources.len() + self.reserved_panel_resources < 128,
+                "多路复用子面板资源 handle 超过限额"
+            );
+        }
         Ok(())
     }
 
-    pub(super) fn reserve_resource(&mut self, id: Option<Uuid>) -> Result<bool> {
-        if id.is_some_and(|id| self.resources.contains_key(&id)) {
+    pub(super) fn reserve_panel_resource(
+        &mut self,
+        panel_id: u64,
+        id: Option<Uuid>,
+    ) -> Result<bool> {
+        if panel_id == protocol::PANEL_ID {
+            if id.is_some_and(|id| self.resources.contains_key(&id)) {
+                return Ok(false);
+            }
+            ensure!(
+                self.resources.len() + self.reserved_resources < 64,
+                "插件资源 handle 超过 64 个限额；未创建标签"
+            );
+            self.reserved_resources += 1;
+            return Ok(true);
+        }
+        if id.is_some_and(|id| self.panel_resources.contains_key(&(panel_id, id))) {
             return Ok(false);
         }
         ensure!(
-            self.resources.len() + self.reserved_resources < 64,
-            "插件资源 handle 超过 64 个限额；未创建标签"
+            self.panel_resources.len() + self.reserved_panel_resources < 128,
+            "多路复用子面板资源 handle 超过 128 个限额；未打开标签"
         );
-        self.reserved_resources += 1;
+        self.reserved_panel_resources += 1;
         Ok(true)
     }
 
-    pub(super) fn release_resource(&mut self, reserved: bool) {
-        if reserved {
+    pub(super) fn release_panel_resource(&mut self, panel_id: u64, reserved: bool) {
+        if !reserved {
+            return;
+        }
+        if panel_id == protocol::PANEL_ID {
             self.reserved_resources -= 1;
+        } else {
+            self.reserved_panel_resources -= 1;
         }
     }
 
-    pub(super) fn authorize_open(&self, id: Uuid, revision: u64) -> Result<()> {
+    pub(super) fn authorize_open_panel(&self, panel_id: u64, id: Uuid, revision: u64) -> Result<()> {
         ensure!(
             self.grants.contains(&Permission::TrafficRead),
             "插件尚未获准 traffic.read；未提供请求内容"
         );
-        self.check_resource(id, revision)
+        self.check_resource_on_panel(panel_id, id, revision)
     }
 
     pub fn bind_resource(&mut self, id: Uuid, revision: u64, read_only: bool) -> Result<()> {
-        self.check_resource(id, revision)?;
-        self.resources.insert(
-            id,
-            ResourceBinding {
-                revision,
-                read_only,
-            },
-        );
+        self.bind_panel_resource(protocol::PANEL_ID, id, revision, read_only)
+    }
+
+    pub fn bind_panel_resource(
+        &mut self,
+        panel_id: u64,
+        id: Uuid,
+        revision: u64,
+        read_only: bool,
+    ) -> Result<()> {
+        self.check_resource_on_panel(panel_id, id, revision)?;
+        let binding = ResourceBinding {
+            revision,
+            read_only,
+        };
+        if panel_id == protocol::PANEL_ID {
+            self.resources.insert(id, binding);
+        } else {
+            self.panel_resources.insert((panel_id, id), binding);
+        }
         Ok(())
     }
 
-    pub(super) fn writable(&self, id: Uuid, revision: u64) -> std::result::Result<(), Failure> {
-        let resource = self
-            .resources
-            .get(&id)
-            .ok_or_else(|| Failure::new(ErrorCode::Denied, "资源不属于此插件实例"))?;
+    pub(super) fn remove_panel_resource(&mut self, panel_id: u64, id: Uuid) {
+        if panel_id == protocol::PANEL_ID {
+            self.resources.remove(&id);
+        } else {
+            self.panel_resources.remove(&(panel_id, id));
+        }
+    }
+
+    pub(super) fn has_panel_resource(&self, panel_id: u64, id: Uuid) -> bool {
+        if panel_id == protocol::PANEL_ID {
+            self.resources.contains_key(&id)
+        } else {
+            self.panel_resources.contains_key(&(panel_id, id))
+        }
+    }
+
+    pub(super) fn writable_panel(
+        &self,
+        panel_id: u64,
+        id: Uuid,
+        revision: u64,
+    ) -> std::result::Result<(), Failure> {
+        let resource = if panel_id == protocol::PANEL_ID {
+            self.resources.get(&id)
+        } else {
+            self.panel_resources.get(&(panel_id, id))
+        }
+        .ok_or_else(|| Failure::new(ErrorCode::Denied, "资源不属于此插件实例"))?;
         if resource.read_only {
             return Err(Failure::new(ErrorCode::Denied, "只读资源拒绝修改"));
         }
@@ -313,8 +397,19 @@ impl PermissionBroker {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn complete_resource(
         &mut self,
+        expected: PendingResource,
+        id: Uuid,
+        revision: u64,
+    ) -> std::result::Result<(), Failure> {
+        self.complete_panel_resource(protocol::PANEL_ID, expected, id, revision)
+    }
+
+    pub(super) fn complete_panel_resource(
+        &mut self,
+        panel_id: u64,
         expected: PendingResource,
         id: Uuid,
         revision: u64,
@@ -330,7 +425,7 @@ impl PermissionBroker {
                         "宿主返回了错误的资源 handle",
                     ));
                 }
-                self.writable(id, expected_revision)?;
+                self.writable_panel(panel_id, id, expected_revision)?;
                 if revision <= expected_revision {
                     return Err(Failure::new(
                         ErrorCode::Stale,
@@ -338,7 +433,7 @@ impl PermissionBroker {
                     ));
                 }
             }
-            PendingResource::OpenRepeater if self.resources.contains_key(&id) => {
+            PendingResource::OpenRepeater if self.has_panel_resource(panel_id, id) => {
                 return Err(Failure::new(
                     ErrorCode::Internal,
                     "新的 Repeater 资源复用了已有 handle",
@@ -346,7 +441,7 @@ impl PermissionBroker {
             }
             PendingResource::OpenRepeater => {}
         }
-        self.bind_resource(id, revision, false)
+        self.bind_panel_resource(panel_id, id, revision, false)
             .map_err(|error| Failure::new(ErrorCode::Internal, error.to_string()))
     }
 
@@ -408,7 +503,7 @@ impl PermissionBroker {
             },
             host_call::Operation::UpdateDraft(update) => {
                 let id = protocol::uuid(&update.resource_id).map_err(invalid)?;
-                self.writable(id, update.expected_revision)?;
+                self.writable_panel(envelope.panel_id, id, update.expected_revision)?;
                 ServiceOperation::UpdateDraft {
                     tab_id: id,
                     expected_revision: update.expected_revision,

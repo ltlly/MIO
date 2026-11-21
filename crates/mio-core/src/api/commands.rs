@@ -52,6 +52,15 @@ pub enum Command {
         default_config: crate::StartupDefaultConfig,
         disable_extensions: bool,
     },
+    RemoveRecentProject {
+        operation_id: Uuid,
+        expected_revision: u64,
+        path: PathBuf,
+    },
+    PruneMissingRecentProjects {
+        operation_id: Uuid,
+        expected_revision: u64,
+    },
     SetUserTlsCertificates {
         operation_id: Uuid,
         expected_revision: u64,

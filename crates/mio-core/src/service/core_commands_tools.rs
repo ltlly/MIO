@@ -69,6 +69,41 @@ impl State {
                 })
                 .await;
             }
+            Command::RemoveRecentProject {
+                operation_id,
+                expected_revision,
+                path,
+            } => {
+                let result = if operation_id.is_nil() {
+                    Err("移除最近项目缺少有效 operation ID；未写入。".into())
+                } else {
+                    self.preferences
+                        .remove_recent(expected_revision, &path)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                self.emit(Event::UserPreferencesSaved {
+                    operation_id,
+                    result,
+                })
+                .await;
+            }
+            Command::PruneMissingRecentProjects {
+                operation_id,
+                expected_revision,
+            } => {
+                let result = if operation_id.is_nil() {
+                    Err("清理失效最近项目缺少有效 operation ID；未写入。".into())
+                } else {
+                    self.preferences
+                        .prune_missing_recent(expected_revision)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                self.emit(Event::UserPreferencesSaved {
+                    operation_id,
+                    result,
+                })
+                .await;
+            }
             Command::SetUserTlsCertificates {
                 operation_id,
                 expected_revision,

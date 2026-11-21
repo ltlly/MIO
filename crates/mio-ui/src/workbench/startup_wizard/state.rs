@@ -1,8 +1,13 @@
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{
     WeakEntity,
-    component::table::{Column, ColumnSort, TableDelegate},
+    component::{
+        menu::{PopupMenu, PopupMenuItem},
+        table::{Column, ColumnSort, TableDelegate},
+    },
 };
 use mio_core::{MAX_RECENT_PROJECTS, RecentProject};
 
@@ -27,6 +32,8 @@ impl Default for RecentProjectsDelegate {
                     .movable(false),
             ],
             rows: Vec::new(),
+            missing_paths: HashSet::new(),
+            selected_path: None,
             sort_column: RecentSortColumn::LastAccessed,
             ascending: false,
         }
@@ -43,8 +50,26 @@ impl RecentProjectsDelegate {
         if rows.len() > MAX_RECENT_PROJECTS {
             rows.truncate(MAX_RECENT_PROJECTS);
         }
+        self.missing_paths = rows
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    std::fs::metadata(&entry.path),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                )
+            })
+            .map(|entry| entry.path.clone())
+            .collect();
         self.rows = rows;
         self.sort_rows();
+    }
+
+    pub(super) fn missing_count(&self) -> usize {
+        self.missing_paths.len()
+    }
+
+    pub(super) fn is_missing(&self, path: &Path) -> bool {
+        self.missing_paths.contains(path)
     }
 
     fn sort_rows(&mut self) {
@@ -94,7 +119,14 @@ impl RecentProjectsDelegate {
         };
         match column {
             0 => item.name.clone(),
-            1 => item.path.to_string_lossy().into_owned(),
+            1 => {
+                let raw = item.path.to_string_lossy();
+                if self.is_missing(&item.path) {
+                    format!("{raw}（文件不存在）")
+                } else {
+                    raw.into_owned()
+                }
+            }
             2 => format_local_date_cn(item.last_accessed_unix_ms),
             _ => String::new(),
         }
@@ -188,15 +220,28 @@ impl TableDelegate for RecentProjectsDelegate {
         };
         self.ascending = sort == ColumnSort::Ascending;
         self.sort_rows();
+        let target_row = self
+            .selected_path
+            .as_ref()
+            .and_then(|path| self.rows.iter().position(|entry| &entry.path == path));
+        let table_weak = cx.weak_entity();
         cx.notify();
-        if let Some(owner) = self.owner.clone() {
-            let handle = window.window_handle();
-            cx.defer(move |cx| {
+        let owner = self.owner.clone();
+        let handle = window.window_handle();
+        cx.defer(move |cx| {
+            let _ = table_weak.update(cx, |table, cx| {
+                if let Some(row) = target_row
+                    && table.selected_row().is_some()
+                {
+                    table.set_selected_row_without_scroll(row, cx);
+                }
+            });
+            if let Some(owner) = owner {
                 let _ = handle.update(cx, |_, _, cx| {
                     let _ = owner.update(cx, |_, cx| cx.notify());
                 });
-            });
-        }
+            }
+        });
     }
 
     fn render_tr(
@@ -208,6 +253,28 @@ impl TableDelegate for RecentProjectsDelegate {
         div().id(("wizard-recent-project-row", row))
     }
 
+    fn context_menu(
+        &mut self,
+        row: usize,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        if let Some(path) = self.rows.get(row).map(|item| item.path.clone()) {
+            let owner = self.owner.clone();
+            return menu.item(
+                PopupMenuItem::new("从最近列表移除").on_click(move |_, window, cx| {
+                    if let Some(owner) = owner.clone() {
+                        let _ = owner.update(cx, |view, cx| {
+                            view.remove_wizard_recent_path(path.clone(), window, cx);
+                        });
+                    }
+                }),
+            );
+        }
+        menu
+    }
+
     fn render_td(
         &mut self,
         row: usize,
@@ -215,13 +282,23 @@ impl TableDelegate for RecentProjectsDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let is_missing_col = column == 1
+            && self
+                .rows
+                .get(row)
+                .is_some_and(|item| self.is_missing(&item.path));
+        let color = if is_missing_col {
+            rgb(if theme::is_dark() { 0xf0883e } else { 0x9a6700 }).into()
+        } else {
+            theme::foreground()
+        };
         div()
             .flex_1()
             .min_w_0()
             .font_family(theme::ui_font_family())
             .text_size(theme::ui_font_size())
             .line_height(gpui_kit::relative(1.25))
-            .text_color(theme::foreground())
+            .text_color(color)
             .truncate()
             .child(self.cell_text(row, column))
     }

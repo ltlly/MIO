@@ -740,10 +740,9 @@ impl Workbench {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        Editor::new(pane.raw_editor.state())
+                        editing::message_editor(pane.raw_editor.state())
                             .readonly(true)
                             .size_full()
-                            .bordered(false)
                             .context_menu(collaborator_raw_editor_context_menu(
                                 pane.raw_editor.state().clone(),
                                 can_operate,

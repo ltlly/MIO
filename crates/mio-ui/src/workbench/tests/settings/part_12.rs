@@ -184,6 +184,7 @@ pub(super) fn setup_picker_error_rebind_fixture(
         tab_id,
         draft_revision,
         editor,
+        ..
     } = action
     else {
         panic!("A's Send must capture a real plugin Commit")

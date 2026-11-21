@@ -18,7 +18,11 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
-    input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
+    input::{
+        RopeExt as _,
+        blink_cursor::CURSOR_WIDTH,
+        display_map::{DisplayPoint, LineLayout},
+    },
 };
 
 use super::{
@@ -2792,6 +2796,8 @@ impl<M: InputModeKind> TextElement<M> {
         visible_buffer_lines: &[usize],
         _visible_top: Pixels,
         visible_byte_range: Range<usize>,
+        visible_display_range: &Range<usize>,
+        space_width: Pixels,
         cx: &mut App,
     ) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
         let state = self.state.read(cx);
@@ -2836,8 +2842,11 @@ impl<M: InputModeKind> TextElement<M> {
 
         // Helper to flush a contiguous range of lines. These ranges are disjoint,
         // so appending avoids repeatedly cloning and recombining prior styles.
-        let mut flush_range =
-            |start_line: usize, end_line: usize, skip: bool, styles: &mut Vec<_>| {
+        let flush_range =
+            |start_line: usize,
+             end_line: usize,
+             styles: &mut Vec<_>,
+             group_ranges: &mut Vec<Range<usize>>| {
                 let byte_start = text.line_start_offset(start_line);
                 let byte_end = if is_multi_line {
                     // +1 for `\n`
@@ -2845,14 +2854,10 @@ impl<M: InputModeKind> TextElement<M> {
                 } else {
                     text.line_end_offset(end_line)
                 };
-                let range_styles = if skip {
-                    vec![(byte_start..byte_end, HighlightStyle::default())]
-                } else {
-                    highlighter.styles(
-                        &(byte_start..byte_end),
-                        state.editor_style.highlight_styles.as_ref(),
-                    )
-                };
+                let range_styles = highlighter.styles(
+                    &(byte_start..byte_end),
+                    state.editor_style.highlight_styles.as_ref(),
+                );
 
                 group_ranges.push(byte_start..byte_end);
                 styles.extend(range_styles);
@@ -2863,15 +2868,97 @@ impl<M: InputModeKind> TextElement<M> {
         let mut range_start: Option<usize> = None;
 
         while let Some(&line) = visible_iter.next() {
-            // Check if this line is too long for highlighting
+            // For mega-lines above MAX_HIGHLIGHT_LINE_LENGTH, style a bounded visible window
+            // instead of falling back to completely unstyled plain text.
             let line_len = text.slice_line(line).len();
             if line_len > MAX_HIGHLIGHT_LINE_LENGTH {
-                // Flush any accumulated range first
                 if let Some(start) = range_start.take() {
-                    flush_range(start, line - 1, false, &mut styles);
+                    flush_range(start, line - 1, &mut styles, &mut group_ranges);
                 }
 
-                flush_range(line, line, true, &mut styles);
+                let byte_start = text.line_start_offset(line);
+                let byte_end = if is_multi_line {
+                    text.line_start_offset(line + 1)
+                } else {
+                    text.line_end_offset(line)
+                };
+                let vis_s = if let Some(line_disp) = state.display_map.buffer_line_to_display_row_range(line)
+                    && line_disp.len() > 1
+                {
+                    let first_vis_row = visible_display_range
+                        .start
+                        .max(line_disp.start)
+                        .min(line_disp.end.saturating_sub(1));
+                    let buf_pos = state
+                        .display_map
+                        .display_pos_to_buffer_pos(DisplayPoint::new(first_vis_row, 0));
+                    let vis_col = if buf_pos.line == line { buf_pos.col } else { 0 };
+                    byte_start.saturating_add(vis_col).clamp(byte_start, byte_end)
+                } else {
+                    let scroll_x = (-state.scroll_handle.offset().x).max(px(0.));
+                    let approx_start = if scroll_x <= px(0.) {
+                        byte_start
+                    } else if let Some(layout) = state.last_layout.as_ref()
+                        && let Some(line_layout) = layout.line(line)
+                        && let Some((local_ix, _)) =
+                            line_layout.closest_index_for_position(point(scroll_x, px(0.)), layout)
+                    {
+                        byte_start.saturating_add(local_ix)
+                    } else {
+                        let adv = f32::from(space_width).max(4.0);
+                        let target_cells = (f32::from(scroll_x) / adv).floor() as usize;
+                        let mut cells = 0usize;
+                        let mut local_bytes = 0usize;
+                        'chunks: for chunk in text.slice_line(line).chunks() {
+                            for ch in chunk.chars() {
+                                if cells >= target_cells {
+                                    break 'chunks;
+                                }
+                                cells += match ch {
+                                    '\t' => 4,
+                                    c if c.is_ascii() => 1,
+                                    _ => 2,
+                                };
+                                local_bytes += ch.len_utf8();
+                            }
+                        }
+                        byte_start.saturating_add(local_bytes)
+                    };
+                    approx_start
+                        .max(visible_byte_range.start)
+                        .clamp(byte_start, byte_end)
+                };
+                let raw_win_start = if vis_s > byte_start + MAX_HIGHLIGHT_LINE_LENGTH / 4 {
+                    vis_s
+                        .saturating_sub(MAX_HIGHLIGHT_LINE_LENGTH / 4)
+                        .max(byte_start)
+                } else {
+                    byte_start
+                };
+                let win_start = text
+                    .floor_char_boundary(raw_win_start)
+                    .clamp(byte_start, byte_end);
+                let win_end = text
+                    .floor_char_boundary(
+                        win_start
+                            .saturating_add(MAX_HIGHLIGHT_LINE_LENGTH)
+                            .min(byte_end),
+                    )
+                    .clamp(win_start, byte_end);
+
+                if byte_start < win_start {
+                    styles.push((byte_start..win_start, HighlightStyle::default()));
+                }
+                if win_start < win_end {
+                    styles.extend(highlighter.styles(
+                        &(win_start..win_end),
+                        state.editor_style.highlight_styles.as_ref(),
+                    ));
+                }
+                if win_end < byte_end {
+                    styles.push((win_end..byte_end, HighlightStyle::default()));
+                }
+                group_ranges.push(byte_start..byte_end);
                 continue;
             }
 
@@ -2888,7 +2975,7 @@ impl<M: InputModeKind> TextElement<M> {
 
             // Flush the contiguous range
             let start_line = range_start.take().unwrap();
-            flush_range(start_line, line, false, &mut styles);
+            flush_range(start_line, line, &mut styles, &mut group_ranges);
         }
 
         let diagnostic_styles: Vec<_> = diagnostics
@@ -3314,6 +3401,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             &visible_buffer_lines,
             visible_top,
             visible_start_offset..visible_end_offset,
+            &visible_display_range,
+            space_width,
             cx,
         );
 

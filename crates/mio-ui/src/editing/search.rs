@@ -132,33 +132,42 @@ impl MessageEditor {
             if query.is_empty() {
                 let _ = state.set_search_regex("", case_insensitive, regex, cx);
                 state.close_search(cx);
-                return Ok(());
+                return Ok(None);
             }
             state
                 .set_search_regex(query.to_string(), case_insensitive, regex, cx)
                 .map_err(|error| format!("搜索正则表达式无效：{error}"))?;
-            match next {
-                Some(true) => {
-                    state.next_search_match(cx);
-                }
-                Some(false) => {
-                    state.previous_search_match(cx);
-                }
-                None => {
-                    if self.auto_scroll_to_match {
-                        state.reveal_current_search_match(cx);
-                    }
-                }
-            }
-            Ok::<(), String>(())
+            let revealed_range = match next {
+                Some(true) => state.next_search_match(cx),
+                Some(false) => state.previous_search_match(cx),
+                None if self.auto_scroll_to_match => state.reveal_current_search_match(cx),
+                None => None,
+            };
+            Ok::<_, String>(revealed_range)
         });
         match result {
-            Ok(()) => {
+            Ok(revealed_range) => {
                 *self.search_error.borrow_mut() = None;
+                if active.entity_id() == self.hex.entity_id() {
+                    if let Some(match_range) = revealed_range {
+                        hex_grid::scroll_hex_grid_to_text_range(
+                            active.entity_id(),
+                            match_range,
+                            cx,
+                        );
+                    } else if query.is_empty()
+                        || active.read(cx).search_session().matcher.is_empty()
+                    {
+                        hex_grid::clear_hex_grid_search_match(active.entity_id(), cx);
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
                 *self.search_error.borrow_mut() = Some(error.clone());
+                if active.entity_id() == self.hex.entity_id() {
+                    hex_grid::clear_hex_grid_search_match(active.entity_id(), cx);
+                }
                 Err(error)
             }
         }

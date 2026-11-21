@@ -6,7 +6,10 @@ use gpui_kit::base::input::{
 };
 use gpui_kit::{Context, FontWeight, HighlightStyle, Hsla, SharedString, Window, hsla, rgb};
 
-pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 4 * 1024 * 1024;
+const LAZY_HIGHLIGHT_WINDOW_BYTES: usize = 256 * 1024;
+const LAZY_LOOKBACK_BYTES: usize = 2048;
+const JSON_CHECKPOINT_STRIDE: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind {
@@ -89,7 +92,13 @@ pub(crate) struct HttpSyntaxHighlighter {
     tokens: Vec<(Range<usize>, TokenKind)>,
     extra_wrap_boundaries: Rc<[usize]>,
     badge_ranges: Rc<[Range<usize>]>,
+    payload_marker_spans: Rc<[Range<usize>]>,
     text_len: usize,
+    eager_end: usize,
+    body_offset: usize,
+    content_type: String,
+    rope: Option<Rope>,
+    json_checkpoints: std::cell::RefCell<Vec<(usize, super::syntax_highlight_body::JsonLexState)>>,
 }
 
 pub(crate) fn http_highlighter_factory() -> InputHighlighterFactory {
@@ -114,6 +123,7 @@ pub(crate) fn http_highlighter_factory_with_badges(
 }
 
 impl HttpSyntaxHighlighter {
+    #[cfg(test)]
     pub(crate) fn with_badges(badge_ranges: Vec<Range<usize>>) -> Self {
         Self {
             badge_ranges: badge_ranges.into(),
@@ -126,8 +136,53 @@ impl HttpSyntaxHighlighter {
         self.text_len = text.len();
         let cap = floor_char_boundary(text, text.len().min(MAX_HIGHLIGHT_BYTES));
         let slice = &text[..cap];
-        self.tokens = tokenize_http_with_badges(slice, &self.badge_ranges);
+        let payload_markers = find_payload_markers(text);
+        let (tokens, body_offset, content_type, json_state) =
+            tokenize_http_with_badges_and_meta(slice, &self.badge_ranges, &payload_markers);
+        self.tokens = tokens;
+        self.eager_end = cap;
+        self.body_offset = body_offset;
+        self.content_type = content_type;
         self.extra_wrap_boundaries = request_start_line_wrap_boundaries(slice, &self.tokens);
+        self.payload_marker_spans = payload_markers.into();
+        self.rope = (text.len() > cap).then(|| Rope::from(text));
+        self.json_checkpoints = std::cell::RefCell::new(if text.len() > cap {
+            json_state.into_iter().map(|state| (cap, state)).collect()
+        } else {
+            Vec::new()
+        });
+    }
+
+    fn json_state_at(
+        &self,
+        rope: &Rope,
+        target: usize,
+    ) -> Option<super::syntax_highlight_body::JsonLexState> {
+        let mut checkpoints = self.json_checkpoints.borrow_mut();
+        if checkpoints.is_empty() {
+            return None;
+        }
+        let idx = checkpoints
+            .partition_point(|(pos, _)| *pos <= target)
+            .saturating_sub(1);
+        let (mut cur, mut state) = checkpoints[idx].clone();
+        while cur < target {
+            let next_raw = cur.saturating_add(JSON_CHECKPOINT_STRIDE).min(target);
+            let step_end = clip_rope_char_end(rope, next_raw).max(cur);
+            if step_end == cur {
+                break;
+            }
+            let chunk = rope.slice(cur..step_end).to_string();
+            super::syntax_highlight_body::advance_json_state(&chunk, &mut state);
+            cur = step_end;
+            if let Some((last_pos, _)) = checkpoints.last()
+                && cur > *last_pos
+                && (cur - *last_pos >= JSON_CHECKPOINT_STRIDE || cur < target)
+            {
+                checkpoints.push((cur, state.clone()));
+            }
+        }
+        Some(state)
     }
 
     pub(crate) fn styles_for_mode(
@@ -140,29 +195,159 @@ impl HttpSyntaxHighlighter {
         if start >= end {
             return Vec::new();
         }
-        let first = self.tokens.partition_point(|(tok, _)| tok.end <= start);
         let mut runs = Vec::new();
-        let mut cursor = start;
-        for (tok, kind) in &self.tokens[first..] {
-            if tok.start >= end {
-                break;
-            }
-            let s = tok.start.max(start);
-            let e = tok.end.min(end);
-            if s >= e || e <= cursor {
-                continue;
-            }
-            if cursor < s {
-                runs.push((cursor..s, HighlightStyle::default()));
-            }
-            runs.push((s..e, kind.style(dark)));
-            cursor = e;
+        let eager_slice_end = end.min(self.eager_end);
+        if start < eager_slice_end {
+            push_token_runs(&self.tokens, start..eager_slice_end, dark, &mut runs);
         }
-        if cursor < end {
-            runs.push((cursor..end, HighlightStyle::default()));
+        if end > self.eager_end {
+            let tail_start = start.max(self.eager_end);
+            if let Some(rope) = &self.rope {
+                let win_target_end = end.min(tail_start.saturating_add(LAZY_HIGHLIGHT_WINDOW_BYTES));
+                let mut tail_tokens = Vec::new();
+                let (win_start, win_end, win_str) =
+                    if let Some(json_state) = {
+                        let start_boundary = clip_rope_char_end(rope, tail_start);
+                        self.json_state_at(rope, start_boundary)
+                            .map(|st| (start_boundary, st))
+                    } {
+                        let (win_start, mut state) = json_state;
+                        let win_end = clip_rope_char_end(rope, win_target_end.max(win_start)).max(win_start);
+                        let win_str = rope.slice(win_start..win_end).to_string();
+                        if !win_str.is_empty() {
+                            super::syntax_highlight_body::tokenize_json_from_state(
+                                &win_str,
+                                win_start,
+                                &mut state,
+                                &mut tail_tokens,
+                            );
+                        }
+                        (win_start, win_end, win_str)
+                    } else {
+                        let lookback_floor = self.body_offset.min(tail_start);
+                        let raw_win_start = tail_start
+                            .saturating_sub(LAZY_LOOKBACK_BYTES)
+                            .max(lookback_floor);
+                        let mut win_start = clip_rope_char_end(rope, raw_win_start);
+                        let win_end =
+                            clip_rope_char_end(rope, win_target_end.max(tail_start)).max(win_start);
+                        let mut win_str = rope.slice(win_start..win_end).to_string();
+                        if win_start > lookback_floor
+                            && let Some(adj) = safe_body_resync_offset(
+                                &win_str,
+                                tail_start.saturating_sub(win_start),
+                                &self.content_type,
+                            )
+                        {
+                            win_start += adj;
+                            win_str.drain(..adj);
+                        }
+                        if !win_str.is_empty() {
+                            tokenize_body(
+                                &win_str,
+                                win_start,
+                                &self.content_type,
+                                &self.badge_ranges,
+                                &mut tail_tokens,
+                            );
+                        }
+                        (win_start, win_end, win_str)
+                    };
+                if !win_str.is_empty() {
+                    let markers =
+                        clip_ranges_to_window(&self.payload_marker_spans, win_start, win_end);
+                    if !markers.is_empty() {
+                        tail_tokens =
+                            overlay_spans(tail_tokens, &markers, TokenKind::PayloadMarker);
+                    }
+                    let overlapping =
+                        clip_ranges_to_window(&self.badge_ranges, win_start, win_end);
+                    if !overlapping.is_empty() {
+                        tail_tokens =
+                            overlay_spans(tail_tokens, &overlapping, TokenKind::NonPrintableBadge);
+                    }
+                }
+                push_token_runs(&tail_tokens, tail_start..win_end, dark, &mut runs);
+                if win_end < end {
+                    runs.push((win_end..end, HighlightStyle::default()));
+                }
+            } else {
+                runs.push((tail_start..end, HighlightStyle::default()));
+            }
         }
         runs
     }
+}
+
+fn push_token_runs(
+    tokens: &[(Range<usize>, TokenKind)],
+    query: Range<usize>,
+    dark: bool,
+    runs: &mut Vec<(Range<usize>, HighlightStyle)>,
+) {
+    let start = query.start;
+    let end = query.end;
+    if start >= end {
+        return;
+    }
+    let first = tokens.partition_point(|(tok, _)| tok.end <= start);
+    let mut cursor = start;
+    for (tok, kind) in &tokens[first..] {
+        if tok.start >= end {
+            break;
+        }
+        let s = tok.start.max(start);
+        let e = tok.end.min(end);
+        if s >= e || e <= cursor {
+            continue;
+        }
+        if cursor < s {
+            runs.push((cursor..s, HighlightStyle::default()));
+        }
+        runs.push((s..e, kind.style(dark)));
+        cursor = e;
+    }
+    if cursor < end {
+        runs.push((cursor..end, HighlightStyle::default()));
+    }
+}
+
+fn safe_body_resync_offset(slice: &str, max_rel: usize, content_type: &str) -> Option<usize> {
+    let clamped_rel = slice.floor_char_boundary(max_rel.min(slice.len()));
+    let prefix = &slice[..clamped_rel];
+    if let Some(nl) = prefix.find('\n') {
+        let after_nl = nl + 1;
+        let rest = prefix[after_nl..].trim_start();
+        let trimmed_offset = after_nl + (prefix[after_nl..].len() - rest.len());
+        if trimmed_offset < max_rel {
+            if content_type.contains("json") || matches!(rest.as_bytes().first(), Some(b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n')) {
+                return Some(trimmed_offset);
+            }
+            if rest.starts_with('<') {
+                return Some(trimmed_offset);
+            }
+        }
+    }
+    if content_type.contains("json") || slice.trim_start().starts_with('{') || slice.trim_start().starts_with('[') {
+        for (idx, b) in prefix.bytes().enumerate() {
+            if matches!(b, b'{' | b'[') {
+                return Some(idx);
+            }
+        }
+        if let Some(comma) = prefix.find(',') {
+            let after = comma + 1;
+            let rest = &prefix[after..];
+            let ws = rest.len() - rest.trim_start().len();
+            let pos = after + ws;
+            if pos < max_rel {
+                return Some(pos);
+            }
+        }
+    }
+    if let Some(lt) = prefix.find('<') {
+        return Some(lt);
+    }
+    None
 }
 
 impl InputHighlighter for HttpSyntaxHighlighter {
@@ -181,8 +366,21 @@ impl InputHighlighter for HttpSyntaxHighlighter {
         self.text_len = text.len();
         let cap = clip_rope_char_end(text, text.len().min(MAX_HIGHLIGHT_BYTES));
         let slice = text.slice(0..cap).to_string();
-        self.tokens = tokenize_http_with_badges(&slice, &self.badge_ranges);
+        let payload_markers = find_payload_markers_in_chunks(text.chunks());
+        let (tokens, body_offset, content_type, json_state) =
+            tokenize_http_with_badges_and_meta(&slice, &self.badge_ranges, &payload_markers);
+        self.tokens = tokens;
+        self.eager_end = cap;
+        self.body_offset = body_offset;
+        self.content_type = content_type;
         self.extra_wrap_boundaries = request_start_line_wrap_boundaries(&slice, &self.tokens);
+        self.payload_marker_spans = payload_markers.into();
+        self.rope = (text.len() > cap).then(|| text.clone());
+        self.json_checkpoints = std::cell::RefCell::new(if text.len() > cap {
+            json_state.into_iter().map(|state| (cap, state)).collect()
+        } else {
+            Vec::new()
+        });
     }
 
     fn update_batch(
@@ -261,18 +459,37 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
+#[cfg(test)]
 pub(crate) fn tokenize_http(text: &str) -> Vec<(Range<usize>, TokenKind)> {
     tokenize_http_with_badges(text, &[])
 }
 
+#[cfg(test)]
 pub(crate) fn tokenize_http_with_badges(
     text: &str,
     badges: &[Range<usize>],
 ) -> Vec<(Range<usize>, TokenKind)> {
+    let payload_markers = find_payload_markers(text);
+    tokenize_http_with_badges_and_meta(text, badges, &payload_markers).0
+}
+
+fn tokenize_http_with_badges_and_meta(
+    text: &str,
+    badges: &[Range<usize>],
+    payload_markers: &[Range<usize>],
+) -> (
+    Vec<(Range<usize>, TokenKind)>,
+    usize,
+    String,
+    Option<super::syntax_highlight_body::JsonLexState>,
+) {
     if text.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0, String::new(), None);
     }
     let mut base = Vec::new();
+    let mut body_offset = 0usize;
+    let mut content_type = String::new();
+    let mut json_state = None;
     let first_nl = text.find('\n').unwrap_or(text.len());
     let first_end = text[..first_nl]
         .strip_suffix('\r')
@@ -281,17 +498,24 @@ pub(crate) fn tokenize_http_with_badges(
 
     if is_http_start_line(first_line) {
         tokenize_start_line(first_line, 0, badges, &mut base);
-        let mut cursor = (first_nl + 1).min(text.len());
-        let mut content_type = String::new();
-        cursor = tokenize_headers_block(text, cursor, badges, &mut content_type, &mut base);
-        if cursor < text.len() {
-            tokenize_body(&text[cursor..], cursor, &content_type, badges, &mut base);
+        let cursor = (first_nl + 1).min(text.len());
+        body_offset = tokenize_headers_block(text, cursor, badges, &mut content_type, &mut base);
+        if body_offset < text.len() {
+            json_state = tokenize_body(
+                &text[body_offset..],
+                body_offset,
+                &content_type,
+                badges,
+                &mut base,
+            );
+        } else if content_type.contains("json") {
+            json_state = Some(super::syntax_highlight_body::JsonLexState::new());
         }
     } else {
-        tokenize_body(text, 0, "", badges, &mut base);
+        json_state = tokenize_body(text, 0, "", badges, &mut base);
     }
 
-    let markers = find_payload_markers(text);
+    let markers = clip_ranges_to_window(payload_markers, 0, text.len());
     if !markers.is_empty() {
         base = overlay_spans(base, &markers, TokenKind::PayloadMarker);
     }
@@ -314,7 +538,7 @@ pub(crate) fn tokenize_http_with_badges(
             base = overlay_spans(base, &valid_badges, TokenKind::NonPrintableBadge);
         }
     }
-    base
+    (base, body_offset, content_type, json_state)
 }
 
 fn line_offset(whole: &str, part: &str) -> Range<usize> {
@@ -576,13 +800,17 @@ fn tokenize_body(
     content_type: &str,
     badges: &[Range<usize>],
     out: &mut Vec<(Range<usize>, TokenKind)>,
-) {
+) -> Option<super::syntax_highlight_body::JsonLexState> {
     let trimmed = body.trim_start();
     if trimmed.is_empty() {
-        return;
+        return content_type
+            .contains("json")
+            .then(super::syntax_highlight_body::JsonLexState::new);
     }
     if content_type.contains("json") || trimmed.starts_with('{') || trimmed.starts_with('[') {
-        super::syntax_highlight_body::tokenize_json(body, offset, out);
+        return Some(super::syntax_highlight_body::tokenize_json_stateful(
+            body, offset, out,
+        ));
     } else if content_type.contains("html")
         || content_type.contains("xml")
         || trimmed.starts_with('<')
@@ -595,6 +823,7 @@ fn tokenize_body(
         let end = trimmed.trim_end_matches(['\r', '\n']).len();
         tokenize_form_body_pairs(&trimmed[..end], offset + lead, badges, out);
     }
+    None
 }
 
 fn tokenize_form_body_pairs(
@@ -647,15 +876,54 @@ fn looks_like_form_urlencoded(s: &str, offset: usize, badges: &[Range<usize>]) -
         && line.bytes().all(|b| b.is_ascii_graphic())
 }
 
+#[cfg(test)]
 fn find_payload_markers(text: &str) -> Vec<Range<usize>> {
+    find_payload_markers_in_chunks(std::iter::once(text))
+}
+
+fn find_payload_markers_in_chunks<'a>(
+    chunks: impl Iterator<Item = &'a str>,
+) -> Vec<Range<usize>> {
     const MARKER: &str = "§";
     const M_LEN: usize = MARKER.len();
-    let mut positions = text.match_indices(MARKER).map(|(idx, _)| idx);
     let mut out = Vec::new();
-    while let (Some(open), Some(close)) = (positions.next(), positions.next()) {
-        out.push(open..close + M_LEN);
+    let mut open_pos: Option<usize> = None;
+    let mut base = 0usize;
+    for chunk in chunks {
+        for (rel, _) in chunk.match_indices(MARKER) {
+            let abs = base + rel;
+            if let Some(open) = open_pos.take() {
+                out.push(open..abs + M_LEN);
+            } else {
+                open_pos = Some(abs);
+            }
+        }
+        base += chunk.len();
     }
     out
+}
+
+fn clip_ranges_to_window(
+    ranges: &[Range<usize>],
+    win_start: usize,
+    win_end: usize,
+) -> Vec<Range<usize>> {
+    if ranges.is_empty() || win_start >= win_end {
+        return Vec::new();
+    }
+    let first = ranges.partition_point(|r| r.end <= win_start);
+    let mut clipped = Vec::new();
+    for range in &ranges[first..] {
+        if range.start >= win_end {
+            break;
+        }
+        let s = range.start.max(win_start);
+        let e = range.end.min(win_end);
+        if s < e {
+            clipped.push(s..e);
+        }
+    }
+    clipped
 }
 
 fn overlay_spans(

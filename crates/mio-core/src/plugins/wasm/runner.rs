@@ -63,6 +63,7 @@ pub(crate) fn spawn_sandbox_worker(
     module: WasmModule,
     mut writes: mpsc::Receiver<Envelope>,
     wire: mpsc::Sender<super::Wire>,
+    outbound_claims: std::sync::Arc<crate::plugins::OutboundWriteClaims>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<Option<Envelope>>(64);
@@ -91,7 +92,8 @@ pub(crate) fn spawn_sandbox_worker(
         let send_env =
             |seq: &mut u64, rev: u64, reply_to: u64, body: envelope::Body| -> Result<u64> {
                 *seq = seq.checked_add(1).context("Wasm 序号耗尽")?;
-                let mut env = Envelope::new(identity, *seq, rev, body, Duration::from_secs(5));
+                let mut env = Envelope::new(identity, *seq, rev, body, Duration::from_secs(5))
+                    .with_minor(protocol::LEGACY_HANDSHAKE_MINOR);
                 env.in_reply_to = reply_to;
                 wire.blocking_send(super::Wire::Frame(Box::new(env)))
                     .map_err(|_| anyhow::anyhow!("Wasm 事件通道已关闭"))?;
@@ -110,6 +112,9 @@ pub(crate) fn spawn_sandbox_worker(
                 }
             };
             let Some(env) = next else { break };
+            if !outbound_claims.claim_for_write(env.panel_id, env.request_id) {
+                continue;
+            }
             let req_id = env.request_id;
             let Some(body) = env.body.clone() else {
                 continue;

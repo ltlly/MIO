@@ -138,6 +138,7 @@ fn runtime_start_with_preferences_persists_plugin_prefs_across_project_switches(
                 action: PluginAction::Ui {
                     instance_id,
                     panel_revision: panel_rev,
+                    event_seq: 0,
                     event: UiEvent {
                         node_id: 10,
                         event: Some(ui_event::Event::Click(Empty {})),

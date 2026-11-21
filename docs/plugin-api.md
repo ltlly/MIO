@@ -1,4 +1,4 @@
-# MIO Native Plugin API Specification (Protocol `v1.4` & `mio-plugin-sdk`)
+# MIO Native Plugin API Specification (Protocol `v1.5` & `mio-plugin-sdk`)
 
 Authoritative specification generated from `crates/mio-plugin-api/src/`, `crates/mio-plugin-sdk/src/`, and `crates/mio-core/src/plugins/`.
 
@@ -53,24 +53,24 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 
 ---
 
-## 3. Wire Framing, Limits & Lifecycle (`v1.4`)
+## 3. Wire Framing, Limits & Lifecycle (`v1.5`)
 
 - **Framing**: `[u32 big-endian length][Protobuf Envelope bytes]`.
 - **Hard Limits**:
-  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 4`
+  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 5` (`LEGACY_HANDSHAKE_MINOR = 4` for backwards-compatible initial `Hello` wire framing)
   - `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`)
   - `MAX_INLINE_BODY = 512 KiB` (`512 * 1024`) — requests/responses/WS payloads exceeding this error rather than truncate
   - `MAX_EDITOR_BYTES = 256 KiB`
   - `MAX_NODES = 512`, `MAX_DEPTH = 24`, `MAX_TABLE_ROWS = 128`, `MAX_DRAW_COMMANDS = 2048`
   - `MAX_STORAGE_KEY_BYTES = 256`, `MAX_STORAGE_VALUE_BYTES = 64 KiB`
   - Header validation: `<= 512` headers, name `1..=256` bytes, value `<= 64 KiB`; method `1..=32` bytes; URL `1..=16 KiB`
-  - Max 64 live resource handles per plugin instance; host service concurrency `16`; `5s` operation timeout
-- **Envelope Header**: `major`, `minor`, `request_id` (strictly increasing per sender, non-zero), `instance_id` (16B UUID), `project_id` (16B UUID), `project_generation` (`!= 0`), `panel_id` (`PANEL_ID = 1`), `revision`, `deadline_unix_ms`, `in_reply_to`, `body`.
+  - Max `64` live resource handles on the main panel (`PANEL_ID = 1`) and `128` shared live resource handles across multiplexed child panels per worker; up to `MAX_CHILD_EDITORS = 64` concurrent child editors project-wide (`panel_id >= 2`); host service concurrency `16`; `5s` operation timeout
+- **Envelope Header**: `major`, `minor`, `request_id` (strictly increasing per sender, non-zero), `instance_id` (16B UUID), `project_id` (16B UUID), `project_generation` (`!= 0`), `panel_id` (`PANEL_ID = 1` for main panel, `>= 2` for multiplexed child panels), `revision`, `deadline_unix_ms`, `in_reply_to`, `body`.
 - **Handshake (`WorkerSession::accept`, handled automatically by `mio_plugin_sdk::run_stdio`)**:
-  1. Host -> Worker: `Hello(max_frame_bytes, max_operation_ms, granted_permissions)`
-  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`): `Register(plugin_id, plugin_version, required_components, panel)`
-  3. Host -> Worker: `Ready` (`in_reply_to = 1`)
-  4. Runtime loop: dispatch incoming envelopes until `Shutdown`.
+  1. Host -> Worker (wire `minor = 4`): `Hello(max_frame_bytes, max_operation_ms, granted_permissions, host_minor = 5)`
+  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`, negotiated `minor = min(max(host_minor, hello.minor), worker_minor)`): `Register(plugin_id, plugin_version, required_components, panel, supports_panel_multiplexing)`
+  3. Host -> Worker (`minor = negotiated_minor`): `Ready` (`in_reply_to = 1`)
+  4. Runtime loop: dispatch incoming envelopes routed by `panel_id` until `Shutdown`.
 
 ---
 
@@ -80,8 +80,8 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 |---|---|---|---|
 | Handshake / Lifecycle | `Hello`(20), `Ready`(22), `Cancel`(31), `Shutdown`(32), `Resync`(34) | `Register`(21), `Ack`(35), `Error`(33) | Strict `in_reply_to` correlation & deadlines |
 | `suite_panel` | `UiEvent`(25) | `Snapshot`(23) / `Patch`(24) / `Ack`(35) | Top-level `42pt` workbench tab with native declarative tree |
-| `message_editor` | `OpenRequest`(26), `CloseRequest`(36), `CommitEditor`(27) | `Snapshot`(23) / `Patch`(24), `Committed`(28) | Custom request tab (Proxy / Repeater / Target / Organiser / external archive); `Send` waits for `Committed` |
-| `message_response_editor` | `OpenResponse`(45), `CommitResponseEditor`(46) | `Snapshot`(23) / `Patch`(24), `ResponseCommitted`(47) | Custom response tab |
+| `message_editor` | `OpenRequest`(26), `CloseRequest`(36), `CommitEditor`(27) | `Snapshot`(23) / `Patch`(24), `Committed`(28), `Ack`(35) | Custom request tab (Proxy / Repeater / Target / Organiser / external archive); `Send` waits for `Committed`; `CloseRequest.destroy_panel` (tag 2) distinguishes single-resource revoke (`false`) from child panel teardown (`true`, `on_panel_destroy`) |
+| `message_response_editor` | `OpenResponse`(45), `CloseRequest`(36), `CommitResponseEditor`(46) | `Snapshot`(23) / `Patch`(24), `ResponseCommitted`(47), `Ack`(35) | Custom response tab (`CloseRequest.destroy_panel = true` tears down multiplexed child viewer) |
 | `context_menu` | `ContextMenuCall`(48) | `ContextMenuResult`(49) | Passes `source`, `action_id`, selection range/bytes, `request`, `response`; supports `status_message`, `log_line`, `open_repeater`, `replace_request` (raw bytes) |
 | `http_hook` | `HttpHookCall`(37) | `HttpHookResult`(38) | Request & response (`response_stage`, `response_head_only`) interception returning `HookAction::{Pass=0, Modify=1, Intercept=2, Drop=3}` |
 | `ws_hook` | `WebSocketHookCall`(39) | `WebSocketHookResult`(40) | Frame hook (`client_to_server`, `is_binary`, `payload`) returning `HookAction` + modified `payload` |
@@ -111,9 +111,9 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 
 ---
 
-## 6. All 19 `HostCall` Operations (`v1.4`, Worker -> Host)
+## 6. All 19 `HostCall` Operations (`v1.5`, Worker -> Host)
 
-Worker sends `Envelope(Body::HostCall(call))`; host replies `Envelope(Body::HostResult(res))` with `in_reply_to`:
+Worker sends `Envelope(Body::HostCall(call))`; host replies `Envelope(Body::HostResult(res))` with `in_reply_to`. `HostCall.parent_request_id` (tag 20, populated automatically by `mio-plugin-sdk`): non-zero values must match an active, uncancelled request on the same `panel_id`, inherit the parent deadline as an upper bound, and cascade-cancel on parent timeout, revoke, or `CancelPanelOp`. When invoked from `MioPlugin::on_cancel` on a **live** panel (closing panels reject `HostCall`s as `Stale`), `parent_request_id` correlates to the host `Cancel` notification's bounded cleanup window (`MAX_OPERATION`), which closes on `Ack`/`Error` (or legacy `Snapshot`/`Patch`): only `QueryHistory`, `ReadFlow`, `ScopeCheck`, `QuerySiteMap`, `ReadAnnotations`, `StorageGet`, `StorageSet`, `PreferencesGet`, and `PreferencesSet` are allowed (bypassing transient revision drift, while scheduling `Resync` only if the active `Cancel` is for a non-`Resync` request and the callback's envelope revision exceeds the host revision), whereas all other operations (including `UpdateDraft`, `OpenRepeater`, `OpenIntruder`, `NetworkSend`, `ScopeUpdate`, `OpenOrganiser`, `UpdateAnnotations`, `SubmitAuditIssue`, and `Collaborator*`) are rejected with `ErrorCode::Cancelled`:
 
 | `host_call::Operation` (tag) | `mio-plugin-sdk` Method (`HostClient`) | Required `Permission` | `host_result::Outcome` (tag) | Notes / Limits |
 |---|---|---|---|---|

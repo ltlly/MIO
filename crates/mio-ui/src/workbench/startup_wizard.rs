@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use gpui_kit::{WeakEntity, component::table::Column};
 use mio_core::{RecentProject, StartupDefaultConfig, Uuid};
 
@@ -31,10 +33,20 @@ enum RecentSortColumn {
     LastAccessed,
 }
 
+pub(super) struct PendingRecentSave {
+    pub(super) operation_id: Uuid,
+    pub(super) expected_revision: u64,
+    pub(super) label: &'static str,
+    pub(super) removed_path: Option<PathBuf>,
+    pub(super) previous_paths: Vec<PathBuf>,
+}
+
 pub(super) struct RecentProjectsDelegate {
     owner: Option<WeakEntity<Workbench>>,
     columns: [Column; 3],
     rows: Vec<RecentProject>,
+    missing_paths: HashSet<PathBuf>,
+    selected_path: Option<PathBuf>,
     sort_column: RecentSortColumn,
     ascending: bool,
 }
@@ -77,6 +89,7 @@ pub(super) struct StartupWizard {
     pub(super) syncing_inputs: bool,
     pub(super) picker: Option<Uuid>,
     pub(super) pending_preference_save: Option<(Uuid, u64, StartupDefaultConfig, bool)>,
+    pub(super) pending_recent_save: Option<PendingRecentSave>,
     pub(super) awaiting_start: bool,
     pub(super) initial_project_ready: bool,
     pub(super) cli_initial_path: Option<PathBuf>,

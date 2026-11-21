@@ -169,6 +169,7 @@ pub(in crate::workbench) enum Operation {
     Event {
         instance: Uuid,
         node_id: u64,
+        event_seq: u64,
     },
     Reject,
     Cancel,
@@ -217,7 +218,6 @@ pub(in crate::workbench) enum Operation {
     },
     SetAutoReload {
         instance: Uuid,
-        enabled: bool,
     },
     ContextMenu {
         instance: Uuid,

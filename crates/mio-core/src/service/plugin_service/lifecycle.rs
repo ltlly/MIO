@@ -7,7 +7,7 @@ impl State {
         context_id: Uuid,
         revision: u64,
     ) -> Result<(), String> {
-        self.plugin_instance(identity.instance_id)
+        self.check_plugin_known(identity.instance_id)
             .map_err(|e| e.to_string())?;
         if self.plugins.context_viewers.get(&identity.instance_id)
             == Some(&(context_id, revision, false))
@@ -18,6 +18,50 @@ impl State {
         }
     }
 
+    pub(super) async fn update_opened_panel(
+        &mut self,
+        identity: ChannelIdentity,
+        panel: std::sync::Arc<PanelSnapshot>,
+    ) -> Option<(LoadedPlugin, std::sync::Arc<PanelSnapshot>)> {
+        if let Some(instance) = self.plugins.instances.get_mut(&identity.instance_id)
+            && instance.info.identity == identity
+            && identity.project == self.project
+        {
+            if panel.revision > instance.panel.revision {
+                instance.panel = panel.clone();
+                self.emit(Event::PluginPanel {
+                    identity,
+                    snapshot: panel,
+                    editor_bases: vec![],
+                    synced_ui_seq: None,
+                    rejected_ui_seqs: vec![],
+                })
+                .await;
+            }
+            let instance = &self.plugins.instances[&identity.instance_id];
+            return Some((instance.info.clone(), instance.panel.clone()));
+        }
+        if let Some(child) = self.plugins.multiplexed.get_mut(&identity.instance_id)
+            && child.info.identity == identity
+            && identity.project == self.project
+        {
+            if panel.revision > child.panel.revision {
+                child.panel = panel.clone();
+                self.emit(Event::PluginPanel {
+                    identity,
+                    snapshot: panel,
+                    editor_bases: vec![],
+                    synced_ui_seq: None,
+                    rejected_ui_seqs: vec![],
+                })
+                .await;
+            }
+            let child = &self.plugins.multiplexed[&identity.instance_id];
+            return Some((child.info.clone(), child.panel.clone()));
+        }
+        None
+    }
+
     pub(super) async fn finish_viewer_open(
         &mut self,
         identity: ChannelIdentity,
@@ -26,12 +70,12 @@ impl State {
         panel: std::sync::Arc<PanelSnapshot>,
         is_response: bool,
     ) -> Result<PluginOutcome, String> {
-        self.plugin_instance(identity.instance_id)
+        self.check_plugin_known(identity.instance_id)
             .map_err(|e| e.to_string())?;
-        self.plugin_panel(identity, panel, vec![]).await;
-        let instance = &self.plugins.instances[&identity.instance_id];
-        let info = instance.info.clone();
-        let panel = instance.panel.clone();
+        let (info, panel) = self
+            .update_opened_panel(identity, panel)
+            .await
+            .ok_or_else(|| "插件实例已禁用或重载".to_owned())?;
         Ok(if is_response {
             PluginOutcome::ResponseOpened {
                 info,
@@ -64,22 +108,167 @@ impl State {
     }
 
     pub(super) fn plugin_capacity_for(&self, replacing: bool) -> Result<()> {
-        let foreground_ops = self
+        let suite_instances = self
+            .plugins
+            .instances
+            .iter()
+            .filter(|(id, inst)| {
+                inst.source.is_none()
+                    && inst.info.tab_id.is_none()
+                    && !self.plugins.context_viewers.contains_key(id)
+            })
+            .count();
+        let suite_ops = self
             .plugins
             .operations
             .values()
-            .filter(|op| !op.background_passive)
+            .filter(|op| !op.background_passive && op.is_suite_start && !op.replaces_existing)
             .count();
-        let in_flight_replaces = self
-            .plugins
-            .operations
-            .values()
-            .filter(|op| !op.background_passive && op.replaces_existing)
-            .count();
-        let occupied = (self.plugins.instances.len() + foreground_ops)
-            .saturating_sub(in_flight_replaces + usize::from(replacing));
+        let occupied = (suite_instances + suite_ops).saturating_sub(usize::from(replacing));
         ensure!(occupied < MAX_INSTANCES, "插件实例及启动任务达到 16 个限额");
         Ok(())
+    }
+
+    pub(super) fn plugin_child_capacity(&self) -> Result<()> {
+        let legacy_children = self
+            .plugins
+            .instances
+            .iter()
+            .filter(|(id, inst)| {
+                inst.source.is_some()
+                    || inst.info.tab_id.is_some()
+                    || self.plugins.context_viewers.contains_key(id)
+            })
+            .count();
+        let child_ops = self
+            .plugins
+            .operations
+            .values()
+            .filter(|op| !op.background_passive && op.is_child_start)
+            .count();
+        let occupied = legacy_children
+            + self.plugins.multiplexed.len()
+            + self.plugins.closing_panels.len()
+            + child_ops;
+        ensure!(
+            occupied < MAX_CHILD_EDITORS,
+            "插件子编辑器或查看器实例达到 64 个限额"
+        );
+        Ok(())
+    }
+
+    pub(super) fn allocate_multiplexed_child(
+        &mut self,
+        source_instance: Uuid,
+        tab_id: Option<TabId>,
+    ) -> Result<(
+        Uuid,
+        u64,
+        ChannelIdentity,
+        crate::plugins::PluginHandle,
+        LoadedPlugin,
+    )> {
+        let source = self.plugin_instance(source_instance)?;
+        ensure!(
+            source.worker.supports_panel_multiplexing,
+            "此插件不支持多路复用"
+        );
+        let handle = source.worker.handle();
+        let directory = source.package.directory.clone();
+        let manifest = source.package.manifest.clone();
+        let grants = source.info.grants.clone();
+        let mut panel_id = self
+            .plugins
+            .next_panel_id
+            .max(mio_plugin_api::protocol::PANEL_ID + 1);
+        for _ in 0..u16::MAX {
+            if panel_id > mio_plugin_api::protocol::PANEL_ID
+                && !self
+                    .plugins
+                    .panel_routes
+                    .contains_key(&(source_instance, panel_id))
+                && !self
+                    .plugins
+                    .closing_panels
+                    .contains(&(source_instance, panel_id))
+            {
+                break;
+            }
+            panel_id = panel_id
+                .saturating_add(1)
+                .max(mio_plugin_api::protocol::PANEL_ID + 1);
+        }
+        ensure!(
+            !self
+                .plugins
+                .panel_routes
+                .contains_key(&(source_instance, panel_id))
+                && !self
+                    .plugins
+                    .closing_panels
+                    .contains(&(source_instance, panel_id)),
+            "插件多路复用 panel_id 已耗尽"
+        );
+        self.plugins.next_panel_id = panel_id
+            .saturating_add(1)
+            .max(mio_plugin_api::protocol::PANEL_ID + 1);
+        let virtual_id = Uuid::new_v4();
+        let identity = ChannelIdentity {
+            instance_id: virtual_id,
+            project: self.project,
+        };
+        let info = LoadedPlugin {
+            identity,
+            directory,
+            manifest,
+            grants,
+            tab_id,
+        };
+        Ok((virtual_id, panel_id, identity, handle, info))
+    }
+
+    pub(super) fn take_multiplexed_child(
+        &mut self,
+        virtual_id: Uuid,
+        reason: &str,
+    ) -> Option<(MultiplexedChild, Option<crate::plugins::PluginHandle>)> {
+        let child = self.plugins.multiplexed.remove(&virtual_id)?;
+        self.plugins
+            .panel_routes
+            .remove(&(child.source_instance, child.panel_id));
+        self.plugins.context_viewers.remove(&virtual_id);
+        for operation in self.plugins.operations.values() {
+            if operation.instance == Some(virtual_id) {
+                operation.cancel.cancel();
+            }
+        }
+        let ws_keys: Vec<_> = self
+            .plugins
+            .workspace
+            .iter()
+            .filter_map(|(key, pending)| {
+                (key.0 == child.source_instance
+                    && pending.call.panel_id == child.panel_id)
+                    .then_some(*key)
+            })
+            .collect();
+        for key in ws_keys {
+            let pending = self.plugins.workspace.remove(&key).unwrap();
+            pending.call.cancel.cancel();
+            let _ = pending
+                .call
+                .reply
+                .send(Err(Failure::new(ErrorCode::Cancelled, reason)));
+        }
+        let parent_handle = self
+            .plugins
+            .instances
+            .get(&child.source_instance)
+            .map(|inst| inst.worker.handle());
+        if let Some(ref handle) = parent_handle {
+            handle.cancel_pending_resource_ops(child.panel_id, child.primary_resource, true);
+        }
+        Some((child, parent_handle))
     }
 
     pub(super) fn maybe_auto_reload_on_heartbeat(&mut self) {
@@ -306,8 +495,12 @@ impl State {
                 response_open,
             })))
         });
-        if replaces_existing && let Some(op) = self.plugins.operations.get_mut(&operation_id) {
-            op.replaces_existing = true;
+        if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
+            op.is_suite_start = is_suite_target;
+            op.is_child_start = !is_suite_target;
+            if replaces_existing {
+                op.replaces_existing = true;
+            }
         }
     }
 
@@ -383,8 +576,11 @@ impl State {
                 response_open: None,
             })))
         });
-        if autoload && let Some(op) = self.plugins.operations.get_mut(&operation_id) {
-            op.autoload_plugin_id = Some(plugin_id);
+        if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
+            op.is_suite_start = true;
+            if autoload {
+                op.autoload_plugin_id = Some(plugin_id);
+            }
         }
     }
 
@@ -455,7 +651,7 @@ impl State {
                 self.emit(Event::PluginAutoLoadFailed {
                     project: self.project,
                     plugin_id: entry.id,
-                    message: "插件后台操作达到 32 个限额，未能自动加载".into(),
+                    message: "插件后台操作达到 64 个限额，未能自动加载".into(),
                 })
                 .await;
                 continue;
@@ -533,42 +729,80 @@ impl State {
         cancel: CancellationToken,
     ) -> Result<()> {
         let tab = self.plugin_tab(tab_id, revision)?;
-        let instance = self.plugin_instance(instance_id)?;
+        let (handle, identity, panel_id, bound_tab, resource_count, has_tab, has_read) =
+            if let Ok(instance) = self.plugin_instance(instance_id) {
+                (
+                    instance.worker.handle(),
+                    instance.info.identity,
+                    mio_plugin_api::protocol::PANEL_ID,
+                    instance.info.tab_id,
+                    instance.resources.len(),
+                    instance.resources.contains_key(&tab_id),
+                    instance.info.grants.contains(&Permission::TrafficRead),
+                )
+            } else {
+                let child = self
+                    .plugins
+                    .multiplexed
+                    .get(&instance_id)
+                    .context("插件实例已禁用或重载")?;
+                let (handle, child_identity, panel_id, bound_tab, resources, _) =
+                    self.plugin_target(instance_id)?;
+                (
+                    handle,
+                    child_identity,
+                    panel_id,
+                    bound_tab,
+                    resources.len(),
+                    resources.contains_key(&tab_id),
+                    child.info.grants.contains(&Permission::TrafficRead),
+                )
+            };
+        ensure!(bound_tab.is_none_or(|id| id == tab_id), "消息编辑器属于其它标签");
+        ensure!(has_read, "插件尚未获准 traffic.read");
         ensure!(
-            instance.info.tab_id.is_none_or(|id| id == tab_id),
-            "消息编辑器属于其它标签"
-        );
-        ensure!(
-            instance.info.grants.contains(&Permission::TrafficRead),
-            "插件尚未获准 traffic.read"
-        );
-        ensure!(
-            instance.resources.contains_key(&tab_id) || instance.resources.len() < MAX_RESOURCES,
+            has_tab || resource_count < MAX_RESOURCES,
             "插件资源 handle 达到 64 个限额；未打开请求"
         );
         let request = parse_request(&tab.draft.raw, &tab.draft.target, tab.draft.version)?;
-        let handle = instance.worker.handle();
-        let identity = instance.info.identity;
-        let previous = self
-            .plugins
-            .instances
-            .get_mut(&instance_id)
-            .unwrap()
-            .resources
-            .insert(tab_id, revision);
+        let previous = if let Some(inst) = self.plugins.instances.get_mut(&instance_id) {
+            inst.resources.insert(tab_id, revision)
+        } else {
+            self.plugins
+                .multiplexed
+                .get_mut(&instance_id)
+                .unwrap()
+                .resources
+                .insert(tab_id, revision)
+        };
+        let is_multiplexed = panel_id != mio_plugin_api::protocol::PANEL_ID;
+        let pending_open = handle.begin_open(panel_id, tab_id);
         let task_cancel = cancel.clone();
         self.plugin_job_start(operation_id, Some(instance_id), cancel, true, async move {
-            let opened = handle.open_request(tab_id, revision, false, request);
+            let opened = pending_open.open_request(revision, false, request);
             tokio::pin!(opened);
             let panel = tokio::select! {
                 biased;
-                _ = task_cancel.cancelled() => { handle.cancel(); anyhow::bail!("打开插件请求已取消；实例正在回收"); }
+                _ = task_cancel.cancelled() => {
+                    if !is_multiplexed {
+                        handle.cancel();
+                        anyhow::bail!("打开插件请求已取消；实例正在回收");
+                    }
+                    let _ = handle.revoke_panel_resource(panel_id, tab_id, false).await;
+                    anyhow::bail!("打开插件请求已取消；已撤销子面板资源");
+                }
                 result = &mut opened => result?,
             };
-            Ok(Output::Opened { identity, tab_id, revision, loading, panel })
+            Ok(Output::Opened {
+                identity,
+                tab_id,
+                revision,
+                loading,
+                panel,
+            })
         });
         let operation = self.plugins.operations.get_mut(&operation_id).unwrap();
-        operation.cleanup_failed = loading;
+        operation.cleanup_failed = loading && !is_multiplexed;
         operation.binding = Some((tab_id, revision, previous));
         Ok(())
     }
@@ -576,13 +810,22 @@ impl State {
     pub(super) fn rollback_plugin_binding(&mut self, operation: &Operation) {
         if let Some((tab_id, revision, previous)) = operation.binding
             && let Some(instance_id) = operation.instance
-            && let Some(instance) = self.plugins.instances.get_mut(&instance_id)
-            && instance.resources.get(&tab_id) == Some(&revision)
         {
-            if let Some(previous) = previous {
-                instance.resources.insert(tab_id, previous);
+            let resources = if let Some(inst) = self.plugins.instances.get_mut(&instance_id) {
+                Some(&mut inst.resources)
+            } else if let Some(child) = self.plugins.multiplexed.get_mut(&instance_id) {
+                Some(&mut child.resources)
             } else {
-                instance.resources.remove(&tab_id);
+                None
+            };
+            if let Some(resources) = resources
+                && resources.get(&tab_id) == Some(&revision)
+            {
+                if let Some(previous) = previous {
+                    resources.insert(tab_id, previous);
+                } else {
+                    resources.remove(&tab_id);
+                }
             }
         }
     }
@@ -591,7 +834,22 @@ impl State {
         &mut self,
         instance_id: Uuid,
         reason: &str,
-    ) -> Vec<(Instance, Vec<Network>)> {
+    ) -> (Vec<(Instance, Vec<Network>)>, Vec<ChannelIdentity>) {
+        let mut retired_multiplexed = Vec::new();
+        let child_ids: Vec<_> = self
+            .plugins
+            .multiplexed
+            .iter()
+            .filter_map(|(id, child)| (child.source_instance == instance_id).then_some(*id))
+            .collect();
+        for cid in child_ids {
+            if let Some((child, _)) = self.take_multiplexed_child(cid, reason) {
+                retired_multiplexed.push(child.info.identity);
+            }
+        }
+        self.plugins
+            .closing_panels
+            .retain(|(src, _)| *src != instance_id);
         let ids: Vec<_> = self
             .plugins
             .instances
@@ -649,21 +907,31 @@ impl State {
             retired.push((instance, network));
         }
         self.sync_proxy_plugin_hooks();
-        retired
+        (retired, retired_multiplexed)
     }
 }
 
 pub(super) async fn retire(
     instances: Vec<(Instance, Vec<Network>)>,
+    retired_multiplexed: Vec<ChannelIdentity>,
     candidate: Option<Box<Candidate>>,
     disabled: Option<ChannelIdentity>,
     reason: String,
 ) -> Result<Output> {
-    retire_with_uninstall(instances, candidate, disabled, None, reason).await
+    retire_with_uninstall(
+        instances,
+        retired_multiplexed,
+        candidate,
+        disabled,
+        None,
+        reason,
+    )
+    .await
 }
 
 pub(super) async fn retire_with_uninstall(
     instances: Vec<(Instance, Vec<Network>)>,
+    retired_multiplexed: Vec<ChannelIdentity>,
     candidate: Option<Box<Candidate>>,
     disabled: Option<ChannelIdentity>,
     uninstalled_plugin_id: Option<String>,
@@ -704,6 +972,7 @@ pub(super) async fn retire_with_uninstall(
     }
     Ok(Output::Retired {
         retired,
+        retired_multiplexed,
         candidate,
         disabled,
         uninstalled_plugin_id,

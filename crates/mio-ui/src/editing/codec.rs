@@ -21,7 +21,9 @@ pub(crate) fn convert_selection(kind: ConvertKind, input: &str) -> Result<String
         ConvertKind::Base64UrlSafeDecode => base64_url_safe_decode(input),
         ConvertKind::AsciiHexEncode => Ok(ascii_hex_encode(input)),
         ConvertKind::AsciiHexDecode => ascii_hex_decode(input),
+        #[cfg(test)]
         ConvertKind::ConstructJsString => Ok(construct_js_string(input.as_bytes())),
+        #[cfg(test)]
         ConvertKind::ConstructSqlChar => Ok(construct_sql_char(input.as_bytes())),
     }
 }
@@ -62,7 +64,9 @@ pub(crate) fn convert_bytes(
         ConvertKind::Base64UrlSafeDecode => base64_url_safe_decode_bytes(input_text),
         ConvertKind::AsciiHexEncode => Ok(ascii_hex_encode_bytes(input_bytes).into_bytes()),
         ConvertKind::AsciiHexDecode => hex_decode(input_text),
+        #[cfg(test)]
         ConvertKind::ConstructJsString => Ok(construct_js_string(input_bytes).into_bytes()),
+        #[cfg(test)]
         ConvertKind::ConstructSqlChar => Ok(construct_sql_char(input_bytes).into_bytes()),
     }
 }
@@ -339,6 +343,7 @@ fn base64_url_safe_decode(input: &str) -> Result<String, String> {
     })
 }
 
+#[cfg(test)]
 fn construct_js_string(bytes: &[u8]) -> String {
     use std::fmt::Write;
 
@@ -378,6 +383,7 @@ fn construct_js_string(bytes: &[u8]) -> String {
         .join(" + ")
 }
 
+#[cfg(test)]
 fn construct_sql_char(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "''".to_owned();
@@ -917,7 +923,7 @@ pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
     let decoded_body_text = header_charset
         .as_deref()
         .and_then(|label| {
-            super::message_editor::MessageDisplayCharset::from_label(label)
+            super::MessageDisplayCharset::from_label(label)
                 .and_then(|cs| cs.decode(body_slice))
         })
         .or_else(|| std::str::from_utf8(body_slice).ok().map(str::to_owned));

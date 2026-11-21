@@ -1,366 +1,8 @@
-use super::*;
-use gpui_kit::component::button::{ButtonRounded, ButtonVariants};
-use gpui_kit::{
-    Context, EntityId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Render, RenderOnce, StyleRefinement, UniformListScrollHandle, WeakEntity, uniform_list,
+use super::http_head::{
+    decode_message_bytes, encode_raw_text_bytes, pretty_line_number_mapping, serialize_pretty_edit,
 };
-use std::collections::HashMap;
+use super::*;
 use std::ops::Range;
-
-std::thread_local! {
-    static HEX_GRID_REGISTRY: RefCell<HashMap<EntityId, WeakEntity<HexGridView>>> =
-        RefCell::new(HashMap::new());
-}
-
-pub(crate) fn hex_text_range_to_byte_range(
-    text_range: Range<usize>,
-    total_bytes: usize,
-) -> Option<Range<usize>> {
-    if text_range.is_empty() || total_bytes == 0 {
-        return None;
-    }
-    let start_byte = text_range.start.saturating_add(1) / 3;
-    let end_byte = (text_range.end.saturating_add(1) / 3).min(total_bytes);
-    (start_byte < end_byte).then_some(start_byte..end_byte)
-}
-
-pub(crate) fn hex_byte_range_to_text_range(byte_range: Range<usize>) -> Range<usize> {
-    if byte_range.is_empty() {
-        let offset = byte_range.start.saturating_mul(3);
-        return offset..offset;
-    }
-    let start = byte_range.start.saturating_mul(3);
-    let end = byte_range.end.saturating_mul(3).saturating_sub(1);
-    start..end
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MessageDisplayCharset {
-    Utf8,
-    Gbk,
-    Gb18030,
-    Big5,
-    ShiftJis,
-    EucKr,
-    Iso8859_1,
-    Windows1252,
-    UsAscii,
-    Other(&'static encoding_rs::Encoding),
-}
-
-impl MessageDisplayCharset {
-    pub(crate) fn from_label(label: &str) -> Option<Self> {
-        let lower = label.trim().to_ascii_lowercase();
-        match lower.as_str() {
-            "" | "utf-8" | "utf8" => Some(Self::Utf8),
-            "gbk" | "gb2312" | "cp936" | "ms936" | "x-gbk" => Some(Self::Gbk),
-            "gb18030" => Some(Self::Gb18030),
-            "big5" | "big5-hkscs" | "cn-big5" | "xx-big5" | "cp950" => Some(Self::Big5),
-            "shift_jis" | "shift-jis" | "sjis" | "ms932" | "cp932" | "windows-31j" | "x-sjis" => {
-                Some(Self::ShiftJis)
-            }
-            "euc-kr" | "euckr" | "cp949" | "ks_c_5601-1987" | "windows-949" => Some(Self::EucKr),
-            "iso-8859-1" | "iso_8859-1" | "latin1" | "latin-1" => Some(Self::Iso8859_1),
-            "windows-1252" | "cp1252" => Some(Self::Windows1252),
-            "us-ascii" | "ascii" => Some(Self::UsAscii),
-            other => encoding_rs::Encoding::for_label(other.as_bytes()).map(Self::Other),
-        }
-    }
-
-    pub(crate) fn decode(self, bytes: &[u8]) -> Option<String> {
-        match self {
-            Self::Utf8 => std::str::from_utf8(bytes).ok().map(str::to_owned),
-            Self::Iso8859_1 => Some(decode_latin1(bytes)),
-            Self::UsAscii => Some(decode_ascii(bytes)),
-            Self::Gbk => Some(
-                encoding_rs::GBK
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::Gb18030 => Some(
-                encoding_rs::GB18030
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::Big5 => Some(
-                encoding_rs::BIG5
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::ShiftJis => Some(
-                encoding_rs::SHIFT_JIS
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::EucKr => Some(
-                encoding_rs::EUC_KR
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::Windows1252 => Some(
-                encoding_rs::WINDOWS_1252
-                    .decode_without_bom_handling(bytes)
-                    .0
-                    .into_owned(),
-            ),
-            Self::Other(enc) => Some(enc.decode_without_bom_handling(bytes).0.into_owned()),
-        }
-    }
-
-    pub(crate) fn encode(self, text: &str) -> Vec<u8> {
-        match self {
-            Self::Utf8 | Self::UsAscii => text.as_bytes().to_vec(),
-            Self::Iso8859_1 => {
-                let mut out = Vec::with_capacity(text.len());
-                let mut buf = [0u8; 4];
-                for ch in text.chars() {
-                    if (ch as u32) <= 0xFF {
-                        out.push(ch as u8);
-                    } else {
-                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                    }
-                }
-                out
-            }
-            Self::Gbk => encoding_rs::GBK.encode(text).0.into_owned(),
-            Self::Gb18030 => encoding_rs::GB18030.encode(text).0.into_owned(),
-            Self::Big5 => encoding_rs::BIG5.encode(text).0.into_owned(),
-            Self::ShiftJis => encoding_rs::SHIFT_JIS.encode(text).0.into_owned(),
-            Self::EucKr => encoding_rs::EUC_KR.encode(text).0.into_owned(),
-            Self::Windows1252 => encoding_rs::WINDOWS_1252.encode(text).0.into_owned(),
-            Self::Other(enc) => enc.encode(text).0.into_owned(),
-        }
-    }
-}
-
-fn extract_header_charset(bytes: &[u8]) -> Option<String> {
-    let (_, headers) = parse_http_head_info(bytes)?;
-    for header in headers {
-        if !header.name.eq_ignore_ascii_case("content-type") {
-            continue;
-        }
-        let value = std::str::from_utf8(&header.value).ok()?;
-        for part in value.split(';').skip(1) {
-            let trimmed = part.trim();
-            if let Some((key, raw_val)) = trimmed.split_once('=')
-                && key.trim().eq_ignore_ascii_case("charset")
-            {
-                let cleaned = raw_val
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .trim();
-                if !cleaned.is_empty() {
-                    return Some(cleaned.to_ascii_lowercase());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn decode_latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| char::from(b)).collect()
-}
-
-fn decode_ascii(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|&b| if b < 0x80 { char::from(b) } else { '\u{FFFD}' })
-        .collect()
-}
-
-fn decode_named_charset(bytes: &[u8], charset_lower: &str) -> Option<String> {
-    match MessageDisplayCharset::from_label(charset_lower) {
-        Some(charset) => charset.decode(bytes),
-        None => std::str::from_utf8(bytes).ok().map(str::to_owned),
-    }
-}
-
-fn active_display_charset(original_wire_bytes: &[u8]) -> MessageDisplayCharset {
-    let (mode, specific) = crate::theme::message_editor_charset();
-    match mode {
-        0 => extract_header_charset(original_wire_bytes)
-            .and_then(|label| MessageDisplayCharset::from_label(&label))
-            .unwrap_or(MessageDisplayCharset::Utf8),
-        1 => MessageDisplayCharset::Utf8,
-        2 => MessageDisplayCharset::Iso8859_1,
-        _ => MessageDisplayCharset::from_label(&specific).unwrap_or(MessageDisplayCharset::Utf8),
-    }
-}
-
-fn decode_message_bytes(bytes: &[u8]) -> Option<String> {
-    let (mode, specific) = crate::theme::message_editor_charset();
-    match mode {
-        // 0: Recognize automatically based on message headers
-        0 => {
-            if let Some(charset) = extract_header_charset(bytes) {
-                decode_named_charset(bytes, &charset)
-            } else {
-                std::str::from_utf8(bytes).ok().map(str::to_owned)
-            }
-        }
-        // 1: Use platform default (UTF-8)
-        1 => std::str::from_utf8(bytes).ok().map(str::to_owned),
-        // 2: Display as raw bytes (1:1 ISO-8859-1 byte view)
-        2 => Some(decode_latin1(bytes)),
-        // 3: Use a specific character set
-        _ => decode_named_charset(bytes, &specific.trim().to_ascii_lowercase()),
-    }
-}
-
-fn encode_raw_text_bytes(text: &str, original_wire_bytes: &[u8]) -> Vec<u8> {
-    if decode_message_bytes(original_wire_bytes).as_deref() == Some(text) {
-        return original_wire_bytes.to_vec();
-    }
-    active_display_charset(original_wire_bytes).encode(text)
-}
-
-fn pretty_line_number_mapping(raw_bytes: &[u8], formatted: &str) -> Option<Vec<usize>> {
-    const MAX_RAW_LINE_SCAN_BYTES: usize = 8 * 1024;
-    const MAX_TOTAL_SCAN_BYTES: usize = 256 * 1024;
-
-    let raw_text = std::str::from_utf8(raw_bytes).ok()?;
-    let raw_lines: Vec<&str> = raw_text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
-    let pretty_lines: Vec<&str> = formatted.split('\n').collect();
-    if raw_lines.is_empty() || pretty_lines.is_empty() {
-        return None;
-    }
-    if raw_lines.len() == pretty_lines.len()
-        && raw_lines.iter().zip(&pretty_lines).all(|(r, p)| *r == *p)
-    {
-        return None;
-    }
-    let mut mapping = Vec::with_capacity(pretty_lines.len());
-    let mut raw_idx = 0usize;
-    let mut byte_pos = 0usize;
-    let mut last_assigned = 0usize;
-    let mut scanned_bytes = 0usize;
-    let mut fast_fallback = false;
-
-    for pretty_line in &pretty_lines {
-        if fast_fallback {
-            let line_no = raw_idx + 1;
-            if raw_idx < raw_lines.len() && line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if byte_pos == 0 && raw_idx < raw_lines.len() && raw_lines[raw_idx] == *pretty_line {
-            let line_no = raw_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            raw_idx += 1;
-            continue;
-        }
-        let needle = pretty_line.trim();
-        if needle.is_empty() {
-            if raw_idx < raw_lines.len() {
-                if byte_pos > 0 && raw_idx + 1 < raw_lines.len() {
-                    raw_idx += 1;
-                    byte_pos = 0;
-                }
-                while raw_idx < raw_lines.len() && !raw_lines[raw_idx].trim().is_empty() {
-                    raw_idx += 1;
-                    byte_pos = 0;
-                }
-                let line_no = raw_idx + 1;
-                if raw_idx < raw_lines.len() && line_no > last_assigned {
-                    mapping.push(line_no);
-                    last_assigned = line_no;
-                    raw_idx += 1;
-                    byte_pos = 0;
-                } else {
-                    mapping.push(0);
-                }
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if raw_idx < raw_lines.len()
-            && (raw_lines[raw_idx].len() > MAX_RAW_LINE_SCAN_BYTES
-                || scanned_bytes >= MAX_TOTAL_SCAN_BYTES)
-        {
-            fast_fallback = true;
-            let line_no = raw_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        // Search current raw line from byte_pos, then subsequent raw lines.
-        let mut found: Option<(usize, usize)> = None;
-        if raw_idx < raw_lines.len() {
-            let tail = raw_lines[raw_idx].get(byte_pos..).unwrap_or("");
-            scanned_bytes = scanned_bytes.saturating_add(tail.len());
-            if let Some(rel) = tail.find(needle) {
-                found = Some((raw_idx, byte_pos + rel + needle.len()));
-            }
-        }
-        if found.is_none() {
-            for (cand_idx, raw_line) in raw_lines.iter().enumerate().skip(raw_idx + 1) {
-                if raw_line.len() > MAX_RAW_LINE_SCAN_BYTES
-                    || scanned_bytes >= MAX_TOTAL_SCAN_BYTES
-                {
-                    fast_fallback = true;
-                    if raw_line.len() > MAX_RAW_LINE_SCAN_BYTES {
-                        raw_idx = cand_idx;
-                    }
-                    break;
-                }
-                scanned_bytes = scanned_bytes.saturating_add(raw_line.len());
-                if let Some(rel) = raw_line.find(needle) {
-                    found = Some((cand_idx, rel + needle.len()));
-                    break;
-                }
-            }
-        }
-        if fast_fallback {
-            let line_no = raw_idx + 1;
-            if raw_idx < raw_lines.len() && line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            continue;
-        }
-        if let Some((hit_idx, next_pos)) = found {
-            let line_no = hit_idx + 1;
-            if line_no > last_assigned {
-                mapping.push(line_no);
-                last_assigned = line_no;
-            } else {
-                mapping.push(0);
-            }
-            raw_idx = hit_idx;
-            byte_pos = next_pos;
-        } else {
-            mapping.push(0);
-        }
-    }
-    // Only apply custom mapping if Pretty actually introduced synthetic lines (zeros).
-    if mapping.len() == pretty_lines.len() && mapping.contains(&0) {
-        Some(mapping)
-    } else {
-        None
-    }
-}
 
 impl MessageEditor {
     pub fn new<V: 'static>(window: &mut Window, cx: &mut gpui_kit::Context<V>) -> Self {
@@ -445,37 +87,54 @@ impl MessageEditor {
                 }
                 let case_insensitive = !case_sensitive_cell.get();
                 let regex = regex_cell.get();
-                let error = active.update(cx, |state, cx| {
+                let result = active.update(cx, |state, cx| {
                     if query.is_empty() {
                         let _ = state.set_search_regex("", case_insensitive, regex, cx);
                         state.close_search(cx);
-                        return None;
+                        return Ok(None);
                     }
                     if let Err(error) =
                         state.set_search_regex(query.to_string(), case_insensitive, regex, cx)
                     {
-                        return Some(format!("搜索正则表达式无效：{error}"));
+                        return Err(format!("搜索正则表达式无效：{error}"));
                     }
-                    match step {
-                        Some(true) => {
-                            state.next_search_match(cx);
-                        }
-                        Some(false) => {
-                            state.previous_search_match(cx);
-                        }
-                        None => {
-                            if auto_scroll_cell.get() {
-                                state.reveal_current_search_match(cx);
+                    let revealed = match step {
+                        Some(true) => state.next_search_match(cx),
+                        Some(false) => state.previous_search_match(cx),
+                        None if auto_scroll_cell.get() => state.reveal_current_search_match(cx),
+                        None => None,
+                    };
+                    Ok(revealed)
+                });
+                match result {
+                    Ok(revealed) => {
+                        *search_error.borrow_mut() = None;
+                        if active.entity_id() == hex.entity_id() {
+                            if let Some(match_range) = revealed {
+                                super::hex_grid::scroll_hex_grid_to_text_range(
+                                    hex.entity_id(),
+                                    match_range,
+                                    cx,
+                                );
+                            } else if query.is_empty()
+                                || active.read(cx).search_session().matcher.is_empty()
+                            {
+                                super::hex_grid::clear_hex_grid_search_match(hex.entity_id(), cx);
                             }
                         }
                     }
-                    None
-                });
-                *search_error.borrow_mut() = error;
+                    Err(error) => {
+                        *search_error.borrow_mut() = Some(error);
+                        if active.entity_id() == hex.entity_id() {
+                            super::hex_grid::clear_hex_grid_search_match(hex.entity_id(), cx);
+                        }
+                    }
+                }
                 cx.notify();
             })
         };
         let observe_editor_change = |editor: &Entity<EditorState>,
+                                     is_hex: bool,
                                      auto_scroll_cell: Rc<Cell<bool>>,
                                      cx: &mut gpui_kit::Context<V>| {
             let auto_scroll_change = auto_scroll_cell.clone();
@@ -484,12 +143,25 @@ impl MessageEditor {
                     && editor.read(cx).search_session().is_active()
                 {
                     let auto_scroll = auto_scroll_change.get();
-                    editor.update(cx, |state, cx| {
+                    let revealed = editor.update(cx, |state, cx| {
                         state.sync_search_matcher();
                         if auto_scroll {
-                            state.reveal_current_search_match(cx);
+                            state.reveal_current_search_match(cx)
+                        } else {
+                            None
                         }
                     });
+                    if is_hex {
+                        if let Some(match_range) = revealed {
+                            super::hex_grid::scroll_hex_grid_to_text_range(
+                                editor.entity_id(),
+                                match_range,
+                                cx,
+                            );
+                        } else if editor.read(cx).search_session().matcher.is_empty() {
+                            super::hex_grid::clear_hex_grid_search_match(editor.entity_id(), cx);
+                        }
+                    }
                     cx.notify();
                 }
             });
@@ -504,8 +176,8 @@ impl MessageEditor {
             });
             Subscription::join(sub, obs)
         };
-        let raw_subscription = observe_editor_change(&raw, auto_scroll_cell.clone(), cx);
-        let hex_subscription = observe_editor_change(&hex, auto_scroll_cell.clone(), cx);
+        let raw_subscription = observe_editor_change(&raw, false, auto_scroll_cell.clone(), cx);
+        let hex_subscription = observe_editor_change(&hex, true, auto_scroll_cell.clone(), cx);
         let replace_subscription = cx.subscribe(&replace, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -642,9 +314,7 @@ impl MessageEditor {
         }
         let hex_for_grid = self.hex.clone();
         let grid = cx.new(|cx| HexGridView::new(hex_for_grid, window, cx));
-        HEX_GRID_REGISTRY.with(|reg| {
-            reg.borrow_mut().insert(self.hex.entity_id(), grid.downgrade());
-        });
+        super::hex_grid::register_hex_grid(self.hex.entity_id(), grid.downgrade());
         self.hex_grid = Some(grid.clone());
         grid
     }
@@ -667,6 +337,7 @@ impl MessageEditor {
         self.show_non_printable || self.render_active || self.hide_headers
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_bytes(&self, cx: &App) -> Option<(Vec<u8>, bool)> {
         let active = self.state().read(cx);
         if active.selected_range().is_empty() {
@@ -761,20 +432,6 @@ impl MessageEditor {
             MessageView::Raw => &self.raw,
             MessageView::Hex => &self.hex,
         }
-    }
-
-    pub fn content_revision_key(
-        &self,
-        cx: &App,
-    ) -> (gpui_kit::EntityId, u64, MessageView, bool, bool) {
-        let active = self.state();
-        (
-            active.entity_id(),
-            active.read(cx).document_revision(),
-            self.view,
-            self.pretty_active,
-            self.hide_headers,
-        )
     }
 
     pub fn current_byte_len(&self, cx: &App) -> usize {
@@ -898,9 +555,11 @@ impl MessageEditor {
             .hex_grid
             .as_ref()
             .and_then(|grid| grid.read(cx).selected_byte_range());
-        let text_range = self.hex.read(cx).selected_range();
+        let hex_state = self.hex.read(cx);
+        let text_range = hex_state.selected_range();
         let total_bytes = self.current_byte_len(cx);
-        hex_text_range_to_byte_range(text_range, total_bytes).or(grid_range)
+        hex_text_range_to_byte_range_for_rope(hex_state.text(), text_range, total_bytes)
+            .or(grid_range)
     }
 
     pub(crate) fn replace_hex_byte_range(
@@ -910,30 +569,26 @@ impl MessageEditor {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(u64, Range<usize>), String> {
-        let mut bytes = self.bytes(window, cx)?;
-        if byte_range.start > byte_range.end || byte_range.end > bytes.len() {
+        let current_bytes = self.bytes(window, cx)?;
+        if byte_range.start > byte_range.end || byte_range.end > current_bytes.len() {
             return Err("目标 Hex 选区超出当前报文字节范围。".into());
         }
-        bytes.splice(byte_range.clone(), replacement.iter().copied());
-        self.original_wire_bytes = bytes.clone();
-        let new_byte_end = byte_range.start + replacement.len();
-        let new_byte_range = byte_range.start..new_byte_end;
-        let new_text_range = hex_byte_range_to_text_range(new_byte_range.clone());
-        let encoded = hex_encode(&bytes);
-        let next_rev = self.hex.update(cx, |state, cx| {
-            state.set_value(encoded, window, cx);
-            state.set_selected_range(new_text_range.clone(), cx);
-            state.document_revision()
-        });
+        let hex_rev = self.hex.read(cx).document_revision();
         let hex_grid = self.ensure_hex_grid(window, cx);
-        hex_grid.update(cx, |grid, cx| {
-            grid.sync_bytes_and_selection(
-                bytes,
-                (!new_byte_range.is_empty()).then_some(new_byte_range),
-                next_rev,
-                cx,
-            );
+        if hex_grid.read(cx).last_synced_revision != hex_rev {
+            hex_grid.update(cx, |grid, cx| {
+                grid.sync_bytes_and_selection(
+                    current_bytes,
+                    Some(byte_range.clone()),
+                    hex_rev,
+                    cx,
+                );
+            });
+        }
+        let (next_rev, new_text_range) = hex_grid.update(cx, |grid, cx| {
+            grid.replace_byte_range(byte_range, replacement, window, cx)
         });
+        self.original_wire_bytes = hex_grid.read(cx).bytes.clone();
         Ok((next_rev, new_text_range))
     }
 
@@ -1598,1067 +1253,5 @@ impl MessageEditor {
             );
         });
         Ok(())
-    }
-}
-
-fn parse_http_head_info(bytes: &[u8]) -> Option<(usize, Vec<mio_core::Header>)> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let newline = bytes.iter().position(|&b| b == b'\n')?;
-    let eol_len = if newline > 0 && bytes[newline - 1] == b'\r' {
-        2
-    } else {
-        1
-    };
-    let first_line = &bytes[..newline + 1 - eol_len];
-    let normalized = if let Some(rest) = first_line.strip_prefix(b"HTTP/2.0 ") {
-        let mut v = b"HTTP/1.1 ".to_vec();
-        v.extend_from_slice(rest);
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(rest) = first_line.strip_prefix(b"HTTP/2 ") {
-        let mut v = b"HTTP/1.1 ".to_vec();
-        v.extend_from_slice(rest);
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(prefix) = first_line.strip_suffix(b" HTTP/2.0") {
-        let mut v = prefix.to_vec();
-        v.extend_from_slice(b" HTTP/1.1");
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else if let Some(prefix) = first_line.strip_suffix(b" HTTP/2") {
-        let mut v = prefix.to_vec();
-        v.extend_from_slice(b" HTTP/1.1");
-        v.extend_from_slice(&bytes[newline + 1 - eol_len..]);
-        Some(v)
-    } else {
-        None
-    };
-    let input = normalized.as_deref().unwrap_or(bytes);
-    let added = input.len() - bytes.len();
-    let mut headers = vec![httparse::EMPTY_HEADER; 4096];
-    let mut config = httparse::ParserConfig::default();
-    config
-        .allow_multiple_spaces_in_request_line_delimiters(true)
-        .allow_multiple_spaces_in_response_status_delimiters(true)
-        .allow_space_before_first_header_name(true)
-        .allow_obsolete_multiline_headers_in_responses(true);
-    let (status, parsed_headers) = if input.starts_with(b"HTTP/") {
-        let mut resp = httparse::Response::new(&mut headers);
-        let status = config.parse_response(&mut resp, input).ok()?;
-        let list = resp
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    } else {
-        let mut req = httparse::Request::new(&mut headers);
-        let status = config.parse_request(&mut req, input).ok()?;
-        let list = req
-            .headers
-            .iter()
-            .map(|h| mio_core::Header {
-                name: h.name.to_owned(),
-                value: h.value.to_vec(),
-            })
-            .collect();
-        (status, list)
-    };
-    match status {
-        httparse::Status::Complete(offset) => Some((offset - added, parsed_headers)),
-        httparse::Status::Partial => None,
-    }
-}
-
-fn serialize_pretty_edit(
-    edited: &str,
-    original_wire: &[u8],
-    baseline: Option<&str>,
-) -> Vec<u8> {
-    let Some((body_offset, edited_headers)) = parse_http_head_info(edited.as_bytes()) else {
-        return edited.as_bytes().to_vec();
-    };
-    let head_part = &edited[..body_offset];
-    let body_part = &edited[body_offset..];
-    let normalized_head: String = head_part
-        .trim_end_matches(['\r', '\n'])
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\r\n");
-    let mut out = Vec::with_capacity(normalized_head.len() + 4 + body_part.len());
-    out.extend_from_slice(normalized_head.as_bytes());
-    out.extend_from_slice(b"\r\n\r\n");
-    let orig_info = parse_http_head_info(original_wire);
-    if let Some(base) = baseline
-        && let Some((base_body_offset, _)) = parse_http_head_info(base.as_bytes())
-        && &base[base_body_offset..] == body_part
-        && let Some((orig_body_offset, ref orig_headers)) = orig_info
-        && mio_core::is_chunked_headers(&edited_headers) == mio_core::is_chunked_headers(orig_headers)
-    {
-        out.extend_from_slice(&original_wire[orig_body_offset..]);
-        return out;
-    }
-    let mut body_text = body_part;
-    let mut extracted_trailers: Vec<mio_core::Header> = Vec::new();
-    if mio_core::is_chunked_headers(&edited_headers)
-        && let Some((orig_off, ref orig_hdrs)) = orig_info
-        && mio_core::is_chunked_headers(orig_hdrs)
-        && let Ok((_, orig_trailers)) =
-            mio_core::decode_http_body(orig_hdrs, &original_wire[orig_off..])
-        && !orig_trailers.is_empty()
-    {
-        let mut trailer_suffix = String::new();
-        for t in &orig_trailers {
-            trailer_suffix.push_str(&format!(
-                "{}: {}\n",
-                t.name,
-                String::from_utf8_lossy(&t.value)
-            ));
-        }
-        if let Some(stripped) = body_text.strip_suffix(&trailer_suffix) {
-            body_text = stripped.strip_suffix('\n').unwrap_or(stripped);
-            extracted_trailers = orig_trailers;
-        }
-    }
-    let payload_bytes = body_text.as_bytes().to_vec();
-    if mio_core::is_chunked_headers(&edited_headers)
-        && mio_core::decode_http_body(&edited_headers, &payload_bytes).is_err()
-    {
-        if !payload_bytes.is_empty() {
-            out.extend_from_slice(format!("{:x}\r\n", payload_bytes.len()).as_bytes());
-            out.extend_from_slice(&payload_bytes);
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(b"0\r\n");
-        for t in &extracted_trailers {
-            out.extend_from_slice(t.name.as_bytes());
-            out.extend_from_slice(b": ");
-            out.extend_from_slice(&t.value);
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(b"\r\n");
-    } else {
-        out.extend_from_slice(&payload_bytes);
-    }
-    out
-}
-
-type EditorContextMenuBuilder =
-    Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static>;
-
-#[derive(IntoElement)]
-pub(crate) struct MessageEditorElement {
-    state: Entity<EditorState>,
-    style: StyleRefinement,
-    readonly: bool,
-    aria_label: Option<SharedString>,
-    context_menu: Option<EditorContextMenuBuilder>,
-}
-
-impl MessageEditorElement {
-    pub(crate) fn new(state: &Entity<EditorState>) -> Self {
-        Self {
-            state: state.clone(),
-            style: StyleRefinement::default(),
-            readonly: false,
-            aria_label: None,
-            context_menu: None,
-        }
-    }
-
-    pub(crate) fn readonly(mut self, readonly: bool) -> Self {
-        self.readonly = readonly;
-        self
-    }
-
-    pub(crate) fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.aria_label = Some(label.into());
-        self
-    }
-
-    pub(crate) fn context_menu(
-        mut self,
-        builder: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static,
-    ) -> Self {
-        self.context_menu = Some(Rc::new(builder));
-        self
-    }
-}
-
-impl Styled for MessageEditorElement {
-    fn style(&mut self) -> &mut StyleRefinement {
-        &mut self.style
-    }
-}
-
-impl RenderOnce for MessageEditorElement {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let grid_entity = HEX_GRID_REGISTRY.with(|reg| {
-            reg.borrow()
-                .get(&self.state.entity_id())
-                .and_then(WeakEntity::upgrade)
-        });
-        let caller_style = self.style;
-        let mut base_editor = Editor::new(&self.state);
-        if grid_entity.is_none() {
-            *base_editor.style() = caller_style.clone();
-        }
-        base_editor = base_editor
-            .bordered(false)
-            .readonly(self.readonly)
-            .line_height(gpui_kit::relative(crate::theme::EDITOR_LINE_HEIGHT))
-            .text_area_paddings(gpui_kit::Edges {
-                top: px(2.),
-                right: px(0.),
-                bottom: px(0.),
-                left: px(0.),
-            });
-        if let Some(label) = self.aria_label.clone() {
-            base_editor = base_editor.aria_label(label);
-        }
-        if let Some(menu) = self.context_menu.clone() {
-            let menu_fn = menu.clone();
-            base_editor = base_editor.context_menu(move |m, w, cx| menu_fn(m, w, cx));
-        }
-        let Some(grid) = grid_entity else {
-            return base_editor.into_any_element();
-        };
-        grid.update(cx, |g, _| {
-            g.readonly = self.readonly;
-            g.context_menu = self.context_menu;
-        });
-        let _ = base_editor;
-        let mut container = div();
-        *container.style() = caller_style;
-        container
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(grid),
-            )
-            .into_any_element()
-    }
-}
-
-pub(crate) struct HexGridView {
-    pub(crate) hex_editor: Entity<EditorState>,
-    pub(crate) byte_input: Entity<InputState>,
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) selected_range: Option<Range<usize>>,
-    pub(crate) selection_anchor: Option<usize>,
-    pub(crate) active_cursor: Option<usize>,
-    pub(crate) low_nibble_pending: bool,
-    pub(crate) editing_ascii: bool,
-    pub(crate) hovered_byte: Option<usize>,
-    pub(crate) dragging: bool,
-    pub(crate) readonly: bool,
-    pub(crate) last_synced_revision: u64,
-    pub(crate) scroll_handle: UniformListScrollHandle,
-    pub(crate) focus_handle: FocusHandle,
-    pub(crate) context_menu: Option<EditorContextMenuBuilder>,
-    _subscriptions: [Subscription; 2],
-}
-
-impl HexGridView {
-    pub(crate) fn new(
-        hex_editor: Entity<EditorState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let byte_input = cx.new(|cx| InputState::new(window, cx).placeholder("Hex (如 41)"));
-        let focus_handle = cx.focus_handle();
-        let sub_change = cx.subscribe(&hex_editor, |this, editor, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                let rev = editor.read(cx).document_revision();
-                if rev != this.last_synced_revision {
-                    let text = editor.read(cx).value();
-                    if let Ok(decoded) = hex_decode(text.as_ref()) {
-                        this.bytes = decoded;
-                        this.last_synced_revision = rev;
-                        if let Some(r) = &this.selected_range
-                            && r.end > this.bytes.len()
-                        {
-                            this.selected_range = None;
-                        }
-                        cx.notify();
-                    }
-                }
-            }
-        });
-        let sub_obs = cx.observe(&hex_editor, |this, editor, cx| {
-            let text_range = editor.read(cx).selected_range();
-            let mapped = hex_text_range_to_byte_range(text_range, this.bytes.len());
-            if mapped != this.selected_range {
-                this.selected_range = mapped.clone();
-                this.active_cursor = mapped.map(|r| r.start);
-                this.low_nibble_pending = false;
-                cx.notify();
-            }
-        });
-        Self {
-            hex_editor,
-            byte_input,
-            bytes: Vec::new(),
-            selected_range: None,
-            selection_anchor: None,
-            active_cursor: None,
-            low_nibble_pending: false,
-            editing_ascii: false,
-            hovered_byte: None,
-            dragging: false,
-            readonly: false,
-            last_synced_revision: 0,
-            scroll_handle: UniformListScrollHandle::new(),
-            focus_handle,
-            context_menu: None,
-            _subscriptions: [sub_change, sub_obs],
-        }
-    }
-
-    pub(crate) fn has_focus(&self, window: &Window, cx: &App) -> bool {
-        self.focus_handle.is_focused(window) || self.byte_input.focus_handle(cx).is_focused(window)
-    }
-
-    pub(crate) fn selected_byte_range(&self) -> Option<Range<usize>> {
-        self.selected_range
-            .clone()
-            .filter(|r| r.start < r.end && r.end <= self.bytes.len())
-    }
-
-    pub(crate) fn sync_bytes_and_selection(
-        &mut self,
-        bytes: Vec<u8>,
-        selected_range: Option<Range<usize>>,
-        revision: u64,
-        cx: &mut Context<Self>,
-    ) {
-        self.bytes = bytes;
-        self.selected_range = selected_range.clone();
-        self.active_cursor = selected_range.map(|r| r.start);
-        self.low_nibble_pending = false;
-        self.last_synced_revision = revision;
-        cx.notify();
-    }
-
-    fn commit_bytes_to_editor(
-        &mut self,
-        next_selection: Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let encoded = hex_encode(&self.bytes);
-        let text_range = next_selection
-            .clone()
-            .map(hex_byte_range_to_text_range)
-            .unwrap_or(0..0);
-        self.selected_range = next_selection.clone();
-        self.active_cursor = next_selection.map(|r| r.start);
-        let rev = self.hex_editor.update(cx, |state, cx| {
-            state.set_value(encoded, window, cx);
-            state.set_selected_range(text_range, cx);
-            state.document_revision()
-        });
-        self.last_synced_revision = rev;
-        cx.notify();
-    }
-
-    pub(crate) fn select_byte(
-        &mut self,
-        byte_ix: usize,
-        extend: bool,
-        ascii_mode: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if byte_ix >= self.bytes.len() {
-            return;
-        }
-        self.focus_handle.focus(window, cx);
-        self.editing_ascii = ascii_mode;
-        self.low_nibble_pending = false;
-        let anchor = if extend {
-            self.selection_anchor.unwrap_or(byte_ix)
-        } else {
-            self.selection_anchor = Some(byte_ix);
-            byte_ix
-        };
-        let start = anchor.min(byte_ix);
-        let end = (anchor.max(byte_ix) + 1).min(self.bytes.len());
-        let range = start..end;
-        self.selected_range = Some(range.clone());
-        self.active_cursor = Some(byte_ix);
-        let text_range = hex_byte_range_to_text_range(range);
-        self.hex_editor.update(cx, |state, cx| {
-            state.set_selected_range(text_range, cx);
-        });
-        let val_hex = format!("{:02X}", self.bytes[byte_ix]);
-        self.byte_input.update(cx, |inp, cx| {
-            inp.set_value(val_hex, window, cx);
-        });
-        cx.notify();
-    }
-
-    fn parse_input_or_default(&self, default_byte: u8, cx: &App) -> Vec<u8> {
-        let raw = self.byte_input.read(cx).value();
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return vec![default_byte];
-        }
-        hex_decode(trimmed).unwrap_or_else(|_| vec![default_byte])
-    }
-
-    pub(crate) fn edit_selected_byte(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly || self.bytes.is_empty() {
-            return;
-        }
-        let target = self
-            .selected_byte_range()
-            .or_else(|| self.active_cursor.map(|c| c..c + 1))
-            .unwrap_or(0..1);
-        let cur_val = self.bytes.get(target.start).copied().unwrap_or(0);
-        let replacement = self.parse_input_or_default(cur_val.wrapping_add(1), cx);
-        let start = target.start;
-        self.bytes.splice(target, replacement.iter().copied());
-        let end = (start + replacement.len()).min(self.bytes.len());
-        self.low_nibble_pending = false;
-        self.commit_bytes_to_editor((start < end).then_some(start..end), window, cx);
-    }
-
-    pub(crate) fn insert_byte_before(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly {
-            return;
-        }
-        let insert_at = self
-            .selected_byte_range()
-            .map(|r| r.start)
-            .or(self.active_cursor)
-            .unwrap_or(0)
-            .min(self.bytes.len());
-        let inserted = self.parse_input_or_default(0x00, cx);
-        let len = inserted.len();
-        self.bytes.splice(insert_at..insert_at, inserted);
-        self.low_nibble_pending = false;
-        self.commit_bytes_to_editor(Some(insert_at..insert_at + len), window, cx);
-    }
-
-    pub(crate) fn append_byte(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly {
-            return;
-        }
-        let start = self.bytes.len();
-        let appended = self.parse_input_or_default(0x00, cx);
-        let len = appended.len();
-        self.bytes.extend_from_slice(&appended);
-        self.low_nibble_pending = false;
-        self.commit_bytes_to_editor(Some(start..start + len), window, cx);
-    }
-
-    pub(crate) fn delete_selected_bytes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly || self.bytes.is_empty() {
-            return;
-        }
-        let Some(range) = self
-            .selected_byte_range()
-            .or_else(|| self.active_cursor.map(|c| c..c + 1))
-        else {
-            return;
-        };
-        if range.end > self.bytes.len() {
-            return;
-        }
-        let start = range.start;
-        self.bytes.drain(range);
-        self.low_nibble_pending = false;
-        let next_sel = if self.bytes.is_empty() {
-            None
-        } else {
-            let idx = start.min(self.bytes.len() - 1);
-            Some(idx..idx + 1)
-        };
-        self.commit_bytes_to_editor(next_sel, window, cx);
-    }
-
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ks = &event.keystroke;
-        if ks.modifiers.platform || ks.modifiers.control || ks.modifiers.alt {
-            if ks.key.eq_ignore_ascii_case("a") && !self.bytes.is_empty() {
-                let all = 0..self.bytes.len();
-                self.selected_range = Some(all.clone());
-                self.active_cursor = Some(0);
-                let text_range = hex_byte_range_to_text_range(all);
-                self.hex_editor.update(cx, |s, cx| {
-                    s.set_selected_range(text_range, cx);
-                });
-                cx.notify();
-            }
-            return;
-        }
-        match ks.key.as_str() {
-            "left" if !self.bytes.is_empty() => {
-                let cur = self.active_cursor.unwrap_or(0).saturating_sub(1);
-                self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
-                return;
-            }
-            "right" if !self.bytes.is_empty() => {
-                let cur = (self.active_cursor.unwrap_or(0) + 1).min(self.bytes.len() - 1);
-                self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
-                return;
-            }
-            "up" if !self.bytes.is_empty() => {
-                let cur = self.active_cursor.unwrap_or(0).saturating_sub(16);
-                self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
-                return;
-            }
-            "down" if !self.bytes.is_empty() => {
-                let cur = (self.active_cursor.unwrap_or(0) + 16).min(self.bytes.len() - 1);
-                self.select_byte(cur, ks.modifiers.shift, self.editing_ascii, window, cx);
-                return;
-            }
-            "backspace" | "delete" if !self.readonly => {
-                self.delete_selected_bytes(window, cx);
-                return;
-            }
-            "insert" if !self.readonly => {
-                self.insert_byte_before(window, cx);
-                return;
-            }
-            _ => {}
-        }
-        if self.readonly || self.bytes.is_empty() {
-            return;
-        }
-        let cursor = self
-            .active_cursor
-            .or_else(|| self.selected_range.as_ref().map(|r| r.start))
-            .unwrap_or(0)
-            .min(self.bytes.len() - 1);
-        let typed = ks.key_char.as_deref().unwrap_or(ks.key.as_str());
-        if typed.len() != 1 {
-            return;
-        }
-        let ch = typed.chars().next().unwrap();
-        if self.editing_ascii {
-            if ch.is_ascii() && !ch.is_ascii_control() {
-                self.bytes[cursor] = ch as u8;
-                let next = (cursor + 1).min(self.bytes.len() - 1);
-                self.commit_bytes_to_editor(Some(next..next + 1), window, cx);
-            }
-        } else if let Some(nibble) = ch.to_digit(16).map(|d| d as u8) {
-            if !self.low_nibble_pending {
-                self.bytes[cursor] = (self.bytes[cursor] & 0x0F) | (nibble << 4);
-                self.low_nibble_pending = true;
-                self.commit_bytes_to_editor(Some(cursor..cursor + 1), window, cx);
-            } else {
-                self.bytes[cursor] = (self.bytes[cursor] & 0xF0) | nibble;
-                self.low_nibble_pending = false;
-                let next = (cursor + 1).min(self.bytes.len() - 1);
-                self.commit_bytes_to_editor(Some(next..next + 1), window, cx);
-            }
-        }
-    }
-}
-
-impl Render for HexGridView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dark = crate::theme::is_dark();
-        let total_bytes = self.bytes.len();
-        let row_count = total_bytes.div_ceil(16).max(1);
-        let readonly = self.readonly;
-        let selected_range = self.selected_range.clone();
-        let _hovered_byte = self.hovered_byte;
-        let _active_cursor = self.active_cursor;
-        let _low_nibble = self.low_nibble_pending;
-        let _editing_ascii = self.editing_ascii;
-        let offset_bg = rgb(if dark { 0x232529 } else { 0xf3f4f6 });
-        let header_bg = rgb(if dark { 0x25272b } else { 0xededf0 });
-        let border_col = crate::theme::border();
-        let mono_font = crate::theme::mono_font_family();
-        let hex_entity_id = self.hex_editor.entity_id();
-
-        let status_summary = if let Some(ref range) = selected_range {
-            let len = range.len();
-            if len == 1
-                && let Some(&b) = self.bytes.get(range.start)
-            {
-                format!(
-                    "Offset: {:08X} · Byte: 0x{b:02X} ({b}) · Total: {total_bytes} B",
-                    range.start
-                )
-            } else {
-                format!(
-                    "Range: {:08X}..{:08X} ({len} B / 0x{len:x}) · Total: {total_bytes} B",
-                    range.start, range.end
-                )
-            }
-        } else {
-            format!("Total: {total_bytes} bytes (0x{total_bytes:x})")
-        };
-
-        let toolbar = div()
-            .id(("hex-grid-toolbar", hex_entity_id))
-            .test_support()
-            .w_full()
-            .h(px(27.))
-            .px(px(8.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .bg(header_bg)
-            .border_b_1()
-            .border_color(border_col)
-            .child(
-                div()
-                    .font_family(mono_font)
-                    .text_size(px(11.5))
-                    .text_color(crate::theme::muted_foreground())
-                    .truncate()
-                    .child(status_summary),
-            )
-            .child(div().flex_1())
-            .when(!readonly, |bar| {
-                bar.child(
-                    div()
-                        .w(px(74.))
-                        .h(px(20.))
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(border_col)
-                        .bg(crate::theme::surface())
-                        .overflow_hidden()
-                        .child(
-                            Input::new(&self.byte_input)
-                                .id(("hex-grid-byte-input", hex_entity_id))
-                                .small()
-                                .appearance(false)
-                                .h(px(18.))
-                                .px(px(4.)),
-                        ),
-                )
-                .child(
-                    Button::new(("hex-grid-edit-byte", hex_entity_id))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .rounded(ButtonRounded::Small)
-                        .h(px(20.))
-                        .px(px(6.))
-                        .label("修改字节")
-                        .tooltip("修改选中字节 (Edit byte)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.edit_selected_byte(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(("hex-grid-insert-before", hex_entity_id))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .rounded(ButtonRounded::Small)
-                        .h(px(20.))
-                        .px(px(6.))
-                        .label("前插字节")
-                        .tooltip("在选中位置前插入字节 (Insert byte before)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.insert_byte_before(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(("hex-grid-append-byte", hex_entity_id))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .rounded(ButtonRounded::Small)
-                        .h(px(20.))
-                        .px(px(6.))
-                        .label("追加字节")
-                        .tooltip("在报文末尾追加字节 (Append byte)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.append_byte(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(("hex-grid-delete-byte", hex_entity_id))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .rounded(ButtonRounded::Small)
-                        .h(px(20.))
-                        .px(px(6.))
-                        .label("删除字节")
-                        .tooltip("删除选中字节 (Delete byte)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.delete_selected_bytes(window, cx);
-                        })),
-                )
-            });
-
-        let mut col_header = div()
-            .id(("hex-grid-column-header", hex_entity_id))
-            .test_support()
-            .w_full()
-            .h(px(21.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .bg(offset_bg)
-            .border_b_1()
-            .border_color(border_col)
-            .font_family(mono_font)
-            .text_size(px(11.5))
-            .text_color(crate::theme::muted_foreground())
-            .child(
-                div()
-                    .w(px(68.))
-                    .h_full()
-                    .px(px(5.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .border_r_1()
-                    .border_color(border_col)
-                    .child("Offset"),
-            );
-
-        let mut hex_cols_hdr = div()
-            .px(px(5.))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(1.5))
-            .border_r_1()
-            .border_color(border_col);
-        for col in 0..16usize {
-            hex_cols_hdr = hex_cols_hdr.child(
-                div()
-                    .w(px(18.))
-                    .when(col == 7, |el| el.mr(px(4.)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(format!("{col:02X}")),
-            );
-        }
-        col_header = col_header.child(hex_cols_hdr).child(
-            div()
-                .px(px(6.))
-                .h_full()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .child("ASCII (0..F)"),
-        );
-
-        let weak = cx.weak_entity();
-        let list = uniform_list(
-            ("hex-grid-rows", hex_entity_id),
-            row_count,
-            move |range, _, cx| {
-                let Some(entity) = weak.upgrade() else {
-                    return Vec::new();
-                };
-                let grid = entity.read(cx);
-                let bytes = &grid.bytes;
-                let total = bytes.len();
-                let sel = grid.selected_range.clone();
-                let hov = grid.hovered_byte;
-                let cur = grid.active_cursor;
-                let low_nib = grid.low_nibble_pending;
-                let ascii_focus = grid.editing_ascii;
-                let sel_primary_bg: gpui_kit::Hsla =
-                    rgb(if dark { 0x265e9c } else { 0x3b82f6 }).into();
-                let sel_sync_bg: gpui_kit::Hsla =
-                    rgb(if dark { 0x2d4163 } else { 0xdbeafe }).into();
-                let hover_sync_bg: gpui_kit::Hsla =
-                    rgb(if dark { 0x32363e } else { 0xe5e7eb }).into();
-
-                range
-                    .map(|row_ix| {
-                        let base_offset = row_ix * 16;
-                        let offset_cell = div()
-                            .id(("hex-row-offset", row_ix))
-                            .test_support()
-                            .w(px(68.))
-                            .h_full()
-                            .px(px(5.))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .bg(offset_bg)
-                            .border_r_1()
-                            .border_color(border_col)
-                            .text_color(crate::theme::muted_foreground())
-                            .child(format!("{base_offset:08X}"));
-
-                        let mut hex_cells = div()
-                            .px(px(5.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(1.5))
-                            .border_r_1()
-                            .border_color(border_col);
-
-                        let mut ascii_cells =
-                            div().px(px(6.)).h_full().flex_shrink_0().flex().items_center();
-
-                        for col in 0..16usize {
-                            let byte_ix = base_offset + col;
-                            if byte_ix < total {
-                                let b = bytes[byte_ix];
-                                let is_sel =
-                                    sel.as_ref().is_some_and(|r| r.contains(&byte_ix));
-                                let is_hov = hov == Some(byte_ix);
-                                let is_cur_nibble =
-                                    cur == Some(byte_ix) && low_nib && !ascii_focus;
-                                let hex_bg = if is_sel {
-                                    if ascii_focus {
-                                        sel_sync_bg
-                                    } else {
-                                        sel_primary_bg
-                                    }
-                                } else if is_hov {
-                                    hover_sync_bg
-                                } else {
-                                    gpui_kit::transparent_black()
-                                };
-                                let hex_fg = if is_sel && !ascii_focus {
-                                    rgb(0xffffff).into()
-                                } else {
-                                    crate::theme::foreground()
-                                };
-                                let ascii_bg = if is_sel {
-                                    if ascii_focus {
-                                        sel_primary_bg
-                                    } else {
-                                        sel_sync_bg
-                                    }
-                                } else if is_hov {
-                                    hover_sync_bg
-                                } else {
-                                    gpui_kit::transparent_black()
-                                };
-                                let is_printable = (0x20..=0x7E).contains(&b);
-                                let ascii_fg = if is_sel && ascii_focus {
-                                    rgb(0xffffff).into()
-                                } else if is_printable {
-                                    crate::theme::foreground()
-                                } else {
-                                    crate::theme::muted_foreground()
-                                };
-                                let ascii_ch = if is_printable {
-                                    char::from(b).to_string()
-                                } else {
-                                    ".".to_owned()
-                                };
-
-                                let w_down_hex = weak.clone();
-                                let w_move_hex = weak.clone();
-                                let w_down_ascii = weak.clone();
-                                let w_move_ascii = weak.clone();
-
-                                hex_cells = hex_cells.child(
-                                    div()
-                                        .id(("hex-byte-cell", byte_ix))
-                                        .test_support()
-                                        .w(px(18.))
-                                        .h(px(18.))
-                                        .when(col == 7, |el| el.mr(px(4.)))
-                                        .rounded(px(2.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .bg(hex_bg)
-                                        .text_color(hex_fg)
-                                        .when(is_cur_nibble, |el| {
-                                            el.border_b_2().border_color(crate::theme::accent())
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |ev: &MouseDownEvent, window, cx| {
-                                                let _ = w_down_hex.update(cx, |this, cx| {
-                                                    this.dragging = true;
-                                                    this.select_byte(
-                                                        byte_ix,
-                                                        ev.modifiers.shift,
-                                                        false,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .on_mouse_move(
-                                            move |ev: &MouseMoveEvent, window, cx| {
-                                                let _ = w_move_hex.update(cx, |this, cx| {
-                                                    if this.hovered_byte != Some(byte_ix) {
-                                                        this.hovered_byte = Some(byte_ix);
-                                                        cx.notify();
-                                                    }
-                                                    if ev.pressed_button == Some(MouseButton::Left)
-                                                        && this.dragging
-                                                    {
-                                                        this.select_byte(
-                                                            byte_ix, true, false, window, cx,
-                                                        );
-                                                    }
-                                                });
-                                            },
-                                        )
-                                        .child(format!("{b:02X}")),
-                                );
-
-                                ascii_cells = ascii_cells.child(
-                                    div()
-                                        .id(("hex-ascii-cell", byte_ix))
-                                        .test_support()
-                                        .w(px(8.5))
-                                        .h(px(18.))
-                                        .rounded(px(2.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .bg(ascii_bg)
-                                        .text_color(ascii_fg)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |ev: &MouseDownEvent, window, cx| {
-                                                let _ = w_down_ascii.update(cx, |this, cx| {
-                                                    this.dragging = true;
-                                                    this.select_byte(
-                                                        byte_ix,
-                                                        ev.modifiers.shift,
-                                                        true,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .on_mouse_move(
-                                            move |ev: &MouseMoveEvent, window, cx| {
-                                                let _ = w_move_ascii.update(cx, |this, cx| {
-                                                    if this.hovered_byte != Some(byte_ix) {
-                                                        this.hovered_byte = Some(byte_ix);
-                                                        cx.notify();
-                                                    }
-                                                    if ev.pressed_button == Some(MouseButton::Left)
-                                                        && this.dragging
-                                                    {
-                                                        this.select_byte(
-                                                            byte_ix, true, true, window, cx,
-                                                        );
-                                                    }
-                                                });
-                                            },
-                                        )
-                                        .child(ascii_ch),
-                                );
-                            } else {
-                                hex_cells = hex_cells.child(
-                                    div()
-                                        .w(px(18.))
-                                        .h(px(18.))
-                                        .when(col == 7, |el| el.mr(px(4.))),
-                                );
-                                ascii_cells = ascii_cells.child(div().w(px(8.5)).h(px(18.)));
-                            }
-                        }
-
-                        div()
-                            .id(("hex-grid-row", row_ix))
-                            .test_support()
-                            .w_full()
-                            .h(px(20.))
-                            .flex()
-                            .items_center()
-                            .font_family(mono_font)
-                            .text_size(crate::theme::editor_font_size())
-                            .child(offset_cell)
-                            .child(hex_cells)
-                            .child(ascii_cells)
-                            .into_any_element()
-                    })
-                    .collect()
-            },
-        )
-        .track_scroll(&self.scroll_handle)
-        .size_full();
-
-        let v_scrollbar = gpui_kit::component::scroll::Scrollbar::vertical(&self.scroll_handle)
-            .id(("hex-grid-vscroll", hex_entity_id))
-            .viewport_from_layout()
-            .mode(gpui_kit::component::scroll::ScrollbarMode::Always);
-
-        div()
-            .id(("hex-grid-view", hex_entity_id))
-            .test_support()
-            .key_context("HexGrid")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(crate::theme::surface())
-            .on_key_down(cx.listener(Self::handle_key_down))
-            .child(toolbar)
-            .child(col_header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .flex()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(list),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(12.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .bg(offset_bg)
-                            .border_l_1()
-                            .border_color(border_col)
-                            .child(v_scrollbar),
-                    ),
-            )
     }
 }

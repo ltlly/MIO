@@ -132,6 +132,7 @@ impl Workbench {
         }
     }
 
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder(
         &self,
         window: &mut Window,
@@ -159,6 +160,7 @@ impl Workbench {
         self.render_intruder_tabs_workspace(body, window, cx)
     }
 
+    #[inline(never)]
     fn render_intruder_attack(
         &self,
         id: TabId,
@@ -167,6 +169,115 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editable = self.transition.is_none();
+        let soft_wrap = editors.request.soft_wrap;
+        let is_http2 = spec.draft.version == HttpVersion::Http2;
+        let has_markers = editors.request.has_markers(cx);
+        let positions_count = editors.request.display_count(cx);
+
+        let top_action_bar = self.render_intruder_top_action_bar(id, spec, editors, editable, cx);
+        let target_bar = self.render_intruder_target_bar(id, spec, editors, editable, cx);
+        let positions_rail = self.render_intruder_positions_rail(id, editable, has_markers, cx);
+        let editor_toolbar = self.render_intruder_editor_toolbar(
+            id,
+            editors,
+            editable,
+            is_http2,
+            soft_wrap,
+            positions_count.clone(),
+            cx,
+        );
+        let search_bar = self.render_intruder_search_bar(id, editors, positions_count, cx);
+
+        let request = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(top_action_bar)
+            .child(target_bar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(theme::surface())
+                    .flex()
+                    .flex_col()
+                    .child(editor_toolbar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div().flex_1().min_w_0().h_full().child(
+                                    Textarea::new(editors.request.state())
+                                        .size_full()
+                                        .bordered(false)
+                                        .readonly(!editable)
+                                        .token(|_, _, _| {
+                                            div()
+                                                .px(px(2.))
+                                                .rounded(px(3.))
+                                                .border_1()
+                                                .border_color(theme::accent().opacity(0.45))
+                                                .bg(theme::accent().opacity(0.14))
+                                                .text_color(theme::accent())
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .child("§")
+                                        })
+                                        .context_menu(self.intruder_positions_context_menu(
+                                            editors.request.state().clone(),
+                                            !editable,
+                                        ))
+                                        .aria_label("Intruder Positions 消息编辑器"),
+                                ),
+                            )
+                            .child(positions_rail),
+                    ),
+            )
+            .on_action(
+                cx.listener(move |this, _: &AddIntruderPosition, window, cx| {
+                    cx.stop_propagation();
+                    this.add_intruder_position(id, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(move |this, _: &crate::ClearIntruderPositions, window, cx| {
+                    cx.stop_propagation();
+                    if has_markers {
+                        this.clear_intruder_positions(id, window, cx);
+                    }
+                }),
+            )
+            .child(search_bar)
+            .when_some(editors.request.position_error.as_ref(), |this, error| {
+                this.child(
+                    div()
+                        .px(px(10.))
+                        .py(px(4.))
+                        .bg(theme::danger_bg())
+                        .border_t_1()
+                        .border_color(theme::danger_border())
+                        .text_color(theme::danger_fg())
+                        .child(error.clone()),
+                )
+            })
+            .into_any_element();
+
+        self.render_intruder_side_panel_and_rail(id, spec, editors, request, editable, cx)
+    }
+
+    #[inline(never)]
+    fn render_intruder_top_action_bar(
+        &self,
+        id: TabId,
+        spec: &IntruderSpec,
+        editors: &IntruderEditors,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let weak = cx.weak_entity();
         let selected = spec.attack_type;
         let attack_type = button("intruder-attack-type", attack_label(selected))
@@ -197,23 +308,7 @@ impl Workbench {
             });
         let target_text = editors.target.read(cx).value();
         let target_summary = format_target_summary(target_text.as_ref());
-        let editor_state = editors.request.state().read(cx);
-        let length = match editors.request.view {
-            MessageView::Raw => editors.request.byte_length(cx).unwrap_or(0).to_string(),
-            MessageView::Hex => editors
-                .hex_length
-                .map_or_else(|| "Hex 未完整".into(), |bytes| bytes.to_string()),
-        };
-        let matches = editor_state.search_session().matcher.len();
-        let search_case_sensitive = editors.request.search_case_sensitive;
-        let search_regex = editors.request.search_regex;
-        let search_has_error = editors.request.search_error.is_some();
-        let soft_wrap = editors.request.soft_wrap;
-        let is_http2 = spec.draft.version == HttpVersion::Http2;
-        let has_markers = editors.request.has_markers(cx);
-        let positions_count = editors.request.display_count(cx);
-
-        let top_action_bar = div()
+        div()
             .w_full()
             .min_h(theme::scaled_px(42.).max(px(40.)))
             .px(px(12.))
@@ -322,9 +417,20 @@ impl Workbench {
                                 this.toggle_intruder_settings_sidebar(id, window, cx);
                             })),
                     ),
-            );
+            )
+            .into_any_element()
+    }
 
-        let target_bar = div()
+    #[inline(never)]
+    fn render_intruder_target_bar(
+        &self,
+        id: TabId,
+        spec: &IntruderSpec,
+        editors: &IntruderEditors,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
             .w_full()
             .min_h(theme::scaled_px(36.).max(px(34.)))
             .px(px(12.))
@@ -364,9 +470,19 @@ impl Workbench {
                             cx,
                         );
                     })),
-            );
+            )
+            .into_any_element()
+    }
 
-        let positions_rail = div()
+    #[inline(never)]
+    fn render_intruder_positions_rail(
+        &self,
+        id: TabId,
+        editable: bool,
+        has_markers: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
             .w(theme::scaled_px(108.).max(px(96.)))
             .flex_shrink_0()
             .h_full()
@@ -431,251 +547,222 @@ impl Workbench {
                     .line_height(theme::scaled_px(16.))
                     .text_color(theme::muted_foreground())
                     .child("使用 § 标记需要替换的载荷位置"),
-            );
+            )
+            .into_any_element()
+    }
 
-        let request = div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn render_intruder_editor_toolbar(
+        &self,
+        id: TabId,
+        editors: &IntruderEditors,
+        editable: bool,
+        is_http2: bool,
+        soft_wrap: bool,
+        positions_count: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        toolbar()
+            .children(
+                [
+                    (
+                        MessageView::Raw,
+                        "Raw",
+                        IconName::Code,
+                        "查看或编辑包含 § 载荷标记的原始请求模板文本",
+                    ),
+                    (
+                        MessageView::Hex,
+                        "Hex",
+                        IconName::Binary,
+                        "以十六进制视图查看或编辑请求字节与 § 载荷标记",
+                    ),
+                ]
+                .into_iter()
+                .map(|(view, label, icon, tip)| {
+                    button(
+                        SharedString::from(format!(
+                            "intruder-view-{}",
+                            label.to_ascii_lowercase()
+                        )),
+                        label,
+                    )
+                    .icon(icon)
+                    .tooltip(tip)
+                    .selected(editors.request.view == view)
+                    .disabled(!editable)
+                    .on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.switch_intruder_view(id, view, window, cx)
+                        },
+                    ))
+                }),
+            )
+            .child(div().w(px(1.)).h(px(16.)).bg(theme::border()))
+            .child(
+                button(
+                    "intruder-protocol-toggle",
+                    if is_http2 { "HTTP/2" } else { "HTTP/1.1" },
+                )
+                .tooltip("切换当前攻击草稿发包使用的 HTTP/1.1 与 HTTP/2 协议版本")
+                .selected(is_http2)
+                .disabled(!editable)
+                .on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.toggle_intruder_protocol(id, window, cx)
+                    },
+                )),
+            )
+            .child(
+                Button::new("intruder-soft-wrap")
+                    .small()
+                    .h(theme::control_height())
+                    .px(theme::scaled_px(7.))
+                    .icon(IconName::TextWrap)
+                    .accessibility_label("自动换行")
+                    .selected(soft_wrap)
+                    .toggled(soft_wrap)
+                    .tooltip(if soft_wrap {
+                        "自动换行已开启（点击切换为单行水平滚动）"
+                    } else {
+                        "自动换行已关闭（点击开启长行自动折行显示）"
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_intruder_soft_wrap(id, window, cx)
+                    })),
+            )
+            .child(
+                div()
+                    .ml_auto()
+                    .px(px(7.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(theme::accent().opacity(0.35))
+                    .bg(theme::accent().opacity(0.08))
+                    .text_size(theme::scaled_px(11.5))
+                    .text_color(theme::accent())
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(positions_count),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_intruder_search_bar(
+        &self,
+        id: TabId,
+        editors: &IntruderEditors,
+        positions_count: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let editor_state = editors.request.state().read(cx);
+        let length = match editors.request.view {
+            MessageView::Raw => editors.request.byte_length(cx).unwrap_or(0).to_string(),
+            MessageView::Hex => editors
+                .hex_length
+                .map_or_else(|| "Hex 未完整".into(), |bytes| bytes.to_string()),
+        };
+        let matches = editor_state.search_session().matcher.len();
+        let search_case_sensitive = editors.request.search_case_sensitive;
+        let search_regex = editors.request.search_regex;
+        let search_has_error = editors.request.search_error.is_some();
+        div()
+            .min_h(theme::scaled_px(34.).max(px(34.)))
+            .py(px(4.))
+            .flex_shrink_0()
             .flex()
-            .flex_col()
-            .child(top_action_bar)
-            .child(target_bar)
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .px(px(10.))
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::toolbar_surface())
+            .child(
+                button("intruder-search-previous", "‹")
+                    .icon(IconName::ChevronUp)
+                    .tooltip("定位到上一个搜索匹配项")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.search_intruder(id, Some(false), window, cx)
+                    })),
+            )
+            .child(
+                button("intruder-search-next", "›")
+                    .icon(IconName::ChevronDown)
+                    .tooltip("定位到下一个搜索匹配项")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.search_intruder(id, Some(true), window, cx)
+                    })),
+            )
             .child(
                 div()
                     .flex_1()
-                    .min_h_0()
-                    .bg(theme::surface())
-                    .flex()
-                    .flex_col()
-                    .child(
-                        toolbar()
-                            .children(
-                                [
-                                    (
-                                        MessageView::Raw,
-                                        "Raw",
-                                        IconName::Code,
-                                        "查看或编辑包含 § 载荷标记的原始请求模板文本",
-                                    ),
-                                    (
-                                        MessageView::Hex,
-                                        "Hex",
-                                        IconName::Binary,
-                                        "以十六进制视图查看或编辑请求字节与 § 载荷标记",
-                                    ),
-                                ]
-                                .into_iter()
-                                .map(|(view, label, icon, tip)| {
-                                    button(
-                                        SharedString::from(format!(
-                                            "intruder-view-{}",
-                                            label.to_ascii_lowercase()
-                                        )),
-                                        label,
-                                    )
-                                    .icon(icon)
-                                    .tooltip(tip)
-                                    .selected(editors.request.view == view)
-                                    .disabled(!editable)
-                                    .on_click(cx.listener(
-                                        move |this, _, window, cx| {
-                                            this.switch_intruder_view(id, view, window, cx)
-                                        },
-                                    ))
-                                }),
-                            )
-                            .child(div().w(px(1.)).h(px(16.)).bg(theme::border()))
-                            .child(
-                                button(
-                                    "intruder-protocol-toggle",
-                                    if is_http2 { "HTTP/2" } else { "HTTP/1.1" },
-                                )
-                                .tooltip("切换当前攻击草稿发包使用的 HTTP/1.1 与 HTTP/2 协议版本")
-                                .selected(is_http2)
-                                .disabled(!editable)
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.toggle_intruder_protocol(id, window, cx)
-                                    },
-                                )),
-                            )
-                            .child(
-                                Button::new("intruder-soft-wrap")
-                                    .small()
-                                    .h(theme::control_height())
-                                    .px(theme::scaled_px(7.))
-                                    .icon(IconName::TextWrap)
-                                    .accessibility_label("自动换行")
-                                    .selected(soft_wrap)
-                                    .toggled(soft_wrap)
-                                    .tooltip(if soft_wrap {
-                                        "自动换行已开启（点击切换为单行水平滚动）"
-                                    } else {
-                                        "自动换行已关闭（点击开启长行自动折行显示）"
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.toggle_intruder_soft_wrap(id, window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .px(px(7.))
-                                    .py(px(1.))
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .border_color(theme::accent().opacity(0.35))
-                                    .bg(theme::accent().opacity(0.08))
-                                    .text_size(theme::scaled_px(11.5))
-                                    .text_color(theme::accent())
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child(positions_count.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_row()
-                            .child(
-                                div().flex_1().min_w_0().h_full().child(
-                                    Textarea::new(editors.request.state())
-                                        .size_full()
-                                        .bordered(false)
-                                        .readonly(!editable)
-                                        .token(|_, _, _| {
-                                            div()
-                                                .px(px(2.))
-                                                .rounded(px(3.))
-                                                .border_1()
-                                                .border_color(theme::accent().opacity(0.45))
-                                                .bg(theme::accent().opacity(0.14))
-                                                .text_color(theme::accent())
-                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                .child("§")
-                                        })
-                                        .context_menu(self.intruder_positions_context_menu(
-                                            editors.request.state().clone(),
-                                            !editable,
-                                        ))
-                                        .aria_label("Intruder Positions 消息编辑器"),
-                                ),
-                            )
-                            .child(positions_rail),
-                    ),
+                    .min_w_0()
+                    .child(Input::new(&editors.search).small()),
             )
-            .on_action(
-                cx.listener(move |this, _: &AddIntruderPosition, window, cx| {
-                    cx.stop_propagation();
-                    this.add_intruder_position(id, window, cx);
-                }),
+            .child(
+                button("intruder-search-case", "Aa")
+                    .tooltip("切换搜索是否区分大小写 (Case sensitive)")
+                    .selected(search_case_sensitive)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_intruder_search_case(id, window, cx)
+                    })),
             )
-            .on_action(
-                cx.listener(move |this, _: &crate::ClearIntruderPositions, window, cx| {
-                    cx.stop_propagation();
-                    if has_markers {
-                        this.clear_intruder_positions(id, window, cx);
-                    }
-                }),
+            .child(
+                button("intruder-search-regex", ".*")
+                    .tooltip("切换搜索是否启用正则表达式匹配 (Regex)")
+                    .selected(search_regex)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_intruder_search_regex(id, window, cx)
+                    })),
             )
             .child(
                 div()
-                    .min_h(theme::scaled_px(34.).max(px(34.)))
-                    .py(px(4.))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(10.))
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .bg(theme::toolbar_surface())
-                    .child(
-                        button("intruder-search-previous", "‹")
-                            .icon(IconName::ChevronUp)
-                            .tooltip("定位到上一个搜索匹配项")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.search_intruder(id, Some(false), window, cx)
-                            })),
-                    )
-                    .child(
-                        button("intruder-search-next", "›")
-                            .icon(IconName::ChevronDown)
-                            .tooltip("定位到下一个搜索匹配项")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.search_intruder(id, Some(true), window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&editors.search).small()),
-                    )
-                    .child(
-                        button("intruder-search-case", "Aa")
-                            .tooltip("切换搜索是否区分大小写 (Case sensitive)")
-                            .selected(search_case_sensitive)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_intruder_search_case(id, window, cx)
-                            })),
-                    )
-                    .child(
-                        button("intruder-search-regex", ".*")
-                            .tooltip("切换搜索是否启用正则表达式匹配 (Regex)")
-                            .selected(search_regex)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_intruder_search_regex(id, window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme::scaled_px(12.))
-                            .text_color(if search_has_error {
-                                theme::danger_fg()
-                            } else {
-                                theme::muted_foreground()
-                            })
-                            .child(if search_has_error {
-                                "正则无效".to_owned()
-                            } else {
-                                format!("{matches} 个匹配")
-                            }),
-                    )
-                    .child(
-                        div()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(theme::border())
-                            .bg(theme::surface())
-                            .text_size(theme::scaled_px(12.))
-                            .text_color(theme::accent())
-                            .child(positions_count),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme::scaled_px(12.))
-                            .text_color(theme::muted_foreground())
-                            .child(format!("长度：{length}")),
-                    ),
+                    .text_size(theme::scaled_px(12.))
+                    .text_color(if search_has_error {
+                        theme::danger_fg()
+                    } else {
+                        theme::muted_foreground()
+                    })
+                    .child(if search_has_error {
+                        "正则无效".to_owned()
+                    } else {
+                        format!("{matches} 个匹配")
+                    }),
             )
-            .when_some(editors.request.position_error.as_ref(), |this, error| {
-                this.child(
-                    div()
-                        .px(px(10.))
-                        .py(px(4.))
-                        .bg(theme::danger_bg())
-                        .border_t_1()
-                        .border_color(theme::danger_border())
-                        .text_color(theme::danger_fg())
-                        .child(error.clone()),
-                )
-            });
+            .child(
+                div()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::surface())
+                    .text_size(theme::scaled_px(12.))
+                    .text_color(theme::accent())
+                    .child(positions_count),
+            )
+            .child(
+                div()
+                    .text_size(theme::scaled_px(12.))
+                    .text_color(theme::muted_foreground())
+                    .child(format!("长度：{length}")),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_intruder_side_panel_and_rail(
+        &self,
+        id: TabId,
+        spec: &IntruderSpec,
+        editors: &IntruderEditors,
+        request: AnyElement,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let any_intruder_sidebar =
             editors.payloads_open || editors.resource_pool_open || editors.settings_open;
         let show_inspector = self.inspector.open && !any_intruder_sidebar;

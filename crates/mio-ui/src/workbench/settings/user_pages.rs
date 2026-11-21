@@ -10,7 +10,8 @@ use mio_core::{UserDisplaySettings, UserMessageEditorSettings, UserMiscSettings,
 use super::*;
 
 mod display;
-mod editor_misc;
+mod message_editor_page;
+mod misc_page;
 #[cfg(test)]
 mod tests;
 

@@ -18,6 +18,8 @@ use std::{
 
 mod codec;
 mod hash;
+mod hex_grid;
+mod http_head;
 mod message_editor;
 mod replace;
 mod search;
@@ -26,6 +28,8 @@ pub(crate) mod syntax_highlight;
 mod syntax_highlight_body;
 #[cfg(test)]
 mod tests_codec;
+#[cfg(test)]
+mod tests_hex_grid;
 #[cfg(test)]
 mod tests_large_perf;
 #[cfg(test)]
@@ -44,11 +48,14 @@ pub(crate) use codec::{
 pub(crate) use hash::{md5_digest, sha256_digest};
 #[cfg(test)]
 pub(crate) use hash::{md5_hex, sha256_hex};
-pub(crate) use message_editor::{HexGridView, MessageEditorElement};
 #[cfg(test)]
-pub(crate) use message_editor::{
-    MessageDisplayCharset, hex_byte_range_to_text_range, hex_text_range_to_byte_range,
+pub(crate) use hex_grid::{
+    hex_byte_range_to_text_range, hex_text_range_to_byte_range, hex_text_range_to_byte_range_in_str,
 };
+pub(crate) use hex_grid::{
+    HexGridView, MessageEditorElement, hex_text_range_to_byte_range_for_rope,
+};
+pub(crate) use http_head::MessageDisplayCharset;
 pub(crate) use smart_decode::smart_decode_bytes;
 
 pub(super) static NEXT_SELECTION_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -216,7 +223,9 @@ pub(crate) enum ConvertKind {
     Base64UrlSafeDecode,
     AsciiHexEncode,
     AsciiHexDecode,
+    #[cfg(test)]
     ConstructJsString,
+    #[cfg(test)]
     ConstructSqlChar,
 }
 

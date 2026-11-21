@@ -88,6 +88,7 @@ impl NativePanel {
                 frame = frame.child(div().text_color(tone(text.tone)).child(text.text.clone()));
             }
             node::Kind::Button(button) => {
+                let expected_label = button.label.clone();
                 let tip = if node.accessibility_label.is_empty() {
                     format!("执行插件操作：{}", button.label)
                 } else {
@@ -99,9 +100,21 @@ impl NativePanel {
                         .tooltip(tip)
                         .small()
                         .disabled(!button.enabled || !self.enabled)
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.activate(id, window, cx)),
-                        ),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let matches_current = matches!(
+                                this.node(id).and_then(|node| node.kind.as_ref()),
+                                Some(node::Kind::Button(current))
+                                    if current.enabled && current.label == expected_label
+                            );
+                            if !matches_current {
+                                this.show_diagnostic(
+                                    "插件面板控件内容已更新；旧视图中的操作未执行，请重试",
+                                    cx,
+                                );
+                                return;
+                            }
+                            this.activate(id, window, cx);
+                        })),
                 );
             }
             node::Kind::Editor(editor) => {
@@ -122,7 +135,7 @@ impl NativePanel {
                 }
             }
             node::Kind::Tabs(tabs) => {
-                let active = self.tabs.get(&id).copied().unwrap_or(tabs.active);
+                let active = latest_overlay(&self.tabs, id).unwrap_or(tabs.active);
                 let horizontal = tabs.axis == Axis::Horizontal as i32;
                 let mut bar = div()
                     .flex()
@@ -132,6 +145,7 @@ impl NativePanel {
                 for tab in &tabs.tabs {
                     let child = tab.content.as_ref().unwrap();
                     let selected = child.id;
+                    let expected_title = tab.title.clone();
                     bar = bar.child(
                         Button::new(("plugin-tab", selected))
                             .label(tab.title.clone())
@@ -139,11 +153,34 @@ impl NativePanel {
                             .small()
                             .selected(active == selected)
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                let matches_current = matches!(
+                                    this.node(id).and_then(|node| node.kind.as_ref()),
+                                    Some(node::Kind::Tabs(tabs))
+                                        if tabs.tabs.iter().any(|t| {
+                                            t.content.as_ref().is_some_and(|c| c.id == selected)
+                                                && t.title == expected_title
+                                        })
+                                );
+                                if !matches_current {
+                                    this.show_diagnostic(
+                                        "插件面板控件内容已更新；旧视图中的操作未执行，请重试",
+                                        cx,
+                                    );
+                                    return;
+                                }
                                 this.cancel_interaction(cx);
-                                this.tabs.insert(id, selected);
-                                this.remember_visible_document();
-                                this.emit(id, ui_event::Event::TabSelected(selected), cx);
-                                this.prepare_drawings(window, cx);
+                                if this.enabled {
+                                    let seq = this.next_ui_seq();
+                                    push_overlay(&mut this.tabs, id, selected, seq);
+                                    this.remember_visible_document();
+                                    this.emit_with_seq(
+                                        id,
+                                        seq,
+                                        ui_event::Event::TabSelected(selected),
+                                        cx,
+                                    );
+                                    this.prepare_drawings(window, cx);
+                                }
                             })),
                     );
                 }
@@ -169,7 +206,7 @@ impl NativePanel {
             }
             node::Kind::Split(split) => {
                 let horizontal = split.axis == Axis::Horizontal as i32;
-                let fraction = self.splits.get(&id).copied().unwrap_or(split.fraction);
+                let fraction = latest_overlay(&self.splits, id).unwrap_or(split.fraction);
                 let bounds = self.geometry[&id].clone();
                 let handle = div()
                     .id(("plugin-split", id))
@@ -248,20 +285,30 @@ impl NativePanel {
         checkbox: &panel::CheckboxNode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let checked = self
-            .checkboxes
-            .get(&id)
-            .copied()
-            .unwrap_or(checkbox.checked);
+        let checked = latest_overlay(&self.checkboxes, id).unwrap_or(checkbox.checked);
+        let expected_label = checkbox.label.clone();
         Checkbox::new(("plugin-checkbox", id))
             .label(checkbox.label.clone())
             .checked(checked)
             .disabled(!checkbox.enabled || !self.enabled)
             .small()
             .on_click(cx.listener(move |this, next, _, cx| {
+                let matches_current = matches!(
+                    this.node(id).and_then(|node| node.kind.as_ref()),
+                    Some(node::Kind::Checkbox(current))
+                        if current.enabled && current.label == expected_label
+                );
+                if !matches_current {
+                    this.show_diagnostic(
+                        "插件面板控件内容已更新；旧视图中的操作未执行，请重试",
+                        cx,
+                    );
+                    return;
+                }
                 if this.enabled {
-                    this.checkboxes.insert(id, *next);
-                    this.emit(id, ui_event::Event::Toggled(*next), cx);
+                    let seq = this.next_ui_seq();
+                    push_overlay(&mut this.checkboxes, id, *next, seq);
+                    this.emit_with_seq(id, seq, ui_event::Event::Toggled(*next), cx);
                 }
             }))
             .into_any_element()
@@ -273,10 +320,7 @@ impl NativePanel {
         select: &panel::SelectNode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self
-            .selects
-            .get(&id)
-            .copied()
+        let selected = latest_overlay(&self.selects, id)
             .filter(|idx| (*idx as usize) < select.options.len())
             .unwrap_or(select.selected_index);
         let current = select
@@ -284,6 +328,7 @@ impl NativePanel {
             .get(selected as usize)
             .cloned()
             .unwrap_or_default();
+        let expected_label = select.label.clone();
         let options = select.options.clone();
         let weak = cx.weak_entity();
         Button::new(("plugin-select", id))
@@ -299,14 +344,37 @@ impl NativePanel {
                     .fold(menu, |menu, (index, option)| {
                         let weak = weak.clone();
                         let idx = index as u32;
+                        let expected_label = expected_label.clone();
+                        let expected_option = option.clone();
                         menu.item(
                             PopupMenuItem::new(option.clone())
                                 .checked(selected == idx)
                                 .on_click(move |_, _, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         if this.enabled {
-                                            this.selects.insert(id, idx);
-                                            this.emit(id, ui_event::Event::SelectedOption(idx), cx);
+                                            let matches_current = matches!(
+                                                this.node(id).and_then(|node| node.kind.as_ref()),
+                                                Some(node::Kind::Select(current_select))
+                                                    if current_select.enabled
+                                                        && current_select.label == expected_label
+                                                        && current_select.options.get(idx as usize)
+                                                            == Some(&expected_option)
+                                            );
+                                            if !matches_current {
+                                                this.show_diagnostic(
+                                                    "下拉选项已更新；旧菜单中的选择未执行，请重新打开菜单选择",
+                                                    cx,
+                                                );
+                                                return;
+                                            }
+                                            let seq = this.next_ui_seq();
+                                            push_overlay(&mut this.selects, id, idx, seq);
+                                            this.emit_with_seq(
+                                                id,
+                                                seq,
+                                                ui_event::Event::SelectedOption(idx),
+                                                cx,
+                                            );
                                         }
                                     });
                                 }),

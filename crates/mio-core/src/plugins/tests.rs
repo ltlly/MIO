@@ -13,6 +13,7 @@ fn broker_denies_ungranted_forged_read_only_and_stale_requests() {
     );
     let send = HostCall {
         operation: Some(host_call::Operation::NetworkSend(request().into())),
+        parent_request_id: 0,
     };
     let mut broker = PermissionBroker::new(identity, [Permission::DraftWrite]);
     assert!(broker.authorize(&envelope, send.clone()).is_err());
@@ -27,6 +28,7 @@ fn broker_denies_ungranted_forged_read_only_and_stale_requests() {
             expected_revision: 3,
             request: Some(request().into()),
         })),
+        parent_request_id: 0,
     };
     assert!(broker.authorize(&envelope, update.clone()).is_err());
     broker.bind_resource(id, 4, false).unwrap();
@@ -37,6 +39,7 @@ fn broker_denies_ungranted_forged_read_only_and_stale_requests() {
             expected_revision: 4,
             request: Some(request().into()),
         })),
+        parent_request_id: 0,
     };
     assert!(matches!(
         broker.authorize(&envelope, valid),

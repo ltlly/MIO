@@ -258,6 +258,22 @@ async fn worker_open_error_preserves_the_previous_draft_binding() {
         .unwrap()
         .unwrap_err();
     assert!(failure.to_string().contains("256 KiB"));
+    timeout(QUICK, async {
+        loop {
+            match worker.events.recv().await.expect("worker events") {
+                PluginEvent::Panel { snapshot, .. }
+                    if snapshot.revision > original_panel.revision =>
+                {
+                    break;
+                }
+                PluginEvent::Error { .. } => continue,
+                PluginEvent::Stopped { reason, .. } => panic!("worker stopped: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("error status panel update");
     let snapshot = snapshots(&original_panel).remove(0);
     let rejected = handle
         .commit(

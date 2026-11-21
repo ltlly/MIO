@@ -25,6 +25,7 @@ impl Lab {
         let id = session.send(
             envelope::Body::HostCall(HostCall {
                 operation: Some(operation),
+                parent_request_id: 0,
             }),
             self.revision,
             0,

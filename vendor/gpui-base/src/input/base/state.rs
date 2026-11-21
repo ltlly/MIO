@@ -1312,6 +1312,24 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify();
     }
 
+    /// Replace the entire text content without recording undo history.
+    pub fn replace_all_without_history(
+        &mut self,
+        text: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.undo_manager.set_ignoring(true);
+        self.replace_text(text, window, cx);
+        self.undo_manager.set_ignoring(false);
+        self.undo_manager.clear();
+        self.reset_selection();
+        self.reset_lsp_state();
+        self.reset_scroll_to_start();
+
+        cx.notify();
+    }
+
     /// Perform `f` with the user-facing edit restrictions lifted.
     ///
     /// The `disabled` and `readonly` modes only reject the changes made by the

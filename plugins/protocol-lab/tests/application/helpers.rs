@@ -263,6 +263,7 @@ impl App {
             .action(PluginAction::Ui {
                 instance_id,
                 panel_revision: panel.revision,
+                event_seq: 0,
                 event: UiEvent {
                     node_id,
                     event: Some(ui_event::Event::Click(panel::Empty {})),

@@ -7,6 +7,7 @@ use mio_core::{UserDisplaySettings, UserMessageEditorSettings, UserMiscSettings,
 pub(crate) const ROW_HEIGHT: f32 = 19.;
 pub(crate) const TOOLBAR_HEIGHT: f32 = 33.;
 pub(crate) const TOOL_TAB_HEIGHT: f32 = 42.;
+#[cfg(test)]
 pub(crate) const WORK_TAB_BAR_HEIGHT: f32 = 47.;
 pub(crate) const SECONDARY_TAB_HEIGHT: f32 = 36.;
 pub(crate) const EDITOR_LINE_HEIGHT: f32 = 17.5 / 13.;
@@ -39,6 +40,7 @@ pub(crate) fn tool_tab_height() -> Pixels {
     scaled_px(TOOL_TAB_HEIGHT).max(px(34.))
 }
 
+#[cfg(test)]
 pub(crate) fn work_tab_bar_height() -> Pixels {
     scaled_px(WORK_TAB_BAR_HEIGHT).max(px(38.))
 }
@@ -252,11 +254,6 @@ pub(crate) fn sync_window_system_dpi(window_scale_factor: f32) {
     {
         let _ = window_scale_factor;
     }
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_system_dpi_scale_percent(percent: u16) {
-    TEST_SYSTEM_DPI_SCALE_PERCENT.with(|c| c.set(percent.clamp(80, 200)));
 }
 
 pub(crate) fn table_cell_preview_chars() -> usize {

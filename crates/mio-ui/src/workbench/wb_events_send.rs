@@ -315,8 +315,18 @@ impl Workbench {
                 identity,
                 snapshot,
                 editor_bases,
+                synced_ui_seq,
+                rejected_ui_seqs,
             } => {
-                self.plugin_panel(identity, snapshot, &editor_bases, window, cx);
+                self.plugin_panel(
+                    identity,
+                    snapshot,
+                    &editor_bases,
+                    synced_ui_seq,
+                    &rejected_ui_seqs,
+                    window,
+                    cx,
+                );
             }
             Event::PluginDiagnostic { identity, message } => {
                 self.plugin_diagnostic(identity, message, false, cx);

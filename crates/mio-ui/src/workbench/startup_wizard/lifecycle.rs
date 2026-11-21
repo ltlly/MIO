@@ -143,6 +143,7 @@ impl Workbench {
             syncing_inputs: false,
             picker: None,
             pending_preference_save: None,
+            pending_recent_save: None,
             awaiting_start: false,
             initial_project_ready: false,
             cli_initial_path: initial_project,
@@ -208,6 +209,7 @@ impl Workbench {
         let fallback_error = self.error.clone();
         if let Some(wizard) = &mut self.startup_wizard {
             wizard.pending_preference_save = None;
+            wizard.pending_recent_save = None;
             wizard.last_start_failed = false;
             if wizard.awaiting_start {
                 wizard.awaiting_start = false;
@@ -244,39 +246,110 @@ impl Workbench {
         &mut self,
         operation_id: Uuid,
         result: &Result<UserPreferences, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(wizard) = &mut self.startup_wizard else {
             return false;
         };
-        let Some((pending_op, expected_rev, expected_cfg, expected_disable)) =
+        if let Some((pending_op, expected_rev, expected_cfg, expected_disable)) =
             wizard.pending_preference_save.clone()
+            && pending_op == operation_id
+        {
+            wizard.pending_preference_save = None;
+            match result {
+                Ok(saved)
+                    if saved.version == 1
+                        && expected_rev.checked_add(1) == Some(saved.revision)
+                        && saved.startup.default_config.as_ref() == Some(&expected_cfg)
+                        && saved.startup.disable_extensions == expected_disable =>
+                {
+                    self.user_preferences.confirmed = Some(saved.clone());
+                    self.user_preferences.load_error = None;
+                }
+                Ok(_) => {
+                    let message = "默认启动配置回执不匹配；结果未确认。".to_owned();
+                    wizard.error = Some(message.clone());
+                    self.fail(message, cx);
+                    self.query_user_preferences(cx);
+                }
+                Err(err) => {
+                    let message = format!("无法保存默认启动设置：{err}");
+                    wizard.error = Some(message.clone());
+                    self.fail(message, cx);
+                    self.query_user_preferences(cx);
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        let Some(pending) = wizard
+            .pending_recent_save
+            .as_ref()
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| {
+                (
+                    pending.expected_revision,
+                    pending.label,
+                    pending.removed_path.clone(),
+                    pending.previous_paths.clone(),
+                )
+            })
         else {
             return false;
         };
-        if pending_op != operation_id {
-            return false;
-        }
-        wizard.pending_preference_save = None;
+        let (expected_rev, action_label, removed_path, previous_paths) = pending;
+        wizard.pending_recent_save = None;
+        let open_input = wizard.open_file_input.clone();
         match result {
             Ok(saved)
-                if saved.version == 1
-                    && expected_rev.checked_add(1) == Some(saved.revision)
-                    && saved.startup.default_config.as_ref() == Some(&expected_cfg)
-                    && saved.startup.disable_extensions == expected_disable =>
+                if saved.version == 1 && expected_rev.checked_add(1) == Some(saved.revision) =>
             {
                 self.user_preferences.confirmed = Some(saved.clone());
                 self.user_preferences.load_error = None;
+                let current_open = open_input.read(cx).value().trim().to_owned();
+                if !current_open.is_empty() {
+                    let current_path = std::path::Path::new(&current_open);
+                    let still_present = saved
+                        .recent_projects
+                        .iter()
+                        .any(|entry| entry.path == current_path);
+                    let was_removed = match removed_path.as_deref() {
+                        Some(path) => path == current_path && !still_present,
+                        None => {
+                            previous_paths.iter().any(|p| p == current_path) && !still_present
+                        }
+                    };
+                    if was_removed {
+                        let composing = open_input
+                            .update(cx, |s, cx| s.marked_text_range(window, cx).is_some());
+                        if !composing {
+                            if let Some(wizard) = &mut self.startup_wizard {
+                                wizard.syncing_inputs = true;
+                            }
+                            open_input.update(cx, |s, cx| s.set_value("", window, cx));
+                            if let Some(wizard) = &mut self.startup_wizard {
+                                wizard.syncing_inputs = false;
+                            }
+                        }
+                    }
+                }
+                self.sync_startup_wizard_preferences(cx);
+                self.status = format!("已{action_label}。").into();
             }
             Ok(_) => {
-                let message = "默认启动配置回执不匹配；结果未确认。".to_owned();
-                wizard.error = Some(message.clone());
+                let message = format!("{action_label}回执不匹配；列表尚未确认。");
+                if let Some(wizard) = &mut self.startup_wizard {
+                    wizard.error = Some(message.clone());
+                }
                 self.fail(message, cx);
                 self.query_user_preferences(cx);
             }
             Err(err) => {
-                let message = format!("无法保存默认启动设置：{err}");
-                wizard.error = Some(message.clone());
+                let message = format!("无法{action_label}：{err}");
+                if let Some(wizard) = &mut self.startup_wizard {
+                    wizard.error = Some(message.clone());
+                }
                 self.fail(message, cx);
                 self.query_user_preferences(cx);
             }
@@ -330,8 +403,28 @@ impl Workbench {
         }
         let recent = confirmed.recent_projects;
         table.update(cx, |state, cx| {
+            let prev_selected = state
+                .selected_row()
+                .and_then(|row| state.delegate().rows.get(row).map(|entry| entry.path.clone()))
+                .or_else(|| state.delegate().selected_path.clone());
             state.delegate_mut().set_rows(recent);
             state.refresh(cx);
+            if let Some(prev_path) = prev_selected {
+                if let Some(next_row) = state
+                    .delegate()
+                    .rows
+                    .iter()
+                    .position(|entry| entry.path == prev_path)
+                {
+                    state.delegate_mut().selected_path = Some(prev_path);
+                    state.set_selected_row_without_scroll(next_row, cx);
+                } else {
+                    state.delegate_mut().selected_path = None;
+                    state.clear_selection(cx);
+                }
+            } else {
+                state.delegate_mut().selected_path = None;
+            }
         });
         cx.notify();
     }

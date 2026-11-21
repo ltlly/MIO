@@ -336,6 +336,7 @@ impl Workbench {
         ]
     }
 
+    #[inline(never)]
     pub(in crate::workbench) fn render_global_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut overlays = Vec::new();
         if self.command_palette_open {
@@ -1483,6 +1484,7 @@ fn sidebar_rail_rotated_label_svg_cached(
     generated
 }
 
+#[cfg(test)]
 pub(in crate::workbench) fn sidebar_rail_rotated_label_svg(
     label: &str,
     text_box_height: f32,
@@ -1642,6 +1644,7 @@ pub(in crate::workbench) fn sidebar_rail_tab_with_dock(
 }
 
 impl Workbench {
+    #[inline(never)]
     pub(in crate::workbench) fn render_tool_tabs(
         &mut self,
         window: &mut Window,
@@ -1649,14 +1652,61 @@ impl Workbench {
     ) -> gpui_kit::base::Tabs {
         self.sync_active_top_suite_tab();
         let active_suite = self.extensions.active_top_suite_tab;
-        let builtin_selected = |tool: Tool| active_suite.is_none() && self.tool == tool;
-        let suite_tabs = self.extensions.top_suite_tabs(cx);
+        let dark = theme::is_dark();
         let scroll_handle = window
             .use_keyed_state("mio-tool-tabs-scroll", cx, |_, _| {
                 gpui_kit::ScrollHandle::new()
             })
             .read(cx)
             .clone();
+        let inner = self.render_tool_tabs_strip(active_suite, &scroll_handle, window, cx);
+        let right_actions = self.render_tool_tabs_right_actions(dark, cx);
+        gpui_kit::base::Tabs::new("tool-tabs")
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .min_w_0()
+            .h(theme::tool_tab_height())
+            .flex_shrink_0()
+            .bg(theme::surface())
+            .child(inner)
+            .child(gpui_kit::base::ScrollableMask::vertical_wheel(
+                &scroll_handle,
+            ))
+            .child(right_actions)
+            .when(!dark, |tabs| {
+                tabs.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.))
+                        .bg(rgb(0xf2f2f2)),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(1.))
+                    .bg(theme::border()),
+            )
+    }
+
+    #[inline(never)]
+    fn render_tool_tabs_strip(
+        &self,
+        active_suite: Option<mio_core::Uuid>,
+        scroll_handle: &gpui_kit::ScrollHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let builtin_selected = |tool: Tool| active_suite.is_none() && self.tool == tool;
+        let suite_tabs = self.extensions.top_suite_tabs(cx);
         let mut inner = div()
             .id("tool-tabs-scroll")
             .flex()
@@ -1664,7 +1714,7 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .overflow_x_scroll()
-            .track_scroll(&scroll_handle)
+            .track_scroll(scroll_handle)
             .child(
                 tool_tab_with_icon(
                     "tool-dashboard",
@@ -1985,38 +2035,47 @@ impl Workbench {
                 })),
             );
         }
-        let dark = theme::is_dark();
         let scroll_for_discover = scroll_handle.clone();
-        inner = inner.child(
-            tool_tab_with_icon(
-                "tool-discover",
-                "Discover",
-                None,
-                builtin_selected(Tool::Discover),
-                window,
-                cx,
-            )
-            .w(theme::scaled_px(74.))
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(
-                    "查看 Agent IPC 自动化接入状态与核心工作流快捷入口",
+        inner
+            .child(
+                tool_tab_with_icon(
+                    "tool-discover",
+                    "Discover",
+                    None,
+                    builtin_selected(Tool::Discover),
+                    window,
+                    cx,
                 )
-                .build(window, cx)
-            })
-            .disabled(self.ext_import.visible)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.cancel_plugin_interactions(cx);
-                this.extensions.active_top_suite_tab = None;
-                this.tool = Tool::Discover;
-                scroll_for_discover.scroll_to_item(0);
-                cx.notify();
-            })),
-        );
+                .w(theme::scaled_px(74.))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        "查看 Agent IPC 自动化接入状态与核心工作流快捷入口",
+                    )
+                    .build(window, cx)
+                })
+                .disabled(self.ext_import.visible)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.cancel_plugin_interactions(cx);
+                    this.extensions.active_top_suite_tab = None;
+                    this.tool = Tool::Discover;
+                    scroll_for_discover.scroll_to_item(0);
+                    cx.notify();
+                })),
+            )
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_tool_tabs_right_actions(
+        &self,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let update_badge = match &self.update_status {
             mio_core::UpdateStatus::Available(info) => Some(info.latest_version.clone()),
             _ => None,
         };
-        let right_actions = div()
+        div()
             .id("suiteTitleBarActionsPanel")
             .test_support()
             .ml_auto()
@@ -2196,40 +2255,7 @@ impl Workbench {
                             this.select_tool(Tool::Discover, window, cx);
                         }
                     })),
-            );
-        gpui_kit::base::Tabs::new("tool-tabs")
-            .relative()
-            .flex()
-            .items_center()
-            .w_full()
-            .min_w_0()
-            .h(theme::tool_tab_height())
-            .flex_shrink_0()
-            .bg(theme::surface())
-            .child(inner)
-            .child(gpui_kit::base::ScrollableMask::vertical_wheel(
-                &scroll_handle,
-            ))
-            .child(right_actions)
-            .when(!dark, |tabs| {
-                tabs.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(1.))
-                        .bg(rgb(0xf2f2f2)),
-                )
-            })
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(1.))
-                    .bg(theme::border()),
             )
+            .into_any_element()
     }
 }

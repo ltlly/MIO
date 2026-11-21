@@ -774,7 +774,7 @@ impl Workbench {
                 .flex_col()
                 .child(
                     div().flex_1().min_h_0().child(
-                        Editor::new(self.websocket.payload.state())
+                        editing::message_editor(self.websocket.payload.state())
                             .readonly(true)
                             .context_menu(
                                 self.websocket_payload_context_menu(
@@ -783,7 +783,6 @@ impl Workbench {
                                 ),
                             )
                             .size_full()
-                            .bordered(false)
                             .aria_label("WebSocket 消息正文"),
                     ),
                 )

@@ -220,6 +220,7 @@ impl State {
         });
         if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
             op.replaces_existing = true;
+            op.is_suite_start = true;
         }
         Ok(())
     }

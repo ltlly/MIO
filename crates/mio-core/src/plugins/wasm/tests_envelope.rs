@@ -114,6 +114,7 @@ fn hello_and_ui_events_handle_open_panel_preferences_and_u64_revisions() -> Resu
             max_frame_bytes: protocol::MAX_FRAME_BYTES as u32,
             max_operation_ms: 5_000,
             granted_permissions: vec![Permission::Storage as i32, Permission::TrafficRead as i32],
+            host_minor: protocol::PROTOCOL_MINOR,
         }),
     );
     let Some(envelope::Body::Snapshot(initial)) =
@@ -212,6 +213,7 @@ fn open_commit_and_close_editors_preserve_messages_and_check_u64_revisions() -> 
                     Permission::TrafficRead as i32,
                     Permission::DraftWrite as i32,
                 ],
+                host_minor: protocol::PROTOCOL_MINOR,
             }),
         ),
         WASM_CALL_FUEL,
@@ -406,6 +408,7 @@ fn open_commit_and_close_editors_preserve_messages_and_check_u64_revisions() -> 
         panel.snapshot().revision,
         envelope::Body::CloseRequest(protocol::CloseRequest {
             resource_id: resp_res.as_bytes().to_vec(),
+            destroy_panel: false,
         }),
     );
     let close_reply =

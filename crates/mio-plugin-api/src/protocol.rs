@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::{ProjectKey, Uuid, panel::*};
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 4;
+pub const PROTOCOL_MINOR: u32 = 5;
+pub const LEGACY_HANDSHAKE_MINOR: u32 = 4;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_BODY: usize = 512 * 1024;
 pub const MAX_STORAGE_KEY_BYTES: usize = 256;

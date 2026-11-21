@@ -88,6 +88,7 @@ async fn plugin_send_increments_depth_header_and_passive_findings_persist_to_aud
             .plugin_service(ServiceRequest {
                 identity: info.identity,
                 plugin_id: info.manifest.id.clone(),
+                panel_id: protocol::PANEL_ID,
                 request_id: req_id,
                 deadline: tokio::time::Instant::now() + Duration::from_secs(5),
                 operation: ServiceOperation::NetworkSend {

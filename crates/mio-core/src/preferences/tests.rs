@@ -299,3 +299,45 @@ fn symlink_and_fifo_preferences_are_rejected_without_following_or_blocking() {
             .is_err()
     );
 }
+
+#[test]
+fn remove_recent_and_prune_missing_recent_enforce_cas_and_persist() {
+    let (dir, pref_path) = location();
+    let live_a = dir.path().join("live-a.mio");
+    let live_b = dir.path().join("live-b.mio");
+    let missing_c = dir.path().join("missing-c.mio");
+    fs::write(&live_a, b"a").unwrap();
+    fs::write(&live_b, b"b").unwrap();
+
+    let mut store = PreferencesStore::new(Some(pref_path.clone()));
+    store.record_recent("Live A", live_a.clone(), 100).unwrap();
+    store.record_recent("Live B", live_b.clone(), 200).unwrap();
+    let prefs = store.record_recent("Missing C", missing_c.clone(), 300).unwrap();
+    assert_eq!(prefs.revision, 3);
+    assert_eq!(prefs.recent_projects.len(), 3);
+
+    // Stale revision rejects remove_recent and prune_missing_recent without mutating disk.
+    assert!(store.remove_recent(2, &live_a).is_err());
+    assert!(store.prune_missing_recent(2).is_err());
+
+    // Remove a single specific recent entry.
+    let after_remove = store.remove_recent(3, &live_b).unwrap();
+    assert_eq!(after_remove.revision, 4);
+    assert_eq!(after_remove.recent_projects.len(), 2);
+    assert!(
+        after_remove
+            .recent_projects
+            .iter()
+            .all(|entry| entry.path != live_b)
+    );
+
+    // Prune missing files leaves existing live_a and removes missing_c.
+    let after_prune = store.prune_missing_recent(4).unwrap();
+    assert_eq!(after_prune.revision, 5);
+    assert_eq!(after_prune.recent_projects.len(), 1);
+    assert_eq!(after_prune.recent_projects[0].path, live_a);
+
+    // Confirm persistence across reload.
+    let reloaded = PreferencesStore::new(Some(pref_path)).query().preferences;
+    assert_eq!(reloaded, after_prune);
+}

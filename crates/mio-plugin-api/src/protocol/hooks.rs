@@ -11,6 +11,8 @@ pub struct Hello {
     pub max_operation_ms: u32,
     #[prost(enumeration = "Permission", repeated, tag = "3")]
     pub granted_permissions: Vec<i32>,
+    #[prost(uint32, tag = "4")]
+    pub host_minor: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -23,6 +25,8 @@ pub struct Register {
     pub required_components: Vec<i32>,
     #[prost(message, optional, tag = "4")]
     pub panel: Option<PanelSnapshot>,
+    #[prost(bool, tag = "5")]
+    pub supports_panel_multiplexing: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -55,6 +59,8 @@ pub struct OpenResponse {
 pub struct CloseRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub resource_id: Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub destroy_panel: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -117,6 +123,8 @@ pub struct HostCall {
         tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
     )]
     pub operation: Option<host_call::Operation>,
+    #[prost(uint64, tag = "20")]
+    pub parent_request_id: u64,
 }
 
 impl HostCall {

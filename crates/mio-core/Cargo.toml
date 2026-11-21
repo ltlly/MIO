@@ -37,4 +37,5 @@ crc32fast = "=1.5.4"
 libc.workspace = true
 
 [dev-dependencies]
+mio-plugin-sdk = { path = "../mio-plugin-sdk" }
 tokio = { workspace = true, features = ["test-util"] }

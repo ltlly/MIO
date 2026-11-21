@@ -16,6 +16,10 @@ impl Workbench {
         let open_file_input = wizard.open_file_input.clone();
         let config_file_input = wizard.config_file_input.clone();
         let recent_table = wizard.recent_table.clone();
+        let selected_recent_row = recent_table.read(cx).selected_row();
+        let recent_rows_empty = recent_table.read(cx).delegate().rows.is_empty();
+        let missing_recent_count = recent_table.read(cx).delegate().missing_count();
+        let recent_save_pending = wizard.pending_recent_save.is_some();
         let config_list_scroll = wizard.config_list_scroll.clone();
         let trust_project_file = wizard.trust_project_file;
         let pause_automated_tasks = wizard.pause_automated_tasks;
@@ -272,6 +276,45 @@ impl Workbench {
                                                     &recent_scroll_handle,
                                                     table_header_h,
                                                 )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .pl(field_indent)
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            wizard_neutral_button(
+                                                "wizard-remove-recent",
+                                                "移除选中",
+                                                Some("将当前选中的最近项目记录从历史列表中移除（不会删除磁盘上的项目文件）"),
+                                                controls_enabled
+                                                    && !recent_save_pending
+                                                    && selected_recent_row.is_some(),
+                                                WizardButtonSize::Compact,
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.remove_selected_wizard_recent(window, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            wizard_neutral_button(
+                                                "wizard-prune-recent",
+                                                if missing_recent_count > 0 {
+                                                    format!("清理失效项目 ({missing_recent_count})")
+                                                } else {
+                                                    "清理失效项目".to_owned()
+                                                },
+                                                Some("批量清理磁盘上已不存在的最近项目历史记录"),
+                                                controls_enabled
+                                                    && !recent_save_pending
+                                                    && !recent_rows_empty,
+                                                WizardButtonSize::Compact,
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.prune_missing_wizard_recent(window, cx);
+                                            })),
                                         ),
                                 )
                                 .child(

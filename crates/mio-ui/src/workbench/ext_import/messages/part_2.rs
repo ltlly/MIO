@@ -233,10 +233,9 @@ impl Workbench {
                 .child(
                     div().flex_1().min_h_0().child(
                         self.render_inspector_dock(
-                            Editor::new(messages.payload.state())
+                            editing::message_editor(messages.payload.state())
                                 .readonly(true)
                                 .size_full()
-                                .bordered(false)
                                 .aria_label("外部归档消息片段")
                                 .into_any_element(),
                             cx,

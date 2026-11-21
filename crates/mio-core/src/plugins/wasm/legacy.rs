@@ -42,6 +42,7 @@ pub(super) fn parse_legacy_host_call(req: &[u8]) -> Result<HostCall> {
             let key = std::str::from_utf8(&req[1..]).context("Wasm KV key 非 UTF-8")?;
             Ok(HostCall {
                 operation: Some(host_call::Operation::StorageGet(key.to_owned())),
+                parent_request_id: 0,
             })
         }
         Some(2) => {
@@ -54,6 +55,7 @@ pub(super) fn parse_legacy_host_call(req: &[u8]) -> Result<HostCall> {
                     key: key.to_owned(),
                     value: req[2 + klen..].to_vec(),
                 })),
+                parent_request_id: 0,
             })
         }
         Some(3) => {
@@ -67,6 +69,7 @@ pub(super) fn parse_legacy_host_call(req: &[u8]) -> Result<HostCall> {
                     body: vec![],
                     trailers: vec![],
                 })),
+                parent_request_id: 0,
             })
         }
         _ => protocol::HostCall::decode_bytes(req).map_err(anyhow::Error::msg),

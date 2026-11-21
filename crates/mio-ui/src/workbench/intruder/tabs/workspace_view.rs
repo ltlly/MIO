@@ -3,6 +3,7 @@ use gpui_kit::{DragMoveEvent, MouseButton};
 use super::*;
 
 impl Workbench {
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_tabs_workspace(
         &self,
         body: AnyElement,

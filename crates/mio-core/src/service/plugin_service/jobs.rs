@@ -23,20 +23,55 @@ impl State {
         let Some(operation) = self.plugins.operations.remove(&operation_id) else {
             return;
         };
+        let close_succeeded = match &completion.result {
+            Ok(Output::Retired { retired, .. }) => retired.iter().all(|r| r.result.is_ok()),
+            Ok(_) => true,
+            Err(_) => false,
+        };
+        if let Some(key) = operation.closing_panel
+            && (close_succeeded || !self.plugins.instances.contains_key(&key.0))
+        {
+            self.plugins.closing_panels.remove(&key);
+        }
         let output = match completion.result {
             Ok(output) => output,
             Err(error) => {
+                if let Some(virtual_id) = operation.multiplexed_cleanup_on_fail
+                    && let Some((child, parent_handle)) =
+                        self.take_multiplexed_child(virtual_id, &error)
+                    && let Some(handle) = parent_handle
+                {
+                    let panel_id = child.panel_id;
+                    let source_instance = child.source_instance;
+                    let res_id = child.primary_resource;
+                    let pending_revoke = handle.begin_revoke_panel_resource(panel_id, res_id, true);
+                    self.plugins.closing_panels.insert((source_instance, panel_id));
+                    let revoke_op = Uuid::new_v4();
+                    self.plugin_job_start(
+                        revoke_op,
+                        Some(source_instance),
+                        CancellationToken::new(),
+                        false,
+                        async move {
+                            pending_revoke.wait().await?;
+                            Ok(Output::Revoked)
+                        },
+                    );
+                    if let Some(op) = self.plugins.operations.get_mut(&revoke_op) {
+                        op.closing_panel = Some((source_instance, panel_id));
+                    }
+                }
                 self.rollback_plugin_binding(&operation);
                 if operation.cleanup_failed
                     && let Some(id) = operation.instance
                 {
-                    let retired = self.take_plugin_family(id, &error);
+                    let (retired, retired_multiplexed) = self.take_plugin_family(id, &error);
                     self.plugin_job_start(
                         operation_id,
                         Some(id),
                         operation.cancel,
                         operation.report,
-                        retire(retired, None, None, error),
+                        retire(retired, retired_multiplexed, None, None, error),
                     );
                 } else if operation.report {
                     self.plugin_result(operation.project, operation_id, Err(error))
@@ -70,6 +105,7 @@ impl State {
         // Retirement must persist joined network results even when the initiating operation was cancelled.
         if let Output::Retired {
             retired,
+            retired_multiplexed,
             candidate,
             disabled,
             uninstalled_plugin_id,
@@ -88,6 +124,13 @@ impl State {
                 }
                 self.emit(Event::PluginStopped {
                     identity: retired.identity,
+                    reason: reason.clone(),
+                })
+                .await;
+            }
+            for identity in retired_multiplexed {
+                self.emit(Event::PluginStopped {
+                    identity,
                     reason: reason.clone(),
                 })
                 .await;
@@ -121,7 +164,7 @@ impl State {
                         None,
                         operation.cancel,
                         operation.report,
-                        retire(vec![(candidate.instance, vec![])], None, None, message),
+                        retire(vec![(candidate.instance, vec![])], vec![], None, None, message),
                     );
                 } else {
                     self.activate_plugin(operation_id, *candidate, operation)
@@ -169,19 +212,27 @@ impl State {
                         operation.report,
                         retire(
                             vec![(candidate.instance, vec![])],
+                            vec![],
                             None,
                             None,
                             "项目、来源插件或加载请求已改变；候选实例已回收".into(),
                         ),
                     );
                 } else if let Some(id) = candidate.replace {
-                    let retired = self.take_plugin_family(id, "插件已重载");
+                    let (retired, retired_multiplexed) =
+                        self.take_plugin_family(id, "插件已重载");
                     self.plugin_job_start(
                         operation_id,
                         Some(id),
                         operation.cancel,
                         operation.report,
-                        retire(retired, Some(candidate), None, "插件已重载".into()),
+                        retire(
+                            retired,
+                            retired_multiplexed,
+                            Some(candidate),
+                            None,
+                            "插件已重载".into(),
+                        ),
                     );
                 } else {
                     self.activate_plugin(operation_id, *candidate, operation)
@@ -220,9 +271,10 @@ impl State {
                             panel,
                         } => {
                             let valid = self.plugin_tab(tab_id, revision).and_then(|_| {
-                                let inst = self.plugin_instance(identity.instance_id)?;
+                                let (_, _, _, _, resources, _) =
+                                    self.plugin_target(identity.instance_id)?;
                                 ensure!(
-                                    inst.resources.get(&tab_id) == Some(&revision),
+                                    resources.get(&tab_id) == Some(&revision),
                                     "插件资源已撤权；打开结果未应用"
                                 );
                                 Ok(())
@@ -230,13 +282,19 @@ impl State {
                             match valid {
                                 Err(error) => Err(error.to_string()),
                                 Ok(()) => {
-                                    self.plugin_panel(identity, panel, vec![]).await;
-                                    let inst = &self.plugins.instances[&identity.instance_id];
+                                    let Some((info, panel)) =
+                                        self.update_opened_panel(identity, panel).await
+                                    else {
+                                        return self
+                                            .plugin_result(
+                                                operation.project,
+                                                operation_id,
+                                                Err("插件实例已禁用或重载".into()),
+                                            )
+                                            .await;
+                                    };
                                     Ok(if loading {
-                                        PluginOutcome::Loaded {
-                                            info: inst.info.clone(),
-                                            panel: inst.panel.clone(),
-                                        }
+                                        PluginOutcome::Loaded { info, panel }
                                     } else {
                                         PluginOutcome::Opened {
                                             identity,
@@ -255,10 +313,10 @@ impl State {
                         } => {
                             match self
                                 .plugin_tab(tab_id, revision)
-                                .and_then(|_| self.plugin_instance(identity.instance_id))
+                                .and_then(|_| self.plugin_target(identity.instance_id))
                             {
-                                Ok(instance)
-                                    if instance.resources.get(&tab_id) == Some(&revision) =>
+                                Ok((_, _, _, _, resources, _))
+                                    if resources.get(&tab_id) == Some(&revision) =>
                                 {
                                     Ok(PluginOutcome::Committed {
                                         identity,
@@ -367,6 +425,32 @@ impl State {
                         }
                     }
                 };
+                if result.is_err()
+                    && let Some(virtual_id) = operation.multiplexed_cleanup_on_fail
+                    && let Some((child, parent_handle)) =
+                        self.take_multiplexed_child(virtual_id, "插件子面板初始化失败")
+                    && let Some(handle) = parent_handle
+                {
+                    let panel_id = child.panel_id;
+                    let source_instance = child.source_instance;
+                    let res_id = child.primary_resource;
+                    let pending_revoke = handle.begin_revoke_panel_resource(panel_id, res_id, true);
+                    self.plugins.closing_panels.insert((source_instance, panel_id));
+                    let revoke_op = Uuid::new_v4();
+                    self.plugin_job_start(
+                        revoke_op,
+                        Some(source_instance),
+                        CancellationToken::new(),
+                        false,
+                        async move {
+                            pending_revoke.wait().await?;
+                            Ok(Output::Revoked)
+                        },
+                    );
+                    if let Some(op) = self.plugins.operations.get_mut(&revoke_op) {
+                        op.closing_panel = Some((source_instance, panel_id));
+                    }
+                }
                 if result.is_err() {
                     self.rollback_plugin_binding(&operation);
                 }
@@ -375,13 +459,13 @@ impl State {
                     && let Some(id) = operation.instance
                 {
                     let reason = result.err().unwrap();
-                    let retired = self.take_plugin_family(id, &reason);
+                    let (retired, retired_multiplexed) = self.take_plugin_family(id, &reason);
                     self.plugin_job_start(
                         operation_id,
                         Some(id),
                         operation.cancel,
                         operation.report,
-                        retire(retired, None, None, reason),
+                        retire(retired, retired_multiplexed, None, None, reason),
                     );
                 } else if operation.report {
                     self.plugin_result(operation.project, operation_id, result)
@@ -463,13 +547,13 @@ impl State {
                 operation.cancel.clone(),
             ) {
                 let reason = error.to_string();
-                let retired = self.take_plugin_family(id, &reason);
+                let (retired, retired_multiplexed) = self.take_plugin_family(id, &reason);
                 self.plugin_job_start(
                     operation_id,
                     Some(id),
                     operation.cancel,
                     operation.report,
-                    retire(retired, None, None, reason),
+                    retire(retired, retired_multiplexed, None, None, reason),
                 );
             }
         } else if context_open.is_some() || response_open.is_some() {
@@ -484,16 +568,17 @@ impl State {
                 .context_viewers
                 .insert(id, (context_id, revision, read_only));
             let handle = self.plugins.instances[&id].worker.handle();
+            let pending_open = handle.begin_open(mio_plugin_api::protocol::PANEL_ID, context_id);
             let identity = info.identity;
             let task_cancel = operation.cancel.clone();
             self.plugin_job_start(operation_id, Some(id), operation.cancel, operation.report, async move {
                 let opened = async {
                     if let Some((_, _, _, req)) = context_open {
-                        let panel = handle.open_request(context_id, revision, read_only, req).await?;
+                        let panel = pending_open.open_request(revision, read_only, req).await?;
                         Ok(Output::ContextOpened { identity, context_id, revision, panel })
                     } else {
                         let (_, _, _, resp) = response_open.unwrap();
-                        let panel = handle.open_response(context_id, revision, read_only, resp).await?;
+                        let panel = pending_open.open_response(revision, read_only, resp).await?;
                         Ok(Output::ResponseOpened { identity, context_id, revision, panel })
                     }
                 };

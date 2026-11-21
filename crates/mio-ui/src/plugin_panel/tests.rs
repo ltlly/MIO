@@ -117,7 +117,10 @@ pub(super) fn fixture(cx: &mut TestAppContext, snapshot: PanelSnapshot) -> Fixtu
     let emitted_revisions = revisions.clone();
     let subscription = cx.update(|cx| {
         cx.subscribe(&view, move |_, event, _| {
-            if let PanelEvent::Ui { revision, event } = event {
+            if let PanelEvent::Ui {
+                revision, event, ..
+            } = event
+            {
                 emitted.borrow_mut().push(event.clone());
                 emitted_revisions.borrow_mut().push(*revision);
             }

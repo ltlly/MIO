@@ -4,7 +4,7 @@ use gpui_kit::accesskit::Role;
 use gpui_kit::component::{
     button::ButtonVariants,
     checkbox::Checkbox,
-    input::{Editor, Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     scroll::{Scrollbar, ScrollbarMode},
     switch::Switch,

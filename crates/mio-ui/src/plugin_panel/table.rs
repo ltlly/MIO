@@ -30,20 +30,48 @@ impl NativePanel {
         offset: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(table) = self.tables.get_mut(&id) else {
+        if !self.enabled {
+            return;
+        }
+        let valid_range = self
+            .node(id)
+            .and_then(|node| match &node.kind {
+                Some(node::Kind::VirtualTable(model)) => {
+                    Some(offset == 0 || offset < model.total_rows)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if !valid_range {
+            self.show_diagnostic("表格行数已更新；旧视图翻页未执行，请重试", cx);
+            return;
+        }
+        let Some(revision) = self
+            .tables
+            .get(&id)
+            .map(|table| table.next_viewport_revision)
+        else {
             return;
         };
-        let Some(revision) = table.viewport_revision.checked_add(1) else {
+        let Some(revision) = revision.checked_add(1) else {
             self.fail("表格 viewport revision 已耗尽。", cx);
             return;
         };
-        table.viewport_revision = revision;
+        let seq = self.next_ui_seq();
+        let table = self.tables.get_mut(&id).unwrap();
+        table.next_viewport_revision = revision;
+        if table.pending_viewports.len() >= MAX_UI_OVERLAY_HISTORY {
+            table.pending_viewports.remove(0);
+        }
+        table.pending_viewports.push((revision, offset, seq));
         table.requested_offset = Some(offset);
+        table.requested_viewport = Some((revision, seq, false));
         table.selected.clear();
         table.anchor = None;
         table.cursor = None;
-        self.emit(
+        self.emit_with_seq(
             id,
+            seq,
             ui_event::Event::Viewport(ViewportRequest {
                 revision,
                 offset,

@@ -296,10 +296,7 @@ impl Workbench {
                     instance_id: id,
                     enabled,
                 },
-                Operation::SetAutoReload {
-                    instance: id,
-                    enabled,
-                },
+                Operation::SetAutoReload { instance: id },
                 cx,
             )
             .is_some()

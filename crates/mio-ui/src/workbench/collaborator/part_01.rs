@@ -185,14 +185,6 @@ impl CollaboratorPane {
         }
     }
 
-    pub(in crate::workbench) fn show_onboarding(&self) -> bool {
-        !self.onboarding_dismissed
-            && !self.status.running
-            && self.status.issued_tokens.is_empty()
-            && self.status.interactions.is_empty()
-            && !self.config_open
-    }
-
     pub(in crate::workbench) fn radar_image(
         &mut self,
         dark: bool,

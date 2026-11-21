@@ -162,6 +162,7 @@ fn main() -> io::Result<()> {
         plugin_version: "0.1.0".into(),
         required_components: (0..=13).collect(),
         panel: Some(lab.snapshot()),
+        supports_panel_multiplexing: false,
     };
     let mut session = WorkerSession::accept(io::stdin().lock(), io::stdout().lock(), registration)?;
     lab.grants.clone_from(&session.grants);

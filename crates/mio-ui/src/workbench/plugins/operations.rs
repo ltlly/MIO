@@ -587,7 +587,7 @@ impl Workbench {
                 self.status = format!("已卸载扩展：{plugin_id}");
             }
             (
-                Operation::SetAutoReload { instance, .. },
+                Operation::SetAutoReload { instance },
                 PluginOutcome::AutoReloadUpdated {
                     instance_id,
                     enabled,

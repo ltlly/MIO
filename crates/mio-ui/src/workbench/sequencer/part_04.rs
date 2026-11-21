@@ -527,10 +527,9 @@ impl Workbench {
                         .min_h_0()
                         .bg(theme::surface())
                         .child(
-                            Editor::new(pane.request.state())
+                            editing::message_editor(pane.request.state())
                                 .readonly(request_readonly)
                                 .size_full()
-                                .bordered(false)
                                 .context_menu(self.request_context_menu(
                                     pane.request.state().clone(),
                                     request_readonly,

@@ -1784,10 +1784,9 @@ impl Workbench {
         let pending_id = pending.id();
         let header_owner = cx.weak_entity();
         let editor_readonly = pending.deciding || pending.editor.is_readonly_preview();
-        let editor_base = Editor::new(pending.editor.state())
+        let editor_base = editing::message_editor(pending.editor.state())
             .readonly(editor_readonly)
             .size_full()
-            .bordered(false)
             .aria_label("Intercept 消息编辑器");
         let editor = if matches!(pending.target, InterceptTarget::WebSocket { .. }) {
             editor_base.context_menu(self.websocket_payload_context_menu(

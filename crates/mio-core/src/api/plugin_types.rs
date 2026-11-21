@@ -58,6 +58,7 @@ pub enum PluginAction {
     Ui {
         instance_id: Uuid,
         panel_revision: u64,
+        event_seq: u64,
         event: panel::UiEvent,
     },
     OpenRequest {
@@ -70,6 +71,7 @@ pub enum PluginAction {
         tab_id: TabId,
         draft_revision: u64,
         editor: panel::EditorSnapshot,
+        expected_panel: Option<Arc<panel::PanelSnapshot>>,
     },
     Cancel {
         operation_id: Uuid,
@@ -103,6 +105,7 @@ pub enum PluginAction {
         revision: u64,
         request: HttpRequest,
         editor: panel::EditorSnapshot,
+        expected_panel: Option<Arc<panel::PanelSnapshot>>,
     },
     OpenResponseViewer {
         source_instance: PluginInstanceId,
@@ -117,6 +120,7 @@ pub enum PluginAction {
         revision: u64,
         response: HttpResponse,
         editor: panel::EditorSnapshot,
+        expected_panel: Option<Arc<panel::PanelSnapshot>>,
     },
     InvokeContextMenu {
         instance_id: PluginInstanceId,

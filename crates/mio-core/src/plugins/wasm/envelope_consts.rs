@@ -212,6 +212,7 @@ pub(super) fn build_consts() -> (Consts, Vec<u8>) {
                 key: "wasm_tag".into(),
                 value: b"envelope-v13".to_vec(),
             })),
+            parent_request_id: 0,
         }))),
         op_pref: add(&status_patch_op("已写入全局偏好: envelope-v13")),
         op_open: add(&status_patch_op("已加载消息载荷")),

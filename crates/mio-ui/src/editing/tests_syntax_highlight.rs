@@ -886,6 +886,41 @@ fn streaming_json_highlighter_highlights_truncated_and_oversized_pretty_json() {
         "oversized pretty JSON exceeding MAX_HIGHLIGHT_BYTES must still highlight JSON numbers within capped prefix"
     );
     assert_valid_non_overlapping_runs(&oversized, 0..MAX_HIGHLIGHT_BYTES.min(oversized.len()), &big_hl.styles_for_mode(&(0..MAX_HIGHLIGHT_BYTES), false));
+
+    // Lazy tail highlighting: viewport beyond MAX_HIGHLIGHT_BYTES still highlights JSON keys & numbers.
+    let tail_start = MAX_HIGHLIGHT_BYTES + 128;
+    let tail_end = oversized.len();
+    let tail_runs = big_hl.styles_for_mode(&(tail_start..tail_end), false);
+    assert!(
+        tail_runs.iter().any(|(_, s)| s.color == TokenKind::JsonKey.style(false).color),
+        "tail viewport beyond MAX_HIGHLIGHT_BYTES must still highlight JSON keys lazily"
+    );
+    assert!(
+        tail_runs.iter().any(|(_, s)| s.color == TokenKind::JsonNumber.style(false).color),
+        "tail viewport beyond MAX_HIGHLIGHT_BYTES must still highlight JSON numbers lazily"
+    );
+    assert_valid_non_overlapping_runs(&oversized, tail_start..tail_end, &tail_runs);
+}
+
+#[test]
+fn mega_single_line_json_beyond_256kib_still_highlights_validly() {
+    let mut single_line = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"rows\":[",
+    );
+    while single_line.len() < 320 * 1024 {
+        single_line.push_str("{\"id\":7,\"name\":\"row\"},");
+    }
+    single_line.push_str("{\"id\":8,\"name\":\"tail\"}]}");
+    let mut hl = HttpSyntaxHighlighter::default();
+    hl.parse_str(&single_line);
+    let body_line_start = single_line.find("{\"rows\"").unwrap();
+    let query = body_line_start..single_line.len().min(body_line_start + 256 * 1024);
+    let runs = hl.styles_for_mode(&query, false);
+    assert!(
+        runs.iter().any(|(_, s)| s.color == TokenKind::JsonKey.style(false).color),
+        "single-line JSON exceeding 256 KiB must still receive JSON highlighting"
+    );
+    assert_valid_non_overlapping_runs(&single_line, query, &runs);
 }
 
 #[gpui_kit::test]
@@ -943,4 +978,162 @@ fn hex_grid_fills_pane_and_renders_multiple_rows_and_ascii_columns(cx: &mut Test
         );
     })
     .unwrap();
+}
+
+#[test]
+fn html_doctype_and_unicode_tags_past_eager_cap_highlight_without_panic() {
+    let dark = false;
+    let mut raw = String::from("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n");
+    while raw.len() < super::syntax_highlight::MAX_HIGHLIGHT_BYTES + 16_384 {
+        raw.push_str("<div class=\"n\">中文字段内容</div>\n");
+    }
+    let tail_start = raw.len();
+    raw.push_str("<!DOCTYPE html><中文标签><!dOcTyPe><div id=\"tail\">完成</div>");
+    let tail_end = raw.len();
+    let mut hl = HttpSyntaxHighlighter::default();
+    hl.parse_str(&raw);
+    let runs = hl.styles_for_mode(&(tail_start..tail_end), dark);
+    assert!(
+        !runs.is_empty(),
+        "tail HTML runs past eager cap must render without panicking on UTF-8 boundaries"
+    );
+    assert_valid_non_overlapping_runs(&raw, tail_start..tail_end, &runs);
+}
+
+#[test]
+fn oversized_single_line_json_long_string_crossing_eager_cap_highlights_tail_tokens() {
+    // Case 1: Single-line >4MiB JSON whose string value spans across MAX_HIGHLIGHT_BYTES
+    // with >8KiB of plain 'a' on both sides (zero newlines/commas/braces in 2KiB lookback).
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"blob\":\"";
+    let mut raw = String::with_capacity(MAX_HIGHLIGHT_BYTES + 32 * 1024);
+    raw.push_str(header);
+    while raw.len() < MAX_HIGHLIGHT_BYTES + 8192 {
+        raw.push('a');
+    }
+    let tail_json = "\",\"next\":123,\"ok\":true}";
+    raw.push_str(tail_json);
+
+    let mut hl = HttpSyntaxHighlighter::default();
+    hl.parse_str(&raw);
+
+    let query_start = MAX_HIGHLIGHT_BYTES + 4096;
+    let query_end = raw.len();
+    let runs = hl.styles_for_mode(&(query_start..query_end), false);
+    assert_valid_non_overlapping_runs(&raw, query_start..query_end, &runs);
+
+    let find_slice_color = |needle: &str, expected: TokenKind| {
+        let offset = raw[query_start..].find(needle).unwrap() + query_start;
+        let span = offset..offset + needle.len();
+        assert!(
+            runs.iter().any(|(r, style)| r.start <= span.start
+                && r.end >= span.end
+                && style.color == expected.style(false).color),
+            "expected {needle:?} ({span:?}) to have color for {expected:?}, runs={:?}",
+            runs.iter()
+                .map(|(r, s)| (r.clone(), &raw[r.clone()], s.color))
+                .collect::<Vec<_>>()
+        );
+    };
+
+    find_slice_color("aaaa", TokenKind::JsonString);
+    find_slice_color("\"next\"", TokenKind::JsonKey);
+    find_slice_color("123", TokenKind::JsonNumber);
+    find_slice_color("\"ok\"", TokenKind::JsonKey);
+    find_slice_color("true", TokenKind::JsonKeyword);
+
+    // Case 2: Escaped quote `\"` straddling exact MAX_HIGHLIGHT_BYTES boundary (`\` before cap, `"` at cap).
+    let mut esc_raw = String::with_capacity(MAX_HIGHLIGHT_BYTES + 32 * 1024);
+    esc_raw.push_str(header);
+    while esc_raw.len() < MAX_HIGHLIGHT_BYTES - 1 {
+        esc_raw.push('x');
+    }
+    esc_raw.push('\\');
+    assert_eq!(esc_raw.len(), MAX_HIGHLIGHT_BYTES);
+    esc_raw.push('"');
+    for _ in 0..8192 {
+        esc_raw.push('y');
+    }
+    esc_raw.push_str("\",\"after_escape\":456,\"flag\":false}");
+
+    let mut esc_hl = HttpSyntaxHighlighter::default();
+    esc_hl.parse_str(&esc_raw);
+    let esc_start = MAX_HIGHLIGHT_BYTES + 4096;
+    let esc_end = esc_raw.len();
+    let esc_runs = esc_hl.styles_for_mode(&(esc_start..esc_end), false);
+    assert_valid_non_overlapping_runs(&esc_raw, esc_start..esc_end, &esc_runs);
+
+    let assert_esc_token = |needle: &str, expected: TokenKind| {
+        let offset = esc_raw[esc_start..].find(needle).unwrap() + esc_start;
+        let span = offset..offset + needle.len();
+        assert!(
+            esc_runs.iter().any(|(r, style)| r.start <= span.start
+                && r.end >= span.end
+                && style.color == expected.style(false).color),
+            "escaped boundary failed for {needle:?} as {expected:?}"
+        );
+    };
+    assert_esc_token("yyyy", TokenKind::JsonString);
+    assert_esc_token("\"after_escape\"", TokenKind::JsonKey);
+    assert_esc_token("456", TokenKind::JsonNumber);
+    assert_esc_token("\"flag\"", TokenKind::JsonKey);
+    assert_esc_token("false", TokenKind::JsonKeyword);
+}
+
+#[test]
+fn oversized_json_payload_markers_keep_global_pairing_across_lazy_window() {
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"blob\":\"";
+    let mut raw = String::with_capacity(MAX_HIGHLIGHT_BYTES + 32 * 1024);
+    raw.push_str(header);
+    while raw.len() < MAX_HIGHLIGHT_BYTES - 4 {
+        raw.push('a');
+    }
+    raw.push_str("§cross§");
+    assert!(raw.len() > MAX_HIGHLIGHT_BYTES);
+    for _ in 0..8192 {
+        raw.push('b');
+    }
+    let marker1_start = raw.len();
+    raw.push_str("§one§ ordinary §two§");
+    raw.push_str("\",\"next\":123}");
+
+    let mut hl = HttpSyntaxHighlighter::default();
+    hl.parse_str(&raw);
+
+    let payload_color = TokenKind::PayloadMarker.style(false).color;
+    let json_str_color = TokenKind::JsonString.style(false).color;
+    let json_key_color = TokenKind::JsonKey.style(false).color;
+    let json_num_color = TokenKind::JsonNumber.style(false).color;
+
+    // Straddling `§cross§` marker across MAX_HIGHLIGHT_BYTES is highlighted as PayloadMarker on BOTH sides!
+    let cross_eager = hl.styles_for_mode(&(MAX_HIGHLIGHT_BYTES - 4..MAX_HIGHLIGHT_BYTES), false);
+    assert!(cross_eager.iter().all(|(_, s)| s.color == payload_color));
+    let cross_tail = hl.styles_for_mode(&(MAX_HIGHLIGHT_BYTES..MAX_HIGHLIGHT_BYTES + 5), false);
+    assert!(cross_tail.iter().all(|(_, s)| s.color == payload_color));
+
+    // Start query strictly inside `one` (past the opening `§` of `§one§`):
+    // `ne§` MUST be PayloadMarker, `ordinary` MUST be JsonString (NOT PayloadMarker), `§two§` MUST be PayloadMarker!
+    let query_start = marker1_start + "§o".len();
+    let query_end = raw.len();
+    let runs = hl.styles_for_mode(&(query_start..query_end), false);
+    assert_valid_non_overlapping_runs(&raw, query_start..query_end, &runs);
+
+    let assert_color = |needle: &str, expected_color| {
+        let offset = raw[query_start..].find(needle).unwrap() + query_start;
+        let span = offset..offset + needle.len();
+        assert!(
+            runs.iter().any(|(r, style)| r.start <= span.start
+                && r.end >= span.end
+                && style.color == expected_color),
+            "expected {needle:?} ({span:?}) to have color {expected_color:?}, got {:?}",
+            runs.iter()
+                .map(|(r, s)| (r.clone(), &raw[r.clone()], s.color))
+                .collect::<Vec<_>>()
+        );
+    };
+
+    assert_color("ne§", payload_color);
+    assert_color("ordinary", json_str_color);
+    assert_color("§two§", payload_color);
+    assert_color("\"next\"", json_key_color);
+    assert_color("123", json_num_color);
 }

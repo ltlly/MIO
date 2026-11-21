@@ -75,7 +75,7 @@ impl State {
         }
         ensure!(
             self.plugins.operations.len() < MAX_OPERATIONS,
-            "插件后台操作达到 32 个限额"
+            "插件后台操作达到 64 个限额"
         );
         let cancel = CancellationToken::new();
         match action {
@@ -157,7 +157,7 @@ impl State {
                 tab_id,
                 draft_revision,
             } => {
-                self.plugin_tab(tab_id, draft_revision)?;
+                let tab = self.plugin_tab(tab_id, draft_revision)?;
                 let source = self.plugin_instance(source_instance)?;
                 ensure!(
                     source.info.tab_id.is_none()
@@ -173,56 +173,174 @@ impl State {
                     source.info.grants.contains(&Permission::TrafficRead),
                     "自定义编辑器需要单独授权 traffic.read"
                 );
+                let supports_multiplex = source.worker.supports_panel_multiplexing;
                 let (package, trust, grants) = (
                     source.package.clone(),
                     source.trust.clone(),
                     source.info.grants.clone(),
                 );
-                self.plugin_capacity()?;
-                self.start_plugin(
-                    operation_id,
-                    package,
-                    trust,
-                    grants,
-                    LaunchTarget::Editor {
-                        source: source_instance,
-                        tab_id,
-                        revision: draft_revision,
-                    },
-                    cancel,
-                );
+                self.plugin_child_capacity()?;
+                if supports_multiplex {
+                    let request =
+                        parse_request(&tab.draft.raw, &tab.draft.target, tab.draft.version)?;
+                    let (virtual_id, panel_id, identity, handle, info) =
+                        self.allocate_multiplexed_child(source_instance, Some(tab_id))?;
+                    let placeholder = std::sync::Arc::new(PanelSnapshot {
+                        revision: 0,
+                        title: info.manifest.id.clone(),
+                        root: None,
+                    });
+                    self.plugins.multiplexed.insert(
+                        virtual_id,
+                        MultiplexedChild {
+                            source_instance,
+                            panel_id,
+                            primary_resource: tab_id,
+                            info,
+                            panel: placeholder,
+                            resources: HashMap::from([(tab_id, draft_revision)]),
+                        },
+                    );
+                    self.plugins
+                        .panel_routes
+                        .insert((source_instance, panel_id), virtual_id);
+                    let pending_open = handle.begin_open(panel_id, tab_id);
+                    let task_cancel = cancel.clone();
+                    self.plugin_job_start(operation_id, Some(virtual_id), cancel, true, async move {
+                        let opened = pending_open.open_request(
+                            draft_revision,
+                            false,
+                            request,
+                        );
+                        tokio::pin!(opened);
+                        let panel = tokio::select! {
+                            biased;
+                            _ = task_cancel.cancelled() => {
+                                let _ = handle.revoke_panel_resource(panel_id, tab_id, true).await;
+                                anyhow::bail!("打开插件多路复用编辑器已取消");
+                            }
+                            result = &mut opened => result?,
+                        };
+                        Ok(Output::Opened {
+                            identity,
+                            tab_id,
+                            revision: draft_revision,
+                            loading: true,
+                            panel,
+                        })
+                    });
+                    if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
+                        op.multiplexed_cleanup_on_fail = Some(virtual_id);
+                        op.binding = Some((tab_id, draft_revision, None));
+                    }
+                } else {
+                    self.start_plugin(
+                        operation_id,
+                        package,
+                        trust,
+                        grants,
+                        LaunchTarget::Editor {
+                            source: source_instance,
+                            tab_id,
+                            revision: draft_revision,
+                        },
+                        cancel,
+                    );
+                }
             }
             PluginAction::Disable { instance_id } => {
-                let inst = self.plugin_instance(instance_id)?;
-                let identity = inst.info.identity;
-                let suite_manifest_id = (inst.info.tab_id.is_none()
-                    && !self.plugins.context_viewers.contains_key(&instance_id))
-                .then(|| inst.info.manifest.id.clone());
-                let retired = self.take_plugin_family(instance_id, "插件已禁用");
-                if let Some(plugin_id) = suite_manifest_id
-                    && let Err(err) = self.plugins.registry.set_enabled(&plugin_id, false)
-                {
-                    self.error("plugin_registry", err).await;
+                if self.plugins.multiplexed.contains_key(&instance_id) {
+                    self.check_plugin_known(instance_id)?;
+                    let Some((child, parent_handle)) =
+                        self.take_multiplexed_child(instance_id, "插件已禁用")
+                    else {
+                        anyhow::bail!("插件实例不存在");
+                    };
+                    let identity = child.info.identity;
+                    let source_instance = child.source_instance;
+                    let panel_id = child.panel_id;
+                    let primary_resource = child.primary_resource;
+                    let track_closing = parent_handle.is_some();
+                    let pending_revoke = parent_handle
+                        .map(|handle| handle.begin_revoke_panel_resource(panel_id, primary_resource, true));
+                    if track_closing {
+                        self.plugins.closing_panels.insert((source_instance, panel_id));
+                    }
+                    self.plugin_job_start(
+                        operation_id,
+                        Some(instance_id),
+                        cancel,
+                        true,
+                        async move {
+                            let close_result = if let Some(revoke) = pending_revoke {
+                                revoke.wait().await.map_err(|e| e.to_string())
+                            } else {
+                                Ok(())
+                            };
+                            Ok(Output::Retired {
+                                retired: vec![Retired {
+                                    identity,
+                                    result: close_result,
+                                    network: Vec::new(),
+                                }],
+                                retired_multiplexed: Vec::new(),
+                                candidate: None,
+                                disabled: Some(identity),
+                                uninstalled_plugin_id: None,
+                                reason: "插件已禁用".into(),
+                            })
+                        },
+                    );
+                    if track_closing
+                        && let Some(op) = self.plugins.operations.get_mut(&operation_id)
+                    {
+                        op.closing_panel = Some((source_instance, panel_id));
+                    }
+                } else {
+                    let inst = self.plugin_instance(instance_id)?;
+                    let identity = inst.info.identity;
+                    let suite_manifest_id = (inst.info.tab_id.is_none()
+                        && !self.plugins.context_viewers.contains_key(&instance_id))
+                    .then(|| inst.info.manifest.id.clone());
+                    let (retired, retired_multiplexed) =
+                        self.take_plugin_family(instance_id, "插件已禁用");
+                    if let Some(plugin_id) = suite_manifest_id
+                        && let Err(err) = self.plugins.registry.set_enabled(&plugin_id, false)
+                    {
+                        self.error("plugin_registry", err).await;
+                    }
+                    self.plugin_job_start(
+                        operation_id,
+                        Some(instance_id),
+                        cancel,
+                        true,
+                        retire(
+                            retired,
+                            retired_multiplexed,
+                            None,
+                            Some(identity),
+                            "插件已禁用".into(),
+                        ),
+                    );
                 }
-                self.plugin_job_start(
-                    operation_id,
-                    Some(instance_id),
-                    cancel,
-                    true,
-                    retire(retired, None, Some(identity), "插件已禁用".into()),
-                );
             }
             PluginAction::Ui {
                 instance_id,
                 panel_revision,
+                event_seq,
                 event,
             } => {
-                let instance = self.plugin_instance(instance_id)?;
+                let (handle, _, panel_id, _, _, panel) = self.plugin_target(instance_id)?;
                 ensure!(
-                    panel_revision == instance.panel.revision,
+                    panel_revision == panel.revision,
                     "插件面板已更新；操作未提交，请在当前视图重试"
                 );
-                instance.worker.handle().try_event(event)?;
+                handle.try_event_on_panel_with_snapshot_seq(
+                    panel_id,
+                    Arc::new(panel.clone()),
+                    event_seq,
+                    event,
+                )?;
                 self.plugin_result(project, operation_id, Ok(PluginOutcome::EventQueued))
                     .await;
             }
@@ -246,25 +364,40 @@ impl State {
                 tab_id,
                 draft_revision,
                 editor,
+                expected_panel,
             } => {
                 self.plugin_idle(instance_id)?;
                 let tab = self.plugin_tab(tab_id, draft_revision)?;
-                let instance = self.plugin_instance(instance_id)?;
+                let (handle, identity, panel_id, bound_tab, resources, panel) =
+                    self.plugin_target(instance_id)?;
                 ensure!(
-                    instance.info.tab_id.is_none_or(|id| id == tab_id),
+                    bound_tab.is_none_or(|id| id == tab_id),
                     "消息编辑器属于其它标签"
                 );
                 ensure!(
-                    instance.resources.get(&tab_id) == Some(&draft_revision),
+                    resources.get(&tab_id) == Some(&draft_revision),
                     "插件请求上下文已改变；未提交旧稿"
                 );
-                let handle = instance.worker.handle();
-                let identity = instance.info.identity;
+                let expected_snapshot = expected_panel.unwrap_or_else(|| Arc::new(panel.clone()));
+                ensure!(
+                    panel.revision == expected_snapshot.revision
+                        || panel::commit_panel_semantically_matches(
+                            Some(&panel),
+                            &expected_snapshot,
+                            &editor,
+                        ),
+                    "插件面板内容已更新；旧视图的编辑提交未执行，请在当前视图重试"
+                );
                 let request = parse_request(&tab.draft.raw, &tab.draft.target, tab.draft.version)?;
+                let pending_commit = handle.begin_commit_with_snapshot(
+                    panel_id,
+                    Some(tab_id),
+                    Some(expected_snapshot),
+                );
                 let task_cancel = cancel.clone();
                 self.plugin_job_start(operation_id, Some(instance_id), cancel, true, async move {
-                    let request = handle
-                        .commit(
+                    let request = pending_commit
+                        .commit_request(
                             CommitEditor {
                                 resource_id: tab_id.as_bytes().to_vec(),
                                 message_revision: draft_revision,
@@ -335,6 +468,7 @@ impl State {
                 revision,
                 request,
                 editor,
+                expected_panel,
             } => {
                 self.start_commit_context_editor(
                     operation_id,
@@ -343,6 +477,7 @@ impl State {
                     revision,
                     request,
                     editor,
+                    expected_panel,
                     cancel,
                 )?;
             }
@@ -401,6 +536,7 @@ impl State {
                 revision,
                 response,
                 editor,
+                expected_panel,
             } => {
                 self.start_commit_response_editor(
                     operation_id,
@@ -409,6 +545,7 @@ impl State {
                     revision,
                     response,
                     editor,
+                    expected_panel,
                     cancel,
                 )?;
             }
@@ -519,7 +656,7 @@ impl State {
                     });
                 if let Some(id) = target_id {
                     let identity = self.plugin_instance(id)?.info.identity;
-                    let retired = self.take_plugin_family(id, "插件已卸载");
+                    let (retired, retired_multiplexed) = self.take_plugin_family(id, "插件已卸载");
                     self.plugin_job_start(
                         operation_id,
                         Some(id),
@@ -527,6 +664,7 @@ impl State {
                         true,
                         retire_with_uninstall(
                             retired,
+                            retired_multiplexed,
                             None,
                             Some(identity),
                             Some(plugin_id),

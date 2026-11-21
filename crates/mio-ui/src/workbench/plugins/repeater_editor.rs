@@ -253,6 +253,7 @@ impl Workbench {
             return true;
         };
         let panel = instance.panel.clone();
+        let expected_panel = Some(panel.read(cx).commit_snapshot());
         let editor = match panel.update(cx, |panel, cx| panel.capture_editor(document, window, cx))
         {
             Ok(editor) => editor,
@@ -271,6 +272,7 @@ impl Workbench {
                     tab_id,
                     draft_revision: send.draft.revision,
                     editor: editor.clone(),
+                    expected_panel,
                 },
                 Operation::Commit {
                     instance: instance_id,
@@ -325,7 +327,11 @@ impl Workbench {
         });
         let subscription =
             cx.subscribe_in(&panel, window, move |this, _, event, _, cx| match event {
-                PanelEvent::Ui { revision, event } => {
+                PanelEvent::Ui {
+                    revision,
+                    seq,
+                    event,
+                } => {
                     if this.extensions.instance(id).is_some_and(|instance| {
                         instance.live && this.project == Some(instance.info.identity.project)
                     }) {
@@ -333,11 +339,13 @@ impl Workbench {
                             PluginAction::Ui {
                                 instance_id: id,
                                 panel_revision: *revision,
+                                event_seq: *seq,
                                 event: event.clone(),
                             },
                             Operation::Event {
                                 instance: id,
                                 node_id: event.node_id,
+                                event_seq: *seq,
                             },
                             cx,
                         );
@@ -380,6 +388,8 @@ impl Workbench {
         identity: ChannelIdentity,
         snapshot: std::sync::Arc<mio_core::panel::PanelSnapshot>,
         editor_bases: &[EditorSnapshot],
+        synced_ui_seq: Option<u64>,
+        rejected_ui_seqs: &[u64],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -394,7 +404,14 @@ impl Workbench {
         }
         let panel = instance.panel.clone();
         if let Err(error) = panel.update(cx, |panel, cx| {
-            panel.replace(snapshot, editor_bases, window, cx)
+            panel.replace_with_sync(
+                snapshot,
+                editor_bases,
+                synced_ui_seq,
+                rejected_ui_seqs,
+                window,
+                cx,
+            )
         }) {
             self.fail(error, cx);
         }
@@ -434,7 +451,7 @@ impl Workbench {
         } else if let Some(instance) = self.extensions.instance_mut(identity.instance_id) {
             instance
                 .panel
-                .update(cx, |panel, cx| panel.event_failed(None, &message, cx));
+                .update(cx, |panel, cx| panel.show_diagnostic(&message, cx));
             instance.status = message;
         }
         cx.notify();

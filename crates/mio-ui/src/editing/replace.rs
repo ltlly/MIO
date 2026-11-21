@@ -143,21 +143,39 @@ impl MessageEditor {
             self.regex,
             MAX_EDITOR_REPLACE_BYTES,
         )?;
+        let target = self.state().clone();
+        let mut canonical_next_offset = None;
         if self.view == MessageView::Hex && !self.pretty_active {
             let mut candidate = String::with_capacity(text.len() - range.len() + expanded.len());
             candidate.push_str(&text[..range.start]);
             candidate.push_str(&expanded);
             candidate.push_str(&text[range.end..]);
-            hex_decode(&candidate).map_err(|err| {
+            let decoded = hex_decode(&candidate).map_err(|err| {
                 format!("替换结果不是有效的完整 Hex 字节（{err}）；原始字节未改变。")
             })?;
+            let prefix_digits = text[..range.start]
+                .bytes()
+                .filter(u8::is_ascii_hexdigit)
+                .count();
+            let expanded_digits = expanded
+                .bytes()
+                .filter(u8::is_ascii_hexdigit)
+                .count();
+            let end_byte = (prefix_digits + expanded_digits)
+                .div_ceil(2)
+                .min(decoded.len());
+            canonical_next_offset = Some(end_byte.saturating_mul(3));
+            let canonical = hex_encode(&decoded);
+            target.update(cx, |state, cx| {
+                state.replace_all_without_history(canonical, window, cx);
+            });
+        } else {
+            target.update(cx, |state, cx| {
+                state.set_selected_range(range.clone(), cx);
+                state.replace(expanded.clone(), window, cx);
+            });
         }
-        let next_offset = range.start + expanded.len();
-        let target = self.state().clone();
-        target.update(cx, |state, cx| {
-            state.set_selected_range(range, cx);
-            state.replace(expanded, window, cx);
-        });
+        let next_offset = canonical_next_offset.unwrap_or(range.start + expanded.len());
         let _ = self.update_search(None, window, cx);
         let steps_needed = {
             let state = self.state().read(cx);
@@ -179,11 +197,23 @@ impl MessageEditor {
             }
         };
         if steps_needed > 0 {
-            target.update(cx, |state, cx| {
+            let revealed = target.update(cx, |state, cx| {
+                let mut last = None;
                 for _ in 0..steps_needed {
-                    state.next_search_match(cx);
+                    last = state.next_search_match(cx);
                 }
+                last
             });
+            if self.view == MessageView::Hex
+                && !self.pretty_active
+                && let Some(match_range) = revealed
+            {
+                super::hex_grid::scroll_hex_grid_to_text_range(
+                    target.entity_id(),
+                    match_range,
+                    cx,
+                );
+            }
         }
         Ok(())
     }
@@ -273,12 +303,17 @@ impl MessageEditor {
             MAX_EDITOR_REPLACE_BYTES,
         )?;
         if self.view == MessageView::Hex && !self.pretty_active {
-            hex_decode(&replaced).map_err(|err| {
+            let decoded = hex_decode(&replaced).map_err(|err| {
                 format!("全部替换结果不是有效的完整 Hex 字节（{err}）；原始字节未改变。")
             })?;
+            let canonical = hex_encode(&decoded);
+            self.state().update(cx, |state, cx| {
+                state.replace_all_without_history(canonical, window, cx);
+            });
+        } else {
+            self.state()
+                .update(cx, |state, cx| state.replace_all(replaced, window, cx));
         }
-        self.state()
-            .update(cx, |state, cx| state.replace_all(replaced, window, cx));
         let _ = self.update_search(None, window, cx);
         Ok(())
     }

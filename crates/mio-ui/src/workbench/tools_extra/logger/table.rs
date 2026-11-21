@@ -641,7 +641,6 @@ pub(super) fn filter_and_sort_logger<'a>(
             LoggerSortColumn::Number => num_a.cmp(num_b),
             LoggerSortColumn::Source => unreachable!(),
             LoggerSortColumn::Method => a.method.cmp(&b.method).then_with(|| num_a.cmp(num_b)),
-            LoggerSortColumn::Url => a.url.cmp(&b.url).then_with(|| num_a.cmp(num_b)),
             LoggerSortColumn::Status => a
                 .status
                 .unwrap_or(0)

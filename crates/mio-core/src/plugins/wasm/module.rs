@@ -61,9 +61,11 @@ pub fn initial_wasm_panel(
                 max_frame_bytes: protocol::MAX_FRAME_BYTES as u32,
                 max_operation_ms: 5_000,
                 granted_permissions: grants.iter().map(|p| *p as i32).collect(),
+                host_minor: protocol::LEGACY_HANDSHAKE_MINOR,
             }),
             Duration::from_secs(5),
-        );
+        )
+        .with_minor(protocol::LEGACY_HANDSHAKE_MINOR);
         let cancel = CancellationToken::new();
         let mut noop = |_: &[u8], _: &mut [u8], _: bool, _: &CancellationToken| Ok(0);
         if let Ok(Some(envelope::Body::Snapshot(mut snap))) =

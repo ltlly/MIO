@@ -21,6 +21,9 @@ pub trait HostClient {
     }
     fn current_panel_revision(&self) -> u64;
     fn next_panel_revision(&mut self) -> u64;
+    fn panel_id(&self) -> u64 {
+        mio_plugin_api::protocol::PANEL_ID
+    }
     fn call_host(&mut self, operation: host_call::Operation)
     -> Result<host_result::Outcome, String>;
 
@@ -265,10 +268,27 @@ pub trait HostClient {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PanelRevisionState {
+    pub(crate) published: u64,
+    pub(crate) pending: u64,
+}
+
+impl PanelRevisionState {
+    pub(crate) fn new(published: u64) -> Self {
+        Self {
+            published,
+            pending: published,
+        }
+    }
+}
+
 pub struct HostContext<'a, R: Read, W: Write> {
     pub(crate) session: &'a mut WorkerSession<R, W>,
     pub(crate) deferred: &'a mut VecDeque<Envelope>,
-    pub(crate) panel_revision: &'a mut u64,
+    pub(crate) panel_id: u64,
+    pub(crate) parent_request_id: u64,
+    pub(crate) panel_revision: &'a mut PanelRevisionState,
 }
 
 impl<R: Read, W: Write> HostClient for HostContext<'_, R, W> {
@@ -277,12 +297,21 @@ impl<R: Read, W: Write> HostClient for HostContext<'_, R, W> {
     }
 
     fn current_panel_revision(&self) -> u64 {
-        *self.panel_revision
+        self.panel_revision.published
     }
 
     fn next_panel_revision(&mut self) -> u64 {
-        *self.panel_revision = self.panel_revision.saturating_add(1).max(1);
-        *self.panel_revision
+        self.panel_revision.pending = self
+            .panel_revision
+            .pending
+            .max(self.panel_revision.published)
+            .saturating_add(1)
+            .max(1);
+        self.panel_revision.pending
+    }
+
+    fn panel_id(&self) -> u64 {
+        self.panel_id
     }
 
     fn call_host(
@@ -291,11 +320,13 @@ impl<R: Read, W: Write> HostClient for HostContext<'_, R, W> {
     ) -> Result<host_result::Outcome, String> {
         let req_id = self
             .session
-            .send(
+            .send_on_panel(
+                self.panel_id,
                 envelope::Body::HostCall(HostCall {
                     operation: Some(operation),
+                    parent_request_id: self.parent_request_id,
                 }),
-                *self.panel_revision,
+                self.panel_revision.published,
                 0,
             )
             .map_err(|e| format!("发送 HostCall 失败：{e}"))?;

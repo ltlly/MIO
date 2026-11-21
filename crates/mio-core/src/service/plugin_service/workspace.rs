@@ -80,10 +80,20 @@ impl State {
         })();
         match result {
             Ok(revision_opt) => {
-                if let Some(revision) = revision_opt
-                    && let Some(instance) = self.plugins.instances.get_mut(&key.0)
-                {
-                    instance.resources.insert(tab_id, revision);
+                if let Some(revision) = revision_opt {
+                    if pending.call.panel_id == protocol::PANEL_ID {
+                        if let Some(instance) = self.plugins.instances.get_mut(&key.0) {
+                            instance.resources.insert(tab_id, revision);
+                        }
+                    } else if let Some(virtual_id) = self
+                        .plugins
+                        .panel_routes
+                        .get(&(key.0, pending.call.panel_id))
+                        .copied()
+                        && let Some(child) = self.plugins.multiplexed.get_mut(&virtual_id)
+                    {
+                        child.resources.insert(tab_id, revision);
+                    }
                 }
                 self.emit(Event::WorkspaceChanged {
                     project: self.project,

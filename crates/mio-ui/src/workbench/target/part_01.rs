@@ -62,28 +62,6 @@ impl TargetTreeState {
         }
     }
 
-    pub(in crate::workbench) fn is_visible(&self, node: &SiteMapNode) -> bool {
-        if node.key.is_empty() || self.is_hidden(node) {
-            return false;
-        }
-        let mut current = node.key.as_str();
-        loop {
-            let Some(node) = self.nodes.iter().find(|node| node.key == current) else {
-                return false;
-            };
-            if self.is_hidden(node) {
-                return false;
-            }
-            let Some(parent) = node.parent_key.as_ref() else {
-                return true;
-            };
-            if !self.expanded.contains(parent) {
-                return false;
-            }
-            current = parent.as_str();
-        }
-    }
-
     pub(in crate::workbench) fn visible_nodes(&self) -> Vec<&SiteMapNode> {
         let len = self.nodes.len();
         if len == 0 {

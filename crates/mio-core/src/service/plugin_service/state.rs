@@ -19,6 +19,10 @@ impl PluginState {
             auto_reload_timer: None,
             inspections: HashMap::new(),
             instances: HashMap::new(),
+            multiplexed: HashMap::new(),
+            panel_routes: HashMap::new(),
+            closing_panels: HashSet::new(),
+            next_panel_id: mio_plugin_api::protocol::PANEL_ID + 1,
             order: Vec::new(),
             context_viewers: HashMap::new(),
             operations: HashMap::new(),
@@ -31,7 +35,10 @@ impl PluginState {
     }
 
     pub(crate) fn has_resources(&self) -> bool {
-        !self.instances.is_empty() || !self.jobs.is_empty() || !self.network.is_empty()
+        !self.instances.is_empty()
+            || !self.multiplexed.is_empty()
+            || !self.jobs.is_empty()
+            || !self.network.is_empty()
     }
 
     pub(crate) fn cancel_network(&self) {
@@ -127,6 +134,58 @@ impl State {
         Ok(instance)
     }
 
+    pub(super) fn plugin_target(
+        &self,
+        instance_id: Uuid,
+    ) -> Result<(
+        crate::plugins::PluginHandle,
+        ChannelIdentity,
+        u64,
+        Option<TabId>,
+        &HashMap<Uuid, u64>,
+        &PanelSnapshot,
+    )> {
+        ensure!(
+            !self.quiesced && !self.plugins.stopping,
+            "项目正在关闭；插件操作已拒绝"
+        );
+        if let Some(instance) = self.plugins.instances.get(&instance_id) {
+            self.check_project(instance.info.identity.project)?;
+            return Ok((
+                instance.worker.handle(),
+                instance.info.identity,
+                mio_plugin_api::protocol::PANEL_ID,
+                instance.info.tab_id,
+                &instance.resources,
+                &instance.panel,
+            ));
+        }
+        let child = self
+            .plugins
+            .multiplexed
+            .get(&instance_id)
+            .context("插件实例已禁用或重载")?;
+        self.check_project(child.info.identity.project)?;
+        let parent = self
+            .plugins
+            .instances
+            .get(&child.source_instance)
+            .context("宿主插件实例已禁用或重载")?;
+        self.check_project(parent.info.identity.project)?;
+        Ok((
+            parent.worker.handle(),
+            child.info.identity,
+            child.panel_id,
+            child.info.tab_id,
+            &child.resources,
+            &child.panel,
+        ))
+    }
+
+    pub(super) fn check_plugin_known(&self, instance_id: Uuid) -> Result<()> {
+        self.plugin_target(instance_id).map(|_| ())
+    }
+
     pub(super) fn plugin_tab(&self, tab_id: TabId, revision: u64) -> Result<WorkTab> {
         let workspace = self.store.workspace()?;
         let tab = workspace
@@ -165,9 +224,13 @@ impl State {
                 report,
                 cleanup_failed: false,
                 background_passive: false,
+                is_suite_start: false,
+                is_child_start: false,
                 replaces_existing: false,
                 autoload_plugin_id: None,
                 binding: None,
+                multiplexed_cleanup_on_fail: None,
+                closing_panel: None,
             },
         );
     }
@@ -216,24 +279,81 @@ impl State {
             }
             Signal::Worker(PluginEvent::Panel {
                 identity,
+                panel_id,
                 snapshot,
                 editor_bases,
+                synced_ui_seq,
+                rejected_ui_seqs,
             }) => {
-                self.plugin_panel(identity, snapshot, editor_bases).await;
+                self.plugin_panel(
+                    identity,
+                    panel_id,
+                    snapshot,
+                    editor_bases,
+                    synced_ui_seq,
+                    rejected_ui_seqs,
+                )
+                .await;
                 self.maybe_auto_reload_on_heartbeat();
             }
-            Signal::Worker(PluginEvent::Error { identity, failure }) => {
+            Signal::Worker(PluginEvent::PanelSynced {
+                identity,
+                panel_id,
+                snapshot,
+                synced_ui_seq,
+                rejected_ui_seqs,
+            }) => {
+                self.plugin_panel_synced(
+                    identity,
+                    panel_id,
+                    snapshot,
+                    synced_ui_seq,
+                    rejected_ui_seqs,
+                )
+                .await;
+            }
+            Signal::Worker(PluginEvent::Error {
+                identity,
+                panel_id,
+                failure,
+            }) => {
+                let target_identity = if panel_id == mio_plugin_api::protocol::PANEL_ID {
+                    self.plugins
+                        .instances
+                        .get(&identity.instance_id)
+                        .filter(|instance| instance.info.identity == identity)
+                        .map(|_| identity)
+                } else {
+                    self.plugins
+                        .instances
+                        .get(&identity.instance_id)
+                        .filter(|instance| instance.info.identity == identity)
+                        .and_then(|_| {
+                            self.plugins
+                                .panel_routes
+                                .get(&(identity.instance_id, panel_id))
+                        })
+                        .and_then(|virtual_id| self.plugins.multiplexed.get(virtual_id))
+                        .map(|child| child.info.identity)
+                };
+                if let Some(target_identity) = target_identity {
+                    self.emit(Event::PluginDiagnostic {
+                        identity: target_identity,
+                        message: failure.message,
+                    })
+                    .await;
+                }
+            }
+            Signal::Worker(PluginEvent::PanelClosed { identity, panel_id }) => {
                 if self
                     .plugins
                     .instances
                     .get(&identity.instance_id)
                     .is_some_and(|instance| instance.info.identity == identity)
                 {
-                    self.emit(Event::PluginDiagnostic {
-                        identity,
-                        message: failure.message,
-                    })
-                    .await;
+                    self.plugins
+                        .closing_panels
+                        .remove(&(identity.instance_id, panel_id));
                 }
             }
             Signal::Worker(PluginEvent::Stopped { identity, reason }) => {
@@ -243,13 +363,14 @@ impl State {
                     .get(&identity.instance_id)
                     .is_some_and(|instance| instance.info.identity == identity)
                 {
-                    let retired = self.take_plugin_family(identity.instance_id, &reason);
+                    let (retired, retired_multiplexed) =
+                        self.take_plugin_family(identity.instance_id, &reason);
                     self.plugin_job_start(
                         Uuid::new_v4(),
                         Some(identity.instance_id),
                         CancellationToken::new(),
                         false,
-                        retire(retired, None, None, reason),
+                        retire(retired, retired_multiplexed, None, None, reason),
                     );
                 }
             }
@@ -259,19 +380,103 @@ impl State {
     pub(super) async fn plugin_panel(
         &mut self,
         identity: ChannelIdentity,
+        panel_id: u64,
         snapshot: std::sync::Arc<PanelSnapshot>,
         editor_bases: Vec<mio_plugin_api::panel::EditorSnapshot>,
+        synced_ui_seq: u64,
+        rejected_ui_seqs: Vec<u64>,
     ) {
-        if let Some(instance) = self.plugins.instances.get_mut(&identity.instance_id)
-            && instance.info.identity == identity
-            && identity.project == self.project
-            && snapshot.revision > instance.panel.revision
+        if identity.project != self.project {
+            return;
+        }
+        if panel_id == mio_plugin_api::protocol::PANEL_ID {
+            if let Some(instance) = self.plugins.instances.get_mut(&identity.instance_id)
+                && instance.info.identity == identity
+                && snapshot.revision > instance.panel.revision
+            {
+                instance.panel = snapshot.clone();
+                self.emit(Event::PluginPanel {
+                    identity,
+                    snapshot,
+                    editor_bases,
+                    synced_ui_seq: Some(synced_ui_seq),
+                    rejected_ui_seqs,
+                })
+                .await;
+            }
+        } else if self
+            .plugins
+            .instances
+            .get(&identity.instance_id)
+            .is_some_and(|instance| instance.info.identity == identity)
+            && let Some(virtual_id) = self
+                .plugins
+                .panel_routes
+                .get(&(identity.instance_id, panel_id))
+                .copied()
+            && let Some(child) = self.plugins.multiplexed.get_mut(&virtual_id)
+            && snapshot.revision > child.panel.revision
         {
-            instance.panel = snapshot.clone();
+            child.panel = snapshot.clone();
+            let child_identity = child.info.identity;
             self.emit(Event::PluginPanel {
-                identity,
+                identity: child_identity,
                 snapshot,
                 editor_bases,
+                synced_ui_seq: Some(synced_ui_seq),
+                rejected_ui_seqs,
+            })
+            .await;
+        }
+    }
+
+    pub(super) async fn plugin_panel_synced(
+        &mut self,
+        identity: ChannelIdentity,
+        panel_id: u64,
+        snapshot: std::sync::Arc<PanelSnapshot>,
+        synced_ui_seq: u64,
+        rejected_ui_seqs: Vec<u64>,
+    ) {
+        if identity.project != self.project {
+            return;
+        }
+        if panel_id == mio_plugin_api::protocol::PANEL_ID {
+            if let Some(instance) = self.plugins.instances.get_mut(&identity.instance_id)
+                && instance.info.identity == identity
+                && snapshot.revision >= instance.panel.revision
+            {
+                instance.panel = snapshot.clone();
+                self.emit(Event::PluginPanel {
+                    identity,
+                    snapshot,
+                    editor_bases: vec![],
+                    synced_ui_seq: Some(synced_ui_seq),
+                    rejected_ui_seqs,
+                })
+                .await;
+            }
+        } else if self
+            .plugins
+            .instances
+            .get(&identity.instance_id)
+            .is_some_and(|instance| instance.info.identity == identity)
+            && let Some(virtual_id) = self
+                .plugins
+                .panel_routes
+                .get(&(identity.instance_id, panel_id))
+                .copied()
+            && let Some(child) = self.plugins.multiplexed.get_mut(&virtual_id)
+            && snapshot.revision >= child.panel.revision
+        {
+            child.panel = snapshot.clone();
+            let child_identity = child.info.identity;
+            self.emit(Event::PluginPanel {
+                identity: child_identity,
+                snapshot,
+                editor_bases: vec![],
+                synced_ui_seq: Some(synced_ui_seq),
+                rejected_ui_seqs,
             })
             .await;
         }
@@ -291,14 +496,65 @@ impl State {
             })
             .collect();
         for id in closed_instances {
-            let retired = self.take_plugin_family(id, "消息编辑器所属工作标签已关闭");
+            let (retired, retired_multiplexed) =
+                self.take_plugin_family(id, "消息编辑器所属工作标签已关闭");
             self.plugin_job_start(
                 Uuid::new_v4(),
                 Some(id),
                 CancellationToken::new(),
                 false,
-                retire(retired, None, None, "消息编辑器所属工作标签已关闭".into()),
+                retire(
+                    retired,
+                    retired_multiplexed,
+                    None,
+                    None,
+                    "消息编辑器所属工作标签已关闭".into(),
+                ),
             );
+        }
+        let closed_multiplexed: Vec<_> = self
+            .plugins
+            .multiplexed
+            .iter()
+            .filter_map(|(id, child)| {
+                child
+                    .info
+                    .tab_id
+                    .filter(|tab| !workspace.tabs.iter().any(|t| t.id == *tab))
+                    .map(|tab| (*id, tab))
+            })
+            .collect();
+        let mut child_revocations = Vec::new();
+        for (virtual_id, tab_id) in closed_multiplexed {
+            if let Some((child, parent_handle)) =
+                self.take_multiplexed_child(virtual_id, "消息编辑器所属工作标签已关闭")
+            {
+                child_revocations.push((child, parent_handle, tab_id));
+            }
+        }
+        let mut stopped_children = Vec::with_capacity(child_revocations.len());
+        for (child, parent_handle, tab_id) in child_revocations {
+            stopped_children.push(child.info.identity);
+            if let Some(handle) = parent_handle {
+                let panel_id = child.panel_id;
+                let source_instance = child.source_instance;
+                let pending_revoke = handle.begin_revoke_panel_resource(panel_id, tab_id, true);
+                self.plugins.closing_panels.insert((source_instance, panel_id));
+                let job_id = Uuid::new_v4();
+                self.plugin_job_start(
+                    job_id,
+                    Some(source_instance),
+                    CancellationToken::new(),
+                    false,
+                    async move {
+                        pending_revoke.wait().await?;
+                        Ok(Output::Revoked)
+                    },
+                );
+                if let Some(op) = self.plugins.operations.get_mut(&job_id) {
+                    op.closing_panel = Some((source_instance, panel_id));
+                }
+            }
         }
         let mut revocations = Vec::new();
         for instance in self.plugins.instances.values_mut() {
@@ -317,7 +573,7 @@ impl State {
         }
         for (handle, resources) in revocations {
             let keys: Vec<_> = self.plugins.workspace.iter().filter_map(|(key, pending)|
-                (key.0 == handle.identity.instance_id && matches!(&pending.call.operation, ServiceOperation::UpdateDraft { tab_id, .. } if resources.contains(tab_id))).then_some(*key)).collect();
+                (key.0 == handle.identity.instance_id && pending.call.panel_id == mio_plugin_api::protocol::PANEL_ID && matches!(&pending.call.operation, ServiceOperation::UpdateDraft { tab_id, .. } if resources.contains(tab_id))).then_some(*key)).collect();
             for key in keys {
                 let pending = self.plugins.workspace.remove(&key).unwrap();
                 pending.call.cancel.cancel();
@@ -326,24 +582,82 @@ impl State {
                     "工作标签已关闭；插件资源已撤权",
                 )));
             }
+            let pending_revoke =
+                handle.begin_revoke_panel_resources(mio_plugin_api::protocol::PANEL_ID, resources);
             self.plugin_job_start(
                 Uuid::new_v4(),
                 Some(handle.identity.instance_id),
                 CancellationToken::new(),
                 false,
                 async move {
-                    let mut first_error = None;
-                    for id in resources {
-                        if let Err(error) = handle.revoke_resource(id).await {
-                            first_error.get_or_insert(error);
-                        }
-                    }
-                    if let Some(error) = first_error {
-                        return Err(error);
-                    }
+                    pending_revoke.wait().await?;
                     Ok(Output::Revoked)
                 },
             );
+        }
+        let mut child_resource_revocations = Vec::new();
+        for child in self.plugins.multiplexed.values_mut() {
+            let removed: Vec<_> = child
+                .resources
+                .keys()
+                .filter(|id| **id != child.primary_resource && !workspace.tabs.iter().any(|tab| tab.id == **id))
+                .copied()
+                .collect();
+            for id in &removed {
+                child.resources.remove(id);
+            }
+            if !removed.is_empty()
+                && let Some(parent) = self.plugins.instances.get(&child.source_instance)
+            {
+                child_resource_revocations.push((
+                    child.source_instance,
+                    child.panel_id,
+                    parent.worker.handle(),
+                    removed,
+                ));
+            }
+        }
+        for (source_instance, panel_id, handle, resources) in child_resource_revocations {
+            let keys: Vec<_> = self
+                .plugins
+                .workspace
+                .iter()
+                .filter_map(|(key, pending)| {
+                    (key.0 == source_instance
+                        && pending.call.panel_id == panel_id
+                        && matches!(
+                            &pending.call.operation,
+                            ServiceOperation::UpdateDraft { tab_id, .. } if resources.contains(tab_id)
+                        ))
+                    .then_some(*key)
+                })
+                .collect();
+            for key in keys {
+                let pending = self.plugins.workspace.remove(&key).unwrap();
+                pending.call.cancel.cancel();
+                let _ = pending.call.reply.send(Err(Failure::new(
+                    ErrorCode::Stale,
+                    "工作标签已关闭；子面板插件资源已撤权",
+                )));
+            }
+            let pending_revoke = handle.begin_revoke_panel_resources(panel_id, resources);
+            self.plugin_job_start(
+                Uuid::new_v4(),
+                Some(source_instance),
+                CancellationToken::new(),
+                false,
+                async move {
+                    pending_revoke.wait().await?;
+                    Ok(Output::Revoked)
+                },
+            );
+        }
+        for identity in stopped_children {
+            self.emit(Event::PluginStopped {
+                identity,
+                reason: "消息编辑器所属工作标签已关闭".into(),
+            })
+            .await;
         }
     }
 
@@ -357,16 +671,25 @@ impl State {
         }
         let ids: Vec<_> = self.plugins.instances.keys().copied().collect();
         let mut retired = Vec::new();
+        let mut retired_multiplexed = Vec::new();
         for id in ids {
-            retired.extend(self.take_plugin_family(id, "项目正在关闭；插件已停用"));
+            let (insts, mults) = self.take_plugin_family(id, "项目正在关闭；插件已停用");
+            retired.extend(insts);
+            retired_multiplexed.extend(mults);
         }
-        if !retired.is_empty() {
+        if !retired.is_empty() || !retired_multiplexed.is_empty() {
             self.plugin_job_start(
                 Uuid::new_v4(),
                 None,
                 CancellationToken::new(),
                 false,
-                retire(retired, None, None, "项目正在关闭；插件已停用".into()),
+                retire(
+                    retired,
+                    retired_multiplexed,
+                    None,
+                    None,
+                    "项目正在关闭；插件已停用".into(),
+                ),
             );
         }
         self.plugins.cancel_network();

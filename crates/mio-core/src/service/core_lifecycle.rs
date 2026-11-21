@@ -45,7 +45,7 @@ impl State {
                 Incoming::Stop => break,
                 Incoming::Command(command) => {
                     let (operation, project) = command_context(&command, self.project);
-                    if let Err(error) = self.command(*command).await {
+                    if let Err(error) = Box::pin(self.command(*command)).await {
                         self.emit(Event::Error {
                             project,
                             operation,
@@ -62,7 +62,7 @@ impl State {
                 Incoming::ProxyFinished(result) => self.proxy_finished(result),
                 Incoming::Completed(result) => self.repeater_completed(result).await,
                 Incoming::RepeaterProgress(tab_id) => self.emit_repeater_progress(tab_id),
-                Incoming::Plugin(signal) => self.plugin_signal(signal).await,
+                Incoming::Plugin(signal) => Box::pin(self.plugin_signal(signal)).await,
                 Incoming::WebSocketRepeater(event) => {
                     self.emit(Event::WebSocketRepeater(event)).await;
                 }

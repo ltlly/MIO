@@ -51,6 +51,7 @@ impl Workbench {
             }))
     }
 
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_numbers_section(
         &self,
         id: TabId,
@@ -166,6 +167,7 @@ impl Workbench {
             .into_any_element()
     }
 
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_processing_section(
         &self,
         id: TabId,
@@ -178,6 +180,7 @@ impl Workbench {
             .get(&id)
             .map(|editors| self.current_intruder_processing_rules(id, editors))
             .unwrap_or_default();
+        let has_pipeline = !pipeline_entries.is_empty();
         let add_rule_weak = cx.weak_entity();
         let add_rule_dropdown = button("intruder-proc-rule-add-dropdown", "添加规则到管线")
             .dropdown_caret(true)
@@ -294,7 +297,7 @@ impl Workbench {
                             .items_center()
                             .gap(px(4.))
                             .child(add_rule_dropdown)
-                            .when(!pipeline_entries.is_empty(), |row| {
+                            .when(has_pipeline, |row| {
                                 row.child(
                                     button("intruder-proc-pipeline-run", "执行管线")
                                         .icon(IconName::Play)
@@ -307,419 +310,189 @@ impl Workbench {
                             }),
                     ),
             )
-            .when(!pipeline_entries.is_empty(), |section| {
-                let total_rules = pipeline_entries.len();
-                section.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.))
-                        .children(pipeline_entries.into_iter().enumerate().map(|(idx, entry)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .px(px(6.))
-                                .py(px(2.))
-                                .rounded(px(3.))
-                                .border_1()
-                                .border_color(theme::border())
-                                .bg(theme::toolbar_surface())
-                                .child(
-                                    div().flex_1().min_w_0().truncate().child(
-                                        Checkbox::new(("intruder-proc-rule-toggle", idx))
-                                            .label(entry.rule.label())
-                                            .checked(entry.enabled)
-                                            .disabled(!editable)
-                                            .on_click(cx.listener(move |this, value, window, cx| {
-                                                this.update_intruder_payload_set_configs(
-                                                    id,
-                                                    |configs, selected| {
-                                                        let target = selected.unwrap_or(0);
-                                                        if let Some(cfg) = configs.get_mut(target)
-                                                            && let Some(item) =
-                                                                cfg.processing_rules.get_mut(idx)
-                                                        {
-                                                            item.enabled = *value;
-                                                        }
-                                                    },
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    ),
-                                )
-                                .child(
-                                    button(("intruder-proc-rule-up", idx), "上移")
-                                        .disabled(!editable || idx == 0)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.update_intruder_payload_set_configs(
-                                                id,
-                                                |configs, selected| {
-                                                    let target = selected.unwrap_or(0);
-                                                    if let Some(cfg) = configs.get_mut(target)
-                                                        && idx > 0
-                                                        && idx < cfg.processing_rules.len()
-                                                    {
-                                                        cfg.processing_rules.swap(idx - 1, idx);
-                                                    }
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    button(("intruder-proc-rule-down", idx), "下移")
-                                        .disabled(!editable || idx + 1 >= total_rules)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.update_intruder_payload_set_configs(
-                                                id,
-                                                |configs, selected| {
-                                                    let target = selected.unwrap_or(0);
-                                                    if let Some(cfg) = configs.get_mut(target)
-                                                        && idx + 1 < cfg.processing_rules.len()
-                                                    {
-                                                        cfg.processing_rules.swap(idx, idx + 1);
-                                                    }
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    button(("intruder-proc-rule-remove", idx), "删除")
-                                        .icon(IconName::Trash)
-                                        .disabled(!editable)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.update_intruder_payload_set_configs(
-                                                id,
-                                                |configs, selected| {
-                                                    let target = selected.unwrap_or(0);
-                                                    if let Some(cfg) = configs.get_mut(target)
-                                                        && idx < cfg.processing_rules.len()
-                                                    {
-                                                        cfg.processing_rules.remove(idx);
-                                                    }
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                        })),
-                )
+            .when(has_pipeline, |section| {
+                section.child(self.render_processing_pipeline_rules(
+                    id,
+                    pipeline_entries,
+                    editable,
+                    cx,
+                ))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(3.))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-prefix",
-                        "加前缀",
-                        IconName::Plus,
-                        "将载荷输入框中的文本作为前缀添加到当前列表每条载荷开头",
-                        PayloadProcessingRule::AddPrefix(String::new()),
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-suffix",
-                        "加后缀",
-                        IconName::Plus,
-                        "将载荷输入框中的文本作为后缀追加到当前列表每条载荷末尾",
-                        PayloadProcessingRule::AddSuffix(String::new()),
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-substring",
-                        "子串截取",
-                        IconName::Scissors,
-                        "按输入框中的 偏移:长度（留空默认 0:8）截取每条载荷子串",
-                        PayloadProcessingRule::Substring {
-                            offset: 0,
-                            length: 8,
-                        },
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-replace",
-                        "字面替换",
-                        IconName::Replace,
-                        "按输入框中的 原文本=>新文本 对当前列表每条载荷执行字面替换",
-                        PayloadProcessingRule::MatchReplace {
-                            match_pattern: String::new(),
-                            replace_with: String::new(),
-                        },
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-add-if-not-match",
-                        "不匹配追加",
-                        IconName::Plus,
-                        "按输入框中的 正则=>后缀 规则，对不匹配正则的载荷追加指定后缀",
-                        PayloadProcessingRule::AddIfNotMatchRegex {
-                            pattern: String::new(),
-                            addition: String::new(),
-                        },
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-skip-if-match",
-                        "匹配则跳过",
-                        IconName::ListFilter,
-                        "移除当前列表中匹配载荷输入框内正则表达式的载荷条目",
-                        PayloadProcessingRule::SkipIfMatchesRegex {
-                            pattern: String::new(),
-                        },
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-url-encode",
-                        "URL 编码",
-                        IconName::Percent,
-                        "对当前列表中的每条载荷执行标准百分号 URL 编码",
-                        PayloadProcessingRule::UrlEncode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-url-decode",
-                        "URL 解码",
-                        IconName::Percent,
-                        "对当前列表中的每条载荷执行百分号 URL 解码",
-                        PayloadProcessingRule::UrlDecode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-base64-encode",
-                        "Base64 编码",
-                        IconName::Binary,
-                        "对当前列表中的每条载荷执行标准 Base64 编码",
-                        PayloadProcessingRule::Base64Encode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-base64-decode",
-                        "Base64 解码",
-                        IconName::Binary,
-                        "对当前列表中的每条载荷执行 Base64 解码",
-                        PayloadProcessingRule::Base64Decode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-hex-encode",
-                        "Hex 编码",
-                        IconName::Code,
-                        "将当前列表中的每条载荷字节编码为小写十六进制字符串",
-                        PayloadProcessingRule::AsciiHexEncode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-hex-decode",
-                        "Hex 解码",
-                        IconName::Code,
-                        "将当前列表中的十六进制字符串解码还原为原始字节载荷",
-                        PayloadProcessingRule::AsciiHexDecode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-uppercase",
-                        "大写",
-                        IconName::ArrowUp,
-                        "将当前列表每条载荷中的英文字母全部转换为大写",
-                        PayloadProcessingRule::Uppercase,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-lowercase",
-                        "小写",
-                        IconName::ArrowDown,
-                        "将当前列表每条载荷中的英文字母全部转换为小写",
-                        PayloadProcessingRule::Lowercase,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-sha256",
-                        "SHA-256",
-                        IconName::Hash,
-                        "将当前列表中的每条载荷替换为对应的 SHA-256 十六进制摘要",
-                        PayloadProcessingRule::Sha256Hex,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-md5",
-                        "MD5",
-                        IconName::Hash,
-                        "将当前列表中的每条载荷替换为对应的 MD5 十六进制摘要",
-                        PayloadProcessingRule::Md5Hex,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-reverse",
-                        "反转",
-                        IconName::ArrowLeftRight,
-                        "按字符/字节顺序反转当前列表中的每条载荷",
-                        PayloadProcessingRule::Reverse,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-regex-replace",
-                        "正则替换",
-                        IconName::Replace,
-                        "按输入框中的 正则=>替换文本 对当前列表每条载荷执行正则替换",
-                        PayloadProcessingRule::MatchReplaceRegex {
-                            pattern: String::new(),
-                            replace_with: String::new(),
-                        },
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-html-encode",
-                        "HTML 编码",
-                        IconName::Code,
-                        "对当前列表中的每条载荷执行 HTML 实体编码",
-                        PayloadProcessingRule::HtmlEncode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-html-decode",
-                        "HTML 解码",
-                        IconName::Code,
-                        "对当前列表中的每条载荷执行 HTML 实体解码",
-                        PayloadProcessingRule::HtmlDecode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-base64-url-encode",
-                        "Base64Url 编码",
-                        IconName::Binary,
-                        "对当前列表中的每条载荷执行 URL 安全无填充 Base64Url 编码",
-                        PayloadProcessingRule::Base64UrlEncode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-base64-url-decode",
-                        "Base64Url 解码",
-                        IconName::Binary,
-                        "对当前列表中的每条载荷执行 Base64Url 解码",
-                        PayloadProcessingRule::Base64UrlDecode,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-sha1",
-                        "SHA-1",
-                        IconName::Hash,
-                        "将当前列表中的每条载荷替换为对应的 SHA-1 十六进制摘要",
-                        PayloadProcessingRule::Sha1Hex,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-sha384",
-                        "SHA-384",
-                        IconName::Hash,
-                        "将当前列表中的每条载荷替换为对应的 SHA-384 十六进制摘要",
-                        PayloadProcessingRule::Sha384Hex,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-sha512",
-                        "SHA-512",
-                        IconName::Hash,
-                        "将当前列表中的每条载荷替换为对应的 SHA-512 十六进制摘要",
-                        PayloadProcessingRule::Sha512Hex,
-                        cx,
-                    ))
-                    .child(self.proc_rule_btn(
-                        id,
-                        editable,
-                        "intruder-proc-gzip",
-                        "Gzip 压缩",
-                        IconName::Binary,
-                        "将当前列表中的每条载荷压缩为 Gzip 字节流",
-                        PayloadProcessingRule::GzipCompress,
-                        cx,
-                    ))
-                    .children(
-                        self.live_payload_plugins("payload_processor")
-                            .into_iter()
-                            .map(|(plugin_uuid, plugin_id)| {
-                                button(
-                                    SharedString::from(format!(
-                                        "intruder-plugin-proc-{plugin_uuid}"
-                                    )),
-                                    format!("插件处理：{plugin_id}"),
-                                )
-                                .icon(IconName::WandSparkles)
-                                .tooltip("调用已加载扩展插件批量转换当前列表中的每条载荷")
-                                .disabled(!editable)
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.process_plugin_intruder_payloads(
-                                            id,
-                                            plugin_uuid,
-                                            window,
-                                            cx,
-                                        )
-                                    },
-                                ))
-                            }),
-                    ),
-            )
+            .child(self.render_processing_rule_palette(id, editable, cx))
             .child(self.render_intruder_payload_encoding_row(id, editable, cx))
             .into_any_element()
     }
 
+    #[inline(never)]
+    fn render_processing_pipeline_rules(
+        &self,
+        id: TabId,
+        pipeline_entries: Vec<IntruderPayloadProcessingEntry>,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let total_rules = pipeline_entries.len();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .children(pipeline_entries.into_iter().enumerate().map(|(idx, entry)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::toolbar_surface())
+                    .child(
+                        div().flex_1().min_w_0().truncate().child(
+                            Checkbox::new(("intruder-proc-rule-toggle", idx))
+                                .label(entry.rule.label())
+                                .checked(entry.enabled)
+                                .disabled(!editable)
+                                .on_click(cx.listener(move |this, value, window, cx| {
+                                    this.update_intruder_payload_set_configs(
+                                        id,
+                                        |configs, selected| {
+                                            let target = selected.unwrap_or(0);
+                                            if let Some(cfg) = configs.get_mut(target)
+                                                && let Some(item) =
+                                                    cfg.processing_rules.get_mut(idx)
+                                            {
+                                                item.enabled = *value;
+                                            }
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    )
+                    .child(
+                        button(("intruder-proc-rule-up", idx), "上移")
+                            .disabled(!editable || idx == 0)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.update_intruder_payload_set_configs(
+                                    id,
+                                    |configs, selected| {
+                                        let target = selected.unwrap_or(0);
+                                        if let Some(cfg) = configs.get_mut(target)
+                                            && idx > 0
+                                            && idx < cfg.processing_rules.len()
+                                        {
+                                            cfg.processing_rules.swap(idx - 1, idx);
+                                        }
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        button(("intruder-proc-rule-down", idx), "下移")
+                            .disabled(!editable || idx + 1 >= total_rules)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.update_intruder_payload_set_configs(
+                                    id,
+                                    |configs, selected| {
+                                        let target = selected.unwrap_or(0);
+                                        if let Some(cfg) = configs.get_mut(target)
+                                            && idx + 1 < cfg.processing_rules.len()
+                                        {
+                                            cfg.processing_rules.swap(idx, idx + 1);
+                                        }
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        button(("intruder-proc-rule-remove", idx), "删除")
+                            .icon(IconName::Trash)
+                            .disabled(!editable)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.update_intruder_payload_set_configs(
+                                    id,
+                                    |configs, selected| {
+                                        let target = selected.unwrap_or(0);
+                                        if let Some(cfg) = configs.get_mut(target)
+                                            && idx < cfg.processing_rules.len()
+                                        {
+                                            cfg.processing_rules.remove(idx);
+                                        }
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    #[inline(never)]
+    fn render_processing_rule_palette(
+        &self,
+        id: TabId,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let specs: [(&'static str, &'static str, IconName, &'static str, fn() -> PayloadProcessingRule); 26] = [
+            ("intruder-proc-prefix", "加前缀", IconName::Plus, "将载荷输入框中的文本作为前缀添加到当前列表每条载荷开头", || PayloadProcessingRule::AddPrefix(String::new())),
+            ("intruder-proc-suffix", "加后缀", IconName::Plus, "将载荷输入框中的文本作为后缀追加到当前列表每条载荷末尾", || PayloadProcessingRule::AddSuffix(String::new())),
+            ("intruder-proc-substring", "子串截取", IconName::Scissors, "按输入框中的 偏移:长度（留空默认 0:8）截取每条载荷子串", || PayloadProcessingRule::Substring { offset: 0, length: 8 }),
+            ("intruder-proc-replace", "字面替换", IconName::Replace, "按输入框中的 原文本=>新文本 对当前列表每条载荷执行字面替换", || PayloadProcessingRule::MatchReplace { match_pattern: String::new(), replace_with: String::new() }),
+            ("intruder-proc-add-if-not-match", "不匹配追加", IconName::Plus, "按输入框中的 正则=>后缀 规则，对不匹配正则的载荷追加指定后缀", || PayloadProcessingRule::AddIfNotMatchRegex { pattern: String::new(), addition: String::new() }),
+            ("intruder-proc-skip-if-match", "匹配则跳过", IconName::ListFilter, "移除当前列表中匹配载荷输入框内正则表达式的载荷条目", || PayloadProcessingRule::SkipIfMatchesRegex { pattern: String::new() }),
+            ("intruder-proc-url-encode", "URL 编码", IconName::Percent, "对当前列表中的每条载荷执行标准百分号 URL 编码", || PayloadProcessingRule::UrlEncode),
+            ("intruder-proc-url-decode", "URL 解码", IconName::Percent, "对当前列表中的每条载荷执行百分号 URL 解码", || PayloadProcessingRule::UrlDecode),
+            ("intruder-proc-base64-encode", "Base64 编码", IconName::Binary, "对当前列表中的每条载荷执行标准 Base64 编码", || PayloadProcessingRule::Base64Encode),
+            ("intruder-proc-base64-decode", "Base64 解码", IconName::Binary, "对当前列表中的每条载荷执行 Base64 解码", || PayloadProcessingRule::Base64Decode),
+            ("intruder-proc-hex-encode", "Hex 编码", IconName::Code, "将当前列表中的每条载荷字节编码为小写十六进制字符串", || PayloadProcessingRule::AsciiHexEncode),
+            ("intruder-proc-hex-decode", "Hex 解码", IconName::Code, "将当前列表中的十六进制字符串解码还原为原始字节载荷", || PayloadProcessingRule::AsciiHexDecode),
+            ("intruder-proc-uppercase", "大写", IconName::ArrowUp, "将当前列表每条载荷中的英文字母全部转换为大写", || PayloadProcessingRule::Uppercase),
+            ("intruder-proc-lowercase", "小写", IconName::ArrowDown, "将当前列表每条载荷中的英文字母全部转换为小写", || PayloadProcessingRule::Lowercase),
+            ("intruder-proc-sha256", "SHA-256", IconName::Hash, "将当前列表中的每条载荷替换为对应的 SHA-256 十六进制摘要", || PayloadProcessingRule::Sha256Hex),
+            ("intruder-proc-md5", "MD5", IconName::Hash, "将当前列表中的每条载荷替换为对应的 MD5 十六进制摘要", || PayloadProcessingRule::Md5Hex),
+            ("intruder-proc-reverse", "反转", IconName::ArrowLeftRight, "按字符/字节顺序反转当前列表中的每条载荷", || PayloadProcessingRule::Reverse),
+            ("intruder-proc-regex-replace", "正则替换", IconName::Replace, "按输入框中的 正则=>替换文本 对当前列表每条载荷执行正则替换", || PayloadProcessingRule::MatchReplaceRegex { pattern: String::new(), replace_with: String::new() }),
+            ("intruder-proc-html-encode", "HTML 编码", IconName::Code, "对当前列表中的每条载荷执行 HTML 实体编码", || PayloadProcessingRule::HtmlEncode),
+            ("intruder-proc-html-decode", "HTML 解码", IconName::Code, "对当前列表中的每条载荷执行 HTML 实体解码", || PayloadProcessingRule::HtmlDecode),
+            ("intruder-proc-base64-url-encode", "Base64Url 编码", IconName::Binary, "对当前列表中的每条载荷执行 URL 安全无填充 Base64Url 编码", || PayloadProcessingRule::Base64UrlEncode),
+            ("intruder-proc-base64-url-decode", "Base64Url 解码", IconName::Binary, "对当前列表中的每条载荷执行 Base64Url 解码", || PayloadProcessingRule::Base64UrlDecode),
+            ("intruder-proc-sha1", "SHA-1", IconName::Hash, "将当前列表中的每条载荷替换为对应的 SHA-1 十六进制摘要", || PayloadProcessingRule::Sha1Hex),
+            ("intruder-proc-sha384", "SHA-384", IconName::Hash, "将当前列表中的每条载荷替换为对应的 SHA-384 十六进制摘要", || PayloadProcessingRule::Sha384Hex),
+            ("intruder-proc-sha512", "SHA-512", IconName::Hash, "将当前列表中的每条载荷替换为对应的 SHA-512 十六进制摘要", || PayloadProcessingRule::Sha512Hex),
+            ("intruder-proc-gzip", "Gzip 压缩", IconName::Binary, "将当前列表中的每条载荷压缩为 Gzip 字节流", || PayloadProcessingRule::GzipCompress),
+        ];
+        let mut row = div().flex().flex_wrap().gap(px(3.));
+        for (btn_id, label, icon, tip, make_rule) in specs {
+            row = row.child(self.proc_rule_btn(id, editable, btn_id, label, icon, tip, make_rule(), cx));
+        }
+        row.children(
+            self.live_payload_plugins("payload_processor")
+                .into_iter()
+                .map(|(plugin_uuid, plugin_id)| {
+                    button(
+                        SharedString::from(format!("intruder-plugin-proc-{plugin_uuid}")),
+                        format!("插件处理：{plugin_id}"),
+                    )
+                    .icon(IconName::WandSparkles)
+                    .tooltip("调用已加载扩展插件批量转换当前列表中的每条载荷")
+                    .disabled(!editable)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.process_plugin_intruder_payloads(id, plugin_uuid, window, cx)
+                    }))
+                }),
+        )
+        .into_any_element()
+    }
+
+    #[inline(never)]
     fn render_intruder_payload_encoding_row(
         &self,
         id: TabId,
@@ -767,6 +540,7 @@ impl Workbench {
             .into_any_element()
     }
 
+    #[inline(never)]
     pub(in crate::workbench) fn render_intruder_generators_cards(
         &self,
         id: TabId,
