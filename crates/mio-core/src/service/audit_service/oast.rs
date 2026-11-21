@@ -176,10 +176,7 @@ impl State {
         if !any_added {
             return;
         }
-        let Ok(next_rev) = next_audit_revision(state.revision) else {
-            return;
-        };
-        state.revision = next_rev;
+        state.revision = next_audit_revision(state.revision);
         if let Err(error) = self.write_audit_snapshot(&state) {
             self.error("audit", error).await;
             return;

@@ -13,11 +13,6 @@ pub(super) fn apply_project_settings_subset(ws: &mut Workspace, raw: &str) -> Re
     candidate.upstream_proxy = subset.upstream_proxy;
     candidate.upstream_tls = subset.upstream_tls;
     candidate.proxy_listeners = subset.proxy_listeners;
-    if candidate.proxy_listeners.is_empty() {
-        candidate.proxy_listener = None;
-    } else {
-        listeners_tls::sync_primary_listener_field(&mut candidate);
-    }
     candidate.client_certificates = subset.client_certificates;
     candidate.scope = subset.scope;
     candidate.match_and_replace_rules = subset.match_and_replace_rules;
@@ -45,7 +40,6 @@ impl Settings {
         for input in [
             &self.search_input,
             &self.repeater_timeout_input,
-            &self.proxy_listener_input,
             &self.upstream_host,
             &self.upstream_port,
             &self.upstream_username,
@@ -170,7 +164,6 @@ impl Settings {
                 && candidate.upstream_proxy == view.workspace.upstream_proxy
                 && candidate.upstream_tls == view.workspace.upstream_tls
                 && candidate.proxy_listeners == view.workspace.proxy_listeners
-                && candidate.proxy_listener == view.workspace.proxy_listener
                 && candidate.client_certificates == view.workspace.client_certificates
                 && candidate.scope == view.workspace.scope
                 && candidate.match_and_replace_rules == view.workspace.match_and_replace_rules
@@ -293,8 +286,7 @@ mod tests {
             override_project_only: true,
         };
 
-        ws.upstream_tls.protocol_mode = TlsProtocolMode::Custom;
-        ws.upstream_tls.allow_unsafe_renegotiation = true;
+        ws.upstream_tls.protocol_mode = TlsProtocolMode::Default;
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
@@ -329,7 +321,7 @@ mod tests {
             include_subdomains: false,
         });
 
-        ws.sessions.cookie_jar.monitor_mio_ai = true;
+        ws.sessions.cookie_jar.monitor_repeater = true;
         ws.ssl_pass_through_rules.push(SslPassThroughRule {
             id: Uuid::new_v4(),
             enabled: true,

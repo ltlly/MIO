@@ -281,11 +281,7 @@ impl Workbench {
         if self.ext_import.report_loading {
             return;
         }
-        let Some(query_revision) = self.ext_import.report_query.checked_add(1) else {
-            self.ext_import.report_error =
-                Some("导入记录查询 revision 已耗尽，请重开项目。".into());
-            return;
-        };
+        let query_revision = self.ext_import.report_query + 1;
         if !self.enqueue(
             Command::QueryExtReport {
                 project,

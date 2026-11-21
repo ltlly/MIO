@@ -259,9 +259,6 @@ impl Workbench {
             if url.len() > MAX_WS_URL_BYTES {
                 return Err("WebSocket Repeater 目标 URL 超过 64 KiB 限额；修改仍保留。".into());
             }
-            if (tab.draft_payload != payload || tab.url != url) && tab.draft_revision == u64::MAX {
-                return Err("WebSocket Repeater 草稿 revision 已耗尽；未采集任何部分输入。".into());
-            }
             snapshots.push(WsDraftSnapshot {
                 id: tab.id,
                 url,

@@ -359,9 +359,7 @@ impl Workbench {
         let Some(tab) = self.workspace.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
-        let Some(send) = self.capture_send(tab.draft.clone(), cx) else {
-            return;
-        };
+        let send = self.capture_send(tab.draft.clone());
         if self.pending_workspace.is_some() || self.workspace_dirty {
             self.pending_sends.insert(tab_id, send);
             self.status = "正在保存当前草稿与 Repeater 设置；保存成功后发送。".into();
@@ -478,9 +476,7 @@ impl Workbench {
             else {
                 continue;
             };
-            let Some(send) = self.capture_send(draft, cx) else {
-                break;
-            };
+            let send = self.capture_send(draft);
             ready_sends.push((tab_id, send));
         }
         let barrier = (mode == mio_core::RepeaterGroupSendMode::ParallelSinglePacketAttack
@@ -699,10 +695,7 @@ impl Workbench {
             else {
                 continue;
             };
-            let Some(send) = self.capture_send(draft, cx) else {
-                clear_sequential_group_queue();
-                return;
-            };
+            let send = self.capture_send(draft);
             let step_no = completed + 1;
             mio_core::register_repeater_group_send_ticket(
                 tab_id,
@@ -857,10 +850,7 @@ impl Workbench {
             RepeaterRedirectMode::Always,
         ) {
             Ok(Some((next_origin, next_request, next_raw))) => {
-                let Some(next_revision) = tab.draft.revision.checked_add(1) else {
-                    self.fail("草稿 revision 已耗尽；无法跟随重定向。", cx);
-                    return;
-                };
+                let next_revision = tab.draft.revision + 1;
                 if let Some(active_tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
                     active_tab.draft.target = next_origin.clone();
                     active_tab.draft.raw = next_raw.clone();
@@ -895,24 +885,15 @@ impl Workbench {
         self.render_repeater(window, cx)
     }
 
-    pub(in crate::workbench) fn capture_send(
-        &mut self,
-        draft: Draft,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingSend> {
-        let required_workspace_revision = self
-            .pending_workspace
-            .unwrap_or(self.workspace.revision)
-            .checked_add(u64::from(self.workspace_dirty));
-        let Some(required_workspace_revision) = required_workspace_revision else {
-            self.fail("工作区 revision 已耗尽；未发送请求。", cx);
-            return None;
-        };
-        Some(PendingSend {
+    pub(in crate::workbench) fn capture_send(&self, draft: Draft) -> PendingSend {
+        let required_workspace_revision =
+            self.pending_workspace.unwrap_or(self.workspace.revision)
+                + u64::from(self.workspace_dirty);
+        PendingSend {
             draft,
             settings: self.workspace.repeater_settings.clone(),
             required_workspace_revision,
-        })
+        }
     }
 
     pub(in crate::workbench) fn enqueue_send(

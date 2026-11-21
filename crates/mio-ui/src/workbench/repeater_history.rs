@@ -109,11 +109,8 @@ impl Workbench {
         let Some((project, tab_id)) = self.repeater_history.owner else {
             return;
         };
-        let Some(revision) = self.repeater_history.query_revision.checked_add(1) else {
-            self.history_navigation_failed("Repeater 历史查询 revision 已耗尽。".into(), cx);
-            return;
-        };
-        self.repeater_history.query_revision = revision;
+        self.repeater_history.query_revision += 1;
+        let revision = self.repeater_history.query_revision;
         self.repeater_history.query_start = start;
         self.repeater_history.querying = false;
         if self.enqueue(

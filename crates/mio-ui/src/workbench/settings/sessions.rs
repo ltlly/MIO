@@ -64,7 +64,6 @@ pub(super) struct SessionsUi {
     pub(super) default_rule_selected: bool,
     pub(super) tracer_open: bool,
     pub(super) cookie_jar_open: bool,
-    pub(super) monitor_mio_ai: bool,
     pub(super) macro_editor_open: bool,
 
     pub(super) editing_rule_id: Option<Uuid>,
@@ -278,7 +277,6 @@ impl SessionsUi {
             default_rule_selected: false,
             tracer_open: false,
             cookie_jar_open: false,
-            monitor_mio_ai: false,
             macro_editor_open: false,
             editing_rule_id: None,
             rule_name: cx

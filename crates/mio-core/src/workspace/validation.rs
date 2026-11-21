@@ -244,18 +244,6 @@ impl HostnameResolutionRule {
 impl UpstreamProxySettings {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.host.len() <= 253
-                && self.username.len() <= 4096
-                && self.password.len() <= 4096
-                && !self
-                    .host
-                    .bytes()
-                    .chain(self.username.bytes())
-                    .chain(self.password.bytes())
-                    .any(|b| matches!(b, b'\r' | b'\n' | 0)),
-            "上游代理配置包含控制字符或超过长度上限"
-        );
-        ensure!(
             self.open_ended_response_timeout_secs <= 86_400,
             "流式响应超时必须在 0 到 86400 秒之间"
         );
@@ -320,7 +308,7 @@ impl UpstreamProxySettings {
         destination_host: Option<&str>,
         tls: mio_proxy::UpstreamTls,
     ) -> Result<mio_proxy::UpstreamRoute> {
-        let socks = self.effective_socks();
+        let socks = &self.socks;
         if socks.use_proxy {
             if let Some(host) = destination_host
                 && socks.should_bypass_host(host)
@@ -329,7 +317,7 @@ impl UpstreamProxySettings {
             }
             return socks.to_route();
         }
-        let rules = self.effective_rules();
+        let rules = &self.rules;
         if !rules.is_empty() {
             if let Some(host) = destination_host {
                 let clean = host.trim().trim_matches(['[', ']']);
@@ -342,9 +330,8 @@ impl UpstreamProxySettings {
             {
                 return wildcard.to_route_with_tls(tls);
             }
-            return Ok(mio_proxy::UpstreamRoute::Direct);
         }
-        self.legacy_route_with_tls(tls)
+        Ok(mio_proxy::UpstreamRoute::Direct)
     }
 
     pub fn route_for_url_with_tls(
@@ -362,8 +349,8 @@ impl UpstreamProxySettings {
         &self,
         tls: mio_proxy::UpstreamTls,
     ) -> Result<mio_proxy::UpstreamRouteResolver> {
-        let socks = self.effective_socks();
-        if socks.use_proxy {
+        if self.socks.use_proxy {
+            let socks = self.socks.clone();
             let socks_route = socks.to_route()?;
             if socks.bypass_hosts.is_empty() {
                 return Ok(Arc::new(move |_| socks_route.clone()));
@@ -377,10 +364,10 @@ impl UpstreamProxySettings {
             }));
         }
         let mut compiled_rules = Vec::new();
-        for rule in self.effective_rules() {
+        for rule in &self.rules {
             if rule.enabled {
                 let route = rule.to_route_with_tls(tls.clone())?;
-                compiled_rules.push((rule, route));
+                compiled_rules.push((rule.clone(), route));
             }
         }
         if !compiled_rules.is_empty() {
@@ -394,8 +381,7 @@ impl UpstreamProxySettings {
                 mio_proxy::UpstreamRoute::Direct
             }));
         }
-        let fallback = self.legacy_route_with_tls(tls)?;
-        Ok(Arc::new(move |_| fallback.clone()))
+        Ok(Arc::new(|_| mio_proxy::UpstreamRoute::Direct))
     }
 
     pub fn to_route(&self) -> Result<mio_proxy::UpstreamRoute> {
@@ -407,58 +393,6 @@ impl UpstreamProxySettings {
         tls: mio_proxy::UpstreamTls,
     ) -> Result<mio_proxy::UpstreamRoute> {
         self.route_for_host_with_tls(None, tls)
-    }
-
-    fn legacy_route_with_tls(
-        &self,
-        tls: mio_proxy::UpstreamTls,
-    ) -> Result<mio_proxy::UpstreamRoute> {
-        if self.protocol == UpstreamProxyProtocol::Direct {
-            return Ok(mio_proxy::UpstreamRoute::Direct);
-        }
-        let host = self.host.trim();
-        ensure!(
-            !host.is_empty() && self.port > 0,
-            "启用上游代理时必须提供有效的主机名和端口"
-        );
-        ensure!(
-            !host.contains("://") && !host.contains(['/', '?', '#', '@', ' ']),
-            "上游代理主机必须是纯主机名或 IP，不能包含 URL 或凭据"
-        );
-        let socks = self.protocol == UpstreamProxyProtocol::Socks5;
-        let credentials = if self.username.is_empty() && self.password.is_empty() {
-            None
-        } else {
-            ensure!(!self.username.is_empty(), "上游代理认证必须填写用户名");
-            if socks {
-                ensure!(
-                    self.username.len() <= 255
-                        && self.password.len() <= 255
-                        && !self.password.is_empty(),
-                    "SOCKS5 认证用户名与密码不能为空且长度不能超过 255 字节"
-                );
-            } else {
-                ensure!(
-                    !self.username.contains(':'),
-                    "HTTP/HTTPS 代理认证用户名不能包含冒号"
-                );
-            }
-            Some(mio_proxy::ProxyCredentials {
-                username: self.username.clone(),
-                password: self.password.clone(),
-            })
-        };
-        let endpoint = mio_proxy::ProxyEndpoint {
-            host: host.to_owned(),
-            port: self.port,
-            credentials,
-        };
-        Ok(match self.protocol {
-            UpstreamProxyProtocol::Direct => mio_proxy::UpstreamRoute::Direct,
-            UpstreamProxyProtocol::Http => mio_proxy::UpstreamRoute::Http(endpoint),
-            UpstreamProxyProtocol::Https => mio_proxy::UpstreamRoute::Https { endpoint, tls },
-            UpstreamProxyProtocol::Socks5 => mio_proxy::UpstreamRoute::Socks5(endpoint),
-        })
     }
 }
 
@@ -478,6 +412,7 @@ impl Workspace {
                 "项目名称不能为空、包含控制字符或超过 256 字节"
             );
         }
+        // Temporary validation retained for `store/` tests until `proxy_listener` is dropped.
         if let Some(listener) = &self.proxy_listener {
             ensure!(
                 !listener.is_empty() && listener.len() <= 128,
@@ -911,10 +846,7 @@ impl Workspace {
         let id = tab.id;
         self.tabs.push(tab);
         self.active = Some(id);
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("工作区 revision 已耗尽"))?;
+        self.revision += 1;
         self.validate()?;
         Ok(id)
     }

@@ -3,19 +3,6 @@ use gpui_kit::FontWeight;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{ButtonRounded, ButtonVariants};
 
-const DEFAULT_VERTICAL_SIDEBAR_WIDTH: f32 = 220.;
-
-pub(in crate::workbench::tabs) fn effective_vertical_sidebar_width(
-    workspace_sidebar_width: u16,
-    tab_width: f32,
-) -> f32 {
-    if workspace_sidebar_width == 0 && (tab_width - 180.).abs() < f32::EPSILON {
-        DEFAULT_VERTICAL_SIDEBAR_WIDTH
-    } else {
-        tab_width.clamp(120., 640.)
-    }
-}
-
 impl Workbench {
     pub(super) fn render_vertical_sidebar_header(
         &self,

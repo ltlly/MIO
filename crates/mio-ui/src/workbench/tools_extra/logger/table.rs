@@ -1816,9 +1816,7 @@ impl Workbench {
                 let mut added = 0usize;
                 let mut first_id = None;
                 for record in &done.collected {
-                    let Ok(number) = next_organiser_number(&self.workspace.organiser_items) else {
-                        break;
-                    };
+                    let number = next_organiser_number(&self.workspace.organiser_items);
                     let Ok(item) = OrganiserItem::from_flow_record(number, "Logger", record) else {
                         continue;
                     };

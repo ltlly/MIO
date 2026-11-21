@@ -140,10 +140,7 @@ impl Workbench {
         let Some(items) = &messages.items else {
             return;
         };
-        let Some(revision) = items.query_revision.checked_add(1) else {
-            self.fail("归档条目查询 revision 已耗尽，请重开项目。", cx);
-            return;
-        };
+        let revision = items.query_revision + 1;
         let source_id = messages.source_id;
         let changed_filter = items.filter != filter;
         let changed_scope = changed_filter || items.query_offset != offset;
@@ -261,10 +258,7 @@ impl Workbench {
             self.fail("归档条目或消息页不在当前摘要范围内，请刷新后重试。", cx);
             return;
         }
-        let Some(revision) = items.selection_revision.checked_add(1) else {
-            self.fail("归档条目选择 revision 已耗尽，请重开项目。", cx);
-            return;
-        };
+        let revision = items.selection_revision + 1;
         let changed_item = items.selected != Some(id);
         let source_id = messages.source_id;
         self.cancel_ext_repeater();

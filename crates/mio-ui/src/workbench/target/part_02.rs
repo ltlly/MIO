@@ -353,10 +353,8 @@ impl Workbench {
             return;
         }
         if let Some(&(entry_id, entry_revision)) = self.target_pane.explicit_entries.get(&row.id()) {
-            let Some(selection_revision) = self.selection_revision.checked_add(1) else {
-                self.fail("消息读取 revision 已耗尽。", cx); return;
-            };
-            self.selection_revision = selection_revision;
+            self.selection_revision += 1;
+            let selection_revision = self.selection_revision;
             let cancel = self.shutdown.child_token();
             if self.enqueue(Command::ReadSiteMapEntry { project, selection_revision, entry_id, revision: entry_revision, cancel }, cx) {
                 self.target_pane.pending_reads.insert(selection_revision, TargetRead::SiteMap { row_id: row.id(), entry_id, revision: entry_revision });
@@ -366,11 +364,8 @@ impl Workbench {
         }
         match row.id() {
             HistoryEntryId::Live(flow_id) => {
-                let Some(revision) = self.selection_revision.checked_add(1) else {
-                    self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                    return;
-                };
-                self.selection_revision = revision;
+                self.selection_revision += 1;
+                let revision = self.selection_revision;
                 if self.enqueue(
                     Command::ReadFlow {
                         project,
@@ -393,11 +388,8 @@ impl Workbench {
                     self.target_pane.site_map_error = Some("所选归档条目没有可读取的请求。".into());
                     return;
                 };
-                let Some(revision) = self.selection_revision.checked_add(1) else {
-                    self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                    return;
-                };
-                self.selection_revision = revision;
+                self.selection_revision += 1;
+                let revision = self.selection_revision;
                 if self.enqueue(
                     Command::ReadExtMessage {
                         project,
@@ -421,11 +413,8 @@ impl Workbench {
                     .as_ref()
                     .or(archive.response.as_ref())
                 {
-                    let Some(revision) = self.selection_revision.checked_add(1) else {
-                        self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                        return;
-                    };
-                    self.selection_revision = revision;
+                    self.selection_revision += 1;
+                    let revision = self.selection_revision;
                     if self.enqueue(
                         Command::ReadExtMessage {
                             project,

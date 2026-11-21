@@ -1,7 +1,23 @@
 use super::*;
 
-#[tokio::test]
-async fn proxy_and_repeater_workspace_tls_trust_is_used_by_actual_commands_and_survives_save_as() {
+#[test]
+fn proxy_and_repeater_workspace_tls_trust_is_used_by_actual_commands_and_survives_save_as() {
+    std::thread::Builder::new()
+        .name("tls-trust-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_tls_trust_test());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn run_tls_trust_test() {
     tokio::time::timeout(Duration::from_secs(8), async {
         let fixture_ca = MitmAuthority::generate().unwrap();
         let good_tls = UpstreamTlsSettings {
@@ -114,9 +130,12 @@ async fn proxy_and_repeater_workspace_tls_trust_is_used_by_actual_commands_and_s
             let mut workspace = state.store.workspace().unwrap();
             workspace.revision += 1;
             workspace.upstream_proxy = UpstreamProxySettings {
-                protocol: UpstreamProxyProtocol::Http,
-                host: "127.0.0.1".into(),
-                port: fixture_proxy.address().port(),
+                rules: vec![crate::UpstreamProxyRule {
+                    protocol: UpstreamProxyProtocol::Http,
+                    host: "127.0.0.1".into(),
+                    port: fixture_proxy.address().port(),
+                    ..crate::UpstreamProxyRule::default()
+                }],
                 ..UpstreamProxySettings::default()
             };
             workspace.upstream_tls = tls;

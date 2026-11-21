@@ -48,10 +48,7 @@ impl Workbench {
         let Some(tab) = self.workspace.tabs.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
-        let Some(next_revision) = tab.draft.revision.checked_add(1) else {
-            self.fail("草稿 revision 已耗尽；无法切换 HTTP 协议版本。", cx);
-            return;
-        };
+        let next_revision = tab.draft.revision + 1;
         let next_raw = mio_core::rewrite_request_line_version(&tab.draft.raw, next_version);
         tab.draft.version = next_version;
         tab.draft.raw = next_raw.clone();
@@ -156,14 +153,10 @@ impl Workbench {
         if !self.flush_workspace(window, cx) {
             return;
         }
-        let entering_vertical = self.workspace.orientation == Orientation::Horizontal;
         self.workspace.orientation = match self.workspace.orientation {
             Orientation::Horizontal => Orientation::Vertical,
             Orientation::Vertical => Orientation::Horizontal,
         };
-        if entering_vertical && (self.tab_width - 180.).abs() < f32::EPSILON {
-            self.tab_width = 220.;
-        }
         self.tabs_scroll.set_offset(gpui_kit::Point::default());
         self.save_workspace(cx);
         cx.notify();

@@ -10,11 +10,8 @@ impl Workbench {
         project: ProjectKey,
         cx: &mut Context<Self>,
     ) {
-        let Some(revision) = self.audit_dashboard.query_revision.checked_add(1) else {
-            self.fail("审计状态查询 revision 已耗尽；请重新打开项目。", cx);
-            return;
-        };
-        self.audit_dashboard.query_revision = revision;
+        self.audit_dashboard.query_revision += 1;
+        let revision = self.audit_dashboard.query_revision;
         if self.enqueue(
             Command::Audit(AuditCommand::QueryState {
                 project,

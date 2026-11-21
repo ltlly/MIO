@@ -477,10 +477,7 @@ impl Workbench {
                 let Some(tab) = self.workspace.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return;
                 };
-                let Some(next_revision) = tab.draft.revision.checked_add(1) else {
-                    self.fail("草稿 revision 已耗尽；无法原地替换请求。", cx);
-                    return;
-                };
+                let next_revision = tab.draft.revision + 1;
                 tab.draft.raw = raw_request.clone();
                 tab.draft.revision = next_revision;
                 if let Some(editors) = self.tab_editors.get_mut(&tab_id) {

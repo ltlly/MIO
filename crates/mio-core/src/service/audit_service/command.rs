@@ -25,7 +25,7 @@ impl State {
                 let mut state = self.store.read_audit_state()?;
                 if state.live_passive_enabled != enabled {
                     state.live_passive_enabled = enabled;
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 self.emit_audit_state(project, state).await;
@@ -37,7 +37,7 @@ impl State {
                 let mut state = self.store.read_audit_state()?;
                 if state.live_passive_crawl_enabled != enabled {
                     state.live_passive_crawl_enabled = enabled;
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 if let Ok(mut workspace) = self.store.workspace()
@@ -81,7 +81,7 @@ impl State {
                             && matches!(t.state, AuditTaskState::Running | AuditTaskState::Paused)
                     }) {
                         state.tasks[idx].state = AuditTaskState::Cancelled;
-                        state.revision = next_audit_revision(state.revision)?;
+                        state.revision = next_audit_revision(state.revision);
                         let task = state.tasks[idx].clone();
                         self.write_audit_snapshot(&state)?;
                         self.emit(Event::Audit(AuditEvent::TaskUpdated {
@@ -112,7 +112,7 @@ impl State {
                 let before = state.tasks.len();
                 state.tasks.retain(|t| t.id != task_id);
                 if state.tasks.len() != before {
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 self.emit_audit_state(project, state).await;
@@ -131,7 +131,7 @@ impl State {
                     finding.severity_label = severity.label().to_owned();
                     finding.severity_rank = severity.rank();
                     finding.confidence = confidence;
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 self.emit_audit_state(project, state).await;
@@ -147,7 +147,7 @@ impl State {
                 let before = state.findings.len();
                 state.findings.retain(|f| f.id != finding_id);
                 if state.findings.len() != before {
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 self.emit_audit_state(project, state).await;
@@ -159,7 +159,7 @@ impl State {
                 let mut state = self.store.read_audit_state()?;
                 if !state.findings.is_empty() {
                     state.findings.clear();
-                    state.revision = next_audit_revision(state.revision)?;
+                    state.revision = next_audit_revision(state.revision);
                     self.write_audit_snapshot(&state)?;
                 }
                 self.emit_audit_state(project, state).await;
@@ -183,7 +183,7 @@ impl State {
                     crate::MAX_AUDIT_FINDINGS
                 );
                 state.findings.insert(0, *finding);
-                state.revision = next_audit_revision(state.revision)?;
+                state.revision = next_audit_revision(state.revision);
                 self.write_audit_snapshot(&state)?;
                 self.emit_audit_state(project, state).await;
             }
@@ -224,7 +224,7 @@ impl State {
                         finding.evidence = format!("{}\n{}", finding.evidence, append_line);
                     }
                 }
-                state.revision = next_audit_revision(state.revision)?;
+                state.revision = next_audit_revision(state.revision);
                 self.write_audit_snapshot(&state)?;
                 self.emit_audit_state(project, state).await;
             }
@@ -257,7 +257,7 @@ impl State {
         };
         if let Some(idx) = state.tasks.iter().position(|t| t.id == task_id) {
             state.tasks[idx].state = target_state;
-            state.revision = next_audit_revision(state.revision)?;
+            state.revision = next_audit_revision(state.revision);
             let task = state.tasks[idx].clone();
             self.write_audit_snapshot(&state)?;
             self.emit(Event::Audit(AuditEvent::TaskUpdated {
@@ -330,10 +330,7 @@ impl State {
                 Vec::new()
             }
         };
-        let Ok(next_rev) = next_audit_revision(state.revision) else {
-            return;
-        };
-        state.revision = next_rev;
+        state.revision = next_audit_revision(state.revision);
         let updated_task = state.tasks[task_idx].clone();
         if self.unsaved_count() == 0
             && let Err(error) = self.write_audit_snapshot(&state)
@@ -442,7 +439,7 @@ impl State {
         if added.is_empty() {
             return None;
         }
-        state.revision = next_audit_revision(state.revision).ok()?;
+        state.revision = next_audit_revision(state.revision);
         self.write_audit_snapshot(&state).ok()?;
         Some(AuditEvent::PassiveFindings {
             project: self.project,
@@ -523,7 +520,7 @@ impl State {
             error: None,
         };
         state.tasks.insert(0, summary.clone());
-        state.revision = next_audit_revision(state.revision)?;
+        state.revision = next_audit_revision(state.revision);
         self.write_audit_snapshot(&state)?;
         let combined_cancel = self.cancel.child_token();
         let shutdown = self.cancel.clone();
@@ -542,7 +539,7 @@ impl State {
                 t.state = AuditTaskState::Failed;
                 t.error = Some(err.to_string());
             }
-            state.revision = next_audit_revision(state.revision)?;
+            state.revision = next_audit_revision(state.revision);
             let _ = self.write_audit_snapshot(&state);
             return Err(err);
         }
@@ -640,9 +637,6 @@ impl State {
     }
 }
 
-pub(super) fn next_audit_revision(current: u64) -> Result<u64> {
-    current
-        .checked_add(1)
-        .filter(|rev| *rev <= i64::MAX as u64)
-        .context("审计状态 revision 已耗尽")
+pub(super) fn next_audit_revision(current: u64) -> u64 {
+    current + 1
 }

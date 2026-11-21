@@ -199,19 +199,6 @@ impl ListenersTlsUi {
     }
 }
 
-pub(super) fn sync_primary_listener_field(workspace: &mut Workspace) {
-    if workspace.proxy_listeners.is_empty() {
-        return;
-    }
-    let primary = workspace
-        .proxy_listeners
-        .iter()
-        .find(|listener| listener.enabled)
-        .or_else(|| workspace.proxy_listeners.first())
-        .map(|listener| listener.bind_address.clone());
-    workspace.proxy_listener = primary.filter(|addr| addr != "127.0.0.1:8080");
-}
-
 pub(super) fn indexed_checkbox(
     id: impl Into<gpui_kit::ElementId>,
     label: impl Into<SharedString>,

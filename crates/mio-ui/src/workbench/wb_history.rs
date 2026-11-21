@@ -43,7 +43,7 @@ impl Workbench {
     ) -> Result<(), String> {
         self.refresh_http_notes_rows(&mut rows, cx);
         self.refresh_http_highlight_rows(&mut rows, cx);
-        let legacy_selection = selection.is_none();
+        let page_only_selection = selection.is_none();
         let mut fallback_selected = Vec::new();
         if let Some(((matches, ranks), mut selected_rows)) = selection {
             self.refresh_http_notes_rows(&mut selected_rows, cx);
@@ -93,7 +93,7 @@ impl Workbench {
             .as_ref()
             .map_or(self.http_filter.sort, |pending| pending.query.sort);
         let sort_changed = requested_sort != self.http_filter.sort;
-        if selected.is_none() && legacy_selection {
+        if selected.is_none() && page_only_selection {
             if !self.leave_http_notes(window, cx) {
                 self.history.update(cx, |table, cx| {
                     table.delegate_mut().loading = false;
@@ -123,7 +123,7 @@ impl Workbench {
                     delegate.previous_offsets.pop();
                 }
             }
-            if legacy_selection {
+            if page_only_selection {
                 delegate
                     .selected_ids
                     .retain(|id| rows.iter().any(|row| row.id() == *id));
@@ -139,8 +139,6 @@ impl Workbench {
                 {
                     delegate.selection_lead = None;
                 }
-            }
-            if legacy_selection {
                 delegate
                     .selected_rows
                     .retain(|id, _| delegate.selected_ids.contains(id));

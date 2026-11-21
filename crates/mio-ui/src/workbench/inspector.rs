@@ -1398,10 +1398,7 @@ impl Workbench {
                 let Some(tab) = self.workspace.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return;
                 };
-                let Some(next_revision) = tab.draft.revision.checked_add(1) else {
-                    self.fail("草稿 revision 已耗尽；无法应用 Inspector 修改。", cx);
-                    return;
-                };
+                let next_revision = tab.draft.revision + 1;
                 if let Some(detected) = mio_core::detect_request_line_version(&next_raw) {
                     tab.draft.version = detected;
                 }
@@ -1569,10 +1566,7 @@ impl Workbench {
                 return false;
             }
         }
-        let Some(next_rev) = next_tab.draft_revision.checked_add(1) else {
-            self.fail("WebSocket 草稿 revision 已耗尽。", cx);
-            return false;
-        };
+        let next_rev = next_tab.draft_revision + 1;
         next_tab.draft_revision = next_rev;
         if let Err(err) = next_tab.validate() {
             self.fail(err.to_string(), cx);

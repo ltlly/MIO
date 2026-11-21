@@ -113,11 +113,8 @@ fn mutation_run(mutation: &IntruderMutation) -> &IntruderRunSummary {
     }
 }
 
-fn next_revision(revision: u64) -> Result<u64> {
-    revision
-        .checked_add(1)
-        .filter(|next| *next <= i64::MAX as u64)
-        .context("Intruder revision 已耗尽")
+fn next_revision(revision: u64) -> u64 {
+    revision + 1
 }
 
 #[cfg(test)]

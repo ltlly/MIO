@@ -306,9 +306,9 @@ impl TableViewportTracker {
             .or_else(|| self.loading.map(|l| l.offset))
     }
 
-    pub(in crate::plugin_panel) fn request_page(&mut self, offset: u64, seq: u64) -> Option<u64> {
-        let revision = self.next_revision.checked_add(1)?;
-        self.next_revision = revision;
+    pub(in crate::plugin_panel) fn request_page(&mut self, offset: u64, seq: u64) -> u64 {
+        self.next_revision += 1;
+        let revision = self.next_revision;
         if self.pending.len() >= MAX_UI_OVERLAY_HISTORY {
             self.pending.pop_front();
         }
@@ -318,7 +318,7 @@ impl TableViewportTracker {
             seq,
         });
         self.loading = None;
-        Some(revision)
+        revision
     }
 
     pub(in crate::plugin_panel) fn fail_request(
@@ -890,11 +890,8 @@ pub(in crate::plugin_panel) fn capture_document(
     if document.read_only && changed {
         return Err("只读插件编辑器拒绝修改。".into());
     }
-    let revision = document
-        .snapshot
-        .revision
-        .checked_add(u64::from(changed || document.pending_rebase))
-        .ok_or("插件文档 revision 已耗尽。")?;
+    let revision =
+        document.snapshot.revision + u64::from(changed || document.pending_rebase);
     let snapshot = EditorSnapshot {
         document_id: document.snapshot.document_id,
         revision,

@@ -123,9 +123,7 @@ impl State {
                 ordinal
             } else {
                 let ordinal = next_ordinal;
-                next_ordinal = next_ordinal
-                    .checked_add(1)
-                    .context("WebSocket 编号已耗尽")?;
+                next_ordinal += 1;
                 ordinal
             };
             let (connection_id, listener_port) =
@@ -137,9 +135,7 @@ impl State {
                             metadata
                         } else {
                             let id = next_connection;
-                            next_connection = next_connection
-                                .checked_add(1)
-                                .context("WebSocket 连接编号已耗尽")?;
+                            next_connection += 1;
                             (id, capture.listener_port)
                         };
                     connections.insert(record.flow_id, metadata);

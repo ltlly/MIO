@@ -304,15 +304,11 @@ fn repeater_timeout_upstream_proxy_and_pretty_view_preserve_raw_bytes(cx: &mut T
     .unwrap();
     cx.run_until_parked();
     let ws_upstream = saved(&mut fixture.commands);
-    assert_eq!(
-        ws_upstream.upstream_proxy.protocol,
-        mio_core::UpstreamProxyProtocol::Socks5
-    );
-    assert_eq!(ws_upstream.upstream_proxy.host, "127.0.0.1");
-    assert_eq!(ws_upstream.upstream_proxy.port, 1080);
-    assert_eq!(ws_upstream.upstream_proxy.username, "alice");
-    assert_eq!(ws_upstream.upstream_proxy.password, "secret");
     assert!(ws_upstream.upstream_proxy.socks.use_proxy);
+    assert_eq!(ws_upstream.upstream_proxy.socks.host, "127.0.0.1");
+    assert_eq!(ws_upstream.upstream_proxy.socks.port, 1080);
+    assert_eq!(ws_upstream.upstream_proxy.socks.username, "alice");
+    assert_eq!(ws_upstream.upstream_proxy.socks.password, "secret");
     acknowledge(&fixture, ws_upstream, cx);
 
     cx.update_window(settings, |_, window, cx| {

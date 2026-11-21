@@ -91,7 +91,7 @@ impl ConnectionsUi {
                             this.connections.selected_rule = this
                                 .state
                                 .upstream_proxy
-                                .effective_rules()
+                                .rules
                                 .get(*row)
                                 .map(|rule| rule.id);
                         }
@@ -184,7 +184,7 @@ impl ConnectionsUi {
             })
             .detach();
         }
-        let socks = state.upstream_proxy.effective_socks();
+        let socks = &state.upstream_proxy.socks;
         Self {
             rules_table: tables[0].clone(),
             dns_table: tables[1].clone(),
@@ -220,7 +220,7 @@ impl ConnectionsUi {
                 .new(|icx| InputState::new(window, icx).placeholder("可选主机名")),
             socks_enabled: socks.use_proxy,
             socks_dns_remote: socks.dns_over_socks,
-            socks_bypass_hosts: socks.bypass_hosts,
+            socks_bypass_hosts: socks.bypass_hosts.clone(),
             selected_socks_bypass: None,
             socks_bypass_input,
             normal_timeout_input,
@@ -303,8 +303,7 @@ impl ConnectionsTable {
                 })
             }
             ConnectionsTableKind::Upstream => {
-                let rules = settings.state.upstream_proxy.effective_rules();
-                let rule = rules.get(row)?;
+                let rule = settings.state.upstream_proxy.rules.get(row)?;
                 Some(match column {
                     0 => if rule.enabled { "Yes" } else { "No" }.into(),
                     1 => rule.destination_host.clone(),
@@ -350,7 +349,7 @@ impl TableDelegate for ConnectionsTable {
             let settings = owner.read(cx);
             match self.kind {
                 ConnectionsTableKind::Upstream => {
-                    settings.state.upstream_proxy.effective_rules().len()
+                    settings.state.upstream_proxy.rules.len()
                 }
                 ConnectionsTableKind::Hostname => {
                     settings.state.upstream_proxy.hostname_resolutions.len()
@@ -427,8 +426,7 @@ impl TableDelegate for ConnectionsTable {
                     (rule.id, rule.enabled, settings.state.enabled)
                 }
                 ConnectionsTableKind::Upstream => {
-                    let rules = settings.state.upstream_proxy.effective_rules();
-                    let Some(rule) = rules.get(row) else {
+                    let Some(rule) = settings.state.upstream_proxy.rules.get(row) else {
                         return div().into_any_element();
                     };
                     (rule.id, rule.enabled, settings.state.enabled)
@@ -552,52 +550,6 @@ fn read_bypass_list_file(path: &Path) -> Result<Vec<String>, String> {
 }
 
 impl Workbench {
-    #[allow(dead_code)]
-    pub(in crate::workbench) fn set_proxy_listener(
-        &mut self,
-        project: Option<ProjectKey>,
-        address: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if project.is_none()
-            || self.project != project
-            || !self.backend_available()
-            || self.transition.is_some()
-        {
-            return false;
-        }
-        let listen: SocketAddr = match address.trim().parse() {
-            Ok(address) => address,
-            Err(_) => {
-                self.fail("监听地址须包含 IP 和端口，例如 127.0.0.1:8080。", cx);
-                return false;
-            }
-        };
-        if !listen.ip().is_loopback() {
-            self.fail("Proxy 监听地址必须使用 loopback 地址。", cx);
-            return false;
-        }
-        let mut next = self.workspace.clone();
-        if let Some(item) = next.proxy_listeners.iter_mut().find(|item| item.enabled) {
-            item.bind_address = listen.to_string();
-        }
-        next.proxy_listener = (listen.to_string() != "127.0.0.1:8080").then(|| listen.to_string());
-        listeners_tls::sync_primary_listener_field(&mut next);
-        if let Err(error) = next.validate_structure() {
-            self.fail(error.to_string(), cx);
-            return false;
-        }
-        if next != self.workspace {
-            self.workspace = next;
-            self.save_workspace(cx);
-        }
-        self.listener_input
-            .update(cx, |input, cx| input.set_value(listen.to_string(), window, cx));
-        cx.notify();
-        true
-    }
-
     pub(in crate::workbench) fn set_upstream_proxy(
         &mut self,
         project: Option<ProjectKey>,
@@ -632,13 +584,12 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let socks = settings.effective_socks();
-        self.upstream_protocol = settings.protocol;
+        let socks = &settings.socks;
         for (input, value) in [
-            (&self.upstream_host, socks.host),
+            (&self.upstream_host, socks.host.clone()),
             (&self.upstream_port, socks.port.to_string()),
-            (&self.upstream_username, socks.username),
-            (&self.upstream_password, socks.password),
+            (&self.upstream_username, socks.username.clone()),
+            (&self.upstream_password, socks.password.clone()),
         ] {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -671,11 +622,7 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         let mut next = self.state.upstream_proxy.clone();
-        let mut real_rules = next.effective_rules();
-        next.socks = next.effective_socks();
-        change(&mut real_rules);
-        next.rules = real_rules;
-        next.sync_legacy_summary();
+        change(&mut next.rules);
         self.commit_connections(next, cx);
     }
 
@@ -685,10 +632,10 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let socks = self.state.upstream_proxy.effective_socks();
+        let socks = &self.state.upstream_proxy.socks;
         self.connections.socks_enabled = socks.use_proxy;
         self.connections.socks_dns_remote = socks.dns_over_socks;
-        self.connections.socks_bypass_hosts = socks.bypass_hosts;
+        self.connections.socks_bypass_hosts = socks.bypass_hosts.clone();
         if self
             .connections
             .selected_socks_bypass
@@ -724,7 +671,7 @@ impl Settings {
         let rule_row = self.connections.selected_rule.and_then(|id| {
             self.state
                 .upstream_proxy
-                .effective_rules()
+                .rules
                 .iter()
                 .position(|rule| rule.id == id)
         });
@@ -766,9 +713,10 @@ impl Settings {
             let Some(rule) = self
                 .state
                 .upstream_proxy
-                .effective_rules()
-                .into_iter()
+                .rules
+                .iter()
                 .find(|rule| Some(rule.id) == self.connections.selected_rule)
+                .cloned()
             else {
                 return;
             };
@@ -888,18 +836,14 @@ impl Settings {
             return;
         }
         let mut next = self.state.upstream_proxy.clone();
-        let mut real_rules = next.effective_rules();
-        next.socks = next.effective_socks();
         let saved_id = rule.id;
-        if let Some(existing) = real_rules.iter_mut().find(|entry| entry.id == rule.id) {
+        if let Some(existing) = next.rules.iter_mut().find(|entry| entry.id == rule.id) {
             let enabled = existing.enabled;
             *existing = rule;
             existing.enabled = enabled;
         } else {
-            real_rules.push(rule);
+            next.rules.push(rule);
         }
-        next.rules = real_rules;
-        next.sync_legacy_summary();
         self.connections.selected_rule = Some(saved_id);
         if self.commit_connections(next, cx) {
             self.connections.rule_editor_visible = false;
@@ -1040,8 +984,7 @@ impl Settings {
             return;
         };
         let mut next = self.state.upstream_proxy.clone();
-        let prev_override = next.effective_socks().override_project_only;
-        next.rules = next.effective_rules();
+        let prev_override = next.socks.override_project_only;
         next.socks = SocksProxySettings {
             use_proxy: self.connections.socks_enabled,
             host: host.trim().into(),
@@ -1052,16 +995,12 @@ impl Settings {
             bypass_hosts: self.connections.socks_bypass_hosts.clone(),
             override_project_only: prev_override,
         };
-        next.sync_legacy_summary();
         self.commit_connections(next, cx);
     }
 
     fn commit_socks_bypass_hosts(&mut self, cx: &mut Context<Self>) {
         let mut next = self.state.upstream_proxy.clone();
-        next.rules = next.effective_rules();
-        next.socks = next.effective_socks();
         next.socks.bypass_hosts = self.connections.socks_bypass_hosts.clone();
-        next.sync_legacy_summary();
         self.commit_connections(next, cx);
     }
 
@@ -1433,7 +1372,7 @@ impl Settings {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rules = self.state.upstream_proxy.effective_rules();
+        let rules = &self.state.upstream_proxy.rules;
         let selected = self
             .connections
             .selected_rule
@@ -1631,8 +1570,6 @@ impl Settings {
                         .on_click(cx.listener(|this, _, window, cx| {
                             let mut next = this.state.upstream_proxy.clone();
                             next.socks = SocksProxySettings::default();
-                            next.protocol = UpstreamProxyProtocol::Direct;
-                            next.sync_legacy_summary();
                             this.commit_connections(next.clone(), cx);
                             this.restore_upstream_draft(&next, window, cx);
                             this.connections.socks_editor_visible = false;
@@ -1835,7 +1772,7 @@ impl Settings {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let socks = self.state.upstream_proxy.effective_socks();
+        let socks = &self.state.upstream_proxy.socks;
         let socks_summary = if !socks.host.trim().is_empty() && socks.port > 0 {
             format!("已配置代理 {}:{}。", socks.host, socks.port)
         } else {
@@ -1889,10 +1826,7 @@ impl Settings {
                 enabled,
                 cx.listener(|this, checked: &bool, _, cx| {
                     let mut next = this.state.upstream_proxy.clone();
-                    next.rules = next.effective_rules();
-                    next.socks = next.effective_socks();
                     next.socks.override_project_only = *checked;
-                    next.sync_legacy_summary();
                     this.commit_connections(next, cx);
                 }),
             ))
@@ -1909,7 +1843,7 @@ impl Settings {
                         enabled,
                         cx.listener(|this, checked: &bool, window, cx| {
                             this.connections.socks_enabled = *checked;
-                            let configured = this.state.upstream_proxy.effective_socks();
+                            let configured = &this.state.upstream_proxy.socks;
                             if *checked && configured.host.trim().is_empty() {
                                 this.connections.socks_editor_visible = true;
                                 cx.notify();

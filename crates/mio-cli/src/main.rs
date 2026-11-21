@@ -14,7 +14,7 @@ const CLI_REPEATER_SEND_TIMEOUT: Duration = Duration::from_secs(305);
 #[derive(Parser, Debug, PartialEq, Eq)]
 #[command(
     name = "mio-cli",
-    about = "MIO 本地 IPC 命令行与无头代理工具（支持环境变量 MIO_IPC_SOCKET / MIO_SOCKET 指定默认 socket 路径）"
+    about = "MIO 本地 IPC 命令行与无头代理工具（支持环境变量 MIO_IPC_SOCKET 指定默认 socket 路径）"
 )]
 struct Cli {
     /// 指定 MIO IPC socket / endpoint 路径
@@ -466,7 +466,6 @@ async fn execute_cli(cli: Cli) -> Result<()> {
                     flow_id: args.flow_id,
                     revision: args.revision,
                     drop_flow: args.drop_flow,
-                    add_header: None,
                     add_headers: args
                         .add_headers
                         .into_iter()

@@ -109,23 +109,9 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn next_intruder_query(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<u64> {
-        let Some(next) = self.intruder.results.query_revision.checked_add(1) else {
-            self.intruder.results.runs.dirty = false;
-            for view in self.intruder.results.views.values_mut() {
-                view.dirty = false;
-            }
-            for probe in self.intruder.results.probes.values_mut() {
-                probe.dirty = false;
-            }
-            self.fail("Intruder 查询 revision 已耗尽，请重新打开项目。", cx);
-            return None;
-        };
-        self.intruder.results.query_revision = next;
-        Some(next)
+    pub(in crate::workbench) fn next_intruder_query(&mut self) -> u64 {
+        self.intruder.results.query_revision += 1;
+        self.intruder.results.query_revision
     }
 
     pub(in crate::workbench) fn query_intruder_runs(
@@ -134,13 +120,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project else { return };
-        let Some(revision) = self.next_intruder_query(cx) else {
-            let page = &mut self.intruder.results.runs;
-            page.loaded = true;
-            page.pending = None;
-            page.error = Some("Intruder 查询 revision 已耗尽，请重新打开项目。".into());
-            return;
-        };
+        let revision = self.next_intruder_query();
         let page = &mut self.intruder.results.runs;
         page.loaded = true;
         page.dirty = false;
@@ -316,9 +296,7 @@ impl Workbench {
         {
             return;
         }
-        let Some(revision) = self.next_intruder_query(cx) else {
-            return;
-        };
+        let revision = self.next_intruder_query();
         let view = self.intruder.results.views.get_mut(&view_id).unwrap();
         view.queued_query = Some(revision);
         view.dirty = false;
@@ -409,9 +387,7 @@ impl Workbench {
         {
             return;
         }
-        let Some(revision) = self.next_intruder_query(cx) else {
-            return;
-        };
+        let revision = self.next_intruder_query();
         let view = self.intruder.results.views.get_mut(&view_id).unwrap();
         view.spec_pending = None;
         view.spec_error = None;

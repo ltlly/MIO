@@ -366,8 +366,7 @@ impl RepeaterTargetDialog {
                         return Err("目标已由其他操作修改；编辑内容保留。".into());
                     }
                     if current.draft.target != target || current.draft.raw != next_raw {
-                        let next_revision = current.draft.revision.checked_add(1)
-                            .ok_or_else(|| "草稿 revision 已耗尽。".to_owned())?;
+                        let next_revision = current.draft.revision + 1;
                         let tab = view.workspace.tabs.iter_mut().find(|tab| tab.id == tab_id)
                             .expect("目标标签页存在");
                         tab.draft.target = target.clone();

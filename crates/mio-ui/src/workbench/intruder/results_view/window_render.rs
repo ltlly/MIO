@@ -76,10 +76,6 @@ impl IntruderResultsWindow {
         let owner = owner.read(cx);
         let pools = &owner.intruder.resource_pools;
         let view = &owner.intruder.results.views[&self.target.view_id];
-        let legacy = view
-            .summary
-            .as_ref()
-            .is_some_and(|run| run.resource_pool.is_none());
         let can_change = owner.can_change_intruder_pool(self.target.view_id)
             && self.pool_create_op.is_none()
             && !pools.management.mutation_pending();
@@ -173,13 +169,6 @@ impl IntruderResultsWindow {
                             }
                         }),
                     )
-                    .when(legacy, |this| {
-                        this.child(
-                            div()
-                                .text_color(theme::muted_foreground())
-                                .child("此旧任务保持独立并发；选择资源池后应用共享设置。"),
-                        )
-                    })
                     .when(pools.pending.is_some(), |this| {
                         this.child(
                             div()

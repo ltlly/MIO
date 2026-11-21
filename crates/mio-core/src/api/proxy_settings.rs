@@ -487,6 +487,8 @@ pub enum TlsProtocolMode {
     #[default]
     AllSupported,
     Default,
+    /// Temporary variant retained only until `store/` removes legacy `TlsProtocolMode::Custom` test coverage.
+    #[doc(hidden)]
     Custom,
 }
 
@@ -536,6 +538,8 @@ pub struct UpstreamTlsSettings {
     pub insecure_skip_verify: bool,
     #[serde(default, skip_serializing_if = "TlsProtocolMode::is_default")]
     pub protocol_mode: TlsProtocolMode,
+    /// Temporary field retained only until `store/` removes legacy `allow_unsafe_renegotiation` test coverage.
+    #[doc(hidden)]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_unsafe_renegotiation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -564,7 +568,6 @@ impl UpstreamTlsSettings {
             && self.custom_ca_ders.is_empty()
             && self.include_system_roots
             && self.protocol_mode == TlsProtocolMode::AllSupported
-            && !self.allow_unsafe_renegotiation
             && !self.disable_session_resume
             && !self.client_certs_override_project_only
     }

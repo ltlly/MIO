@@ -287,7 +287,7 @@ impl Workbench {
             pending_sends: HashMap::new(),
             close_after_send: HashSet::new(),
             rename: None,
-            tab_width: 180.,
+            tab_width: 220.,
             tabs_scroll: ScrollHandle::new(),
             resize_original: None,
             drop_target: None,

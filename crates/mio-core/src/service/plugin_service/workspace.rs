@@ -166,9 +166,7 @@ pub(super) fn validate_workspace_edit(
                 "插件草稿基准 revision 已过期"
             );
             tab.draft = Draft {
-                revision: expected_revision
-                    .checked_add(1)
-                    .context("草稿 revision 已耗尽")?,
+                revision: expected_revision + 1,
                 target: request.url.clone(),
                 raw: request_to_raw(request),
                 version: request.version,

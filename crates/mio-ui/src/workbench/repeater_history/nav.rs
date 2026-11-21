@@ -344,20 +344,17 @@ impl Workbench {
                 self.invalidate_archive_response(tab_id, cx);
                 self.sync_tab_editors(window, cx);
                 if let Some(flow_id) = tab.last_flow {
-                    if let Some(revision) = self.selection_revision.checked_add(1) {
-                        self.selection_revision = revision;
-                        if self.enqueue(
-                            Command::ReadFlow {
-                                project,
-                                selection_revision: revision,
-                                flow_id,
-                            },
-                            cx,
-                        ) {
-                            self.repeater_reads.insert(revision, tab_id);
-                        }
-                    } else {
-                        self.fail("响应读取 revision 已耗尽。", cx);
+                    self.selection_revision += 1;
+                    let revision = self.selection_revision;
+                    if self.enqueue(
+                        Command::ReadFlow {
+                            project,
+                            selection_revision: revision,
+                            flow_id,
+                        },
+                        cx,
+                    ) {
+                        self.repeater_reads.insert(revision, tab_id);
                     }
                 }
                 if self

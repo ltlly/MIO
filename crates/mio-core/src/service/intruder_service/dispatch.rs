@@ -203,7 +203,7 @@ impl State {
         self.persist_intruder_result(id, ordinal, Ok(Box::new(record.clone())))?;
         if self.intruder.runs[&id].cancel.is_cancelled() {
             let mut record = record;
-            record.summary.revision = next_revision(record.summary.revision)?;
+            record.summary.revision = next_revision(record.summary.revision);
             record.summary.state = FlowState::Cancelled;
             let saved = self.persist_intruder_result(id, ordinal, Ok(Box::new(record)));
             self.intruder_history_changed();
@@ -216,7 +216,7 @@ impl State {
                 // Keep the original request detail and Pending -> Failed lifecycle even though
                 // local validation prevented a network attempt and must not charge pool timing.
                 let mut record = record;
-                record.summary.revision = next_revision(record.summary.revision)?;
+                record.summary.revision = next_revision(record.summary.revision);
                 record.summary.state = FlowState::Failed(error.to_string());
                 let saved = self.persist_intruder_result(id, ordinal, Ok(Box::new(record)));
                 self.intruder_history_changed();
@@ -492,7 +492,7 @@ impl State {
         run.failure = Some(message.clone());
         run.cancel.cancel();
         if let Some((ordinal, mut record)) = admitted {
-            record.summary.revision = next_revision(record.summary.revision)?;
+            record.summary.revision = next_revision(record.summary.revision);
             record.summary.state = FlowState::Failed(message.clone());
             self.persist_intruder_result(id, ordinal, Ok(Box::new(record)))?;
         }

@@ -202,11 +202,7 @@ impl Workbench {
                     || tab.draft.target != request.url
                     || tab.draft.version != request.version;
                 if changed {
-                    let Some(revision) = tab.draft.revision.checked_add(1) else {
-                        self.fail("草稿 revision 已耗尽；未修改或发送。", cx);
-                        return;
-                    };
-                    tab.draft.revision = revision;
+                    tab.draft.revision += 1;
                     tab.draft.raw = raw;
                     tab.draft.target = request.url;
                     tab.draft.version = request.version;

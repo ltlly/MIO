@@ -109,7 +109,7 @@ fn flow_and_draft_preserve_binary_payloads_and_serde_roundtrip() {
         trailers: Vec::new(),
     };
     let from_draft = OrganiserItem::from_draft(
-        next_organiser_number(std::slice::from_ref(&decoded)).unwrap(),
+        next_organiser_number(std::slice::from_ref(&decoded)),
         "Repeater",
         &draft,
         Some(&resp),

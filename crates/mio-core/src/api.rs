@@ -93,6 +93,8 @@ pub struct Workspace {
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
+    /// Temporary field retained only until `store/` removes legacy `proxy_listener` references.
+    #[doc(hidden)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listener: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

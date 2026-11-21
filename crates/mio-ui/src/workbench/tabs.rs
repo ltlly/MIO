@@ -318,11 +318,6 @@ impl Workbench {
                 .to_string();
             let version =
                 actions::sync_captured_draft_version(&tab.draft.raw, &raw, tab.draft.version);
-            if (tab.draft.raw != raw || tab.draft.target != target || tab.draft.version != version)
-                && tab.draft.revision == u64::MAX
-            {
-                return Err("草稿 revision 已耗尽；未采集任何部分输入。".into());
-            }
             snapshots.push((tab.id, raw, target, version));
         }
         // An unconfirmed composition in any editor must not partially harvest other drafts.
@@ -392,10 +387,7 @@ impl Workbench {
         {
             return true;
         }
-        let Some(revision) = self.workspace.revision.checked_add(1) else {
-            self.fail("工作区 revision 已耗尽，无法继续保存。", cx);
-            return false;
-        };
+        let revision = self.workspace.revision + 1;
         let mut workspace = (*self.workspace).clone();
         workspace.revision = revision;
         if self.enqueue(Command::SaveWorkspace { project, workspace }, cx) {

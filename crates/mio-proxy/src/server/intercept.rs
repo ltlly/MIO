@@ -132,11 +132,7 @@ impl State {
             } else {
                 transformed = transform_applied;
                 if response_stage && !response_head_only && backup.response != record.response {
-                    backup.summary.revision = backup
-                        .summary
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| ProxyError::invalid("流量 revision 已耗尽"))?;
+                    backup.summary.revision += 1;
                     record.summary.revision = backup.summary.revision;
                     self.emit(ProxyEvent::Captured {
                         project: self.project,
@@ -231,11 +227,7 @@ impl State {
                     )?;
                     if backup.response.as_ref() != Some(&response) {
                         if !response_head_only && !transformed && backup.response.is_some() {
-                            backup.summary.revision = backup
-                                .summary
-                                .revision
-                                .checked_add(1)
-                                .ok_or_else(|| ProxyError::invalid("流量 revision 已耗尽"))?;
+                            backup.summary.revision += 1;
                             record.summary.revision = backup.summary.revision;
                             self.emit(ProxyEvent::Captured {
                                 project: self.project,
@@ -453,11 +445,7 @@ impl State {
                 {
                     let mut backup = record.clone();
                     backup.summary.state = FlowState::Pending;
-                    backup.summary.revision = backup
-                        .summary
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| ProxyError::invalid("流量 revision 已耗尽"))?;
+                    backup.summary.revision += 1;
                     record.summary.revision = backup.summary.revision;
                     self.emit(ProxyEvent::Captured {
                         project: self.project,

@@ -279,11 +279,7 @@ impl State {
         let previous_project = self.project;
         self.project = ProjectKey {
             id: next.id,
-            generation: self
-                .project
-                .generation
-                .checked_add(1)
-                .context("项目 generation 已耗尽")?,
+            generation: self.project.generation + 1,
         };
         self.store = next;
         if let Some(disabled) = extensions_disabled {

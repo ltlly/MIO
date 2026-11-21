@@ -99,12 +99,8 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let Some(revision) = self.intruder.resource_pools.query_revision.checked_add(1) else {
-            self.intruder.resource_pools.error =
-                Some("资源池查询 revision 已耗尽，请重开项目。".into());
-            return;
-        };
-        self.intruder.resource_pools.query_revision = revision;
+        self.intruder.resource_pools.query_revision += 1;
+        let revision = self.intruder.resource_pools.query_revision;
         if !self.enqueue(
             Command::QueryIntruderResourcePools {
                 project,

@@ -141,7 +141,7 @@ impl Workbench {
                 self.storage_error = None;
                 self.pending_records = 0;
                 self.tab_width = if self.workspace.tab_sidebar_width == 0 {
-                    180.
+                    220.
                 } else {
                     f32::from(self.workspace.tab_sidebar_width)
                 };
@@ -360,7 +360,7 @@ impl Workbench {
                                 });
                             }
                             self.tab_width = if self.workspace.tab_sidebar_width == 0 {
-                                180.
+                                220.
                             } else {
                                 f32::from(self.workspace.tab_sidebar_width)
                             };

@@ -722,25 +722,14 @@ fn settings_search_scope_filter_project_json_roundtrip_and_macro_history_recorde
 }
 
 #[gpui_kit::test]
-fn sessions_monitor_mio_ai_default_cookie_jar_rule_and_interactive_tracer(
+fn sessions_default_cookie_jar_rule_and_interactive_tracer(
     cx: &mut TestAppContext,
 ) {
-    let mut fixture = fixture(cx, vec![tab("Sessions MioAI 与实时追踪器测试")], 64);
+    let mut fixture = fixture(cx, vec![tab("Sessions 默认规则与实时追踪器测试")], 64);
     drain(&mut fixture.commands);
     let settings = open_sessions_page(&fixture, cx);
 
-    // 1. Toggle MioAI Cookie Jar monitor -> persisted in workspace.sessions.cookie_jar.monitor_mio_ai.
-    cx.update_window(settings, |_, window, cx| {
-        window.render_frame(cx);
-        window.click("settings-cookie-jar-monitor-ai", cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    let ws_ai = saved(&mut fixture.commands);
-    assert!(ws_ai.sessions.cookie_jar.monitor_mio_ai);
-    acknowledge(&fixture, ws_ai, cx);
-
-    // 2. Toggle default Cookie Jar rule checkbox -> materializes real persisted UseCookieJar rule.
+    // 1. Toggle default Cookie Jar rule checkbox -> materializes real persisted UseCookieJar rule.
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
         window.click("settings-sessions-rule-enable-default", cx);

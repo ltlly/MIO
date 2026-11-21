@@ -44,23 +44,6 @@ impl NativePanel {
                 .then_some(*id)
             })
             .collect();
-        // Check before mutating any document so overflow preserves the entire last valid panel.
-        for node in &nodes {
-            if let Some(node::Kind::Editor(editor)) = &node.kind
-                && let Some(document) = self.documents.get(&editor.document_id)
-                && document.retains_local(
-                    editor,
-                    pending_input.contains(&editor.document_id),
-                    editor_bases,
-                )
-                && editor.revision >= document.snapshot.revision
-            {
-                editor
-                    .revision
-                    .checked_add(1)
-                    .ok_or("插件文档 revision 已耗尽；已保留当前面板和编辑内容。")?;
-            }
-        }
         let mut rebased = Vec::new();
         for (id, document) in &mut self.documents {
             // Change observers can run after this layout update, including after unbinding.

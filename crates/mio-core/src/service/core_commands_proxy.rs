@@ -249,8 +249,7 @@ impl State {
             ..SendConfig::default()
         });
         let listeners = workspace.effective_proxy_listeners();
-        let has_explicit_listeners =
-            !workspace.proxy_listeners.is_empty() || workspace.proxy_listener.is_some();
+        let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
         let enabled_listeners: Vec<ProxyListenerConfig> = if let Some(explicit) =
             explicit_listen_override
         {
@@ -456,8 +455,7 @@ impl State {
         }
 
         let listeners = workspace.effective_proxy_listeners();
-        let has_explicit_listeners =
-            !workspace.proxy_listeners.is_empty() || workspace.proxy_listener.is_some();
+        let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
         let desired_listeners: Vec<(ProxyListenerConfig, SocketAddr)> =
             if has_explicit_listeners && listeners.iter().any(|l| l.enabled) {
                 listeners
@@ -946,7 +944,12 @@ mod tests {
         let project = state.project;
         let mut ws = state.store.workspace().unwrap();
         ws.revision += 1;
-        ws.proxy_listener = Some("127.0.0.1:0".into());
+        ws.proxy_listeners = vec![ProxyListenerConfig {
+            id: Uuid::new_v4(),
+            enabled: true,
+            bind_address: "127.0.0.1:0".into(),
+            ..ProxyListenerConfig::default()
+        }];
         state.store.save_workspace(&ws).unwrap();
         state.intercept_requests = true;
         state.intercept_responses = true;

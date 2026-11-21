@@ -264,9 +264,7 @@ fn exec_batch_row_op(
             let mut added = 0usize;
             let mut first_id = None;
             for (flow, detail_rec, notes, highlight) in entries_data {
-                let Ok(num) = next_organiser_number(&wb.workspace.organiser_items) else {
-                    break;
-                };
+                let num = next_organiser_number(&wb.workspace.organiser_items);
                 let item_res = if let Some(rec) = detail_rec {
                     OrganiserItem::from_flow_record(num, "Intruder", &rec)
                 } else {
@@ -549,9 +547,11 @@ fn exec_row_op(
             if let Err(err) = wb.validate_organiser_composition(window, cx) {
                 return wb.fail(err, cx);
             }
-            let item = match next_organiser_number(&wb.workspace.organiser_items)
-                .and_then(|n| OrganiserItem::from_flow_record(n, "Intruder", &record))
-            {
+            let item = match OrganiserItem::from_flow_record(
+                next_organiser_number(&wb.workspace.organiser_items),
+                "Intruder",
+                &record,
+            ) {
                 Ok(item) => item,
                 Err(err) => return wb.fail(err.to_string(), cx),
             };

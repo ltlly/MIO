@@ -332,11 +332,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let project = self.project?;
-        let Some(revision) = self.websocket.query_revision.checked_add(1) else {
-            self.websocket.dirty = false;
-            self.fail("WebSocket 查询 revision 已耗尽。请重新打开项目。", cx);
-            return None;
-        };
+        let revision = self.websocket.query_revision + 1;
         self.websocket.dirty = false;
         self.websocket.query_revision = revision;
         self.websocket.query_offset = offset;
@@ -415,10 +411,7 @@ impl Workbench {
         if self.websocket.selected == Some(message_id) && self.websocket.detail_error.is_none() {
             return;
         }
-        let Some(revision) = self.websocket.selection_revision.checked_add(1) else {
-            self.fail("WebSocket 选择 revision 已耗尽。请重新打开项目。", cx);
-            return;
-        };
+        let revision = self.websocket.selection_revision + 1;
         let summary = self
             .websocket
             .table

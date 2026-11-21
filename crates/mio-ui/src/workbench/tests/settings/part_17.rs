@@ -34,7 +34,9 @@ fn proxy_listener_persistence_copy_response_and_delete_live_history_work(cx: &mu
     cx.run_until_parked();
 
     let saved_ws = saved(&mut fixture.commands);
-    assert_eq!(saved_ws.proxy_listener.as_deref(), Some("127.0.0.1:18080"));
+    assert_eq!(saved_ws.proxy_listeners.len(), 1);
+    assert_eq!(saved_ws.proxy_listeners[0].bind_address, "127.0.0.1:18080");
+    assert_eq!(saved_ws.proxy_listener_or_default(), "127.0.0.1:18080");
     acknowledge(&fixture, saved_ws, cx);
     cx.read(|cx| {
         assert_eq!(
@@ -56,7 +58,8 @@ fn proxy_listener_persistence_copy_response_and_delete_live_history_work(cx: &mu
     .unwrap();
     cx.run_until_parked();
     let reset_ws = saved(&mut fixture.commands);
-    assert_eq!(reset_ws.proxy_listener, None);
+    assert!(reset_ws.proxy_listeners.is_empty());
+    assert_eq!(reset_ws.proxy_listener_or_default(), "127.0.0.1:8080");
     acknowledge(&fixture, reset_ws, cx);
 
     cx.update_window(settings, |_, window, cx| {

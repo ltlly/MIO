@@ -51,10 +51,7 @@ impl NativePanel {
         }
         let seq = self.next_ui_seq();
         let table = self.tables.get_mut(&id).unwrap();
-        let Some(revision) = table.viewport.request_page(offset, seq) else {
-            self.fail("表格 viewport revision 已耗尽。", cx);
-            return;
-        };
+        let revision = table.viewport.request_page(offset, seq);
         table.selected.clear();
         table.anchor = None;
         table.cursor = None;

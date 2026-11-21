@@ -34,14 +34,8 @@ pub fn validate_organiser_items(items: &[OrganiserItem]) -> Result<()> {
     Ok(())
 }
 
-pub fn next_organiser_number(items: &[OrganiserItem]) -> Result<u64> {
-    items
-        .iter()
-        .map(|item| item.number)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .context("Organiser 条目序号已耗尽")
+pub fn next_organiser_number(items: &[OrganiserItem]) -> u64 {
+    items.iter().map(|item| item.number).max().unwrap_or(0) + 1
 }
 
 pub(crate) fn validate_organiser_item(item: &OrganiserItem) -> Result<()> {

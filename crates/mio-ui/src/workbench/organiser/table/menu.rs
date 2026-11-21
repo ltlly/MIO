@@ -163,13 +163,7 @@ fn duplicate_selected_organiser_item(
         view.fail("请先选中一条 Organiser 条目。", cx);
         return;
     };
-    let number = match next_organiser_number(&view.workspace.organiser_items) {
-        Ok(number) => number,
-        Err(err) => {
-            view.fail(err.to_string(), cx);
-            return;
-        }
-    };
+    let number = next_organiser_number(&view.workspace.organiser_items);
     let target_or_url = if !source.target.is_empty() {
         source.target.as_str()
     } else {

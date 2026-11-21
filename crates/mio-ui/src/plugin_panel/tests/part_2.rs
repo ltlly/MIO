@@ -157,34 +157,3 @@ fn removed_marked_text_and_incomplete_hex_keep_the_native_recovery_buffer(cx: &m
         .unwrap();
     }
 }
-
-#[gpui_kit::test]
-fn rebase_revision_overflow_rejects_the_whole_panel_without_losing_edits(cx: &mut TestAppContext) {
-    let fixture = fixture(cx, model());
-    let raw = cx.read(|cx| fixture.view.read(cx).documents[&401].state.clone());
-    cx.update_window(fixture.window, |_, window, cx| {
-        window.click(("input", raw.entity_id()), cx);
-        window.press(crate::kbd!("a"), cx);
-        window.input("retain on overflow", cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    cx.update_window(fixture.window, |_, window, cx| {
-        fixture.view.update(cx, |panel, cx| {
-            let before = panel.snapshot.clone();
-            let error = panel
-                .replace(
-                    Arc::new(changed_raw(2, u64::MAX, b"cannot rebase")),
-                    &[],
-                    window,
-                    cx,
-                )
-                .unwrap_err();
-            assert!(error.contains("revision 已耗尽"));
-            assert!(Arc::ptr_eq(&panel.snapshot, &before));
-            assert_eq!(raw.read(cx).value().as_ref(), "retain on overflow");
-            assert_eq!(panel.capture_editor(401, window, cx).unwrap().revision, 2);
-        });
-    })
-    .unwrap();
-}

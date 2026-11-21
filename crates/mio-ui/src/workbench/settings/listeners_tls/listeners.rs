@@ -341,18 +341,11 @@ impl Workbench {
         }
         let mut candidate = self.workspace.clone();
         candidate.proxy_listeners = next;
-        if candidate.proxy_listeners.is_empty() {
-            candidate.proxy_listener = None;
-        } else {
-            sync_primary_listener_field(&mut candidate);
-        }
         candidate
             .validate_structure()
             .map_err(|error| error.to_string())?;
-        let changed = self.workspace.proxy_listeners != candidate.proxy_listeners
-            || self.workspace.proxy_listener != candidate.proxy_listener;
+        let changed = self.workspace.proxy_listeners != candidate.proxy_listeners;
         self.workspace.proxy_listeners = candidate.proxy_listeners;
-        self.workspace.proxy_listener = candidate.proxy_listener;
         let primary = self.workspace.proxy_listener_or_default().to_owned();
         self.listener_input
             .update(cx, |input, cx| input.set_value(primary, window, cx));

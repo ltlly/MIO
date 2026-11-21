@@ -466,7 +466,7 @@ impl State {
                 let result: Result<ServiceResult> = async {
                     self.require_saved()?;
                     let mut workspace = self.store.workspace()?;
-                    let number = crate::next_organiser_number(&workspace.organiser_items)?;
+                    let number = crate::next_organiser_number(&workspace.organiser_items);
                     let mut item = crate::OrganiserItem::from_raw_parts(
                         number,
                         &format!("Plugin: {}", call.plugin_id),

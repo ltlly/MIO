@@ -1,7 +1,6 @@
 use gpui_kit::{AnyWindowHandle, WeakEntity};
 use mio_core::{
-    ProxyInterceptionSettings, RepeaterRedirectMode, TargetScope, UpstreamProxyProtocol,
-    UpstreamProxySettings,
+    ProxyInterceptionSettings, RepeaterRedirectMode, TargetScope, UpstreamProxySettings,
 };
 
 use super::*;
@@ -92,7 +91,6 @@ struct SettingsState {
     request_timeout_secs: u64,
     intercept_requests: bool,
     intercept_responses: bool,
-    proxy_listener: String,
     proxy_listeners: Vec<mio_core::ProxyListenerConfig>,
     active_proxy_address: Option<std::net::SocketAddr>,
     active_proxy_listeners: Vec<(mio_core::Uuid, std::net::SocketAddr)>,
@@ -149,7 +147,6 @@ impl SettingsState {
             request_timeout_secs: view.workspace.repeater_settings.request_timeout_secs,
             intercept_requests: view.intercept_requests,
             intercept_responses: view.intercept_responses,
-            proxy_listener: view.workspace.proxy_listener_or_default().to_string(),
             proxy_listeners: view.workspace.effective_proxy_listeners(),
             active_proxy_address: view.proxy_address,
             active_proxy_listeners: view.proxy_listeners_bound.clone(),
@@ -226,7 +223,6 @@ impl SettingsState {
         self.request_timeout_secs = view.workspace.repeater_settings.request_timeout_secs;
         self.intercept_requests = view.intercept_requests;
         self.intercept_responses = view.intercept_responses;
-        self.proxy_listener = view.workspace.proxy_listener_or_default().to_string();
         self.proxy_listeners = view.workspace.effective_proxy_listeners();
         self.active_proxy_address = view.proxy_address;
         self.active_proxy_listeners
@@ -299,10 +295,8 @@ struct Settings {
     scope_oos_custom_editor_open: bool,
     scope_oos_custom_editing: Option<mio_core::Uuid>,
     scope_oos_custom_subdomains: bool,
-    proxy_listener_input: Entity<InputState>,
     listeners_tls: Box<listeners_tls::ListenersTlsUi>,
     connections: Box<connections::ConnectionsUi>,
-    upstream_protocol: UpstreamProxyProtocol,
     upstream_host: Entity<InputState>,
     upstream_port: Entity<InputState>,
     upstream_username: Entity<InputState>,

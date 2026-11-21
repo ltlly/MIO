@@ -263,12 +263,8 @@ pub(crate) fn merge_ext_websocket_history(
             {
                 continue;
             }
-            mapped_ordinal = mapped_ordinal
-                .checked_add(1)
-                .context("WebSocket 编号已耗尽")?;
-            let ordinal = ordinal_base
-                .checked_add(mapped_ordinal)
-                .context("WebSocket 编号已耗尽")?;
+            mapped_ordinal += 1;
+            let ordinal = ordinal_base + mapped_ordinal;
             let entry = row_to_archive_summary(row, ordinal)?;
             if excluded.contains(&entry.summary.id) {
                 continue;

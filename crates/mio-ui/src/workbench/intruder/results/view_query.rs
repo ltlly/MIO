@@ -64,7 +64,7 @@ impl Workbench {
         if view.discarded {
             return None;
         }
-        let revision = self.next_intruder_query(cx)?;
+        let revision = self.next_intruder_query();
         let grep_config = self.intruder.results.views[&view_id]
             .summary
             .as_ref()

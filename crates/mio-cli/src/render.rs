@@ -170,8 +170,11 @@ pub(super) fn render_human(payload: &AiIpcPayload, show_original: bool) {
                 if *dropped { "已丢弃" } else { "已放行" }
             );
         }
-        AiIpcPayload::WorkspaceState { workspace_json, .. } => {
-            println!("{workspace_json}");
+        AiIpcPayload::WorkspaceState { workspace } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(workspace).unwrap_or_else(|_| workspace.to_string())
+            );
         }
         AiIpcPayload::WebSocketList {
             ws_total,

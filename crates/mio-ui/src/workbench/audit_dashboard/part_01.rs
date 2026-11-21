@@ -645,11 +645,8 @@ impl Workbench {
                 cx.notify();
                 return;
             }
-            let Some(revision) = self.selection_revision.checked_add(1) else {
-                self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                return;
-            };
-            self.selection_revision = revision;
+            self.selection_revision += 1;
+            let revision = self.selection_revision;
             if self.enqueue(
                 Command::ReadFlow {
                     project,

@@ -41,7 +41,7 @@ fn rejection_rebase_checks_both_revision_ceilings_without_rewriting_input() {
     assert!(
         rebased_spec(&changed, &stored)
             .unwrap_err()
-            .contains("revision 已耗尽")
+            .contains("revision 无效")
     );
     assert_eq!(changed.draft.raw, local.draft.raw);
     assert_eq!(changed.draft.revision, 2);
@@ -51,7 +51,7 @@ fn rejection_rebase_checks_both_revision_ceilings_without_rewriting_input() {
     assert!(
         rebased_spec(&changed, &stored)
             .unwrap_err()
-            .contains("revision 已耗尽")
+            .contains("revision 无效")
     );
     assert_eq!(changed.draft.raw.last(), Some(&255));
     assert_eq!(changed.revision, 1);

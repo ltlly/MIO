@@ -497,7 +497,7 @@ fn multi_proxy_listeners_add_toggle_remove_and_legacy_input_sync(cx: &mut TestAp
         mio_core::ProxyListenerCertMode::SelfSigned
     );
     assert_eq!(added.proxy_listeners[1].tls_protocols_label, "TLSv1.3 only");
-    assert_eq!(added.proxy_listener, None);
+    assert_eq!(added.proxy_listener_or_default(), "127.0.0.1:8080");
     acknowledge(&fixture, added, cx);
 
     cx.update_window(settings, |_, window, cx| {
@@ -543,7 +543,7 @@ fn multi_proxy_listeners_add_toggle_remove_and_legacy_input_sync(cx: &mut TestAp
 
     let toggled = saved(&mut fixture.commands);
     assert!(!toggled.proxy_listeners[0].enabled);
-    assert_eq!(toggled.proxy_listener.as_deref(), Some("127.0.0.1:18081"));
+    assert_eq!(toggled.proxy_listener_or_default(), "127.0.0.1:18081");
     acknowledge(&fixture, toggled, cx);
 
     cx.update_window(settings, |_, window, cx| {
@@ -571,7 +571,7 @@ fn multi_proxy_listeners_add_toggle_remove_and_legacy_input_sync(cx: &mut TestAp
 
     let updated = saved(&mut fixture.commands);
     assert_eq!(updated.proxy_listeners[1].bind_address, "127.0.0.1:18082");
-    assert_eq!(updated.proxy_listener.as_deref(), Some("127.0.0.1:18082"));
+    assert_eq!(updated.proxy_listener_or_default(), "127.0.0.1:18082");
     acknowledge(&fixture, updated, cx);
 
     for _ in 0..2 {
@@ -593,7 +593,6 @@ fn multi_proxy_listeners_add_toggle_remove_and_legacy_input_sync(cx: &mut TestAp
     cx.read(|cx| {
         let ws = &fixture.view.read(cx).workspace;
         assert!(ws.proxy_listeners.is_empty());
-        assert_eq!(ws.proxy_listener, None);
         assert_eq!(ws.proxy_listener_or_default(), "127.0.0.1:8080");
     });
 }
@@ -660,6 +659,14 @@ Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
     assert!(drain(&mut fixture.commands).is_empty());
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
+        if !window.find("settings-client-cert-error").visible() {
+            window.scroll(
+                "settings-tls-page",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-120.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
         assert!(window.find("settings-client-cert-error").visible());
         assert_eq!(
             window.find("settings-client-cert-host").value(),

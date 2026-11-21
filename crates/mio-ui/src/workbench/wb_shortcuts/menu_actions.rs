@@ -431,8 +431,8 @@ impl Workbench {
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.draft.revision.checked_add(1))
-            .ok_or_else(|| "草稿 revision 已耗尽；无法更新请求。".to_owned())?;
+            .map(|tab| tab.draft.revision + 1)
+            .ok_or_else(|| "当前标签页不存在。".to_owned())?;
         if let Some(active_tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
             if let Some(origin) = &next_origin {
                 active_tab.draft.target = origin.clone();

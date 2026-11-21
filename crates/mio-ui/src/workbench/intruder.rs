@@ -170,20 +170,13 @@ fn revised_spec(previous: &IntruderSpec, mut next: IntruderSpec) -> Result<Intru
     next.revision = previous.revision;
     next.draft.revision = previous.draft.revision;
     if next != *previous {
-        next.revision = advance_revision(previous.revision)?;
+        next.revision = previous.revision + 1;
         if next.draft != previous.draft {
-            next.draft.revision = advance_revision(previous.draft.revision)?;
+            next.draft.revision = previous.draft.revision + 1;
         }
     }
     next.validate_draft().map_err(|error| error.to_string())?;
     Ok(next)
-}
-
-fn advance_revision(revision: u64) -> Result<u64, String> {
-    revision
-        .checked_add(1)
-        .filter(|revision| *revision <= i64::MAX as u64)
-        .ok_or_else(|| "Intruder revision 已耗尽；当前输入仍保留，无法继续保存此配置。".to_owned())
 }
 
 fn rebased_spec(local: &IntruderSpec, stored: &IntruderSpec) -> Result<IntruderSpec, String> {
@@ -192,14 +185,14 @@ fn rebased_spec(local: &IntruderSpec, stored: &IntruderSpec) -> Result<IntruderS
         || local.draft.target != stored.draft.target
         || local.draft.version != stored.draft.version;
     next.draft.revision = local.draft.revision.max(if draft_changed {
-        advance_revision(stored.draft.revision)?
+        stored.draft.revision + 1
     } else {
         stored.draft.revision
     });
     next.revision = stored.revision;
     // A retained newer draft revision is itself part of the complete persisted spec.
     let minimum = if next != *stored {
-        advance_revision(stored.revision)?
+        stored.revision + 1
     } else {
         stored.revision
     };

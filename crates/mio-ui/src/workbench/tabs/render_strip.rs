@@ -13,10 +13,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let vertical = self.workspace.orientation == Orientation::Vertical;
-        let sidebar_width = vertical::effective_vertical_sidebar_width(
-            self.workspace.tab_sidebar_width,
-            self.tab_width,
-        );
+        let sidebar_width = self.tab_width.clamp(120., 640.);
         let open_ws_count = self
             .workspace
             .websocket_tabs

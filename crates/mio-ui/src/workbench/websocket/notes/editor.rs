@@ -47,13 +47,7 @@ impl Workbench {
         notes.active = Some(id);
         notes.stored = None;
         notes.error = None;
-        notes.read_revision = match notes.read_revision.checked_add(1) {
-            Some(next) => next,
-            None => {
-                notes.error = Some("备注读取 revision 已耗尽，请重新打开项目。".into());
-                return;
-            }
-        };
+        notes.read_revision += 1;
         if let Some(draft) = notes.drafts.get(&id) {
             notes.stored = Some(draft.stored.clone());
             notes.error = draft.error.clone();

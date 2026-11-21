@@ -19,7 +19,6 @@ impl Settings {
         let e7 = cx.entity();
         let e8 = cx.entity();
         let e9 = cx.entity();
-        let e_ai = cx.entity();
 
         div()
             .pb(px(14.))
@@ -126,22 +125,6 @@ impl Settings {
                                             e7.update(cx, |this, cx| {
                                                 this.set_cookie_jar_monitor(
                                                     SessionTool::Scanner,
-                                                    st == CheckboxState::Checked,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                    )
-                                    .child(
-                                        inline_checkbox(
-                                            "settings-cookie-jar-monitor-ai",
-                                            "MioAI",
-                                            jar.monitor_mio_ai,
-                                            enabled,
-                                        )
-                                        .on_change(move |st, _, _, cx| {
-                                            e_ai.update(cx, |this, cx| {
-                                                this.set_cookie_jar_monitor_mio_ai(
                                                     st == CheckboxState::Checked,
                                                     cx,
                                                 );

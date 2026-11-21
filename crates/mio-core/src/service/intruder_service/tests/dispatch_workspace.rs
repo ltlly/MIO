@@ -73,7 +73,18 @@ async fn invalid_dispatch_workspace_never_falls_back_and_recovery_does_not_send(
                 match mutation {
                     1 => workspace["upstream_tls"] = serde_json::json!({"custom_ca_ders": [[48, 0]]}),
                     2 => workspace["upstream_tls"] = serde_json::json!({"include_system_roots": false}),
-                    _ => workspace["upstream_proxy"] = serde_json::json!({"protocol": "http", "host": "", "port": 8080}),
+                    _ => {
+                        workspace["upstream_proxy"] = serde_json::json!({
+                            "rules": [{
+                                "id": Uuid::new_v4(),
+                                "enabled": true,
+                                "destination_host": "*",
+                                "protocol": "http",
+                                "host": "",
+                                "port": 8080
+                            }]
+                        })
+                    }
                 }
                 serde_json::to_vec(&workspace).unwrap()
             };
@@ -261,9 +272,12 @@ async fn intruder_workspace_tls_trust_is_used_by_actual_send_and_strictly_reject
             let mut workspace = state.store.workspace().unwrap();
             workspace.revision += 1;
             workspace.upstream_proxy = crate::UpstreamProxySettings {
-                protocol: crate::UpstreamProxyProtocol::Http,
-                host: "127.0.0.1".into(),
-                port: fixture_proxy.address().port(),
+                rules: vec![crate::UpstreamProxyRule {
+                    protocol: crate::UpstreamProxyProtocol::Http,
+                    host: "127.0.0.1".into(),
+                    port: fixture_proxy.address().port(),
+                    ..crate::UpstreamProxyRule::default()
+                }],
                 ..crate::UpstreamProxySettings::default()
             };
             workspace.upstream_tls = tls;

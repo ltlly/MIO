@@ -31,7 +31,6 @@ use crate::{
 mod handlers;
 
 pub const ENV_MIO_IPC_SOCKET: &str = "MIO_IPC_SOCKET";
-pub const ENV_MIO_SOCKET_ALIAS: &str = "MIO_SOCKET";
 #[cfg(unix)]
 const MAX_SUN_PATH_SAFE_LEN: usize = 96;
 const MAX_IPC_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -121,8 +120,6 @@ pub enum AiIpcRequest {
         flow_id: Uuid,
         revision: u64,
         drop_flow: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        add_header: Option<(String, String)>,
         #[serde(default)]
         add_headers: Vec<(String, String)>,
         #[serde(default)]
@@ -247,9 +244,7 @@ pub enum AiIpcPayload {
         dropped: bool,
     },
     WorkspaceState {
-        workspace_json: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace: Option<serde_json::Value>,
+        workspace: serde_json::Value,
     },
     WebSocketList {
         ws_total: usize,
@@ -337,7 +332,6 @@ fn current_euid() -> u32 {
 pub fn env_ipc_socket_path() -> Option<PathBuf> {
     std::env::var_os(ENV_MIO_IPC_SOCKET)
         .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os(ENV_MIO_SOCKET_ALIAS).filter(|v| !v.is_empty()))
         .map(PathBuf::from)
 }
 

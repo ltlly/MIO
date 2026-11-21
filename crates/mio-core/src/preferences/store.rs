@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 
 use super::{
     io::{
@@ -88,9 +88,7 @@ impl PreferencesStore {
                 current.revision == expected,
                 "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
             );
-            let revision = expected
-                .checked_add(1)
-                .context("用户偏好 revision 已耗尽")?;
+            let revision = expected + 1;
             Ok(UserPreferences {
                 version: VERSION,
                 revision,
@@ -124,9 +122,7 @@ impl PreferencesStore {
                 current.revision == expected,
                 "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
             );
-            let revision = expected
-                .checked_add(1)
-                .context("用户偏好 revision 已耗尽")?;
+            let revision = expected + 1;
             Ok(UserPreferences {
                 revision,
                 custom_ca_ders: certificates,
@@ -215,9 +211,7 @@ fn next_preferences(
         current.revision == expected,
         "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
     );
-    let revision = expected
-        .checked_add(1)
-        .context("用户偏好 revision 已耗尽")?;
+    let revision = expected + 1;
     Ok(UserPreferences {
         version: VERSION,
         revision,
@@ -238,9 +232,7 @@ fn next_startup_preferences(
         current.revision == expected,
         "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
     );
-    let revision = expected
-        .checked_add(1)
-        .context("用户偏好 revision 已耗尽")?;
+    let revision = expected + 1;
     Ok(UserPreferences {
         version: VERSION,
         revision,
@@ -259,10 +251,7 @@ fn next_recent_preferences(
     last_accessed_unix_ms: i64,
 ) -> Result<UserPreferences> {
     let entry = validated_recent_project(name, path, last_accessed_unix_ms)?;
-    let revision = current
-        .revision
-        .checked_add(1)
-        .context("用户偏好 revision 已耗尽")?;
+    let revision = current.revision + 1;
     let mut recent_projects =
         Vec::with_capacity((current.recent_projects.len() + 1).min(MAX_RECENT_PROJECTS));
     recent_projects.push(entry);
@@ -290,9 +279,7 @@ fn next_removed_recent_preferences(
         current.revision == expected,
         "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
     );
-    let revision = expected
-        .checked_add(1)
-        .context("用户偏好 revision 已耗尽")?;
+    let revision = expected + 1;
     let recent_projects = current
         .recent_projects
         .iter()
@@ -315,9 +302,7 @@ fn next_pruned_recent_preferences(
         current.revision == expected,
         "用户偏好 revision 已改变；未覆盖，请重新读取后重试"
     );
-    let revision = expected
-        .checked_add(1)
-        .context("用户偏好 revision 已耗尽")?;
+    let revision = expected + 1;
     let recent_projects = current
         .recent_projects
         .iter()

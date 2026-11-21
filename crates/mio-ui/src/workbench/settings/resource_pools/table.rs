@@ -345,11 +345,8 @@ impl Workbench {
         }
         let project = self.project.unwrap();
         let management = &mut self.intruder.resource_pools.management;
-        let Some(revision) = management.query_revision.checked_add(1) else {
-            self.fail("资源池任务计数查询 revision 已耗尽。", cx);
-            return;
-        };
-        management.query_revision = revision;
+        management.query_revision += 1;
+        let revision = management.query_revision;
         if !self.enqueue(
             Command::QueryIntruderPoolUsage {
                 project,

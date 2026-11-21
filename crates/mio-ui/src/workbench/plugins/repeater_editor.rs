@@ -262,9 +262,7 @@ impl Workbench {
                 return true;
             }
         };
-        let Some(send) = self.capture_send(tab.draft.clone(), cx) else {
-            return true;
-        };
+        let send = self.capture_send(tab.draft.clone());
         if self
             .plugin_action(
                 PluginAction::CommitEditor {

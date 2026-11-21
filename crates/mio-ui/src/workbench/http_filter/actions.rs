@@ -116,10 +116,7 @@ impl Workbench {
             return None;
         }
         // Querying does not change the editor; the result handler guards removal of its row.
-        let Some(revision) = self.query_revision.checked_add(1) else {
-            self.fail("HTTP 历史查询 revision 已耗尽；请重新打开项目。", cx);
-            return None;
-        };
+        let revision = self.query_revision + 1;
         let mut selected_ids: Vec<_> = self
             .history
             .read(cx)

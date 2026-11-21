@@ -212,10 +212,7 @@ impl Workbench {
             self.fail("URL／方法筛选超过 4096 字节；当前列表保留。", cx);
             return None;
         }
-        let Some(revision) = self.query_revision.checked_add(1) else {
-            self.fail("HTTP 历史查询 revision 已耗尽；请重新打开项目。", cx);
-            return None;
-        };
+        let revision = self.query_revision + 1;
         let (filter, sort, enabled) = self.http_filter.requested();
         Some(HttpHistoryQuery {
             project,
@@ -409,11 +406,7 @@ impl Workbench {
         }
         if let Some(next_offset) = shift.remaining_offsets.pop() {
             let mut next_query = shift.query.clone();
-            let Some(revision) = self.query_revision.checked_add(1) else {
-                self.clear_history_shift(cx);
-                self.fail("HTTP 历史查询 revision 已耗尽；请重新打开项目。", cx);
-                return true;
-            };
+            let revision = self.query_revision + 1;
             next_query.query_revision = revision;
             next_query.offset = next_offset;
             next_query.selected_ids.clear();

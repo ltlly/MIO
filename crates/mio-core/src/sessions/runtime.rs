@@ -40,7 +40,6 @@ struct SessionRuntimeInner {
     monitor_scanner: bool,
     monitor_sequencer: bool,
     monitor_extensions: bool,
-    monitor_mio_ai: bool,
     rules: Vec<SessionRule>,
     macros: HashMap<Uuid, SessionMacro>,
     scope: TargetScope,
@@ -83,7 +82,6 @@ impl SessionRuntime {
                 monitor_scanner: workspace.sessions.cookie_jar.monitor_scanner,
                 monitor_sequencer: workspace.sessions.cookie_jar.monitor_sequencer,
                 monitor_extensions: workspace.sessions.cookie_jar.monitor_extensions,
-                monitor_mio_ai: workspace.sessions.cookie_jar.monitor_mio_ai,
                 rules: workspace.sessions.rules.clone(),
                 macros,
                 scope: workspace.scope.clone(),
@@ -132,7 +130,6 @@ impl SessionRuntime {
         guard.monitor_scanner = workspace.sessions.cookie_jar.monitor_scanner;
         guard.monitor_sequencer = workspace.sessions.cookie_jar.monitor_sequencer;
         guard.monitor_extensions = workspace.sessions.cookie_jar.monitor_extensions;
-        guard.monitor_mio_ai = workspace.sessions.cookie_jar.monitor_mio_ai;
         guard.rules = workspace.sessions.rules.clone();
         guard.macros = workspace
             .sessions
@@ -171,7 +168,6 @@ impl SessionRuntime {
         guard.monitor_scanner = workspace.sessions.cookie_jar.monitor_scanner;
         guard.monitor_sequencer = workspace.sessions.cookie_jar.monitor_sequencer;
         guard.monitor_extensions = workspace.sessions.cookie_jar.monitor_extensions;
-        guard.monitor_mio_ai = workspace.sessions.cookie_jar.monitor_mio_ai;
         guard.rules = workspace.sessions.rules.clone();
         guard.macros = workspace
             .sessions

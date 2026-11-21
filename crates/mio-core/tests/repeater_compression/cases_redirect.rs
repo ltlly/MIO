@@ -316,9 +316,12 @@ async fn repeater_send_uses_workspace_upstream_proxy_and_request_timeout() {
 
         // 1. Send via reachable loopback HTTP upstream proxy.
         workspace.upstream_proxy = UpstreamProxySettings {
-            protocol: UpstreamProxyProtocol::Http,
-            host: proxy_address.ip().to_string(),
-            port: proxy_address.port(),
+            rules: vec![mio_core::UpstreamProxyRule {
+                protocol: UpstreamProxyProtocol::Http,
+                host: proxy_address.ip().to_string(),
+                port: proxy_address.port(),
+                ..mio_core::UpstreamProxyRule::default()
+            }],
             ..UpstreamProxySettings::default()
         };
         save_workspace(&mut client, project, &mut workspace).await?;
@@ -342,9 +345,12 @@ async fn repeater_send_uses_workspace_upstream_proxy_and_request_timeout() {
 
         // 2. Unreachable upstream proxy fails explicitly without falling back to direct origin.
         workspace.upstream_proxy = UpstreamProxySettings {
-            protocol: UpstreamProxyProtocol::Http,
-            host: "127.0.0.1".into(),
-            port: dead_port,
+            rules: vec![mio_core::UpstreamProxyRule {
+                protocol: UpstreamProxyProtocol::Http,
+                host: "127.0.0.1".into(),
+                port: dead_port,
+                ..mio_core::UpstreamProxyRule::default()
+            }],
             ..UpstreamProxySettings::default()
         };
         save_workspace(&mut client, project, &mut workspace).await?;

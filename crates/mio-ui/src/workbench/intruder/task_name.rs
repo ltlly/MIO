@@ -250,8 +250,8 @@ impl Workbench {
             self.set_task_name_status("此任务已不可用；输入仍保留，请取消后重新读取任务。", cx);
             return;
         };
-        if title.len() > 4096 || current.title_revision == u64::MAX {
-            self.set_task_name_status("名称超过 4096 字节或名称 revision 已耗尽；未提交。", cx);
+        if title.len() > 4096 {
+            self.set_task_name_status("名称超过 4096 字节；未提交。", cx);
             return;
         }
         let project = rename.project;

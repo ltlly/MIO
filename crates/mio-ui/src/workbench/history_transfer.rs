@@ -345,15 +345,11 @@ impl Workbench {
             .tabs
             .iter()
             .chain(&candidate.closed)
-            .filter_map(|tab| tab.title.split(": ").next()?.parse::<u32>().ok())
+            .filter_map(|tab| tab.title.split(": ").next()?.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
         for (_, mut tab) in tabs {
-            let Some(next) = number.checked_add(1) else {
-                self.fail("Repeater 标签编号已耗尽；未创建部分标签。", cx);
-                return;
-            };
-            number = next;
+            number += 1;
             let urlpath = crate::workbench::tabs::actions::extract_repeater_urlpath(
                 Some(&tab.draft.raw),
                 Some(&tab.draft.target),

@@ -1488,11 +1488,8 @@ impl Workbench {
             if self.audit_dashboard.flow_cache.contains_key(&flow_id) {
                 continue;
             }
-            let Some(revision) = self.selection_revision.checked_add(1) else {
-                self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                return;
-            };
-            self.selection_revision = revision;
+            self.selection_revision += 1;
+            let revision = self.selection_revision;
             if self.enqueue(
                 Command::ReadFlow {
                     project,
@@ -1570,10 +1567,7 @@ impl Workbench {
                 let mut added = 0usize;
                 let mut first_id = None;
                 for record in &records {
-                    let Ok(number) = mio_core::next_organiser_number(&self.workspace.organiser_items)
-                    else {
-                        break;
-                    };
+                    let number = mio_core::next_organiser_number(&self.workspace.organiser_items);
                     let Ok(item) =
                         mio_core::OrganiserItem::from_flow_record(number, "Scanner", record)
                     else {

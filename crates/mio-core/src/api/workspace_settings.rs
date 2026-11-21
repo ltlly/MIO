@@ -280,11 +280,6 @@ impl std::fmt::Debug for PlatformAuthSettings {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpstreamProxySettings {
-    pub protocol: UpstreamProxyProtocol,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<UpstreamProxyRule>,
     #[serde(default, skip_serializing_if = "SocksProxySettings::is_default")]
@@ -305,103 +300,12 @@ const fn is_zero_u64(v: &u64) -> bool {
 
 impl UpstreamProxySettings {
     pub fn is_default(&self) -> bool {
-        self.protocol == UpstreamProxyProtocol::Direct
-            && self.host.is_empty()
-            && self.port == 0
-            && self.username.is_empty()
-            && self.password.is_empty()
-            && self.rules.is_empty()
+        self.rules.is_empty()
             && self.socks.is_default()
             && self.open_ended_response_timeout_secs == 0
             && self.hostname_resolutions.is_empty()
             && self.platform_auth.is_default()
             && !self.override_project_only
-    }
-
-    pub fn effective_rules(&self) -> Vec<UpstreamProxyRule> {
-        if !self.rules.is_empty() {
-            return self.rules.clone();
-        }
-        if matches!(
-            self.protocol,
-            UpstreamProxyProtocol::Http | UpstreamProxyProtocol::Https
-        ) && !self.host.trim().is_empty()
-            && self.port > 0
-        {
-            let has_auth = !self.username.is_empty() || !self.password.is_empty();
-            return vec![UpstreamProxyRule {
-                id: Uuid::from_u128(0x1001),
-                enabled: true,
-                destination_host: "*".into(),
-                protocol: self.protocol,
-                host: self.host.clone(),
-                port: self.port,
-                auth_type: if has_auth {
-                    UpstreamAuthType::Basic
-                } else {
-                    UpstreamAuthType::None
-                },
-                username: self.username.clone(),
-                password: self.password.clone(),
-                domain: String::new(),
-                workstation: String::new(),
-                description: String::new(),
-            }];
-        }
-        Vec::new()
-    }
-
-    pub fn effective_socks(&self) -> SocksProxySettings {
-        if !self.socks.is_default() {
-            return self.socks.clone();
-        }
-        if self.protocol == UpstreamProxyProtocol::Socks5 {
-            return SocksProxySettings {
-                use_proxy: true,
-                host: self.host.clone(),
-                port: self.port,
-                username: self.username.clone(),
-                password: self.password.clone(),
-                dns_over_socks: true,
-                bypass_hosts: Vec::new(),
-                override_project_only: false,
-            };
-        }
-        SocksProxySettings::default()
-    }
-
-    pub fn sync_legacy_summary(&mut self) {
-        if self.socks.use_proxy {
-            self.protocol = UpstreamProxyProtocol::Socks5;
-            self.host = self.socks.host.clone();
-            self.port = self.socks.port;
-            self.username = self.socks.username.clone();
-            self.password = self.socks.password.clone();
-            return;
-        }
-        if let Some(rule) = self
-            .rules
-            .iter()
-            .find(|rule| rule.enabled && rule.destination_host.trim() == "*")
-            .or_else(|| self.rules.iter().find(|rule| rule.enabled))
-        {
-            self.protocol = rule.protocol;
-            self.host = rule.host.clone();
-            self.port = rule.port;
-            if rule.auth_type == UpstreamAuthType::Basic {
-                self.username = rule.username.clone();
-                self.password = rule.password.clone();
-            } else {
-                self.username.clear();
-                self.password.clear();
-            }
-            return;
-        }
-        self.protocol = UpstreamProxyProtocol::Direct;
-        self.host.clear();
-        self.port = 0;
-        self.username.clear();
-        self.password.clear();
     }
 
     pub fn compiled_platform_auth_rules(&self) -> std::sync::Arc<[PlatformAuthRuleConfig]> {
@@ -417,7 +321,7 @@ impl UpstreamProxySettings {
 
     pub fn compiled_upstream_auth_rules(&self) -> std::sync::Arc<[UpstreamAuthRuleConfig]> {
         let list: Vec<UpstreamAuthRuleConfig> = self
-            .effective_rules()
+            .rules
             .iter()
             .filter_map(UpstreamProxyRule::to_upstream_auth_config)
             .collect();
@@ -430,10 +334,10 @@ impl UpstreamProxySettings {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.override_project_only {
-            guard.upstream_rules = self.effective_rules();
+            guard.upstream_rules = self.rules.clone();
         }
         if !self.socks.override_project_only {
-            guard.socks = self.effective_socks();
+            guard.socks = self.socks.clone();
         }
         if !self.platform_auth.override_project_only {
             guard.platform_auth = PlatformAuthSettings {
@@ -452,18 +356,16 @@ impl UpstreamProxySettings {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !out.override_project_only
-            && out.effective_rules().is_empty()
+            && out.rules.is_empty()
             && !guard.upstream_rules.is_empty()
         {
             out.rules = guard.upstream_rules.clone();
-            out.sync_legacy_summary();
         }
         if !out.socks.override_project_only
-            && out.effective_socks().is_default()
+            && out.socks.is_default()
             && !guard.socks.is_default()
         {
             out.socks = guard.socks.clone();
-            out.sync_legacy_summary();
         }
         if !out.platform_auth.override_project_only
             && !out.platform_auth.enabled
@@ -494,13 +396,6 @@ fn user_level_connections_cache() -> &'static std::sync::Mutex<UserLevelConnecti
 impl std::fmt::Debug for UpstreamProxySettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UpstreamProxySettings")
-            .field("protocol", &self.protocol)
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field(
-                "authenticated",
-                &(!self.username.is_empty() || !self.password.is_empty()),
-            )
             .field("rules_len", &self.rules.len())
             .field("socks", &self.socks)
             .field(

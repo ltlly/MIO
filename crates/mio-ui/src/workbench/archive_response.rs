@@ -80,15 +80,8 @@ impl Workbench {
             return;
         }
         let Some(project) = self.project else { return };
-        let Some(revision) = self.archive_responses.revision.checked_add(1) else {
-            self.archive_response_failed(
-                "归档响应读取 revision 已耗尽，请重新打开项目。".into(),
-                false,
-                cx,
-            );
-            return;
-        };
-        self.archive_responses.revision = revision;
+        self.archive_responses.revision += 1;
+        let revision = self.archive_responses.revision;
         self.archive_responses.pending = Some(Pending {
             project,
             revision,

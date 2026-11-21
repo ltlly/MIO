@@ -68,12 +68,9 @@ impl Workbench {
                 return;
             }
         }
-        let Some(revision) = self.workspace.revision.checked_add(1) else {
-            self.fail_intruder_result_close("工作区 revision 已耗尽；结果仍保留。", cx);
-            return;
-        };
         self.workspace.tab_sidebar_width = self.tab_width as u16;
         let mut workspace = self.workspace.clone();
+        let revision = self.workspace.revision + 1;
         workspace.revision = revision;
         if let Err(error) = workspace.validate_structure() {
             self.fail_intruder_result_close(format!("最新工作区无效：{error}；结果仍保留。"), cx);

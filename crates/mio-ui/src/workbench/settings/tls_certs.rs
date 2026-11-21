@@ -438,9 +438,7 @@ impl Settings {
         let project_enabled = self.state.enabled && self.tls_import.is_none();
         let verify_upstream = !self.state.upstream_tls.insecure_skip_verify;
         let proto_mode = self.state.upstream_tls.protocol_mode;
-        let allow_unsafe_reneg = self.state.upstream_tls.allow_unsafe_renegotiation;
         let disable_session_resume = self.state.upstream_tls.disable_session_resume;
-        let unsafe_reneg_owner = cx.entity();
         let session_resume_owner = cx.entity();
 
         // Section 1: TLS negotiation (TOP — matches MIO Network > TLS)
@@ -532,25 +530,6 @@ impl Settings {
                                         );
                                     });
                                 })
-                            })
-                            .child({
-                                let proto_owner = cx.entity();
-                                settings_radio(
-                                    "settings-tls-proto-custom",
-                                    "使用自定义协议与密码套件",
-                                    proto_mode == mio_core::TlsProtocolMode::Custom,
-                                    project_enabled,
-                                    window,
-                                    cx,
-                                )
-                                .on_change(move |_, _, _, cx| {
-                                    proto_owner.update(cx, |this, cx| {
-                                        this.update_upstream_tls(
-                                            |s| s.protocol_mode = mio_core::TlsProtocolMode::Custom,
-                                            cx,
-                                        );
-                                    });
-                                })
                             }),
                     )
                     .child(
@@ -558,23 +537,6 @@ impl Settings {
                             .mt(px(8.))
                             .text_color(theme::foreground())
                             .child("TLS 协商变通方案"),
-                    )
-                    .child(
-                        listeners_tls::indexed_checkbox(
-                            "settings-tls-unsafe-renegotiation",
-                            "允许不安全的重新协商（部分客户端证书需要）",
-                            allow_unsafe_reneg,
-                            project_enabled,
-                        )
-                        .on_change(move |state, _, _, cx| {
-                            let checked = state == CheckboxState::Checked;
-                            unsafe_reneg_owner.update(cx, |this, cx| {
-                                this.update_upstream_tls(
-                                    move |s| s.allow_unsafe_renegotiation = checked,
-                                    cx,
-                                );
-                            });
-                        }),
                     )
                     .child(
                         listeners_tls::indexed_checkbox(

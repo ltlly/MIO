@@ -53,7 +53,7 @@ fn exhausted_intruder_revision_prevents_partial_repeater_capture(cx: &mut TestAp
             assert!(
                 view.capture_drafts(window, cx)
                     .unwrap_err()
-                    .contains("revision 已耗尽")
+                    .contains("revision 无效")
             );
             assert_eq!(view.workspace, stored);
         });

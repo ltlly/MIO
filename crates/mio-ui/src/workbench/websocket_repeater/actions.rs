@@ -288,13 +288,7 @@ impl Workbench {
             );
             return;
         }
-        let Some(next_revision) = self.workspace.websocket_tabs[tab_index]
-            .draft_revision
-            .checked_add(1)
-        else {
-            self.fail("WebSocket Repeater 草稿 revision 已耗尽；未发送。", cx);
-            return;
-        };
+        let next_revision = self.workspace.websocket_tabs[tab_index].draft_revision + 1;
         let direction = if matches!(mode, WebSocketRepeaterConnectionMode::Standalone { .. }) {
             WebSocketDirection::ClientToServer
         } else {
@@ -414,13 +408,7 @@ impl Workbench {
         else {
             return;
         };
-        let Some(next_revision) = tab.draft_revision.checked_add(1) else {
-            self.fail(
-                "WebSocket Repeater 草稿 revision 已耗尽；无法载入历史消息。",
-                cx,
-            );
-            return;
-        };
+        let next_revision = tab.draft_revision + 1;
         tab.draft_payload = item.payload.clone();
         tab.draft_revision = next_revision;
         tab.draft_kind = item.kind;

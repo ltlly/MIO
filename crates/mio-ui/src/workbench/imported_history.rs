@@ -200,15 +200,8 @@ impl Workbench {
                 continue;
             }
             let Some(project) = self.project else { return };
-            let Some(revision) = self.selection_revision.checked_add(1) else {
-                self.set_imported_read_error(
-                    is_response,
-                    "消息读取 revision 已耗尽，请重新打开项目。".into(),
-                    false,
-                );
-                continue;
-            };
-            self.selection_revision = revision;
+            self.selection_revision += 1;
+            let revision = self.selection_revision;
             self.imported_history.pending = Some(Pending {
                 project,
                 selected: row.id(),

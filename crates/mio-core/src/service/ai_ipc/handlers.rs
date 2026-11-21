@@ -174,27 +174,8 @@ impl State {
                 self.ipc_repeater_open(flow_id, use_original, target, raw_request, title)
                     .await
             }
-            AiIpcRequest::RepeaterSend {
-                flow_id,
-                use_original,
-                target,
-                raw_request,
-                add_headers,
-                remove_headers,
-                override_body,
-                insecure,
-            } => {
-                self.ipc_repeater_send(
-                    flow_id,
-                    use_original,
-                    target,
-                    raw_request,
-                    add_headers,
-                    remove_headers,
-                    override_body,
-                    insecure,
-                )
-                .await
+            AiIpcRequest::RepeaterSend { .. } => {
+                unreachable!("RepeaterSend is already handled in accept_ai_ipc_call")
             }
             AiIpcRequest::SlimSave { path, options } => self.ipc_slim_save(&path, options).await,
             AiIpcRequest::ExportCa { path, pem } => self.ipc_export_ca(&path, pem).await,
@@ -209,7 +190,6 @@ impl State {
                 flow_id,
                 revision,
                 drop_flow,
-                add_header,
                 add_headers,
                 remove_headers,
                 override_body,
@@ -219,7 +199,6 @@ impl State {
                     flow_id,
                     revision,
                     drop_flow,
-                    add_header,
                     add_headers,
                     remove_headers,
                     override_body,
@@ -230,14 +209,12 @@ impl State {
             AiIpcRequest::WorkspaceGet => {
                 let ws = self.store.workspace()?;
                 Ok(AiIpcPayload::WorkspaceState {
-                    workspace_json: serde_json::to_string_pretty(&ws)?,
-                    workspace: Some(serde_json::to_value(&ws)?),
+                    workspace: serde_json::to_value(&ws)?,
                 })
             }
             AiIpcRequest::WorkspacePatch { workspace_json } => {
-                let normalized = normalize_workspace_patch_json(&workspace_json);
                 let workspace: Workspace =
-                    serde_json::from_str(&normalized).context("解析工作区 JSON 失败")?;
+                    serde_json::from_str(&workspace_json).context("解析工作区 JSON 失败")?;
                 ensure!(
                     !self.quiesced,
                     "项目正在切换或静默保存，暂无法修改工作区配置"
@@ -245,8 +222,7 @@ impl State {
                 self.apply_save_workspace(self.project, workspace).await?;
                 let saved = self.store.workspace()?;
                 Ok(AiIpcPayload::WorkspaceState {
-                    workspace_json: serde_json::to_string_pretty(&saved)?,
-                    workspace: Some(serde_json::to_value(&saved)?),
+                    workspace: serde_json::to_value(&saved)?,
                 })
             }
             AiIpcRequest::WebSocketList { limit } => self.ipc_websocket_list(limit),
@@ -513,48 +489,6 @@ impl State {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn ipc_repeater_send(
-        &mut self,
-        flow_id: Option<FlowId>,
-        use_original: bool,
-        target: Option<String>,
-        raw_request: Option<String>,
-        add_headers: Vec<(String, String)>,
-        remove_headers: Vec<String>,
-        override_body: Option<String>,
-        insecure: bool,
-    ) -> Result<AiIpcPayload> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Err((_, err)) = self.spawn_ipc_repeater_send(
-            tx,
-            flow_id,
-            use_original,
-            target,
-            raw_request,
-            add_headers,
-            remove_headers,
-            override_body,
-            insecure,
-        ) {
-            return Err(err);
-        }
-        if let Some(done) = self.ipc_jobs.join_next().await {
-            self.complete_ipc_repeater(done);
-        }
-        let env = rx.await.context("IPC Repeater 后台任务未返回结果")?;
-        if env.ok
-            && let Some(payload) = env.payload
-        {
-            Ok(payload)
-        } else {
-            bail!(
-                "{}",
-                env.error.unwrap_or_else(|| "Repeater 发送失败".into())
-            )
-        }
-    }
-
     async fn ipc_slim_save(
         &mut self,
         path: &str,
@@ -701,14 +635,11 @@ impl State {
         flow_id: FlowId,
         revision: u64,
         drop_flow: bool,
-        add_header: Option<(String, String)>,
         add_headers: Vec<(String, String)>,
         remove_headers: Vec<String>,
         override_body: Option<String>,
         override_status: Option<u16>,
     ) -> Result<AiIpcPayload> {
-        let merged_add_headers: Vec<(String, String)> =
-            add_header.into_iter().chain(add_headers).collect();
         let decision = if drop_flow {
             Decision::Drop
         } else {
@@ -722,7 +653,7 @@ impl State {
                     for name in remove_headers {
                         req.headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
                     }
-                    for (k, v) in merged_add_headers {
+                    for (k, v) in add_headers {
                         req.headers.retain(|h| !h.name.eq_ignore_ascii_case(&k));
                         req.headers.push(Header {
                             name: k,
@@ -753,7 +684,7 @@ impl State {
                     for name in remove_headers {
                         resp.headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
                     }
-                    for (k, v) in merged_add_headers {
+                    for (k, v) in add_headers {
                         resp.headers.retain(|h| !h.name.eq_ignore_ascii_case(&k));
                         resp.headers.push(Header {
                             name: k,
@@ -817,22 +748,6 @@ impl State {
             shutting_down: true,
         })
     }
-}
-
-fn normalize_workspace_patch_json(raw_text: &str) -> String {
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_text)
-        && val.get("ok").is_some()
-    {
-        if let Some(ws_obj) = val.get("workspace").filter(|v| v.is_object())
-            && let Ok(serialized) = serde_json::to_string(ws_obj)
-        {
-            return serialized;
-        }
-        if let Some(ws_str) = val.get("workspace_json").and_then(|v| v.as_str()) {
-            return ws_str.to_owned();
-        }
-    }
-    raw_text.to_owned()
 }
 
 fn resolve_repeater_open_request(

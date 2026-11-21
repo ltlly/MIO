@@ -12,11 +12,7 @@ impl Workbench {
         };
         let changed_scope = messages.items_visible;
         if changed_scope {
-            let Some(revision) = messages.query_revision.checked_add(1) else {
-                self.fail("归档消息查询 revision 已耗尽，请重开项目。", cx);
-                return;
-            };
-            messages.query_revision = revision;
+            messages.query_revision += 1;
             messages.items_visible = false;
             messages.clear_rows(&self.focus, window, cx);
             if let Some(items) = &mut messages.items {
@@ -143,10 +139,7 @@ impl Workbench {
         else {
             return;
         };
-        let Some(query_revision) = messages.query_revision.checked_add(1) else {
-            self.fail("归档消息查询 revision 已耗尽，请重开项目。", cx);
-            return;
-        };
+        let query_revision = messages.query_revision + 1;
         let source_id = messages.source_id;
         if !self.enqueue(
             Command::QueryExtMessages {
@@ -242,10 +235,7 @@ impl Workbench {
         {
             return;
         }
-        let Some(selection_revision) = messages.selection_revision.checked_add(1) else {
-            self.fail("归档消息选择 revision 已耗尽，请重开项目。", cx);
-            return;
-        };
+        let selection_revision = messages.selection_revision + 1;
         self.ext_import.repeater = Default::default();
         messages.selected = Some(message_id);
         messages.requested_offset = offset;

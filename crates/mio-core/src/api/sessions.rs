@@ -53,6 +53,8 @@ pub struct CookieJarSettings {
     pub monitor_sequencer: bool,
     #[serde(default)]
     pub monitor_extensions: bool,
+    /// Temporary field retained only until `store/` removes legacy `monitor_mio_ai` test coverage.
+    #[doc(hidden)]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monitor_mio_ai: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -216,10 +216,7 @@ impl Workbench {
                 return;
             }
             let mut proposal = self.workspace.clone();
-            let Some(revision) = proposal.revision.checked_add(1) else {
-                self.reject_plugin_workspace(request, "工作区 revision 已耗尽。", cx);
-                continue;
-            };
+            let revision = proposal.revision + 1;
             proposal.revision = revision;
             let mutation =
                 match &request.edit {
@@ -238,12 +235,8 @@ impl Workbench {
                             );
                             continue;
                         };
-                        let Some(revision) = expected_revision.checked_add(1) else {
-                            self.reject_plugin_workspace(request, "草稿 revision 已耗尽。", cx);
-                            continue;
-                        };
                         tab.draft = Draft {
-                            revision,
+                            revision: expected_revision + 1,
                             target: message.url.clone(),
                             raw: request_to_raw(message),
                             version: message.version,

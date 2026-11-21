@@ -108,8 +108,7 @@ fn upstream_tls_model_preserves_defaults_and_explicit_system_setting() {
             .include_system_roots
     );
     let protocol_only = crate::UpstreamTlsSettings {
-        protocol_mode: crate::TlsProtocolMode::Custom,
-        allow_unsafe_renegotiation: true,
+        protocol_mode: crate::TlsProtocolMode::Default,
         disable_session_resume: true,
         client_certs_override_project_only: true,
         ..crate::UpstreamTlsSettings::default()

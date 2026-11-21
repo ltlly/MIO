@@ -114,11 +114,8 @@ impl Workbench {
         {
             return;
         }
-        let Some(revision) = self.selection_revision.checked_add(1) else {
-            self.fail("消息选择 revision 已耗尽，请重新打开项目。", cx);
-            return;
-        };
-        self.selection_revision = revision;
+        self.selection_revision += 1;
+        let revision = self.selection_revision;
         self.history_detail_revision = revision;
         self.imported_history.request_edited = edited;
         self.imported_history.request_ready = false;
@@ -219,11 +216,7 @@ impl Workbench {
         {
             return;
         }
-        let Some(revision) = self.selection_revision.checked_add(1) else {
-            self.fail("消息选择 revision 已耗尽，请重新打开项目。", cx);
-            return;
-        };
-        self.selection_revision = revision;
+        self.selection_revision += 1;
         self.imported_history.response_edited = edited;
         self.imported_history.response_ready = false;
         if self

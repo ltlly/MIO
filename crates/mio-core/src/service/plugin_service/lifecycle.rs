@@ -156,41 +156,11 @@ impl State {
         let directory = source.package.directory.clone();
         let manifest = source.package.manifest.clone();
         let grants = source.info.grants.clone();
-        let mut panel_id = self
+        let panel_id = self
             .plugins
             .next_panel_id
             .max(mio_plugin_api::protocol::PANEL_ID + 1);
-        for _ in 0..u16::MAX {
-            if panel_id > mio_plugin_api::protocol::PANEL_ID
-                && !self
-                    .plugins
-                    .panel_routes
-                    .contains_key(&(source_instance, panel_id))
-                && !self
-                    .plugins
-                    .closing_panels
-                    .contains(&(source_instance, panel_id))
-            {
-                break;
-            }
-            panel_id = panel_id
-                .saturating_add(1)
-                .max(mio_plugin_api::protocol::PANEL_ID + 1);
-        }
-        ensure!(
-            !self
-                .plugins
-                .panel_routes
-                .contains_key(&(source_instance, panel_id))
-                && !self
-                    .plugins
-                    .closing_panels
-                    .contains(&(source_instance, panel_id)),
-            "插件多路复用 panel_id 已耗尽"
-        );
-        self.plugins.next_panel_id = panel_id
-            .saturating_add(1)
-            .max(mio_plugin_api::protocol::PANEL_ID + 1);
+        self.plugins.next_panel_id = panel_id + 1;
         let virtual_id = Uuid::new_v4();
         let identity = ChannelIdentity {
             instance_id: virtual_id,

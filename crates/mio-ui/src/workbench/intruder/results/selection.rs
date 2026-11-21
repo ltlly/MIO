@@ -83,9 +83,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project else { return };
-        let Some(revision) = self.next_intruder_query(cx) else {
-            return;
-        };
+        let revision = self.next_intruder_query();
         let probe = self.intruder.results.probes.entry(run_id).or_default();
         probe.dirty = false;
         probe.pending = None;
@@ -128,9 +126,7 @@ impl Workbench {
         {
             return;
         }
-        let Some(revision) = self.next_intruder_query(cx) else {
-            return;
-        };
+        let revision = self.next_intruder_query();
         self.intruder
             .results
             .views
@@ -251,12 +247,8 @@ impl Workbench {
             cx.notify();
             return;
         };
-        let Some(revision) = self.selection_revision.checked_add(1) else {
-            view.detail_error = Some("消息选择 revision 已耗尽，请重新打开项目。".into());
-            cx.notify();
-            return;
-        };
-        self.selection_revision = revision;
+        self.selection_revision += 1;
+        let revision = self.selection_revision;
         if self.enqueue(
             Command::ReadFlow {
                 project,

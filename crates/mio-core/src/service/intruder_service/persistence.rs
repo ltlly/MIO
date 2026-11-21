@@ -51,7 +51,7 @@ impl State {
                     record.summary.state =
                         FlowState::Failed("登记请求失败，未发送；恢复不会重发请求".into());
                 }
-                run.summary.revision = next_revision(run.summary.revision)?;
+                run.summary.revision = next_revision(run.summary.revision);
                 if ordinal == run.summary.dispatched {
                     run.summary.dispatched += 1;
                 }
@@ -136,7 +136,7 @@ impl State {
             Ok(summary) => run.summary = summary,
             Err(error) => {
                 if run.summary.state != state {
-                    run.summary.revision = next_revision(run.summary.revision)?;
+                    run.summary.revision = next_revision(run.summary.revision);
                     run.summary.state = state;
                     self.intruder.recovery.push(IntruderMutation::State {
                         run: run.summary.clone(),
@@ -190,7 +190,7 @@ impl State {
                 let message = format!("Intruder 发送任务异常退出，结果未知，未自动重发：{error}");
                 run.failure.get_or_insert_with(|| message.clone());
                 let mut record = self.read_flow(active.flow_id)?;
-                record.summary.revision = next_revision(record.summary.revision)?;
+                record.summary.revision = next_revision(record.summary.revision);
                 record.summary.state = FlowState::Failed(message);
                 (record, None)
             }

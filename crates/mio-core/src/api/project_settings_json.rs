@@ -353,7 +353,6 @@ struct UpstreamTlsJson {
     include_system_roots: bool,
     insecure_skip_verify: bool,
     protocol_mode: TlsProtocolMode,
-    allow_unsafe_renegotiation: bool,
     disable_session_resume: bool,
     client_certs_override_project_only: bool,
 }
@@ -371,7 +370,6 @@ impl From<&UpstreamTlsSettings> for UpstreamTlsJson {
             include_system_roots: tls.include_system_roots,
             insecure_skip_verify: tls.insecure_skip_verify,
             protocol_mode: tls.protocol_mode,
-            allow_unsafe_renegotiation: tls.allow_unsafe_renegotiation,
             disable_session_resume: tls.disable_session_resume,
             client_certs_override_project_only: tls.client_certs_override_project_only,
         }
@@ -390,7 +388,7 @@ impl UpstreamTlsJson {
             include_system_roots: self.include_system_roots,
             insecure_skip_verify: self.insecure_skip_verify,
             protocol_mode: self.protocol_mode,
-            allow_unsafe_renegotiation: self.allow_unsafe_renegotiation,
+            allow_unsafe_renegotiation: false,
             disable_session_resume: self.disable_session_resume,
             client_certs_override_project_only: self.client_certs_override_project_only,
         })
@@ -1320,8 +1318,7 @@ mod tests {
             .certificate_der();
         ws.upstream_tls.custom_ca_ders = vec![ca_der];
         ws.upstream_tls.include_system_roots = false;
-        ws.upstream_tls.protocol_mode = TlsProtocolMode::Custom;
-        ws.upstream_tls.allow_unsafe_renegotiation = true;
+        ws.upstream_tls.protocol_mode = TlsProtocolMode::Default;
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
@@ -1421,7 +1418,7 @@ mod tests {
         ws.proxy_websocket_interception.intercept_in_scope_only = true;
 
         let macro_id = Uuid::new_v4();
-        ws.sessions.cookie_jar.monitor_mio_ai = true;
+        ws.sessions.cookie_jar.monitor_repeater = true;
         ws.sessions.cookie_jar.entries.push(CookieJarEntry {
             id: Uuid::new_v4(),
             domain: "example.invalid".into(),

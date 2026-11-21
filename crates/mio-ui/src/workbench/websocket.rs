@@ -1171,13 +1171,7 @@ impl Workbench {
         if !self.organiser_editable() || !self.flush_workspace(window, cx) {
             return;
         }
-        let number = match mio_core::next_organiser_number(&self.workspace.organiser_items) {
-            Ok(n) => n,
-            Err(err) => {
-                self.fail(err.to_string(), cx);
-                return;
-            }
-        };
+        let number = mio_core::next_organiser_number(&self.workspace.organiser_items);
         let summary = self
             .websocket
             .table

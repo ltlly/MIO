@@ -24,21 +24,6 @@ impl Settings {
         let _ = self.commit_session_settings(next, cx);
     }
 
-    pub(super) fn set_cookie_jar_monitor_mio_ai(
-        &mut self,
-        checked: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let mut next = self.state.sessions.clone();
-        if next.cookie_jar.monitor_mio_ai == checked {
-            return;
-        }
-        next.cookie_jar.monitor_mio_ai = checked;
-        if self.commit_session_settings(next, cx) {
-            self.sessions.monitor_mio_ai = checked;
-        }
-    }
-
     pub(super) fn save_cookie_jar_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw_domain = match editing::input_snapshot(&self.sessions.cookie_domain, window, cx) {
             Ok(v) => v.to_string(),

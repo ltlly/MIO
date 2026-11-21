@@ -25,10 +25,7 @@ impl Workbench {
             let (Some(project), Some(flow_id)) = (self.project, self.selected_flow) else {
                 return;
             };
-            let Some(revision) = self.selection_revision.checked_add(1) else {
-                self.fail("消息读取 revision 已耗尽；请重新打开项目。", cx);
-                return;
-            };
+            let revision = self.selection_revision + 1;
             if self.enqueue(
                 Command::ReadFlow {
                     project,

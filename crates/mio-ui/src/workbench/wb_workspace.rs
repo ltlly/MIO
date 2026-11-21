@@ -139,11 +139,7 @@ impl Workbench {
             }
         };
         let workspace = if path.is_some() && self.workspace_dirty {
-            let Some(revision) = self.workspace.revision.checked_add(1) else {
-                self.cancel_transition(cx);
-                self.fail("工作区 revision 已耗尽，无法保存项目。", cx);
-                return;
-            };
+            let revision = self.workspace.revision + 1;
             let mut snapshot = (*self.workspace).clone();
             snapshot.revision = revision;
             Some(snapshot)

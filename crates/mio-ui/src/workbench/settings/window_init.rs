@@ -142,7 +142,6 @@ impl Settings {
                 network_http_changed,
                 scheduled_tasks_changed,
                 observed_certs_changed,
-                listener_changed,
                 upstream_changed,
                 legacy_changed,
                 certificates_changed,
@@ -167,8 +166,6 @@ impl Settings {
                     project_changed || this.state.scheduled_tasks != view.workspace.scheduled_tasks;
                 let observed_certs_changed = project_changed
                     || this.state.observed_server_certs != view.observed_server_certs;
-                let listener_changed = project_changed
-                    || this.state.proxy_listener != view.workspace.proxy_listener_or_default();
                 let upstream_changed =
                     project_changed || this.state.upstream_proxy != view.workspace.upstream_proxy;
                 let legacy_changed = this.state.upstream_tls != view.workspace.upstream_tls;
@@ -196,7 +193,6 @@ impl Settings {
                     network_http_changed,
                     scheduled_tasks_changed,
                     observed_certs_changed,
-                    listener_changed,
                     upstream_changed,
                     legacy_changed,
                     certificates_changed,
@@ -328,11 +324,6 @@ impl Settings {
                     cx.notify();
                 });
             }
-            if listener_changed {
-                this.proxy_listener_input.update(cx, |input, cx| {
-                    input.set_value(this.state.proxy_listener.clone(), window, cx)
-                });
-            }
             if upstream_changed {
                 this.restore_upstream_draft(&this.state.upstream_proxy.clone(), window, cx);
                 this.sync_connections_ui(project_changed, window, cx);
@@ -430,8 +421,6 @@ impl Settings {
             }
         })
         .detach();
-        let proxy_listener_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(state.proxy_listener.clone()));
         let mut listeners_tls = boxed_with(|| listeners_tls::ListenersTlsUi::new(window, cx));
         if !state.proxy_listeners.is_empty() {
             listeners_tls.selected_index = Some(0);
@@ -496,17 +485,17 @@ impl Settings {
         .detach();
         let connections = boxed_with(|| connections::ConnectionsUi::new(&state, window, cx));
         let sessions = boxed_with(|| sessions::SessionsUi::new(window, cx));
-        let upstream_protocol = state.upstream_proxy.protocol;
-        let upstream_host = cx
-            .new(|cx| InputState::new(window, cx).default_value(state.upstream_proxy.host.clone()));
+        let upstream_host = cx.new(|cx| {
+            InputState::new(window, cx).default_value(state.upstream_proxy.socks.host.clone())
+        });
         let upstream_port = cx.new(|cx| {
-            InputState::new(window, cx).default_value(state.upstream_proxy.port.to_string())
+            InputState::new(window, cx).default_value(state.upstream_proxy.socks.port.to_string())
         });
         let upstream_username = cx.new(|cx| {
-            InputState::new(window, cx).default_value(state.upstream_proxy.username.clone())
+            InputState::new(window, cx).default_value(state.upstream_proxy.socks.username.clone())
         });
         let upstream_password = cx.new(|cx| {
-            InputState::new(window, cx).default_value(state.upstream_proxy.password.clone())
+            InputState::new(window, cx).default_value(state.upstream_proxy.socks.password.clone())
         });
         let tls_names = certificate_names(&state.preferences);
         let tls_legacy_names = tls_certificate_names(&state.upstream_tls.custom_ca_ders).join("、");
@@ -598,10 +587,8 @@ impl Settings {
             scope_oos_custom_editor_open: false,
             scope_oos_custom_editing: None,
             scope_oos_custom_subdomains: false,
-            proxy_listener_input,
             listeners_tls,
             connections,
-            upstream_protocol,
             upstream_host,
             upstream_port,
             upstream_username,

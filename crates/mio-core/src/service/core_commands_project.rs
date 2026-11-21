@@ -184,7 +184,6 @@ impl State {
                             prev.upstream_proxy != workspace.upstream_proxy
                                 || prev.upstream_tls != workspace.upstream_tls
                                 || prev.client_certificates != workspace.client_certificates
-                                || prev.proxy_listener != workspace.proxy_listener
                                 || prev.proxy_listeners != workspace.proxy_listeners
                                 || prev.proxy_messages.misc != workspace.proxy_messages.misc
                                 || prev.network_http != workspace.network_http
@@ -472,7 +471,6 @@ impl State {
                 prev.upstream_proxy != workspace.upstream_proxy
                     || prev.upstream_tls != workspace.upstream_tls
                     || prev.client_certificates != workspace.client_certificates
-                    || prev.proxy_listener != workspace.proxy_listener
                     || prev.proxy_listeners != workspace.proxy_listeners
                     || prev.proxy_messages.misc != workspace.proxy_messages.misc
                     || prev.network_http != workspace.network_http

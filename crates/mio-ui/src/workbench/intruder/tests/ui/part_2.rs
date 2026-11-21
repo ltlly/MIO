@@ -107,7 +107,7 @@ async fn payload_file_load_appends_binary_lines_saves_once_and_releases_picker(
     cx.run_until_parked();
 
     // Saving also records the default sidebar width.
-    expected.tab_sidebar_width = 180;
+    expected.tab_sidebar_width = 220;
     let spec = &mut expected.intruder.tabs[0].spec;
     spec.draft.target = latest.into();
     spec.draft.revision += 1;

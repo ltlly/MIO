@@ -24,13 +24,7 @@ impl Workbench {
         if !self.flush_workspace(window, cx) {
             return;
         }
-        let number = match next_organiser_number(&self.workspace.organiser_items) {
-            Ok(number) => number,
-            Err(err) => {
-                self.fail(err.to_string(), cx);
-                return;
-            }
-        };
+        let number = next_organiser_number(&self.workspace.organiser_items);
         let extracted = match self.extract_organiser_item(number, window, cx) {
             Ok(item) => item,
             Err(err) => {

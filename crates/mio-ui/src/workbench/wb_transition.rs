@@ -91,7 +91,7 @@ impl Workbench {
             || !self.workspace.scope.is_empty()
             || !self.workspace.upstream_proxy.is_default()
             || !self.workspace.upstream_tls.is_default()
-            || self.workspace.proxy_listener.is_some()
+            || !self.workspace.proxy_listeners.is_empty()
             || self.workspace_dirty
             || self.pending_workspace.is_some()
             || !self.workspace.tabs.is_empty()
