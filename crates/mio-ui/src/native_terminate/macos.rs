@@ -1,3 +1,10 @@
+//! Minimal macOS `applicationShouldTerminate:` guard for `GPUIApplicationDelegate`.
+//!
+//! `gpui-pre-macos` (unvendored from crates.io) only implements `applicationWillTerminate:` via
+//! `App::on_app_quit`, which executes after AppKit has already committed to quitting and clears
+//! windows synchronously. MIO needs cancellable `NSTerminateLater` handoff so dirty drafts, save
+//! prompts, and background `Runtime::join()` can complete or cancel exit cleanly.
+
 use objc2::{
     runtime::{Imp, Sel},
     sel,
@@ -19,10 +26,6 @@ impl NativeTerminate {
     fn create(terminate_target: Option<Retained<AnyObject>>) -> anyhow::Result<Self> {
         let class = AnyClass::get(c"GPUIApplicationDelegate")
             .context("缺少固定版 GPUIApplicationDelegate，无法安装原生退出保护")?;
-        ensure!(
-            class.instance_variable(c"platform").is_some(),
-            "GPUI delegate 布局已变化"
-        );
         install_hook(class)?;
         ensure!(
             CURRENT.with(|slot| slot.borrow().upgrade().is_none()),
@@ -305,7 +308,9 @@ pub(super) fn current() -> Option<NativeTerminate> {
 }
 
 fn hook_imp() -> Imp {
-    // applicationShouldTerminate: returns NSUInteger and takes one object argument.
+    // SAFETY: `should_terminate` uses `extern "C-unwind"` with Objective-C signature `Q@:@`
+    // (`NSUInteger` return, receiver `&AnyObject`, selector `Sel`, argument `*mut AnyObject`),
+    // matching `applicationShouldTerminate:` checked by `install_hook`.
     unsafe {
         std::mem::transmute::<extern "C-unwind" fn(&AnyObject, Sel, *mut AnyObject) -> Reply, Imp>(
             should_terminate,

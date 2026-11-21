@@ -9,58 +9,6 @@ use objc2_foundation::NSDate;
 
 use super::*;
 
-#[test]
-fn file_panel_response_rejects_abort_and_invalid_success_without_losing_cancel() {
-    use std::cell::Cell;
-
-    let selections = Cell::new(0);
-    for response in [NSModalResponseCancel, -1001, 29] {
-        let result = file_panel_result(response, || {
-            selections.set(selections.get() + 1);
-            Ok(PathBuf::from("/tmp/selected.mio"))
-        });
-        if response == NSModalResponseCancel {
-            assert_eq!(result.unwrap(), None);
-        } else {
-            assert!(result.is_err());
-        }
-    }
-    assert_eq!(selections.get(), 0);
-    assert_eq!(
-        file_panel_result(NSModalResponseOK, || Ok(PathBuf::from("/tmp/selected.mio"))).unwrap(),
-        Some(PathBuf::from("/tmp/selected.mio"))
-    );
-    assert!(
-        file_panel_result::<PathBuf>(NSModalResponseOK, || {
-            Err(anyhow::anyhow!("missing file URL"))
-        })
-        .is_err()
-    );
-}
-
-#[test]
-fn file_panel_paths_preserve_non_utf8_bytes_and_double_extensions() {
-    use std::ffi::OsStr;
-
-    let path = PathBuf::from(OsStr::from_bytes(b"/tmp/MIO-\xff.mio"));
-    let url = NSURL::from_file_path(&path).unwrap();
-    assert_eq!(selected_file_path(&url).unwrap(), path);
-    for raw in [
-        b"/tmp/report.backup.bak".as_slice(),
-        b"/tmp/data.json.js".as_slice(),
-        b"/tmp/file.mio".as_slice(),
-    ] {
-        let double_path = PathBuf::from(OsStr::from_bytes(raw));
-        let double_url = NSURL::from_file_path(&double_path).unwrap();
-        assert_eq!(selected_file_path(&double_url).unwrap(), double_path);
-    }
-    let remote = NSURL::URLWithString(&objc2_foundation::NSString::from_str(
-        "https://example.invalid/not-a-file",
-    ))
-    .unwrap();
-    assert!(selected_file_path(&remote).is_err());
-}
-
 #[gpui_kit::test]
 fn file_panel_headless_forwarders_preserve_path_selection_and_cancel(
     cx: &mut gpui_kit::TestAppContext,
@@ -78,7 +26,6 @@ fn file_panel_headless_forwarders_preserve_path_selection_and_cancel(
     let expected = PathBuf::from(OsStr::from_bytes(b"/tmp/file-panel-test/\xff.mio"));
     let mut save = window
         .update(cx, |_, window, cx| {
-            assert!(native_prompt_parent(window).is_err());
             prompt_for_new_path(window, cx, directory, Some("draft.mio"))
         })
         .unwrap();

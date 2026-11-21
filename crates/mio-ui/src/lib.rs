@@ -577,20 +577,7 @@ pub fn run_with_project(
             let cancel = client.shutdown.clone();
             let joined = cx.background_spawn(async move {
                 let result = runtime.join();
-                #[cfg(target_os = "macos")]
-                objc2::rc::autoreleasepool(|_| {
-                    unsafe extern "C-unwind" {
-                        #[link_name = "NSLog"]
-                        fn ns_log(format: &objc2_foundation::NSString, ...);
-                    }
-                    let message = if result.is_ok() {
-                        objc2_foundation::ns_string!("MIO native-exit joined ok=true")
-                    } else {
-                        objc2_foundation::ns_string!("MIO native-exit joined ok=false")
-                    };
-                    // SAFETY: These fixed format strings contain no conversion specifiers.
-                    unsafe { ns_log(message) };
-                });
+                eprintln!("MIO native-exit joined ok={}", result.is_ok());
                 result
             });
             let window_size = if initial_project.is_some() {

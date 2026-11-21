@@ -190,10 +190,8 @@ impl RenderOnce for Switch {
         let disabled_bg = if checked { checked_bg } else { unchecked_bg }.opacity(0.5);
         let toggle_bg: Background = if checked {
             cx.theme().tokens.switch_thumb.into()
-        } else if cx.theme().mode.is_dark() {
-            gpui::rgb(0xd4d4d4).into()
         } else {
-            gpui::rgb(0x2b2b2b).into()
+            cx.theme().foreground.into()
         };
         let disabled_label_color = cx.theme().muted_foreground;
 

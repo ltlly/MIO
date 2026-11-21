@@ -1,11 +1,11 @@
 # MIO Architecture & CLI IPC Specification
 
-AI-oriented technical specification of MIO workspace crates, persistence, MITM stack, and `mio-cli` IPC.
+AI-oriented technical specification of MIO workspace crates, persistence, MITM stack, and `MioAT` / `mio-cli` IPC.
 
 ## 1. Scope & Non-Goals
 
 - **Security isolation / sandboxing is out of scope**: All Rhai scripts and Native worker plugins are executed as user-trusted local code. MIO provides capability declarations and process boundaries for lifecycle/stability, NOT adversarial security containment.
-- **No WASM plugin sandbox**: Only Native executable plugins (`engine: "native"`) are developed and maintained (`crates/mio-core/src/plugins/wasm*` and `plugins/wasm-sandbox-lab/` are frozen legacy test fixtures).
+- **Native worker plugins only**: Native executable plugins (`engine: "native"`) communicating over Protobuf stdio (`v1.5`) are the sole supported extension architecture.
 - **Other hard boundaries**: No JVM/.jar/Jython plugin loading, no embedded WebView/browser, external archive sources are strictly read-only, OAST uses local loopback HTTP/DNS or explicit self-hosted endpoints.
 
 ---
@@ -14,15 +14,16 @@ AI-oriented technical specification of MIO workspace crates, persistence, MITM s
 
 | Crate | Path | Responsibility | Hard Boundary |
 |---|---|---|---|
-| `mio-app` | `crates/mio-app` | `mio` desktop binary & `mio-cli` CLI/headless daemon | Thin entrypoint; no duplicated business logic |
+| `mio-app` | `crates/mio-app` | `mio` desktop GUI binary | Thin entrypoint; no duplicated business logic |
+| `mio-cli` | `crates/mio-cli` | Standalone `mio-cli` CLI client & headless `serve` daemon (`MioAT` IPC) | Zero GPUI dependency; depends only on `mio-core` |
 | `mio-ui` | `crates/mio-ui` | GPUI (`gpui-kit = "=0.9.0"`) workbench, themes, message editors, panel renderer | Sole crate depending on `gpui-kit`; dispatches all I/O to `mio-core` via async messages |
-| `mio-core` | `crates/mio-core` | Project SQLite DB, external archive streaming importer, Proxy/Repeater/Intruder/Scanner/OAST/Sessions/Sequencer/Organiser services, Rhai MioScript engine, Native plugin host (`v1.4`), `AiIpcServer` | Zero GPUI dependency |
+| `mio-core` | `crates/mio-core` | Project SQLite DB, external archive streaming importer, Proxy/Repeater/Intruder/Scanner/OAST/Sessions/Sequencer/Organiser services, Rhai MioScript engine, Native plugin host (`v1.5`), `AiIpcServer` | Zero GPUI dependency |
 | `mio-proxy` | `crates/mio-proxy` | Rama `=0.4.0` + `rustls` (`ring`) adapter, TLS MITM, H1/H2/SOCKS5/WS/SSE transport, single-packet barrier | Isolates Rama types behind `mio-core` facade |
-| `mio-plugin-api` | `crates/mio-plugin-api` | Versioned Protobuf `Envelope` wire protocol (`v1.4`), manifest/DTO types, `PanelSnapshot` / `PanelPatch` / `UiEvent` | Zero GPUI, SQLite, or host internal types |
-| `mio-plugin-sdk` | `crates/mio-plugin-sdk` | Ergonomic Native worker SDK (`MioPlugin` trait, `HostClient` typed `v1.4` RPC helpers, `ui::*` builders, `run_stdio`) | Zero GPUI or host internals; depends only on `mio-plugin-api` |
+| `mio-plugin-api` | `crates/mio-plugin-api` | Versioned Protobuf `Envelope` wire protocol (`v1.5`), manifest/DTO types, `PanelSnapshot` / `PanelPatch` / `UiEvent` | Zero GPUI, SQLite, or host internal types |
+| `mio-plugin-sdk` | `crates/mio-plugin-sdk` | Ergonomic Native worker SDK (`MioPlugin` trait, `HostClient` typed `v1.5` RPC helpers, `ui::*` builders, `run_stdio`) | Zero GPUI or host internals; depends only on `mio-plugin-api` |
 | `mio-protocol-lab` | `plugins/protocol-lab` | Reference Native worker implementing all 11 protocol contributions | Standalone binary (`protocol-lab`) |
 
-Vendored workspace patches in `vendor/`: `gpui-base`, `gpui-component` (including soft-wrap visual-row virtualization), `gpui-pre-windows`, `gpui-pre-linux`. Toolchain: Rust `1.99`, edition `2024`.
+Vendored workspace patches in `vendor/` (detailed in [vendor/README.md](../vendor/README.md)): `gpui-base` (including soft-wrap visual-row virtualization, multi-token inline editing, bounded regex search, and custom gutters), `gpui-component`, `gpui-pre-windows`, `gpui-pre-linux`. Toolchain: Rust `1.99`, edition `2024`.
 
 ---
 
@@ -45,9 +46,9 @@ Vendored workspace patches in `vendor/`: `gpui-base`, `gpui-component` (includin
 
 ---
 
-## 5. `mio-cli` & Local AI IPC (`AiIpcServer`)
+## 5. `MioAT` (`mio-cli`) & Local Agent IPC (`AiIpcServer`)
 
-Defined in `crates/mio-core/src/service/ai_ipc.rs` and `crates/mio-app/src/bin/mio_cli.rs`:
+Defined in `crates/mio-core/src/service/ai_ipc.rs` and `crates/mio-cli/src/main.rs` (`render.rs`):
 
 - **Transport & Default Path** (overridable by `--socket <path>`, `MIO_IPC_SOCKET`, or `MIO_SOCKET`):
   - macOS: `~/Library/Application Support/MIO/run/mio.sock` (Unix domain socket `0600`, UID check; falls back to `/tmp/mio-<euid>/mio.sock` if `> 96` bytes).

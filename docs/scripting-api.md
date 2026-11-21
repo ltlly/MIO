@@ -1,6 +1,6 @@
 # MIO Scripting API Specification (Rhai / MioScript Engine)
 
-Authoritative specification generated from `crates/mio-core/src/http/mio_script.rs`.
+Authoritative specification generated from `crates/mio-core/src/http/mio_script/`.
 
 ## 1. Engine & Runtime Model
 

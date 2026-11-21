@@ -12,7 +12,7 @@
 
 1. 原生 UI 采用 GPUI + GPUI Kit，Rust 核心；不再以开发/调试便利自动改回 WebView。
 2. GPUI 依赖通过 Kit 固定兼容版本，不混用不同 GPUI 快照。
-3. HTTP(S) MITM 起步采用 Rama 0.4 + Rustls/ring；新独立探针补齐了此前缺少的基础修改、H2 与证书校验运行证据。具体 features/API 见 [SDK 决策](../research/rust-capture-decision.md)。
+3. HTTP(S) MITM 起步采用 Rama 0.4 + Rustls/ring；新独立探针补齐了此前缺少的基础修改、H2 与证书校验运行证据，具体边界与网络栈说明见 [架构文档](../architecture.md)。
 4. Hudsucker 保留为 Rust 回退，不忽略其已知分片、Stop 与路由问题；Go 仅为比较资料，改成双后端属于需要说明的重大变更。
 5. 强插件使用原生 Panel SDK + 独立逻辑执行域，不以稳定 dylib ABI、同线程不可信脚本或仅表单替代。
 6. 用户要求不继承旧代码、旧数据兼容和额外取证契约；零 Python、中文/英文专名、垂直工作标签、不做内嵌浏览器继续有效。
@@ -25,4 +25,4 @@ Rama 的 Rustls 路径不等同其 BoringSSL 成对 relay；主动连接停止�
 
 ## 验收与交接
 
-[当前路线](../native-rewrite-plan.md)定义模块边界，[ROADMAP](../../ROADMAP.md)维护模块状态，[当前状态](../current-status.md)记录实测命令与证据。
+[架构文档](../architecture.md)定义模块边界与 IPC 规范，[ROADMAP](../ROADMAP.md)维护演进规划，[README](../../README.md)记录构建、测试与打包入口。

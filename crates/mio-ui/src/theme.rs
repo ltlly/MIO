@@ -242,17 +242,52 @@ pub(crate) fn user_custom_scale_percent() -> u16 {
     }
 }
 
+fn compute_system_dpi_scale_percent(window_scale_factor: f32, is_macos: bool) -> u16 {
+    if !window_scale_factor.is_finite() || window_scale_factor <= 0.0 {
+        return 100;
+    }
+    // macOS Retina displays report 2.0 (or 3.0), whereas non-Retina external displays report 1.0
+    // (or fractional HiDPI <= 1.5); treat 2.0+ on macOS as the 100% Retina baseline without
+    // downscaling 1.0x displays to 80%.
+    let normal_base = if is_macos && window_scale_factor >= 1.75 {
+        2.0
+    } else {
+        1.0
+    };
+    let ratio = (window_scale_factor / normal_base).clamp(0.8, 2.0);
+    (ratio * 100.0).round() as u16
+}
+
 pub(crate) fn sync_window_system_dpi(window_scale_factor: f32) {
     #[cfg(not(test))]
     {
-        let normal_base = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
-        let ratio = (window_scale_factor / normal_base).clamp(0.8, 2.0);
-        let pct = (ratio * 100.0).round() as u16;
+        let pct = compute_system_dpi_scale_percent(window_scale_factor, cfg!(target_os = "macos"));
         SYSTEM_DPI_SCALE_PERCENT.store(pct, Ordering::Relaxed);
     }
     #[cfg(test)]
     {
         let _ = window_scale_factor;
+    }
+}
+
+#[cfg(test)]
+mod system_dpi_tests {
+    use super::compute_system_dpi_scale_percent;
+
+    #[test]
+    fn macos_non_retina_and_retina_baselines_do_not_downscale_1x_displays() {
+        assert_eq!(compute_system_dpi_scale_percent(1.0, true), 100);
+        assert_eq!(compute_system_dpi_scale_percent(1.25, true), 125);
+        assert_eq!(compute_system_dpi_scale_percent(1.5, true), 150);
+        assert_eq!(compute_system_dpi_scale_percent(2.0, true), 100);
+        assert_eq!(compute_system_dpi_scale_percent(3.0, true), 150);
+        assert_eq!(compute_system_dpi_scale_percent(0.0, true), 100);
+        assert_eq!(compute_system_dpi_scale_percent(f32::NAN, true), 100);
+
+        assert_eq!(compute_system_dpi_scale_percent(1.0, false), 100);
+        assert_eq!(compute_system_dpi_scale_percent(1.25, false), 125);
+        assert_eq!(compute_system_dpi_scale_percent(1.5, false), 150);
+        assert_eq!(compute_system_dpi_scale_percent(2.0, false), 200);
     }
 }
 

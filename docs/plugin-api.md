@@ -6,7 +6,6 @@ Authoritative specification generated from `crates/mio-plugin-api/src/`, `crates
 
 - **Sole supported extension path**: Out-of-process **Native Worker executables** (`engine: "native"`) communicating over 4-byte length-prefixed Protobuf `Envelope` frames on `stdin` / `stdout`. Authors should use `crates/mio-plugin-sdk` (`MioPlugin` + `HostClient` + `ui::*` builders).
 - **Security isolation / sandboxing is NOT in scope**: Native workers execute directly as OS child processes without OS sandboxing. `manifest.permissions` mediates MIO `HostCall` broker dispatch (`PermissionBroker`) and UI trust prompts, not OS syscall containment.
-- **WASM sandbox unmaintained**: `engine: "wasm"` (`crates/mio-core/src/plugins/wasm*`) and `plugins/wasm-sandbox-lab/` are frozen legacy test fixtures and will not receive new capabilities.
 
 ---
 
@@ -29,7 +28,7 @@ A plugin package directory contains `manifest.json` + the relative native execut
 Validation rules (`PluginManifest`, `#[serde(deny_unknown_fields)]` in `crates/mio-core/src/plugins/package.rs`):
 - `id`: `1..=128` ASCII `[A-Za-z0-9._-]`.
 - `version`: `1..=64` chars; `api_version` must equal `1` (`PROTOCOL_MAJOR`).
-- `engine`: `"native"` (`"wasm"` legacy only).
+- `engine`: `"native"`.
 - `entry`: relative non-escaping path inside package directory (`0o111` executable with valid Mach-O/ELF/PE magic).
 - `permissions` (unique list from 8 exact strings):
   - `"traffic.read"` (`TrafficRead`)
@@ -57,7 +56,7 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 
 - **Framing**: `[u32 big-endian length][Protobuf Envelope bytes]`.
 - **Hard Limits**:
-  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 5` (`LEGACY_HANDSHAKE_MINOR = 4` for backwards-compatible initial `Hello` wire framing)
+  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 5`
   - `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`)
   - `MAX_INLINE_BODY = 512 KiB` (`512 * 1024`) — requests/responses/WS payloads exceeding this error rather than truncate
   - `MAX_EDITOR_BYTES = 256 KiB`
@@ -67,9 +66,9 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
   - Max `64` live resource handles on the main panel (`PANEL_ID = 1`) and `128` shared live resource handles across multiplexed child panels per worker; up to `MAX_CHILD_EDITORS = 64` concurrent child editors project-wide (`panel_id >= 2`); host service concurrency `16`; `5s` operation timeout
 - **Envelope Header**: `major`, `minor`, `request_id` (strictly increasing per sender, non-zero), `instance_id` (16B UUID), `project_id` (16B UUID), `project_generation` (`!= 0`), `panel_id` (`PANEL_ID = 1` for main panel, `>= 2` for multiplexed child panels), `revision`, `deadline_unix_ms`, `in_reply_to`, `body`.
 - **Handshake (`WorkerSession::accept`, handled automatically by `mio_plugin_sdk::run_stdio`)**:
-  1. Host -> Worker (wire `minor = 4`): `Hello(max_frame_bytes, max_operation_ms, granted_permissions, host_minor = 5)`
-  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`, negotiated `minor = min(max(host_minor, hello.minor), worker_minor)`): `Register(plugin_id, plugin_version, required_components, panel, supports_panel_multiplexing)`
-  3. Host -> Worker (`minor = negotiated_minor`): `Ready` (`in_reply_to = 1`)
+  1. Host -> Worker (wire `minor = 5`): `Hello(max_frame_bytes, max_operation_ms, granted_permissions, host_minor = 5)`
+  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`, `minor = 5`): `Register(plugin_id, plugin_version, required_components, panel, supports_panel_multiplexing)`
+  3. Host -> Worker (`minor = 5`): `Ready` (`in_reply_to = 1`)
   4. Runtime loop: dispatch incoming envelopes routed by `panel_id` until `Shutdown`.
 
 ---
