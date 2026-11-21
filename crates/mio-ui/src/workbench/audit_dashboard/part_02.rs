@@ -1749,7 +1749,7 @@ impl Workbench {
                             let row_id = if is_child {
                                 SharedString::from(format!("dashboard-issue-evidence-row-{id}"))
                             } else {
-                                SharedString::from(format!("dashboard-issue-row-{id}"))
+                                SharedString::from(format!("dashboard-issue-activity-row-{id}"))
                             };
                             let row_bg = if let Some(hl_bg) =
                                 crate::history::highlight_background(hl_color)

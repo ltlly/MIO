@@ -228,6 +228,36 @@ fn listener_target_overrides_and_proxy_misc_transforms_work() {
         .find(|h| h.name.eq_ignore_ascii_case("connection"))
         .unwrap();
     assert_eq!(conn.value, b"close");
+
+    // Verify http1_keep_alive + set_request_connection_header preserves Connection: keep-alive outbound
+    let mut keepalive_cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    keepalive_cfg.http1_keep_alive = true;
+    keepalive_cfg.set_request_connection_header = true;
+    let mut ka_req = HttpRequest {
+        method: "GET".into(),
+        url: "http://example.com/keep".into(),
+        version: HttpVersion::Http11,
+        headers: vec![Header {
+            name: "Host".into(),
+            value: b"example.com".to_vec(),
+        }],
+        body: Vec::new(),
+        trailers: Vec::new(),
+    };
+    listener::apply_proxy_misc_request_transforms(&mut ka_req, &keepalive_cfg, false);
+    assert!(ka_req.headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("connection") && h.value.eq_ignore_ascii_case(b"keep-alive")
+    }));
+    let send_cfg = crate::SendConfig {
+        http1_keep_alive: true,
+        set_connection_keep_alive: true,
+        ..Default::default()
+    };
+    let wire_req = crate::message::to_request_with_config(&ka_req, &send_cfg).unwrap();
+    assert_eq!(
+        wire_req.headers().get("connection").and_then(|v| v.to_str().ok()),
+        Some("keep-alive")
+    );
 }
 
 #[tokio::test]

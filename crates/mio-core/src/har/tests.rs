@@ -136,7 +136,7 @@ fn har_export_preserves_utf8_text_duplicate_headers_query_params_and_versions() 
     let log = &parsed["log"];
     assert_eq!(log["version"], "1.2");
     assert_eq!(log["creator"]["name"], "MIO");
-    assert_eq!(log["creator"]["version"], "0.1.0");
+    assert_eq!(log["creator"]["version"], env!("CARGO_PKG_VERSION"));
 
     let entries = log["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
@@ -264,7 +264,7 @@ fn har_export_allows_empty_list_and_enforces_record_and_byte_limits() {
         serde_json::json!({
             "log": {
                 "version": "1.2",
-                "creator": {"name": "MIO", "version": "0.1.0"},
+                "creator": {"name": "MIO", "version": env!("CARGO_PKG_VERSION")},
                 "entries": []
             }
         })

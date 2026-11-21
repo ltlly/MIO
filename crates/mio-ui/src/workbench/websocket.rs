@@ -1539,7 +1539,7 @@ fn build_websocket_item_xml(
         .write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
         .map_err(|e| e.to_string())?;
     let mut root = BytesStart::new("websocket-items");
-    root.push_attribute(("mioVersion", "2026.10.1"));
+    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
     writer
         .write_event(XmlEvent::Start(root))
         .map_err(|e| e.to_string())?;

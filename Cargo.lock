@@ -4864,6 +4864,7 @@ dependencies = [
  "embed-resource",
  "mio-core",
  "mio-ui",
+ "serde_json",
  "tokio",
 ]
 

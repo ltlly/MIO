@@ -434,7 +434,6 @@ pub(super) fn generate_payloads_by_type_and_input(
                 min_integer_digits: 1,
                 max_integer_digits: None,
                 min_fraction_digits: 0,
-                max_fraction_digits: None,
                 seed: 1,
             })
             .map_err(|e| e.to_string())

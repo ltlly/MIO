@@ -100,7 +100,7 @@ fn encoded_body_len(body: &[u8]) -> usize {
 fn creator() -> Value {
     let mut creator = Map::new();
     creator.insert("name".into(), Value::String("MIO".into()));
-    creator.insert("version".into(), Value::String("0.1.0".into()));
+    creator.insert("version".into(), Value::String(env!("CARGO_PKG_VERSION").into()));
     Value::Object(creator)
 }
 

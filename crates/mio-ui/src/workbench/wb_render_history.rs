@@ -2012,7 +2012,7 @@ pub(crate) fn build_ext_items_xml(
     writer.write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
         .map_err(|error| error.to_string())?;
     let mut root = BytesStart::new("items");
-    root.push_attribute(("mioVersion", "2026.10.1"));
+    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
     let export_time = quick_xml::escape::escape(time_str);
     root.push_attribute(("exportTime", export_time.as_ref()));
     writer.write_event(XmlEvent::Start(root)).map_err(|error| error.to_string())?;

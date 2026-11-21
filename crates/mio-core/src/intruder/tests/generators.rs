@@ -359,7 +359,6 @@ fn all_eighteen_payload_types_and_generators_produce_expected_sequences() {
         min_integer_digits: 2,
         max_integer_digits: Some(2),
         min_fraction_digits: 1,
-        max_fraction_digits: Some(1),
         seed: 0,
     })
     .unwrap();
@@ -385,6 +384,17 @@ fn all_eighteen_payload_types_and_generators_produce_expected_sequences() {
             b"2024/03/31".to_vec(),
         ]
     );
+
+    let dates_mmm = generate_dates_with_unit_payloads(
+        "2024-03-05",
+        "2024-03-05",
+        1,
+        DateStepUnit::Day,
+        DateOutputFormat::IsoDate,
+        Some("MM-MMM-yyyy"),
+    )
+    .unwrap();
+    assert_eq!(dates_mmm, vec![b"03-Mar-2024".to_vec()]);
 
     let brute = generate_brute_forcer_payloads(&BruteForcerConfig {
         charset: "ab".into(),

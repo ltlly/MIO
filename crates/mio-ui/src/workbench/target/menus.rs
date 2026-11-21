@@ -1148,6 +1148,7 @@ pub(in crate::workbench) fn target_issue_row_menu(
         severity_rank,
         current_sev,
         current_conf,
+        is_fp,
         is_verified,
         view_mode,
         layout_mode,
@@ -1175,6 +1176,7 @@ pub(in crate::workbench) fn target_issue_row_menu(
             rank,
             sev,
             conf,
+            wb.audit_dashboard.false_positive_findings.contains(&finding_id),
             wb.target_pane.verified_findings.contains(&finding_id),
             wb.target_pane.site_map_view_mode,
             wb.target_pane.site_map_layout,
@@ -1197,7 +1199,7 @@ pub(in crate::workbench) fn target_issue_row_menu(
                 let owner = v_sev.clone();
                 sub.item(
                     PopupMenuItem::new(label)
-                        .checked(current_sev == sev)
+                        .checked(!is_fp && current_sev == sev)
                         .disabled(!can_operate)
                         .on_click(move |_, _, cx| {
                             let _ = owner.update(cx, |wb, cx| {
@@ -1208,10 +1210,11 @@ pub(in crate::workbench) fn target_issue_row_menu(
             });
             sub.item(
                 PopupMenuItem::new("误报")
+                    .checked(is_fp)
                     .disabled(!can_operate)
-                    .on_click(move |_, window, cx| {
+                    .on_click(move |_, _, cx| {
                         let _ = v_fp.update(cx, |wb, cx| {
-                            wb.delete_target_site_map_finding(finding_id, true, window, cx);
+                            wb.mark_audit_finding_false_positive(finding_id, cx);
                         });
                     }),
             )
@@ -1362,7 +1365,7 @@ pub(in crate::workbench) fn target_issue_row_menu(
                 .disabled(!can_operate)
                 .on_click(move |_, window, cx| {
                     let _ = v_delete.update(cx, |wb, cx| {
-                        wb.delete_target_site_map_finding(finding_id, false, window, cx);
+                        wb.delete_target_site_map_finding(finding_id, window, cx);
                     });
                 }),
         )

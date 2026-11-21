@@ -110,11 +110,15 @@ fn table_real_selection_keys_filter_and_failed_page_are_retryable(cx: &mut TestA
     };
     let fixture = fixture(cx, snapshot);
     cx.update_window(fixture.window, |_, window, cx| {
-        window.click(("plugin-row", 0usize), cx);
-        window.click_with_modifiers(("plugin-row", 2usize), crate::secondary_modifiers(true), cx);
+        window.click(gpui_kit::SharedString::from("plugin-row-10-0"), cx);
+        window.click_with_modifiers(
+            gpui_kit::SharedString::from("plugin-row-10-2"),
+            crate::secondary_modifiers(true),
+            cx,
+        );
         assert_eq!(fixture.view.read(cx).tables[&10].selected, ["a", "c"]);
         window.click_with_modifiers(
-            ("plugin-row", 1usize),
+            gpui_kit::SharedString::from("plugin-row-10-1"),
             Modifiers {
                 shift: true,
                 ..Modifiers::default()

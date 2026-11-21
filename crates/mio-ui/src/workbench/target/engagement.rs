@@ -224,7 +224,7 @@ fn build_multi_item_ext_xml(
         .write_event(XmlEvent::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
         .map_err(|e| e.to_string())?;
     let mut root = BytesStart::new("items");
-    root.push_attribute(("mioVersion", "2026.10.1"));
+    root.push_attribute(("mioVersion", env!("CARGO_PKG_VERSION")));
     root.push_attribute(("exportTime", now.as_str()));
     writer
         .write_event(XmlEvent::Start(root))
@@ -749,6 +749,9 @@ impl Workbench {
             return;
         };
         self.remember_finding_original(&finding);
+        self.audit_dashboard
+            .false_positive_findings
+            .remove(&finding_id);
         self.set_audit_finding_triage(finding_id, severity, finding.confidence, cx);
         self.status = format!("已将问题严重性设置为 {}。", severity.label());
         cx.notify();
@@ -781,6 +784,9 @@ impl Workbench {
                     .map(|def| def.typical_severity)
             })
             .unwrap_or_else(|| finding.severity());
+        self.audit_dashboard
+            .false_positive_findings
+            .remove(&finding_id);
         self.set_audit_finding_triage(finding_id, orig_sev, finding.confidence, cx);
         self.status = format!("已恢复问题原始严重性（{}）。", orig_sev.label());
         cx.notify();
@@ -854,7 +860,6 @@ impl Workbench {
     pub(in crate::workbench) fn delete_target_site_map_finding(
         &mut self,
         finding_id: Uuid,
-        false_positive: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -864,11 +869,7 @@ impl Workbench {
             self.target_pane.selected_site_map_finding_id = None;
         }
         self.delete_audit_finding(finding_id, window, cx);
-        self.status = if false_positive {
-            "已将该问题标记为误报并移除。".into()
-        } else {
-            "已删除所选问题。".into()
-        };
+        self.status = "已删除所选问题。".into();
         cx.notify();
     }
 

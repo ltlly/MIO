@@ -321,8 +321,7 @@ impl State {
                     flow_id,
                 });
             }
-            for (message_id, pending) in self.pending_websockets.drain().collect::<Vec<_>>() {
-                let _ = pending.reply.is_closed();
+            for (message_id, _) in self.pending_websockets.drain().collect::<Vec<_>>() {
                 self.queue_proxy_notification(Event::WebSocketInterceptResolved {
                     project: self.project,
                     message_id,

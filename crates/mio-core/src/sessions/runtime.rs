@@ -133,7 +133,6 @@ impl SessionRuntime {
         guard.monitor_sequencer = workspace.sessions.cookie_jar.monitor_sequencer;
         guard.monitor_extensions = workspace.sessions.cookie_jar.monitor_extensions;
         guard.monitor_mio_ai = workspace.sessions.cookie_jar.monitor_mio_ai;
-        guard.monitor_mio_ai = workspace.sessions.cookie_jar.monitor_mio_ai;
         guard.rules = workspace.sessions.rules.clone();
         guard.macros = workspace
             .sessions

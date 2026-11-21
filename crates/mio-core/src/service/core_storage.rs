@@ -221,6 +221,9 @@ impl State {
         if let Some(proxy) = &self.proxy {
             proxy.request_stop();
         }
+        for (_, proxy) in &self.extra_proxies {
+            proxy.request_stop();
+        }
         for send in self.sends.values_mut() {
             send.cancel.cancel();
             send.progress_rx = None;

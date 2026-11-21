@@ -1062,12 +1062,16 @@ mod tests {
             );
             assert!(
                 window
-                    .find(SharedString::from(format!("dashboard-issue-row-{f1_id}")))
+                    .find(SharedString::from(format!(
+                        "dashboard-issue-activity-row-{f1_id}"
+                    )))
                     .visible()
             );
             assert!(
                 window
-                    .find(SharedString::from(format!("dashboard-issue-row-{f2_id}")))
+                    .find(SharedString::from(format!(
+                        "dashboard-issue-activity-row-{f2_id}"
+                    )))
                     .visible()
             );
         })

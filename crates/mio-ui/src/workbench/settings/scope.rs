@@ -713,41 +713,67 @@ impl Settings {
             },
         );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await
-                && let Some(path) = paths.into_iter().next()
-            {
-                let entries = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let meta = std::fs::metadata(&path).ok()?;
-                        if !meta.is_file() || meta.len() > 256 * 1024 {
-                            return None;
-                        }
-                        let text = std::fs::read_to_string(path).ok()?;
-                        Some(
-                            text.lines()
-                                .map(str::trim)
-                                .filter(|line| {
-                                    !line.is_empty()
-                                        && line.len() <= 2048
-                                        && !line.chars().any(char::is_control)
-                                })
-                                .map(str::to_owned)
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .await;
-                if let Some(entries) = entries
-                    && !entries.is_empty()
-                {
+            let picked = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => return,
+                Ok(Err(err)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error(format!("打开文件选择器失败：{err}"), cx);
+                    });
+                    return;
+                }
+                Err(_) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error("文件选择器通道意外关闭。", cx);
+                    });
+                    return;
+                }
+            };
+            let Some(path) = picked else {
+                return;
+            };
+            let result: Result<Vec<String>, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let meta = std::fs::metadata(&path)
+                        .map_err(|err| format!("读取文件元数据失败：{err}"))?;
+                    if !meta.is_file() {
+                        return Err("所选路径不是普通文件。".into());
+                    }
+                    if meta.len() > 256 * 1024 {
+                        return Err("规则文件超过 256 KiB 上限，未导入。".into());
+                    }
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|err| format!("读取 UTF-8 规则文件失败：{err}"))?;
+                    let entries: Vec<String> = text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| {
+                            !line.is_empty()
+                                && line.len() <= 2048
+                                && !line.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                        .collect();
+                    if entries.is_empty() {
+                        return Err("文件中未找到有效的 URL 前缀规则。".into());
+                    }
+                    Ok(entries)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(entries) => {
                         let _ = this.owner.update(cx, |view, cx| {
+                            let mut added = 0usize;
+                            let mut skipped = 0usize;
                             view.update_scope_out_of_scope(
                                 project,
                                 |scope| {
                                     for prefix in entries {
                                         if scope.out_of_scope_custom_rules.len() >= 256 {
-                                            break;
+                                            skipped += 1;
+                                            continue;
                                         }
                                         scope.out_of_scope_custom_rules.push(mio_core::ScopeRule {
                                             id: Uuid::new_v4(),
@@ -755,15 +781,22 @@ impl Settings {
                                             prefix,
                                             include_subdomains: false,
                                         });
+                                        added += 1;
                                     }
                                 },
                                 cx,
                             );
+                            if skipped > 0 {
+                                view.status = format!(
+                                    "已导入 {added} 条规则；已达 256 条上限，跳过 {skipped} 条。"
+                                );
+                            }
                         });
-                        cx.notify();
-                    });
+                    }
+                    Err(err) => this.settings_error(err, cx),
                 }
-            }
+                cx.notify();
+            });
         })
         .detach();
     }

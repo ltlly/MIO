@@ -82,6 +82,29 @@ pub(crate) fn apply_preemptive_auth_to_model(
     mutated
 }
 
+async fn drain_auth_challenge_body(
+    mut body: rama::http::Body,
+    deadline: tokio::time::Instant,
+) -> Result<(), ProxyError> {
+    const AUTH_CHALLENGE_DRAIN_LIMIT: usize = 256 * 1024;
+    let mut drained = 0usize;
+    loop {
+        match tokio::time::timeout_at(deadline, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    drained = drained.saturating_add(data.len());
+                    if drained > AUTH_CHALLENGE_DRAIN_LIMIT {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(Some(Err(err))) => return Err(ProxyError::network(err)),
+            Ok(None) => return Ok(()),
+            Err(_) => return Err(ProxyError::Timeout),
+        }
+    }
+}
+
 pub(crate) async fn exchange_model_with_auth(
     mut model: HttpRequest,
     base_config: &SendConfig,
@@ -151,7 +174,7 @@ pub(crate) async fn exchange_model_with_auth(
                 {
                     break;
                 }
-                let _ = response.into_body().collect().await;
+                drain_auth_challenge_body(response.into_body(), deadline).await?;
                 let val = crate::build_basic_authorization_value(&creds.username, &creds.password);
                 crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
                 config.raw_http1_override = None;
@@ -175,7 +198,7 @@ pub(crate) async fn exchange_model_with_auth(
                 else {
                     break;
                 };
-                let _ = response.into_body().collect().await;
+                drain_auth_challenge_body(response.into_body(), deadline).await?;
                 let (cnonce, _, _) = crate::auth::next_cnonce_and_challenge();
                 let uri_path = crate::auth::request_uri_path_and_query(&model.url);
                 let val = digest_chal.build_authorization_value(
@@ -215,13 +238,13 @@ pub(crate) async fn exchange_model_with_auth(
                     .iter()
                     .find_map(|raw| crate::NtlmType2Challenge::parse_from_header(raw).ok())
                 {
-                    let _ = response.into_body().collect().await;
+                    drain_auth_challenge_body(response.into_body(), deadline).await?;
                     chal
                 } else if challenges
                     .iter()
                     .any(|raw| raw.eq_ignore_ascii_case("ntlm") || raw.starts_with("NTLM") || raw.starts_with("ntlm"))
                 {
-                    let _ = response.into_body().collect().await;
+                    drain_auth_challenge_body(response.into_body(), deadline).await?;
                     let type1_val =
                         crate::build_ntlm_type1_header_value(&creds.domain, &creds.workstation);
                     crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type1_val);
@@ -252,7 +275,7 @@ pub(crate) async fn exchange_model_with_auth(
                         timing = type2_timing;
                         break;
                     };
-                    let _ = type2_resp.into_body().collect().await;
+                    drain_auth_challenge_body(type2_resp.into_body(), deadline).await?;
                     chal
                 } else {
                     break;

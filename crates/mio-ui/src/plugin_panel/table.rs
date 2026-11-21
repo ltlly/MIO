@@ -241,7 +241,9 @@ impl NativePanel {
                     .map(|(index, row)| {
                         let weak = weak.clone();
                         let mut element = div()
-                            .id(("plugin-row", index))
+                            .id(gpui_kit::SharedString::from(format!(
+                                "plugin-row-{id}-{index}"
+                            )))
                             .test_support()
                             .role(Role::Row)
                             .aria_label(row.cells.join("，"))

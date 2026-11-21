@@ -103,18 +103,22 @@ impl State {
                 } else {
                     self.persist_repeater_completion(received.as_ref(), &record)
                 };
-                if saved.is_ok() {
-                    if let Some(event) = self.audit_inspect_live_flow(&record) {
-                        self.queue_repeater_event(Event::Audit(event));
-                    }
-                    if record.summary.state == FlowState::Complete
-                        && !self.passive_check_hooks().is_empty()
-                    {
-                        let _ = self
-                            .plugins
-                            .passive_tx
-                            .try_send((done.project, Box::new(record.clone())));
-                    }
+                if let Err(error) = saved {
+                    let _ = done
+                        .reply
+                        .send(AiIpcEnvelope::err(format!("保存 Repeater 请求记录失败：{error:#}")));
+                    return;
+                }
+                if let Some(event) = self.audit_inspect_live_flow(&record) {
+                    self.queue_repeater_event(Event::Audit(event));
+                }
+                if record.summary.state == FlowState::Complete
+                    && !self.passive_check_hooks().is_empty()
+                {
+                    let _ = self
+                        .plugins
+                        .passive_tx
+                        .try_send((done.project, Box::new(record.clone())));
                 }
                 if !self.history_dirty {
                     self.history_dirty = true;

@@ -65,8 +65,12 @@ pub(crate) fn to_request_with_config(
         );
     }
     let effective_version = config.http_version.unwrap_or(request.version);
-    if !config.http1_keep_alive && effective_version != HttpVersion::Http2 {
-        headers.insert("connection", HeaderValue::from_static("close"));
+    if effective_version != HttpVersion::Http2 {
+        if !config.http1_keep_alive {
+            headers.insert("connection", HeaderValue::from_static("close"));
+        } else if config.set_connection_keep_alive {
+            headers.insert("connection", HeaderValue::from_static("keep-alive"));
+        }
     }
     let effective_route = uri
         .host_str()

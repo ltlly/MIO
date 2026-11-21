@@ -434,7 +434,7 @@ impl State {
                     if pos != target {
                         self.plugins.order.swap(pos, target);
                         self.sync_proxy_plugin_hooks();
-                        self.sync_registry_order();
+                        self.sync_registry_order()?;
                     }
                 }
                 let order = self.plugins.order.clone();

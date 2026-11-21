@@ -1564,8 +1564,9 @@ impl Workbench {
                 let req_b64 = B64_STANDARD.encode(&raw_req);
                 let resp_b64 = B64_STANDARD.encode(&raw_resp);
 
-                let mut xml = String::from(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<items mioVersion=\"2026.10.1\">\n",
+                let mut xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<items mioVersion=\"{}\">\n",
+                    env!("CARGO_PKG_VERSION")
                 );
                 xml.push_str(&format!(
                     "  <item>\n    <title>{}</title>\n    <url>{}</url>\n    <host>{}</host>\n    <port>{}</port>\n    <protocol>{}</protocol>\n    <method>{}</method>\n    <path>{}</path>\n    <request base64=\"true\">{}</request>\n    <status>{}</status>\n    <responselength>{}</responselength>\n    <response base64=\"true\">{}</response>\n  </item>\n",
@@ -1624,8 +1625,9 @@ impl Workbench {
                     .iter()
                     .find(|t| !t.closed && t.id == ws_id)
             {
-                let mut xml = String::from(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<websocketHistory mioVersion=\"2026.10.1\">\n",
+                let mut xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<websocketHistory mioVersion=\"{}\">\n",
+                    env!("CARGO_PKG_VERSION")
                 );
                 for item in &ws_tab.history {
                     xml.push_str(&format!(

@@ -338,10 +338,9 @@ impl State {
                 let ca = tokio::task::spawn_blocking(authority::regenerate).await??;
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
                 self.ca = Some(ca);
-                if (self.proxy.is_some() || !self.extra_proxies.is_empty())
-                    && let Ok(workspace) = self.store.workspace()
-                {
-                    let _ = self.reload_running_proxy_from_workspace(&workspace).await;
+                if self.proxy.is_some() || !self.extra_proxies.is_empty() {
+                    let workspace = self.store.workspace()?;
+                    self.reload_running_proxy_from_workspace(&workspace).await?;
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
             }
@@ -354,17 +353,27 @@ impl State {
                 .await??;
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
                 self.ca = Some(ca);
-                if (self.proxy.is_some() || !self.extra_proxies.is_empty())
-                    && let Ok(workspace) = self.store.workspace()
-                {
-                    let _ = self.reload_running_proxy_from_workspace(&workspace).await;
+                if self.proxy.is_some() || !self.extra_proxies.is_empty() {
+                    let workspace = self.store.workspace()?;
+                    self.reload_running_proxy_from_workspace(&workspace).await?;
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
             }
             Command::CheckForUpdates { manual } => {
+                let fallback_route = match self.updater_fallback_route() {
+                    Ok(route) => route,
+                    Err(err) => {
+                        if manual {
+                            self.emit(Event::UpdateStatus(UpdateStatus::Error(format!(
+                                "{err:#}"
+                            ))))
+                            .await;
+                        }
+                        return Err(err);
+                    }
+                };
                 let events = self.events.clone();
                 let cancel = self.cancel.child_token();
-                let fallback_route = self.updater_fallback_route();
                 tokio::spawn(async move {
                     if manual {
                         let _ = events.send(Event::UpdateStatus(UpdateStatus::Checking)).await;
@@ -383,9 +392,18 @@ impl State {
                 });
             }
             Command::InstallUpdate { info } => {
+                let fallback_route = match self.updater_fallback_route() {
+                    Ok(route) => route,
+                    Err(err) => {
+                        self.emit(Event::UpdateStatus(UpdateStatus::Error(format!(
+                            "{err:#}"
+                        ))))
+                        .await;
+                        return Err(err);
+                    }
+                };
                 let events = self.events.clone();
                 let cancel = self.cancel.child_token();
-                let fallback_route = self.updater_fallback_route();
                 tokio::spawn(async move {
                     let tx = events.clone();
                     let terminal = crate::updater::download_and_install_update_with_route(
@@ -405,18 +423,10 @@ impl State {
         Ok(())
     }
 
-    fn updater_fallback_route(&self) -> mio_proxy::UpstreamRoute {
-        self.store
-            .workspace()
-            .ok()
-            .and_then(|ws| {
-                let tls = self
-                    .preferences
-                    .effective_upstream_tls(&ws.upstream_tls)
-                    .unwrap_or(mio_proxy::UpstreamTls::System);
-                ws.upstream_proxy.to_route_with_tls(tls).ok()
-            })
-            .unwrap_or(mio_proxy::UpstreamRoute::Direct)
+    fn updater_fallback_route(&self) -> Result<mio_proxy::UpstreamRoute> {
+        let ws = self.store.workspace()?;
+        let tls = self.preferences.effective_upstream_tls(&ws.upstream_tls)?;
+        Ok(ws.upstream_proxy.to_route_with_tls(tls)?)
     }
 
     pub(super) async fn apply_save_workspace(

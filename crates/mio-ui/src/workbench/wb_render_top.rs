@@ -478,7 +478,7 @@ impl Workbench {
                                             .text_size(px(28.))
                                             .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_color(rgb(0xdb612f))
-                                            .child("Ext,"),
+                                            .child("MIO,"),
                                     )
                                     .child(
                                         div()
@@ -625,14 +625,14 @@ impl Workbench {
                             .child(self.render_discover_card(
                                 "discover-card-command-palette",
                                 "Go faster with command palette",
-                                "Find and run External commands instantly to keep your workflow moving without digging through menus.",
+                                "Find and run MIO commands instantly to keep your workflow moving without digging through menus.",
                                 cx.listener(|this, _, window, cx| {
                                     this.open_command_palette(window, cx);
                                 }),
                             ))
                             .child(self.render_discover_card(
                                 "discover-card-custom-logic",
-                                "Customize External with your own logic",
+                                "Customize MIO with your own logic",
                                 "Shape your workflow and surface the data that matters most using custom actions, columns, and filters.",
                                 cx.listener(|this, _, window, cx| {
                                     this.select_tool(Tool::Proxy, window, cx);

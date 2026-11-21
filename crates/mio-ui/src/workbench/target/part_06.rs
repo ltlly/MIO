@@ -571,19 +571,25 @@ mod tests {
                 assert!(window.find("dashboard-task-filter-banner").visible());
                 assert!(
                     window
-                        .find(SharedString::from(format!("dashboard-issue-row-{alpha_id}")))
+                        .find(SharedString::from(format!(
+                            "dashboard-issue-activity-row-{alpha_id}"
+                        )))
                         .visible()
                 );
                 assert!(
                     window
-                        .try_find(SharedString::from(format!("dashboard-issue-row-{beta_id}")))
+                        .try_find(SharedString::from(format!(
+                            "dashboard-issue-activity-row-{beta_id}"
+                        )))
                         .is_none()
                 );
                 window.click("dashboard-show-all-task-issues", cx);
                 window.render_frame(cx);
                 assert!(
                     window
-                        .find(SharedString::from(format!("dashboard-issue-row-{beta_id}")))
+                        .find(SharedString::from(format!(
+                            "dashboard-issue-activity-row-{beta_id}"
+                        )))
                         .visible()
                 );
             })

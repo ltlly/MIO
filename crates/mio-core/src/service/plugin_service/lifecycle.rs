@@ -698,9 +698,9 @@ impl State {
         });
     }
 
-    pub(super) fn sync_registry_order(&self) {
+    pub(super) fn sync_registry_order(&self) -> Result<()> {
         if !self.plugins.registry.is_persistent() {
-            return;
+            return Ok(());
         }
         let ordered_ids: Vec<String> = self
             .plugins
@@ -716,7 +716,7 @@ impl State {
                     .map(|inst| inst.info.manifest.id.clone())
             })
             .collect();
-        let _ = self.plugins.registry.reorder_by_ids(&ordered_ids);
+        self.plugins.registry.reorder_by_ids(&ordered_ids)
     }
 
     pub(super) fn start_plugin_open(

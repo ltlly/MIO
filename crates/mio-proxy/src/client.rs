@@ -44,6 +44,7 @@ pub struct SendConfig {
     pub normalize_http1_line_endings: bool,
     pub raw_http1_override: Option<Arc<[u8]>>,
     pub http1_keep_alive: bool,
+    pub set_connection_keep_alive: bool,
     pub http2_reuse: bool,
     pub use_connection_pool: bool,
     pub allow_http2_alpn_override: bool,
@@ -82,6 +83,7 @@ impl std::fmt::Debug for SendConfig {
                 &self.raw_http1_override.is_some(),
             )
             .field("http1_keep_alive", &self.http1_keep_alive)
+            .field("set_connection_keep_alive", &self.set_connection_keep_alive)
             .field("http2_reuse", &self.http2_reuse)
             .field("use_connection_pool", &self.use_connection_pool)
             .field("allow_http2_alpn_override", &self.allow_http2_alpn_override)
@@ -124,6 +126,7 @@ impl Default for SendConfig {
             normalize_http1_line_endings: true,
             raw_http1_override: None,
             http1_keep_alive: true,
+            set_connection_keep_alive: false,
             http2_reuse: true,
             use_connection_pool: false,
             allow_http2_alpn_override: false,

@@ -833,7 +833,7 @@ fn target_sitemap_issues_row_context_menu_triage_comparer_mio_at_and_delete(
                 assert_eq!(view.tool, Tool::Comparer);
                 assert_eq!(view.extra_tools.comparer_items.len(), 1);
 
-                view.delete_target_site_map_finding(finding_id, false, window, cx);
+                view.delete_target_site_map_finding(finding_id, window, cx);
                 assert!(view.audit_dashboard.snapshot.findings.is_empty());
             });
         })

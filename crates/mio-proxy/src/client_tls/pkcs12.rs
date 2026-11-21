@@ -83,8 +83,22 @@ pub(super) fn unpack_pkcs12_to_pem(
     match run_openssl_pkcs12(&temp.path, password, false) {
         Ok(stdout) => Ok(stdout),
         Err(Pkcs12RunError::Failed { stderr }) if needs_openssl3_legacy_retry(&stderr) => {
-            run_openssl_pkcs12(&temp.path, password, true)
-                .map_err(|_| classify_pkcs12_stderr(&stderr))
+            match run_openssl_pkcs12(&temp.path, password, true) {
+                Ok(stdout) => Ok(stdout),
+                Err(Pkcs12RunError::Failed {
+                    stderr: retry_stderr,
+                }) => {
+                    let chosen = if retry_stderr.trim().is_empty() {
+                        &stderr
+                    } else {
+                        &retry_stderr
+                    };
+                    Err(classify_pkcs12_stderr(chosen))
+                }
+                #[cfg(windows)]
+                Err(Pkcs12RunError::NotFound) => unpack_pkcs12_windows_native(pkcs12_bytes, password),
+                Err(Pkcs12RunError::Fatal(error)) => Err(error),
+            }
         }
         Err(Pkcs12RunError::Failed { stderr }) => Err(classify_pkcs12_stderr(&stderr)),
         #[cfg(windows)]
@@ -512,7 +526,7 @@ fn unpack_pkcs12_windows_native(
                 let mode_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(mode_cbc.as_ptr().cast(), mode_cbc.len() * 2)
                 };
-                let _ = unsafe {
+                if unsafe {
                     BCryptSetProperty(
                         h_alg,
                         prop_name.as_ptr(),
@@ -520,7 +534,13 @@ fn unpack_pkcs12_windows_native(
                         mode_bytes.len() as u32,
                         0,
                     )
-                };
+                } != 0
+                {
+                    unsafe {
+                        let _ = BCryptCloseAlgorithmProvider(h_alg, 0);
+                    }
+                    return Err(ProxyError::Tls("无法配置 Windows BCrypt 3DES CBC 模式".into()));
+                }
                 let mut h_sym: *mut c_void = std::ptr::null_mut();
                 let gen_st = unsafe {
                     BCryptGenerateSymmetricKey(

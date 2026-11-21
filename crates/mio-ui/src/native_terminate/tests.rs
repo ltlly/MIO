@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::{os::unix::ffi::OsStrExt, time::{Duration, Instant}};
 
 use objc2::{
     AnyThread, DefinedClass, define_class,
@@ -39,41 +39,26 @@ fn file_panel_response_rejects_abort_and_invalid_success_without_losing_cancel()
 }
 
 #[test]
-fn file_panel_paths_preserve_non_utf8_bytes_and_existing_extension_workaround() {
+fn file_panel_paths_preserve_non_utf8_bytes_and_double_extensions() {
     use std::ffi::OsStr;
 
     let path = PathBuf::from(OsStr::from_bytes(b"/tmp/MIO-\xff.mio"));
     let url = NSURL::from_file_path(&path).unwrap();
     assert_eq!(selected_file_path(&url).unwrap(), path);
+    for raw in [
+        b"/tmp/report.backup.bak".as_slice(),
+        b"/tmp/data.json.js".as_slice(),
+        b"/tmp/file.mio".as_slice(),
+    ] {
+        let double_path = PathBuf::from(OsStr::from_bytes(raw));
+        let double_url = NSURL::from_file_path(&double_path).unwrap();
+        assert_eq!(selected_file_path(&double_url).unwrap(), double_path);
+    }
     let remote = NSURL::URLWithString(&objc2_foundation::NSString::from_str(
         "https://example.invalid/not-a-file",
     ))
     .unwrap();
     assert!(selected_file_path(&remote).is_err());
-    for (raw, major, expected) in [
-        (
-            b"/tmp/MIO-\xff.sql.s".as_slice(),
-            15,
-            b"/tmp/MIO-\xff.sql".as_slice(),
-        ),
-        (
-            b"/tmp/MIO-\xff.sql.s".as_slice(),
-            14,
-            b"/tmp/MIO-\xff.sql.s".as_slice(),
-        ),
-        (
-            b"/tmp/file.sql.unknown".as_slice(),
-            27,
-            b"/tmp/file.sql.unknown".as_slice(),
-        ),
-        (b"/tmp/file.mio".as_slice(), 27, b"/tmp/file.mio".as_slice()),
-    ] {
-        let path = PathBuf::from(OsStr::from_bytes(raw));
-        assert_eq!(
-            normalize_save_path(path, major).as_os_str().as_bytes(),
-            expected
-        );
-    }
 }
 
 #[gpui_kit::test]

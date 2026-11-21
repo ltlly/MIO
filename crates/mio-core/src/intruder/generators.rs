@@ -221,8 +221,6 @@ pub struct NumbersGeneratorConfig {
     #[serde(default)]
     pub min_fraction_digits: usize,
     #[serde(default)]
-    pub max_fraction_digits: Option<usize>,
-    #[serde(default)]
     pub seed: u64,
 }
 
@@ -1033,12 +1031,6 @@ pub fn generate_numbers_config_payloads(config: &NumbersGeneratorConfig) -> Resu
         );
     }
     ensure!(config.min_fraction_digits <= 16, "最少小数位数不能超过 16");
-    if let Some(max_f) = config.max_fraction_digits {
-        ensure!(
-            max_f >= config.min_fraction_digits && max_f <= 16,
-            "最大小数位数必须 >= 最少小数位数且 <= 16"
-        );
-    }
     let format_num = |value: i128| -> Vec<u8> {
         let magnitude = value.unsigned_abs();
         let mut int_part = if config.hex {
@@ -1124,6 +1116,54 @@ pub fn generate_numbers_config_payloads(config: &NumbersGeneratorConfig) -> Resu
     }
 }
 
+fn format_custom_date_pattern(pat: &str, y: i32, m: u32, d: u32) -> String {
+    use std::fmt::Write as _;
+    const MONTHS_SHORT: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let m_idx = (m.saturating_sub(1) as usize).min(11);
+    let yy = y.rem_euclid(100);
+    let mut out = String::with_capacity(pat.len() + 4);
+    let mut rest = pat;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("yyyy") {
+            let _ = write!(out, "{y:04}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("MMM") {
+            out.push_str(MONTHS_SHORT[m_idx]);
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("MM") {
+            let _ = write!(out, "{m:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("yy") {
+            let _ = write!(out, "{yy:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("dd") {
+            let _ = write!(out, "{d:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("%Y") {
+            let _ = write!(out, "{y:04}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("%y") {
+            let _ = write!(out, "{yy:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("%m") {
+            let _ = write!(out, "{m:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("%d") {
+            let _ = write!(out, "{d:02}");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("%b") {
+            out.push_str(MONTHS_SHORT[m_idx]);
+            rest = after;
+        } else if let Some(ch) = rest.chars().next() {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
 pub fn generate_dates_with_unit_payloads(
     from_date: &str,
     to_date: &str,
@@ -1140,20 +1180,7 @@ pub fn generate_dates_with_unit_payloads(
     let (ty, tm, td) = parse_iso_ymd(to_date)?;
     let format_custom = |y: i32, m: u32, d: u32| -> String {
         if let Some(pat) = custom_pattern.filter(|p| !p.trim().is_empty()) {
-            const MONTHS_SHORT: [&str; 12] = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-            ];
-            let m_idx = (m.saturating_sub(1) as usize).min(11);
-            pat.replace("%Y", &format!("{y:04}"))
-                .replace("yyyy", &format!("{y:04}"))
-                .replace("%y", &format!("{:02}", y.rem_euclid(100)))
-                .replace("yy", &format!("{:02}", y.rem_euclid(100)))
-                .replace("%m", &format!("{m:02}"))
-                .replace("MM", &format!("{m:02}"))
-                .replace("%d", &format!("{d:02}"))
-                .replace("dd", &format!("{d:02}"))
-                .replace("%b", MONTHS_SHORT[m_idx])
-                .replace("MMM", MONTHS_SHORT[m_idx])
+            format_custom_date_pattern(pat, y, m, d)
         } else {
             format_ymd(y, m, d, format)
         }

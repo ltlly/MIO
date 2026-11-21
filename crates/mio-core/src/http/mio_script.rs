@@ -1936,6 +1936,9 @@ fn dynamic_eq(a: &Dynamic, b: &Dynamic) -> bool {
     if let (Some(ia), Some(ib)) = (a.clone().try_cast::<i64>(), b.clone().try_cast::<i64>()) {
         return ia == ib;
     }
+    if let (Some(fa), Some(fb)) = (a.clone().try_cast::<f64>(), b.clone().try_cast::<f64>()) {
+        return fa == fb;
+    }
     if let (Some(ba), Some(bb)) = (a.clone().try_cast::<bool>(), b.clone().try_cast::<bool>()) {
         return ba == bb;
     }

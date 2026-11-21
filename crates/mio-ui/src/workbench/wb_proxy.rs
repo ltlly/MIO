@@ -364,19 +364,21 @@ impl Workbench {
             return;
         };
         let next_annotated = !self.annotated_live_flows.contains(&flow_id);
-        if next_annotated {
-            self.annotated_live_flows.insert(flow_id);
-        } else {
-            self.annotated_live_flows.remove(&flow_id);
-        }
-        let _ = self.enqueue(
+        if !self.enqueue(
             Command::SetLiveFlowAnnotated {
                 project,
                 flow_id,
                 annotated: next_annotated,
             },
             cx,
-        );
+        ) {
+            return;
+        }
+        if next_annotated {
+            self.annotated_live_flows.insert(flow_id);
+        } else {
+            self.annotated_live_flows.remove(&flow_id);
+        }
         if next_annotated {
             let mut settings = self.workspace.proxy_interception.clone();
             let mut changed = false;
@@ -409,18 +411,19 @@ impl Workbench {
                 changed = true;
             }
             if changed {
-                self.set_proxy_interception(Some(project), settings, cx);
+                let _ = self.set_proxy_interception(Some(project), settings, cx);
             }
-            if !self.intercept_responses {
-                self.intercept_responses = true;
-                let _ = self.enqueue(
+            if !self.intercept_responses
+                && self.enqueue(
                     Command::SetIntercept {
                         project,
                         requests: self.intercept_requests,
                         responses: true,
                     },
                     cx,
-                );
+                )
+            {
+                self.intercept_responses = true;
             }
             self.status = "已标记拦截此请求的响应。".into();
         } else {

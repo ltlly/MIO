@@ -1,6 +1,4 @@
 #[cfg(target_os = "macos")]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(target_os = "macos")]
 use std::rc::Weak;
 #[cfg(target_os = "macos")]
 use std::sync::Mutex;
@@ -39,7 +37,7 @@ use objc2::class;
 #[cfg(all(target_os = "macos", not(test)))]
 use objc2_app_kit::{NSOpenPanel, NSSavePanel};
 #[cfg(all(target_os = "macos", not(test)))]
-use objc2_foundation::{NSProcessInfo, NSString};
+use objc2_foundation::NSString;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -190,13 +188,7 @@ pub(crate) fn prompt_for_new_path(
                         };
                         let result = file_panel_result(response, || {
                             let url = panel.URL().context("保存选择器未返回文件 URL。")?;
-                            let path = selected_file_path(&url)?;
-                            Ok(normalize_save_path(
-                                path,
-                                NSProcessInfo::processInfo()
-                                    .operatingSystemVersion()
-                                    .majorVersion,
-                            ))
+                            selected_file_path(&url)
                         });
                         panel.orderOut(None);
                         let _ = done_tx.send(result);
@@ -240,24 +232,6 @@ fn selected_file_path(url: &NSURL) -> anyhow::Result<PathBuf> {
     ensure!(url.isFileURL(), "文件选择器返回的不是本地文件 URL。");
     url.to_file_path()
         .context("文件选择器返回的路径无法完整读取；未应用选择。")
-}
-
-#[cfg(target_os = "macos")]
-fn normalize_save_path(mut path: PathBuf, macos_major: isize) -> PathBuf {
-    let Some(filename) = path.file_name() else {
-        return path;
-    };
-    let chunks = filename
-        .as_bytes()
-        .split(|&byte| byte == b'.')
-        .collect::<Vec<_>>();
-    if let &[_, second, third] = chunks.as_slice()
-        && second.starts_with(third)
-        && macos_major >= 15
-    {
-        path.set_extension("");
-    }
-    path
 }
 
 const TERMINATE_TIMEOUT: f64 = 30.0;

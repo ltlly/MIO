@@ -915,14 +915,14 @@ impl TableDelegate for HistoryDelegate {
             .separator()
             .item(
                 PopupMenuItem::new(if row_in_scope {
-                    "添加到范围"
-                } else {
                     "从范围中排除 (Exclude from scope)"
+                } else {
+                    "添加到范围"
                 })
                 .action(if row_in_scope {
-                    Box::new(AddToScope) as Box<dyn gpui_kit::Action>
-                } else {
                     Box::new(crate::ExcludeFromScope) as Box<dyn gpui_kit::Action>
+                } else {
+                    Box::new(AddToScope) as Box<dyn gpui_kit::Action>
                 })
                 .disabled(!can_operate),
             )

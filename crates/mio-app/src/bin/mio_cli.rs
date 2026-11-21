@@ -424,9 +424,12 @@ fn run_headless_server(
     }
     if json {
         println!(
-            "{{\"ready\":true,\"socket\":{:?},\"proxy_address\":{:?}}}",
-            socket_path.to_string_lossy(),
-            active_proxy
+            "{}",
+            serde_json::json!({
+                "ready": true,
+                "socket": socket_path.to_string_lossy(),
+                "proxy_address": active_proxy,
+            })
         );
     } else {
         println!(

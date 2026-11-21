@@ -247,46 +247,52 @@ impl ExtSource {
         (end >= start && end <= self.header.boundary).then_some((start, end - start))
     }
 
-    fn field_bytes<const N: usize>(&mut self, obj: &RawObject, id: u8) -> Option<[u8; N]> {
-        let (start, max_width) = self.field_span(obj, id)?;
+    fn field_bytes<const N: usize>(&mut self, obj: &RawObject, id: u8) -> Result<Option<[u8; N]>> {
+        let Some((start, max_width)) = self.field_span(obj, id) else {
+            return Ok(None);
+        };
         if max_width < N as u64 {
-            return None;
+            return Ok(None);
         }
         let mut buf = [0u8; N];
-        self.read_exact(start, &mut buf).ok()?;
-        Some(buf)
+        self.read_exact(start, &mut buf)?;
+        Ok(Some(buf))
     }
 
-    pub(crate) fn opt_u8(&mut self, obj: &RawObject, id: u8) -> Option<u8> {
-        self.field_bytes::<1>(obj, id).map(|[v]| v)
+    pub(crate) fn opt_u8(&mut self, obj: &RawObject, id: u8) -> Result<Option<u8>> {
+        Ok(self.field_bytes::<1>(obj, id)?.map(|[v]| v))
     }
 
-    pub(crate) fn opt_bool(&mut self, obj: &RawObject, id: u8) -> Option<bool> {
-        match self.opt_u8(obj, id)? {
-            0 => Some(false),
-            1 => Some(true),
+    pub(crate) fn opt_bool(&mut self, obj: &RawObject, id: u8) -> Result<Option<bool>> {
+        Ok(match self.opt_u8(obj, id)? {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
             _ => None,
-        }
+        })
     }
 
-    pub(crate) fn opt_i32(&mut self, obj: &RawObject, id: u8) -> Option<i32> {
-        self.field_bytes::<4>(obj, id).map(i32::from_be_bytes)
+    pub(crate) fn opt_i32(&mut self, obj: &RawObject, id: u8) -> Result<Option<i32>> {
+        Ok(self.field_bytes::<4>(obj, id)?.map(i32::from_be_bytes))
     }
 
-    pub(crate) fn opt_i64(&mut self, obj: &RawObject, id: u8) -> Option<i64> {
-        self.field_bytes::<8>(obj, id).map(i64::from_be_bytes)
+    pub(crate) fn opt_i64(&mut self, obj: &RawObject, id: u8) -> Result<Option<i64>> {
+        Ok(self.field_bytes::<8>(obj, id)?.map(i64::from_be_bytes))
     }
 
-    pub(crate) fn opt_ref(&mut self, obj: &RawObject, id: u8) -> Option<Option<u64>> {
-        let raw = self.opt_i64(obj, id)?;
+    pub(crate) fn opt_ref(&mut self, obj: &RawObject, id: u8) -> Result<Option<Option<u64>>> {
+        let Some(raw) = self.opt_i64(obj, id)? else {
+            return Ok(None);
+        };
         if raw == 0 {
-            return Some(None);
+            return Ok(Some(None));
         }
-        let addr = u64::try_from(raw).ok()?;
+        let Some(addr) = u64::try_from(raw).ok() else {
+            return Ok(None);
+        };
         if addr >= HEADER_SIZE && addr < self.header.boundary {
-            Some(Some(addr))
+            Ok(Some(Some(addr)))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -336,7 +342,7 @@ impl ExtSource {
 
     pub(crate) fn read_collection_slots(&mut self, addr: u64) -> Result<Vec<Option<u64>>> {
         let obj = self.object(addr)?;
-        let len_raw = self.opt_i32(&obj, 0).context("集合缺少 f0 逻辑长度")?;
+        let len_raw = self.opt_i32(&obj, 0)?.context("集合缺少 f0 逻辑长度")?;
         let logical_len = usize::try_from(len_raw).context("集合逻辑长度为负数")?;
         ensure!(
             logical_len <= MAX_COLLECTION_ITEMS,
@@ -350,26 +356,26 @@ impl ExtSource {
             .is_some_and(|(_, width)| width == 4)
             && obj.fields.iter().any(|f| f.id == 2);
         if is_chunked {
-            let chunk_width_raw = self.opt_i32(&obj, 1).context("分块集合缺少块宽度")?;
+            let chunk_width_raw = self.opt_i32(&obj, 1)?.context("分块集合缺少块宽度")?;
             let chunk_width = usize::try_from(chunk_width_raw)
                 .ok()
                 .filter(|w| *w > 0)
                 .context("分块集合块宽度无效")?;
             let leading = self
-                .opt_i32(&obj, 3)
+                .opt_i32(&obj, 3)?
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(0);
             let chunks_addr = self
-                .opt_ref(&obj, 2)
+                .opt_ref(&obj, 2)?
                 .flatten()
                 .context("分块集合缺少块列表引用")?;
             let chunks_obj = self.object(chunks_addr)?;
             let active_chunks = self
-                .opt_i32(&chunks_obj, 0)
+                .opt_i32(&chunks_obj, 0)?
                 .and_then(|v| usize::try_from(v).ok())
                 .context("分块集合活动块数无效")?;
             let refs_addr = self
-                .opt_ref(&chunks_obj, 1)
+                .opt_ref(&chunks_obj, 1)?
                 .flatten()
                 .context("分块集合缺少块引用数组")?;
             let chunk_addrs = self.read_reference_array(refs_addr, active_chunks)?;
@@ -409,7 +415,7 @@ impl ExtSource {
             }
             Ok(out)
         } else {
-            let Some(refs_addr) = self.opt_ref(&obj, 1).flatten() else {
+            let Some(refs_addr) = self.opt_ref(&obj, 1)?.flatten() else {
                 bail!("直接集合缺少背板引用数组");
             };
             let slots = self.read_reference_array(refs_addr, logical_len)?;
@@ -418,12 +424,12 @@ impl ExtSource {
         }
     }
 
-    pub(crate) fn read_bytes(&mut self, addr: u64) -> Option<Vec<u8>> {
+    pub(crate) fn read_bytes(&mut self, addr: u64) -> Result<Option<Vec<u8>>> {
         if addr < HEADER_SIZE || addr + 8 > self.header.boundary {
-            return None;
+            return Ok(None);
         }
         let mut head = [0u8; 8];
-        self.read_exact(addr, &mut head).ok()?;
+        self.read_exact(addr, &mut head)?;
         let total_size = i32::from_be_bytes(head[..4].try_into().unwrap());
         let element_count = i32::from_be_bytes(head[4..8].try_into().unwrap());
         if total_size >= 9
@@ -436,30 +442,36 @@ impl ExtSource {
             let take = (element_count as usize).min(MAX_IMPORT_RAW_BYTES);
             let mut out = vec![0u8; take];
             if take > 0 {
-                self.read_exact(addr + 8, &mut out).ok()?;
+                self.read_exact(addr + 8, &mut out)?;
             }
-            return Some(out);
+            return Ok(Some(out));
         }
 
-        let obj = self.object(addr).ok()?;
-        let logical_raw = self.opt_i32(&obj, 0)?;
+        let obj = self.object(addr)?;
+        let Some(logical_raw) = self.opt_i32(&obj, 0)? else {
+            return Ok(None);
+        };
         if logical_raw < 0 {
-            return None;
+            return Ok(None);
         }
         if logical_raw == 0 {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let target_len = (logical_raw as usize).min(MAX_IMPORT_RAW_BYTES);
-        let wrapper_addr = self.opt_ref(&obj, 1)??;
-        let wrapper = self.object(wrapper_addr).ok()?;
-        let active_raw = self.opt_i32(&wrapper, 0)?;
+        let Some(wrapper_addr) = self.opt_ref(&obj, 1)?.flatten() else {
+            return Ok(None);
+        };
+        let wrapper = self.object(wrapper_addr)?;
+        let Some(active_raw) = self.opt_i32(&wrapper, 0)? else {
+            return Ok(None);
+        };
         if active_raw <= 0 {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
-        let refs_addr = self.opt_ref(&wrapper, 1)??;
-        let chunk_addrs = self
-            .read_reference_array(refs_addr, active_raw as usize)
-            .ok()?;
+        let Some(refs_addr) = self.opt_ref(&wrapper, 1)?.flatten() else {
+            return Ok(None);
+        };
+        let chunk_addrs = self.read_reference_array(refs_addr, active_raw as usize)?;
         let mut out = Vec::with_capacity(target_len);
         for chunk_addr in chunk_addrs.into_iter().flatten() {
             if out.len() >= target_len {
@@ -469,134 +481,168 @@ impl ExtSource {
                 break;
             }
             let mut chead = [0u8; 8];
-            self.read_exact(chunk_addr, &mut chead).ok()?;
+            self.read_exact(chunk_addr, &mut chead)?;
             let cts = i32::from_be_bytes(chead[..4].try_into().unwrap());
             let cec = i32::from_be_bytes(chead[4..8].try_into().unwrap());
             if cts < 9 || cec < 0 || (cts as u64) != (cec as u64).max(1) + 8 {
-                return None;
+                return Ok(None);
             }
             let take = (cec as usize).min(target_len - out.len());
             if take > 0 {
                 let start = out.len();
                 out.resize(start + take, 0);
-                self.read_exact(chunk_addr + 8, &mut out[start..]).ok()?;
+                self.read_exact(chunk_addr + 8, &mut out[start..])?;
             }
         }
-        Some(out)
+        Ok(Some(out))
     }
 
-    fn read_utf16_array_units(&mut self, addr: u64, max_units: usize) -> Option<Vec<u16>> {
+    fn read_utf16_array_units(&mut self, addr: u64, max_units: usize) -> Result<Option<Vec<u16>>> {
         if addr < HEADER_SIZE || addr + 8 > self.header.boundary {
-            return None;
+            return Ok(None);
         }
         let mut head = [0u8; 8];
-        self.read_exact(addr, &mut head).ok()?;
+        self.read_exact(addr, &mut head)?;
         let total_size = i32::from_be_bytes(head[..4].try_into().unwrap());
         let element_count = i32::from_be_bytes(head[4..8].try_into().unwrap());
         if total_size < 9 || element_count < 0 {
-            return None;
+            return Ok(None);
         }
-        let payload_bytes = (element_count as u64).checked_mul(2)?;
+        let Some(payload_bytes) = (element_count as u64).checked_mul(2) else {
+            return Ok(None);
+        };
         if (total_size as u64) != payload_bytes.max(1) + 8 {
-            return None;
+            return Ok(None);
         }
         if addr
             .checked_add(total_size as u64)
             .is_none_or(|end| end > self.header.boundary)
         {
-            return None;
+            return Ok(None);
         }
         let take = (element_count as usize).min(max_units);
         let mut raw = vec![0u8; take * 2];
         if take > 0 {
-            self.read_exact(addr + 8, &mut raw).ok()?;
+            self.read_exact(addr + 8, &mut raw)?;
         }
-        Some(
+        Ok(Some(
             raw.as_chunks::<2>()
                 .0
                 .iter()
                 .map(|pair| u16::from_be_bytes(*pair))
                 .collect(),
-        )
+        ))
     }
 
-    pub(crate) fn read_utf16_string(&mut self, addr: u64, max_units: usize) -> Option<String> {
+    pub(crate) fn read_utf16_string(
+        &mut self,
+        addr: u64,
+        max_units: usize,
+    ) -> Result<Option<String>> {
         let cap = max_units.min(MAX_UTF16_UNITS);
-        if let Some(units) = self.read_utf16_array_units(addr, cap) {
-            return Some(String::from_utf16_lossy(&units));
+        if let Some(units) = self.read_utf16_array_units(addr, cap)? {
+            return Ok(Some(String::from_utf16_lossy(&units)));
         }
-        let obj = self.object(addr).ok()?;
+        let obj = self.object(addr)?;
         if self.field_span(&obj, 0).is_some_and(|(_, w)| w == 4)
             && obj.fields.iter().any(|f| f.id == 3)
         {
-            let len_raw = self.opt_i32(&obj, 0)?;
+            let Some(len_raw) = self.opt_i32(&obj, 0)? else {
+                return Ok(None);
+            };
             if len_raw <= 0 {
-                return Some(String::new());
+                return Ok(Some(String::new()));
             }
             let target = (len_raw as usize).min(cap);
-            let wrapper_addr = self.opt_ref(&obj, 3)??;
-            let wrapper = self.object(wrapper_addr).ok()?;
-            let active = self.opt_i32(&wrapper, 0)?;
+            let Some(wrapper_addr) = self.opt_ref(&obj, 3)?.flatten() else {
+                return Ok(None);
+            };
+            let wrapper = self.object(wrapper_addr)?;
+            let Some(active) = self.opt_i32(&wrapper, 0)? else {
+                return Ok(None);
+            };
             if active <= 0 {
-                return Some(String::new());
+                return Ok(Some(String::new()));
             }
-            let refs_addr = self.opt_ref(&wrapper, 1)??;
-            let chunks = self
-                .read_reference_array(refs_addr, active as usize)
-                .ok()?;
+            let Some(refs_addr) = self.opt_ref(&wrapper, 1)?.flatten() else {
+                return Ok(None);
+            };
+            let chunks = self.read_reference_array(refs_addr, active as usize)?;
             let mut units = Vec::with_capacity(target);
             for chunk_addr in chunks.into_iter().flatten() {
                 if units.len() >= target {
                     break;
                 }
                 let remain = target - units.len();
-                let part = self.read_utf16_array_units(chunk_addr, remain)?;
+                let Some(part) = self.read_utf16_array_units(chunk_addr, remain)? else {
+                    return Ok(None);
+                };
                 units.extend(part);
             }
-            return Some(String::from_utf16_lossy(&units));
+            return Ok(Some(String::from_utf16_lossy(&units)));
         }
         if obj.fields.iter().any(|f| f.id == 1)
             && self.field_span(&obj, 2).is_some_and(|(_, w)| w >= 4)
-            && let Some(len_raw) = self.opt_i32(&obj, 2)
+            && let Some(len_raw) = self.opt_i32(&obj, 2)?
         {
             if len_raw <= 0 {
-                return Some(String::new());
+                return Ok(Some(String::new()));
             }
-            let backing = self.opt_ref(&obj, 1)??;
-            let units = self.read_utf16_array_units(backing, (len_raw as usize).min(cap))?;
-            return Some(String::from_utf16_lossy(&units));
-        }
-        if let Some(arr_opt) = self.opt_ref(&obj, 0) {
-            let Some(arr_addr) = arr_opt else {
-                return Some(String::new());
+            let Some(backing) = self.opt_ref(&obj, 1)?.flatten() else {
+                return Ok(None);
             };
-            let units = self.read_utf16_array_units(arr_addr, cap)?;
-            return Some(String::from_utf16_lossy(&units));
+            let Some(units) =
+                self.read_utf16_array_units(backing, (len_raw as usize).min(cap))?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(String::from_utf16_lossy(&units)));
         }
-        None
+        if let Some(arr_opt) = self.opt_ref(&obj, 0)? {
+            let Some(arr_addr) = arr_opt else {
+                return Ok(Some(String::new()));
+            };
+            let Some(units) = self.read_utf16_array_units(arr_addr, cap)? else {
+                return Ok(None);
+            };
+            return Ok(Some(String::from_utf16_lossy(&units)));
+        }
+        Ok(None)
     }
 
-    pub(crate) fn read_service_origin(&mut self, addr: u64) -> Option<String> {
-        let service = self.object(addr).ok()?;
-        let host_addr = self.opt_ref(&service, 0)??;
-        let host = self.read_utf16_string(host_addr, 4096)?;
+    pub(crate) fn read_service_origin(&mut self, addr: u64) -> Result<Option<String>> {
+        let service = self.object(addr)?;
+        let Some(host_addr) = self.opt_ref(&service, 0)?.flatten() else {
+            return Ok(None);
+        };
+        let Some(host) = self.read_utf16_string(host_addr, 4096)? else {
+            return Ok(None);
+        };
         let host = host.trim();
         if host.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let port_raw = self.opt_i32(&service, 1)?;
-        let port = u16::try_from(port_raw).ok().filter(|p| *p > 0)?;
-        let tls = self.opt_bool(&service, 2).unwrap_or(port == 443);
+        let Some(port_raw) = self.opt_i32(&service, 1)? else {
+            return Ok(None);
+        };
+        let Some(port) = u16::try_from(port_raw).ok().filter(|p| *p > 0) else {
+            return Ok(None);
+        };
+        let tls = self.opt_bool(&service, 2)?.unwrap_or(port == 443);
         let scheme = if tls { "https" } else { "http" };
         let authority = if host.contains(':') && !host.starts_with('[') {
-            host.parse::<std::net::Ipv6Addr>().ok()?;
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Ok(None);
+            }
             format!("[{host}]")
         } else {
             host.to_owned()
         };
         let origin = format!("{scheme}://{authority}:{port}");
-        crate::validate_target_origin(&origin).ok()?;
-        Some(origin)
+        if crate::validate_target_origin(&origin).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(origin))
     }
 }
 

@@ -983,6 +983,9 @@ pub(in crate::server) async fn process_http(
         normalize_http1_line_endings: true,
         raw_http1_override: None,
         http1_keep_alive: state.config.http1_keep_alive && !state.config.use_http10_in_requests,
+        set_connection_keep_alive: state.config.set_request_connection_header
+            && state.config.http1_keep_alive
+            && !state.config.use_http10_in_requests,
         http2_reuse: state.config.enable_http2,
         use_connection_pool: state.config.use_connection_pool,
         allow_http2_alpn_override: false,

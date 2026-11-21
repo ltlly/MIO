@@ -80,22 +80,22 @@ pub(crate) fn inspect_report(
     if src.header.project_root != 0 {
         let root = src.object(src.header.project_root)?;
         check_cancel(cancel)?;
-        if let Some(Some(f1_addr)) = src.opt_ref(&root, 1)
+        if let Some(Some(f1_addr)) = src.opt_ref(&root, 1)?
             && let Ok(f1) = src.object(f1_addr)
         {
             for (fid, col_path) in [(0u8, "root.f1.f0"), (1u8, "root.f1.f1")] {
-                collections.push(inspect_collection(&mut src, &f1, fid, col_path));
+                collections.push(inspect_collection(&mut src, &f1, fid, col_path)?);
             }
         }
         check_cancel(cancel)?;
-        if let Some(Some(f2_addr)) = src.opt_ref(&root, 2)
+        if let Some(Some(f2_addr)) = src.opt_ref(&root, 2)?
             && let Ok(f2) = src.object(f2_addr)
         {
-            let tabs_report = inspect_collection(&mut src, &f2, 1, "root.f2.f1");
+            let tabs_report = inspect_collection(&mut src, &f2, 1, "root.f2.f1")?;
             let tab_len = tabs_report.logical_items;
             collections.push(tabs_report);
-            collections.push(inspect_collection(&mut src, &f2, 4, "root.f2.f4"));
-            if let Some(active_raw) = src.opt_i32(&f2, 0)
+            collections.push(inspect_collection(&mut src, &f2, 4, "root.f2.f4")?);
+            if let Some(active_raw) = src.opt_i32(&f2, 0)?
                 && let Ok(active_u64) = u64::try_from(active_raw)
                 && tab_len.is_some_and(|len| active_u64 < len)
             {
@@ -123,17 +123,17 @@ fn inspect_collection(
     parent: &source::RawObject,
     field_id: u8,
     path: &str,
-) -> ExtCollectionReport {
+) -> Result<ExtCollectionReport> {
     if !parent.fields.iter().any(|f| f.id == field_id) {
-        return ExtCollectionReport {
+        return Ok(ExtCollectionReport {
             path: path.into(),
             logical_items: None,
             indexed_items: 0,
             message_count: 0,
             state: "missing".into(),
-        };
+        });
     }
-    match src.opt_ref(parent, field_id) {
+    Ok(match src.opt_ref(parent, field_id)? {
         Some(None) => ExtCollectionReport {
             path: path.into(),
             logical_items: None,
@@ -141,31 +141,29 @@ fn inspect_collection(
             message_count: 0,
             state: "null".into(),
         },
-        Some(Some(addr)) => match src
-            .object(addr)
-            .ok()
-            .and_then(|obj| src.opt_i32(&obj, 0))
-            .and_then(|n| u64::try_from(n).ok())
-        {
-            Some(len) => ExtCollectionReport {
-                path: path.into(),
-                logical_items: Some(len),
-                indexed_items: 0,
-                message_count: 0,
-                state: if len == 0 {
-                    "empty".into()
-                } else {
-                    "available".into()
+        Some(Some(addr)) => {
+            let obj = src.object(addr)?;
+            match src.opt_i32(&obj, 0)?.and_then(|n| u64::try_from(n).ok()) {
+                Some(len) => ExtCollectionReport {
+                    path: path.into(),
+                    logical_items: Some(len),
+                    indexed_items: 0,
+                    message_count: 0,
+                    state: if len == 0 {
+                        "empty".into()
+                    } else {
+                        "available".into()
+                    },
                 },
-            },
-            None => ExtCollectionReport {
-                path: path.into(),
-                logical_items: None,
-                indexed_items: 0,
-                message_count: 0,
-                state: "failed".into(),
-            },
-        },
+                None => ExtCollectionReport {
+                    path: path.into(),
+                    logical_items: None,
+                    indexed_items: 0,
+                    message_count: 0,
+                    state: "failed".into(),
+                },
+            }
+        }
         None => ExtCollectionReport {
             path: path.into(),
             logical_items: None,
@@ -173,7 +171,7 @@ fn inspect_collection(
             message_count: 0,
             state: "failed".into(),
         },
-    }
+    })
 }
 
 pub(crate) enum StreamExtEvent {
@@ -207,15 +205,13 @@ pub(crate) fn stream_ext_file(
         let root = src.object(src.header.project_root)?;
         check_cancel(cancel)?;
 
-        if let Some(Some(f1_addr)) = src.opt_ref(&root, 1)
-            && let Ok(f1) = src.object(f1_addr)
-        {
+        if let Some(Some(f1_addr)) = src.opt_ref(&root, 1)? {
+            let f1 = src.object(f1_addr)?;
             let mut seen_proxy_addrs = HashSet::new();
             for (fid, col_path) in [(0u8, "root.f1.f0"), (1u8, "root.f1.f1")] {
-                let mut col_report = inspect_collection(&mut src, &f1, fid, col_path);
-                if let Some(Some(col_addr)) = src.opt_ref(&f1, fid)
-                    && let Ok(slots) = src.read_collection_slots(col_addr)
-                {
+                let mut col_report = inspect_collection(&mut src, &f1, fid, col_path)?;
+                if let Some(Some(col_addr)) = src.opt_ref(&f1, fid)? {
+                    let slots = src.read_collection_slots(col_addr)?;
                     let total_slots = slots.len() as u64;
                     col_report.logical_items = Some(total_slots);
                     let mut col_indexed = 0u64;
@@ -228,15 +224,13 @@ pub(crate) fn stream_ext_file(
                         let Some(raw_addr) = slot_addr else {
                             continue;
                         };
-                        let Ok(item_obj) = src.object(raw_addr) else {
-                            continue;
-                        };
+                        let item_obj = src.object(raw_addr)?;
                         let is_new = seen_proxy_addrs.insert(item_obj.address);
                         if !is_new {
                             continue;
                         }
                         if let Some((flow, msg_cnt)) =
-                            parse_proxy_item(&mut src, &item_obj, proxy_count)
+                            parse_proxy_item(&mut src, &item_obj, proxy_count)?
                         {
                             proxy_count += 1;
                             col_indexed += 1;
@@ -252,17 +246,15 @@ pub(crate) fn stream_ext_file(
         }
 
         check_cancel(cancel)?;
-        if let Some(Some(f2_addr)) = src.opt_ref(&root, 2)
-            && let Ok(f2) = src.object(f2_addr)
-        {
-            repeater_active_raw = src.opt_i32(&f2, 0);
+        if let Some(Some(f2_addr)) = src.opt_ref(&root, 2)? {
+            let f2 = src.object(f2_addr)?;
+            repeater_active_raw = src.opt_i32(&f2, 0)?;
             let mut group_by_addr: BTreeMap<u64, Uuid> = BTreeMap::new();
             let mut repeater_groups = Vec::new();
 
-            let mut groups_report = inspect_collection(&mut src, &f2, 4, "root.f2.f4");
-            if let Some(Some(groups_addr)) = src.opt_ref(&f2, 4)
-                && let Ok(group_slots) = src.read_collection_slots(groups_addr)
-            {
+            let mut groups_report = inspect_collection(&mut src, &f2, 4, "root.f2.f4")?;
+            if let Some(Some(groups_addr)) = src.opt_ref(&f2, 4)? {
+                let group_slots = src.read_collection_slots(groups_addr)?;
                 groups_report.logical_items = Some(group_slots.len() as u64);
                 let mut grp_indexed = 0u64;
                 for slot_addr in group_slots.into_iter().flatten() {
@@ -270,13 +262,11 @@ pub(crate) fn stream_ext_file(
                     if repeater_groups.len() >= MAX_WORK_GROUPS {
                         break;
                     }
-                    let Ok(grp_obj) = src.object(slot_addr) else {
-                        continue;
-                    };
+                    let grp_obj = src.object(slot_addr)?;
                     if group_by_addr.contains_key(&grp_obj.address) {
                         continue;
                     }
-                    if let Some(group) = parse_repeater_group(&mut src, &grp_obj) {
+                    if let Some(group) = parse_repeater_group(&mut src, &grp_obj)? {
                         group_by_addr.insert(grp_obj.address, group.id);
                         repeater_groups.push(group);
                         grp_indexed += 1;
@@ -286,12 +276,11 @@ pub(crate) fn stream_ext_file(
             }
             on_event(StreamExtEvent::RepeaterGroups(repeater_groups))?;
 
-            let mut tabs_report = inspect_collection(&mut src, &f2, 1, "root.f2.f1");
+            let mut tabs_report = inspect_collection(&mut src, &f2, 1, "root.f2.f1")?;
             let mut tab_history_reports = Vec::new();
             let mut total_draft_bytes = 0usize;
-            if let Some(Some(tabs_addr)) = src.opt_ref(&f2, 1)
-                && let Ok(tab_slots) = src.read_collection_slots(tabs_addr)
-            {
+            if let Some(Some(tabs_addr)) = src.opt_ref(&f2, 1)? {
+                let tab_slots = src.read_collection_slots(tabs_addr)?;
                 tabs_report.logical_items = Some(tab_slots.len() as u64);
                 let mut tab_indexed = 0u64;
                 let mut tab_messages = 0u64;
@@ -303,9 +292,7 @@ pub(crate) fn stream_ext_file(
                     let Some(slot_addr) = slot_opt else {
                         continue;
                     };
-                    let Ok(tab_obj) = src.object(slot_addr) else {
-                        continue;
-                    };
+                    let tab_obj = src.object(slot_addr)?;
                     if let Some((tab, tab_msg_cnt, hist_report_opt)) = parse_repeater_tab(
                         &mut src,
                         &tab_obj,
@@ -370,22 +357,26 @@ fn parse_proxy_item(
     src: &mut ExtSource,
     item: &source::RawObject,
     seq_idx: u64,
-) -> Option<(ImportedProxyFlow, u64)> {
-    let service_origin = src
-        .opt_ref(item, 2)
-        .flatten()
-        .and_then(|p_addr| src.object(p_addr).ok())
-        .and_then(|parsed_req| src.opt_ref(&parsed_req, 0).flatten())
-        .and_then(|s_addr| src.read_service_origin(s_addr));
+) -> Result<Option<(ImportedProxyFlow, u64)>> {
+    let service_origin = match src.opt_ref(item, 2)? {
+        Some(Some(p_addr)) => {
+            let parsed_req = src.object(p_addr)?;
+            match src.opt_ref(&parsed_req, 0)? {
+                Some(Some(s_addr)) => src.read_service_origin(s_addr)?,
+                _ => None,
+            }
+        }
+        _ => None,
+    };
 
-    let raw_f15 = src
-        .opt_ref(item, 15)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr));
-    let raw_f17 = src
-        .opt_ref(item, 17)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr));
+    let raw_f15 = match src.opt_ref(item, 15)? {
+        Some(Some(addr)) => src.read_bytes(addr)?,
+        _ => None,
+    };
+    let raw_f17 = match src.opt_ref(item, 17)? {
+        Some(Some(addr)) => src.read_bytes(addr)?,
+        _ => None,
+    };
 
     let parsed_orig_req = raw_f15
         .as_deref()
@@ -402,17 +393,17 @@ fn parse_proxy_item(
         }
         (Some((orig, _)), None) => (orig, None, 1),
         (None, Some((edit, _))) => (edit, None, 1),
-        (None, None) => return None,
+        (None, None) => return Ok(None),
     };
 
-    let raw_f18 = src
-        .opt_ref(item, 18)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr));
-    let raw_f20 = src
-        .opt_ref(item, 20)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr));
+    let raw_f18 = match src.opt_ref(item, 18)? {
+        Some(Some(addr)) => src.read_bytes(addr)?,
+        _ => None,
+    };
+    let raw_f20 = match src.opt_ref(item, 20)? {
+        Some(Some(addr)) => src.read_bytes(addr)?,
+        _ => None,
+    };
 
     let parsed_orig_resp = raw_f18.as_deref().and_then(parse_imported_response);
     let parsed_edit_resp = raw_f20.as_deref().and_then(parse_imported_response);
@@ -429,21 +420,21 @@ fn parse_proxy_item(
             (None, None) => (None, None, 0),
         };
 
-    let observed_start = src.opt_i64(item, 11);
+    let observed_start = src.opt_i64(item, 11)?;
     let time_known = observed_start.is_some();
     let started_unix_ms = observed_start.unwrap_or(0);
 
     let timer_f28 = src
-        .opt_i64(item, 28)
+        .opt_i64(item, 28)?
         .and_then(|v| u64::try_from(v).ok())
         .filter(|&v| v > 0)
         .map(|v| v.min(86_400_000));
     let timer_f29 = src
-        .opt_i64(item, 29)
+        .opt_i64(item, 29)?
         .and_then(|v| u64::try_from(v).ok())
         .filter(|&v| v > 0)
         .map(|v| v.min(86_400_000));
-    let end_ms = src.opt_i64(item, 30).unwrap_or(0);
+    let end_ms = src.opt_i64(item, 30)?.unwrap_or(0);
     let elapsed_ms = if timer_f28.is_some() || timer_f29.is_some() {
         timer_f29.unwrap_or(0).max(timer_f28.unwrap_or(0))
     } else if time_known && end_ms > started_unix_ms {
@@ -466,22 +457,27 @@ fn parse_proxy_item(
     };
 
     let listener_port = src
-        .opt_i32(item, 14)
+        .opt_i32(item, 14)?
         .and_then(|p| u16::try_from(p).ok())
         .filter(|p| *p > 0);
 
-    let highlight = src.opt_u8(item, 13).filter(|c| *c <= 9).unwrap_or(0);
+    let highlight = src.opt_u8(item, 13)?.filter(|c| *c <= 9).unwrap_or(0);
 
-    let notes = src
-        .opt_ref(item, 27)
-        .flatten()
-        .and_then(|ann_addr| src.object(ann_addr).ok())
-        .and_then(|ann_obj| src.opt_ref(&ann_obj, 2).flatten())
-        .and_then(|note_addr| src.read_utf16_string(note_addr, 32_768))
-        .map(|s| truncate_utf8_clean(&s, MAX_LIVE_NOTE_BYTES))
-        .unwrap_or_default();
+    let notes = match src.opt_ref(item, 27)? {
+        Some(Some(ann_addr)) => {
+            let ann_obj = src.object(ann_addr)?;
+            match src.opt_ref(&ann_obj, 2)? {
+                Some(Some(note_addr)) => src
+                    .read_utf16_string(note_addr, 32_768)?
+                    .map(|s| truncate_utf8_clean(&s, MAX_LIVE_NOTE_BYTES))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    };
 
-    Some((
+    Ok(Some((
         ImportedProxyFlow {
             index: seq_idx,
             started_unix_ms,
@@ -498,27 +494,29 @@ fn parse_proxy_item(
             highlight,
         },
         req_msg_cnt + resp_msg_cnt,
-    ))
+    )))
 }
 
-fn parse_repeater_group(src: &mut ExtSource, obj: &source::RawObject) -> Option<TabGroup> {
-    let raw_title = src
-        .opt_ref(obj, 0)
-        .flatten()
-        .and_then(|addr| src.read_utf16_string(addr, 4096))?;
+fn parse_repeater_group(src: &mut ExtSource, obj: &source::RawObject) -> Result<Option<TabGroup>> {
+    let Some(Some(addr)) = src.opt_ref(obj, 0)? else {
+        return Ok(None);
+    };
+    let Some(raw_title) = src.read_utf16_string(addr, 4096)? else {
+        return Ok(None);
+    };
     let trimmed = raw_title.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
     let title = truncate_utf8_clean(trimmed, MAX_TITLE_BYTES);
-    let expanded = src.opt_bool(obj, 2).unwrap_or(true);
-    let color = src.opt_u8(obj, 1).filter(|c| *c <= 14);
-    Some(TabGroup {
+    let expanded = src.opt_bool(obj, 2)?.unwrap_or(true);
+    let color = src.opt_u8(obj, 1)?.filter(|c| *c <= 14);
+    Ok(Some(TabGroup {
         id: Uuid::new_v4(),
         title,
         collapsed: !expanded,
         color,
-    })
+    }))
 }
 
 fn parse_repeater_tab(
@@ -529,11 +527,10 @@ fn parse_repeater_tab(
     total_draft_bytes: &mut usize,
     cancel: &CancellationToken,
 ) -> Result<Option<(ImportedRepeaterTab, u64, Option<ExtCollectionReport>)>> {
-    let raw_title = src
-        .opt_ref(tab, 0)
-        .flatten()
-        .and_then(|addr| src.read_utf16_string(addr, 4096))
-        .unwrap_or_default();
+    let raw_title = match src.opt_ref(tab, 0)? {
+        Some(Some(addr)) => src.read_utf16_string(addr, 4096)?.unwrap_or_default(),
+        _ => String::new(),
+    };
     let clean_title = truncate_utf8_clean(raw_title.trim(), MAX_TITLE_BYTES);
     let title = if clean_title.is_empty() {
         (tab_idx + 1).to_string()
@@ -541,24 +538,25 @@ fn parse_repeater_tab(
         clean_title
     };
 
-    let group = src
-        .opt_ref(tab, 32)
-        .flatten()
-        .and_then(|g_addr| src.object(g_addr).ok())
-        .and_then(|g_obj| group_by_addr.get(&g_obj.address).copied());
+    let group = match src.opt_ref(tab, 32)? {
+        Some(Some(g_addr)) => {
+            let g_obj = src.object(g_addr)?;
+            group_by_addr.get(&g_obj.address).copied()
+        }
+        _ => None,
+    };
 
-    let tab_service_origin = src
-        .opt_ref(tab, 3)
-        .flatten()
-        .and_then(|s_addr| src.read_service_origin(s_addr));
+    let tab_service_origin = match src.opt_ref(tab, 3)? {
+        Some(Some(s_addr)) => src.read_service_origin(s_addr)?,
+        _ => None,
+    };
 
     let mut history_items = Vec::new();
     let mut raw_to_valid_index = Vec::new();
     let mut history_report = None;
 
-    if let Some(Some(hist_addr)) = src.opt_ref(tab, 2)
-        && let Ok(pair_slots) = src.read_collection_slots(hist_addr)
-    {
+    if let Some(Some(hist_addr)) = src.opt_ref(tab, 2)? {
+        let pair_slots = src.read_collection_slots(hist_addr)?;
         let hist_logical = pair_slots.len() as u64;
         let mut hist_indexed = 0u64;
         let mut hist_messages = 0u64;
@@ -571,21 +569,16 @@ fn parse_repeater_tab(
                 raw_to_valid_index.push(None);
                 continue;
             };
-            let Ok(pair_obj) = src.object(pair_addr) else {
-                raw_to_valid_index.push(None);
-                continue;
-            };
-            let pair_service = src
-                .opt_ref(&pair_obj, 0)
-                .flatten()
-                .and_then(|s_addr| src.read_service_origin(s_addr))
-                .or_else(|| tab_service_origin.clone());
-            let Some(mut raw_req) = src
-                .opt_ref(&pair_obj, 2)
-                .flatten()
-                .and_then(|r_addr| src.read_bytes(r_addr))
-                .filter(|b| !b.is_empty())
-            else {
+            let pair_obj = src.object(pair_addr)?;
+            let pair_service = match src.opt_ref(&pair_obj, 0)? {
+                Some(Some(s_addr)) => src.read_service_origin(s_addr)?,
+                _ => None,
+            }
+            .or_else(|| tab_service_origin.clone());
+            let Some(mut raw_req) = (match src.opt_ref(&pair_obj, 2)? {
+                Some(Some(r_addr)) => src.read_bytes(r_addr)?.filter(|b| !b.is_empty()),
+                _ => None,
+            }) else {
                 raw_to_valid_index.push(None);
                 continue;
             };
@@ -598,18 +591,19 @@ fn parse_repeater_tab(
                 raw_to_valid_index.push(None);
                 continue;
             };
-            let response = src
-                .opt_ref(&pair_obj, 3)
-                .flatten()
-                .and_then(|resp_addr| src.read_bytes(resp_addr))
-                .and_then(|bytes| parse_imported_response(&bytes));
-            let pair_started = src.opt_i64(&pair_obj, 4).unwrap_or(0);
+            let response = match src.opt_ref(&pair_obj, 3)? {
+                Some(Some(resp_addr)) => src
+                    .read_bytes(resp_addr)?
+                    .and_then(|bytes| parse_imported_response(&bytes)),
+                _ => None,
+            };
+            let pair_started = src.opt_i64(&pair_obj, 4)?.unwrap_or(0);
             let pair_elapsed = src
-                .opt_i64(&pair_obj, 5)
+                .opt_i64(&pair_obj, 5)?
                 .and_then(|v| u64::try_from(v).ok())
                 .filter(|&v| v <= 86_400_000)
                 .unwrap_or(0);
-            let pair_is_http2 = src.opt_u8(&pair_obj, 11) == Some(2)
+            let pair_is_http2 = src.opt_u8(&pair_obj, 11)? == Some(2)
                 || response
                     .as_ref()
                     .is_some_and(|(r, _)| r.version == HttpVersion::Http2);
@@ -644,24 +638,24 @@ fn parse_repeater_tab(
         });
     }
 
-    let selected_raw = src.opt_i32(tab, 1).unwrap_or(-1);
+    let selected_raw = src.opt_i32(tab, 1)?.unwrap_or(-1);
     let selected_from_f1 = usize::try_from(selected_raw)
         .ok()
         .and_then(|idx| raw_to_valid_index.get(idx).copied().flatten());
 
-    let mut current_f4 = src
-        .opt_ref(tab, 4)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr))
-        .unwrap_or_default();
+    let mut current_f4 = match src.opt_ref(tab, 4)? {
+        Some(Some(addr)) => src.read_bytes(addr)?.unwrap_or_default(),
+        _ => Vec::new(),
+    };
     if current_f4.len() > MAX_DRAFT_SINGLE_BYTES {
         current_f4.truncate(MAX_DRAFT_SINGLE_BYTES);
     }
-    let current_f5_resp = src
-        .opt_ref(tab, 5)
-        .flatten()
-        .and_then(|addr| src.read_bytes(addr))
-        .and_then(|bytes| parse_imported_response(&bytes));
+    let current_f5_resp = match src.opt_ref(tab, 5)? {
+        Some(Some(addr)) => src
+            .read_bytes(addr)?
+            .and_then(|bytes| parse_imported_response(&bytes)),
+        _ => None,
+    };
 
     let mut tab_msg_cnt = 0u64;
     if !current_f4.is_empty() {
