@@ -6,12 +6,7 @@ use crate::{
 };
 use mio_plugin_api::protocol;
 
-pub(super) fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
-}
+pub(super) use crate::codec_util::now_unix_ms;
 
 pub(super) fn build_scanner_flow(
     id: FlowId,

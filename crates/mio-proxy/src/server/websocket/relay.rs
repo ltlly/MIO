@@ -16,7 +16,6 @@ use std::time::Instant;
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -405,10 +404,4 @@ impl Relay<'_> {
     }
 }
 
-pub(super) fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
+pub(super) use crate::now_unix_ms;

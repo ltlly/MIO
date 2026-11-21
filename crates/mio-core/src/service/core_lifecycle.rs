@@ -593,19 +593,7 @@ impl State {
 }
 
 fn current_local_hh_mm(now_secs: i64) -> (u32, u32) {
-    #[cfg(unix)]
-    {
-        let t = now_secs as libc::time_t;
-        let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
-        // SAFETY: `localtime_r` writes into our stack-allocated `tm` struct.
-        let res = unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) };
-        if !res.is_null() {
-            let tm = unsafe { tm.assume_init() };
-            return (tm.tm_hour.max(0) as u32, tm.tm_min.max(0) as u32);
-        }
-    }
-    let day_secs = now_secs.rem_euclid(86_400) as u32;
-    (day_secs / 3600, (day_secs % 3600) / 60)
+    crate::codec_util::local_hh_mm(now_secs)
 }
 
 fn scheduled_task_due(trigger_spec: &str, now_secs: i64, last_fired_min: Option<i64>) -> bool {

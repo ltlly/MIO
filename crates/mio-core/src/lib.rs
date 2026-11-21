@@ -1,6 +1,7 @@
 mod api;
 pub mod audit_engine;
 mod authority;
+pub mod codec_util;
 pub mod ext_archive;
 pub mod har;
 mod http;
@@ -19,6 +20,7 @@ pub mod updater;
 mod workspace;
 
 pub use api::*;
+pub use codec_util::now_unix_ms;
 pub use http::mio_script::*;
 pub use http::test_match_and_replace_rule;
 pub use har::export_flows_to_har;

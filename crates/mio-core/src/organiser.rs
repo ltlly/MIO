@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use url::Url;
@@ -104,13 +103,7 @@ pub(crate) fn validate_organiser_item(item: &OrganiserItem) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
+pub(crate) use crate::codec_util::now_unix_ms;
 
 pub(crate) fn normalize_source_tool(source_tool: &str) -> Result<String> {
     let trimmed = source_tool.trim();

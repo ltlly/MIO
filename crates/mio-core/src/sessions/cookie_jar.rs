@@ -449,32 +449,7 @@ pub(crate) fn parse_http_cookie_date_ms(input: &str) -> Option<i64> {
     if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
-    let days = days_from_civil(year, month, day)?;
-    let secs = days
-        .checked_mul(86_400)?
-        .checked_add(i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second.min(59)))?;
-    secs.checked_mul(1000)
-}
-
-fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    let max_days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-            if leap { 29 } else { 28 }
-        }
-        _ => return None,
-    };
-    if day > max_days {
-        return None;
-    }
-    let y = year - i64::from(month <= 2);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64;
-    let m = u64::from(month);
-    let d = u64::from(day);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + (doe as i64) - 719_468)
+    let date = chrono::NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)?;
+    let dt = date.and_hms_opt(hour, minute, second.min(59))?.and_utc();
+    Some(dt.timestamp_millis())
 }

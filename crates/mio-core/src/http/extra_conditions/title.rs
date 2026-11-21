@@ -2,8 +2,6 @@ use anyhow::{Result, bail, ensure};
 
 use super::{MAX_PAGE_TITLE_BYTES, MAX_TITLE_SCAN_BYTES};
 
-const MAX_HTML_ENTITY_BYTES: usize = 32;
-
 /// Extracts and normalizes the first HTML `<title>` within the leading
 /// [`MAX_TITLE_SCAN_BYTES`] bytes of `body`, with an explicit check hook for
 /// cooperative cancellation / deadline polling.
@@ -28,7 +26,7 @@ pub(crate) fn extract_html_page_title_checked(
         "Proxy 页面标题原始字节超过限额"
     );
     let decoded = decode_utf8_or_latin1(raw_title, check)?;
-    let unescaped = decode_html_entities(&decoded, check)?;
+    let unescaped = crate::codec_util::html_decode_checked(&decoded, check)?;
     fold_html_title_whitespace(&unescaped, check)
 }
 
@@ -150,76 +148,6 @@ fn decode_utf8_or_latin1(bytes: &[u8], check: &impl Fn() -> Result<()>) -> Resul
     }
     check()?;
     Ok(decoded)
-}
-
-fn decode_html_entities(input: &str, check: &impl Fn() -> Result<()>) -> Result<String> {
-    let mut out = String::with_capacity(input.len().min(MAX_PAGE_TITLE_BYTES + 64));
-    let mut rest = input;
-    let mut steps = 0_usize;
-    while let Some(amp) = rest.find('&') {
-        steps = steps.wrapping_add(1);
-        if steps & 0x3ff == 0 {
-            check()?;
-        }
-        out.push_str(&rest[..amp]);
-        let after_amp = &rest[amp + 1..];
-        let window = &after_amp[..after_amp.floor_char_boundary(MAX_HTML_ENTITY_BYTES)];
-        if let Some(semi) = window.find(';') {
-            let candidate = &window[..semi];
-            if !candidate.contains('&')
-                && let Some(decoded) = decode_single_html_entity(candidate)
-            {
-                out.push(decoded);
-                rest = &after_amp[semi + 1..];
-                continue;
-            }
-        }
-        out.push('&');
-        rest = after_amp;
-    }
-    out.push_str(rest);
-    check()?;
-    Ok(out)
-}
-
-fn decode_single_html_entity(entity: &str) -> Option<char> {
-    if entity.eq_ignore_ascii_case("amp") {
-        return Some('&');
-    }
-    if entity.eq_ignore_ascii_case("lt") {
-        return Some('<');
-    }
-    if entity.eq_ignore_ascii_case("gt") {
-        return Some('>');
-    }
-    if entity.eq_ignore_ascii_case("quot") {
-        return Some('"');
-    }
-    if entity == "apos" {
-        return Some('\'');
-    }
-    if entity.eq_ignore_ascii_case("nbsp") {
-        return Some('\u{00a0}');
-    }
-    let numeric = entity.strip_prefix('#')?;
-    let codepoint = if let Some(hex) = numeric
-        .strip_prefix('x')
-        .or_else(|| numeric.strip_prefix('X'))
-    {
-        if hex.is_empty() || hex.len() > 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
-        }
-        u32::from_str_radix(hex, 16).ok()?
-    } else {
-        if numeric.is_empty() || numeric.len() > 8 || !numeric.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        numeric.parse::<u32>().ok()?
-    };
-    if codepoint == 0 {
-        return None;
-    }
-    char::from_u32(codepoint)
 }
 
 fn fold_html_title_whitespace(input: &str, check: &impl Fn() -> Result<()>) -> Result<String> {

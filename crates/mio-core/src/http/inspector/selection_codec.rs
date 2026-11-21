@@ -1,9 +1,7 @@
+use crate::codec_util;
+
 const MAX_SELECTION_CODEC_BYTES: usize = 512 * 1024;
 const MAX_CODEC_STEPS: usize = 4;
-
-const STD_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const URL_SAFE_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectorSelectionCodec {
@@ -44,22 +42,13 @@ impl DecodedInspectorSelection {
     }
 }
 
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn parse_hex_u16(bytes: &[u8]) -> Option<u16> {
     if bytes.len() < 4 {
         return None;
     }
     let mut out = 0u16;
     for &byte in &bytes[..4] {
-        out = (out << 4) | u16::from(hex_nibble(byte)?);
+        out = (out << 4) | u16::from(codec_util::hex_nibble(byte)?);
     }
     Some(out)
 }
@@ -97,8 +86,10 @@ fn try_url_decode_step(input: &str) -> Option<(String, InspectorSelectionCodec)>
                     continue;
                 }
                 if idx + 3 <= bytes.len()
-                    && let (Some(hi), Some(lo)) =
-                        (hex_nibble(bytes[idx + 1]), hex_nibble(bytes[idx + 2]))
+                    && let (Some(hi), Some(lo)) = (
+                        codec_util::hex_nibble(bytes[idx + 1]),
+                        codec_util::hex_nibble(bytes[idx + 2]),
+                    )
                 {
                     out.push((hi << 4) | lo);
                     saw_percent_escape = true;
@@ -129,63 +120,6 @@ fn try_url_decode_step(input: &str) -> Option<(String, InspectorSelectionCodec)>
     ))
 }
 
-fn decode_b64_sextet(byte: u8, url_safe: bool) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' if !url_safe => Some(62),
-        b'/' if !url_safe => Some(63),
-        b'-' if url_safe => Some(62),
-        b'_' if url_safe => Some(63),
-        _ => None,
-    }
-}
-
-fn decode_b64_canonical(clean: &[u8], url_safe: bool) -> Option<(Vec<u8>, bool)> {
-    if clean.len() < 4 {
-        return None;
-    }
-    let pad_count = clean.iter().rev().take_while(|&&b| b == b'=').count();
-    if pad_count > 2 || (pad_count > 0 && !clean.len().is_multiple_of(4)) {
-        return None;
-    }
-    let data = &clean[..clean.len() - pad_count];
-    if data.is_empty() || data.len() % 4 == 1 {
-        return None;
-    }
-    let mut sextets: Vec<u8> = Vec::with_capacity(data.len());
-    for &byte in data {
-        sextets.push(decode_b64_sextet(byte, url_safe)?);
-    }
-    let sextets: Box<[u8]> = sextets.into_boxed_slice();
-    let mut out = Vec::with_capacity(sextets.len() * 3 / 4);
-    let (chunks, rem) = sextets.as_chunks::<4>();
-    for chunk in chunks {
-        out.push((chunk[0] << 2) | (chunk[1] >> 4));
-        out.push(((chunk[1] & 0x0f) << 4) | (chunk[2] >> 2));
-        out.push(((chunk[2] & 0x03) << 6) | chunk[3]);
-    }
-    match rem.len() {
-        0 => {}
-        2 => {
-            if (rem[1] & 0x0f) != 0 {
-                return None;
-            }
-            out.push((rem[0] << 2) | (rem[1] >> 4));
-        }
-        3 => {
-            if (rem[2] & 0x03) != 0 {
-                return None;
-            }
-            out.push((rem[0] << 2) | (rem[1] >> 4));
-            out.push(((rem[1] & 0x0f) << 4) | (rem[2] >> 2));
-        }
-        _ => return None,
-    }
-    Some((out, pad_count > 0))
-}
-
 fn try_base64_decode_step(input: &str) -> Option<(String, InspectorSelectionCodec)> {
     if input
         .bytes()
@@ -198,7 +132,7 @@ fn try_base64_decode_step(input: &str) -> Option<(String, InspectorSelectionCode
         .filter(|byte| !matches!(byte, b'\r' | b'\n'))
         .collect();
     let url_safe = clean.contains(&b'-') || clean.contains(&b'_');
-    let (bytes, padded) = decode_b64_canonical(&clean, url_safe)?;
+    let (bytes, padded) = codec_util::base64_decode_canonical(&clean, url_safe)?;
     if !padded
         && clean.len() <= 8
         && (clean.iter().all(|b| b.is_ascii_lowercase())
@@ -249,37 +183,6 @@ pub fn decode_inspector_selection(input: &str) -> DecodedInspectorSelection {
     }
 }
 
-fn encode_b64(bytes: &[u8], url_safe: bool, padded: bool) -> String {
-    let alphabet = if url_safe {
-        URL_SAFE_ALPHABET
-    } else {
-        STD_ALPHABET
-    };
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let (chunks, rem) = bytes.as_chunks::<3>();
-    for chunk in chunks {
-        out.push(alphabet[(chunk[0] >> 2) as usize] as char);
-        out.push(alphabet[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
-        out.push(alphabet[(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6)) as usize] as char);
-        out.push(alphabet[(chunk[2] & 0x3f) as usize] as char);
-    }
-    if rem.len() == 1 {
-        out.push(alphabet[(rem[0] >> 2) as usize] as char);
-        out.push(alphabet[((rem[0] & 0x03) << 4) as usize] as char);
-        if padded {
-            out.push_str("==");
-        }
-    } else if rem.len() == 2 {
-        out.push(alphabet[(rem[0] >> 2) as usize] as char);
-        out.push(alphabet[(((rem[0] & 0x03) << 4) | (rem[1] >> 4)) as usize] as char);
-        out.push(alphabet[((rem[1] & 0x0f) << 2) as usize] as char);
-        if padded {
-            out.push('=');
-        }
-    }
-    out
-}
-
 fn encode_url(input: &str, plus_for_space: bool) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(input.len());
@@ -308,7 +211,7 @@ pub fn encode_inspector_selection(
     for &step in steps.iter().rev() {
         current = match step {
             InspectorSelectionCodec::Base64 { url_safe, padded } => {
-                encode_b64(current.as_bytes(), url_safe, padded)
+                codec_util::base64_encode_variant(current.as_bytes(), url_safe, padded)
             }
             InspectorSelectionCodec::Url { plus_for_space } => encode_url(&current, plus_for_space),
         };

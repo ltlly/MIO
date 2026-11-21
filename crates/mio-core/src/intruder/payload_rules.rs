@@ -3,10 +3,10 @@ use anyhow::{Context, Result, ensure};
 mod digests;
 
 use super::*;
+use crate::codec_util;
 use digests::{
-    base64_url_decode_bytes, base64_url_encode_bytes, compile_rule_regexes, gzip_compress_bytes,
-    html_decode_bytes, html_encode_bytes, md5_hex_bytes, reverse_payload_bytes, sha1_hex_bytes,
-    sha256_hex_bytes, sha384_hex_bytes, sha512_hex_bytes, substring_slice, transform_case_bytes,
+    compile_rule_regexes, gzip_compress_bytes, reverse_payload_bytes, substring_slice,
+    transform_case_bytes,
 };
 
 pub const DEFAULT_PAYLOAD_ENCODING_CHARS: &str = "!#$&'()*+,/:;=?@[] ";
@@ -138,32 +138,6 @@ pub(super) fn apply_payload_processing_rules_with_limit(
         }
     }
     let compiled_regexes = compile_rule_regexes(rules)?;
-    if let [rule] = rules {
-        let regex = compiled_regexes[0].as_ref();
-        let mut output_bytes = 0usize;
-        let mut kept_lens = Vec::with_capacity(values.len());
-        for value in values {
-            if matches!(rule, PayloadProcessingRule::SkipIfMatchesRegex { .. })
-                && regex.is_some_and(|re| re.is_match(value))
-            {
-                kept_lens.push(None);
-                continue;
-            }
-            let len = payload_processing_output_len(value, rule, regex)?;
-            output_bytes = output_bytes
-                .checked_add(len)
-                .context("Intruder payload 总字节数溢出")?;
-            ensure_payload_byte_limit(output_bytes, limit)?;
-            kept_lens.push(Some(len));
-        }
-        let mut out = Vec::with_capacity(values.len());
-        for (value, maybe_len) in values.iter().zip(kept_lens) {
-            if let Some(len) = maybe_len {
-                out.push(transform_payload(value, rule, regex, len)?);
-            }
-        }
-        return Ok(out);
-    }
     let mut stage_bytes = vec![0usize; rules.len()];
     let mut out = Vec::with_capacity(values.len());
     for value in values {
@@ -179,12 +153,12 @@ pub(super) fn apply_payload_processing_rules_with_limit(
                 skipped = true;
                 break;
             }
-            let output_len = payload_processing_output_len(source, rule, regex.as_ref())?;
+            let next = transform_payload(source, rule, regex.as_ref(), *total_bytes, limit)?;
             *total_bytes = total_bytes
-                .checked_add(output_len)
+                .checked_add(next.len())
                 .context("Intruder payload 总字节数溢出")?;
             ensure_payload_byte_limit(*total_bytes, limit)?;
-            transformed = Some(transform_payload(source, rule, regex.as_ref(), output_len)?);
+            transformed = Some(next);
         }
         if !skipped {
             out.push(transformed.unwrap_or_else(|| value.clone()));
@@ -209,129 +183,21 @@ fn literal_match_offsets<'a>(
     })
 }
 
-fn payload_processing_output_len(
-    input: &[u8],
-    rule: &PayloadProcessingRule,
-    regex: Option<&regex::bytes::Regex>,
+fn ensure_projected_len(
+    stage_bytes: usize,
+    projected: Option<usize>,
+    limit: usize,
 ) -> Result<usize> {
-    let length = match rule {
-        PayloadProcessingRule::AddPrefix(text) | PayloadProcessingRule::AddSuffix(text) => {
-            input.len().checked_add(text.len())
-        }
-        PayloadProcessingRule::Uppercase => Some(transform_case_bytes(input, true).len()),
-        PayloadProcessingRule::Lowercase => Some(transform_case_bytes(input, false).len()),
-        PayloadProcessingRule::Substring { offset, length } => {
-            Some(substring_slice(input, *offset, *length).len())
-        }
-        PayloadProcessingRule::Reverse | PayloadProcessingRule::SkipIfMatchesRegex { .. } => {
-            Some(input.len())
-        }
-        PayloadProcessingRule::Sha1Hex => Some(40),
-        PayloadProcessingRule::Sha256Hex => Some(64),
-        PayloadProcessingRule::Sha384Hex => Some(96),
-        PayloadProcessingRule::Sha512Hex => Some(128),
-        PayloadProcessingRule::Md5Hex => Some(32),
-        PayloadProcessingRule::HtmlEncode => Some(html_encode_bytes(input).len()),
-        PayloadProcessingRule::HtmlDecode => Some(html_decode_bytes(input).len()),
-        PayloadProcessingRule::Base64UrlEncode => Some(base64_url_encode_bytes(input).len()),
-        PayloadProcessingRule::Base64UrlDecode => Some(base64_url_decode_bytes(input)?.len()),
-        PayloadProcessingRule::GzipCompress => Some(gzip_compress_bytes(input)?.len()),
-        PayloadProcessingRule::InvokeExtension { processor_name } => {
-            anyhow::bail!("扩展处理器 {processor_name} 需要通过已加载插件通道运行")
-        }
-        PayloadProcessingRule::AddIfNotMatchRegex { addition, .. } => {
-            if regex.is_some_and(|re| re.is_match(input)) {
-                Some(input.len())
-            } else {
-                input.len().checked_add(addition.len())
-            }
-        }
-        PayloadProcessingRule::MatchReplaceRegex { replace_with, .. } => {
-            let re = regex.context("MatchReplaceRegex 缺少已编译正则表达式")?;
-            let replaced = re.replace_all(input, replace_with.as_bytes());
-            Some(replaced.len())
-        }
-        PayloadProcessingRule::MatchReplace {
-            match_pattern,
-            replace_with,
-        } => {
-            let count = literal_match_offsets(input, match_pattern.as_bytes()).count();
-            input
-                .len()
-                .checked_sub(
-                    count
-                        .checked_mul(match_pattern.len())
-                        .context("匹配长度溢出")?,
-                )
-                .and_then(|remaining| remaining.checked_add(count.checked_mul(replace_with.len())?))
-        }
-        PayloadProcessingRule::UrlEncode => input.len().checked_add(
-            input
-                .iter()
-                .filter(|&&byte| !url_unreserved(byte))
-                .count()
-                .checked_mul(2)
-                .context("URL 编码长度溢出")?,
-        ),
-        PayloadProcessingRule::UrlDecode => {
-            Some(url_decoded_bytes(input).try_fold(0usize, |length, byte| {
-                byte?;
-                Ok::<_, anyhow::Error>(length + 1)
-            })?)
-        }
-        PayloadProcessingRule::Base64Encode => input.len().div_ceil(3).checked_mul(4),
-        PayloadProcessingRule::Base64Decode => {
-            ensure!(
-                input.len().is_multiple_of(4),
-                "Base64 输入长度必须为 4 的倍数"
-            );
-            let (chunks, _) = input.as_chunks::<4>();
-            let Some((last, prefix)) = chunks.split_last() else {
-                return Ok(0);
-            };
-            ensure!(
-                prefix
-                    .iter()
-                    .flatten()
-                    .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')),
-                "Base64 包含无效字符或非末尾填充"
-            );
-            let (_, tail_length) = decode_base64_quartet(last)?;
-            prefix
-                .len()
-                .checked_mul(3)
-                .and_then(|length| length.checked_add(tail_length))
-        }
-        PayloadProcessingRule::AsciiHexEncode => input.len().checked_mul(2),
-        PayloadProcessingRule::AsciiHexDecode => {
-            let mut digits = 0usize;
-            for &byte in input {
-                if !byte.is_ascii_whitespace() {
-                    hex_nibble(byte).context("ASCII Hex 解码包含非十六进制字符")?;
-                    digits += 1;
-                }
-            }
-            ensure!(
-                digits.is_multiple_of(2),
-                "ASCII Hex 解码十六进制数字个数必须为偶数"
-            );
-            Some(digits / 2)
-        }
-    };
-    length.context("Intruder payload 总字节数溢出")
+    let len = projected.context("Intruder payload 总字节数溢出")?;
+    let next_total = stage_bytes
+        .checked_add(len)
+        .context("Intruder payload 总字节数溢出")?;
+    ensure_payload_byte_limit(next_total, limit)?;
+    Ok(len)
 }
 
 fn url_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn url_decoded_bytes(input: &[u8]) -> impl Iterator<Item = Result<u8>> + '_ {
@@ -347,8 +213,8 @@ fn url_decoded_bytes(input: &[u8]) -> impl Iterator<Item = Result<u8>> + '_ {
                     .get(index + 1)
                     .context("URL 解码遇到不完整的 % 转义")?;
                 index += 2;
-                let hi = hex_nibble(hi).context("URL 解码包含无效十六进制字符")?;
-                let lo = hex_nibble(lo).context("URL 解码包含无效十六进制字符")?;
+                let hi = codec_util::hex_nibble(hi).context("URL 解码包含无效十六进制字符")?;
+                let lo = codec_util::hex_nibble(lo).context("URL 解码包含无效十六进制字符")?;
                 Ok((hi << 4) | lo)
             })(),
             byte => Ok(byte),
@@ -360,56 +226,96 @@ fn transform_payload(
     input: &[u8],
     rule: &PayloadProcessingRule,
     regex: Option<&regex::bytes::Regex>,
-    output_len: usize,
+    stage_bytes: usize,
+    limit: usize,
 ) -> Result<Vec<u8>> {
     const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
-    const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(output_len);
     match rule {
         PayloadProcessingRule::AddPrefix(prefix) => {
+            let out_len = ensure_projected_len(stage_bytes, input.len().checked_add(prefix.len()), limit)?;
+            let mut out = Vec::with_capacity(out_len);
             out.extend_from_slice(prefix.as_bytes());
             out.extend_from_slice(input);
+            Ok(out)
         }
         PayloadProcessingRule::AddSuffix(suffix) => {
+            let out_len = ensure_projected_len(stage_bytes, input.len().checked_add(suffix.len()), limit)?;
+            let mut out = Vec::with_capacity(out_len);
             out.extend_from_slice(input);
             out.extend_from_slice(suffix.as_bytes());
+            Ok(out)
         }
-        PayloadProcessingRule::Uppercase => return Ok(transform_case_bytes(input, true)),
-        PayloadProcessingRule::Lowercase => return Ok(transform_case_bytes(input, false)),
+        PayloadProcessingRule::Uppercase => Ok(transform_case_bytes(input, true)),
+        PayloadProcessingRule::Lowercase => Ok(transform_case_bytes(input, false)),
         PayloadProcessingRule::Substring { offset, length } => {
-            return Ok(substring_slice(input, *offset, *length));
+            Ok(substring_slice(input, *offset, *length))
         }
-        PayloadProcessingRule::Reverse => return Ok(reverse_payload_bytes(input)),
-        PayloadProcessingRule::Sha1Hex => return Ok(sha1_hex_bytes(input)),
-        PayloadProcessingRule::Sha256Hex => return Ok(sha256_hex_bytes(input)),
-        PayloadProcessingRule::Sha384Hex => return Ok(sha384_hex_bytes(input)),
-        PayloadProcessingRule::Sha512Hex => return Ok(sha512_hex_bytes(input)),
-        PayloadProcessingRule::Md5Hex => return Ok(md5_hex_bytes(input)),
-        PayloadProcessingRule::HtmlEncode => return Ok(html_encode_bytes(input)),
-        PayloadProcessingRule::HtmlDecode => return Ok(html_decode_bytes(input)),
-        PayloadProcessingRule::Base64UrlEncode => return Ok(base64_url_encode_bytes(input)),
-        PayloadProcessingRule::Base64UrlDecode => return base64_url_decode_bytes(input),
-        PayloadProcessingRule::GzipCompress => return gzip_compress_bytes(input),
+        PayloadProcessingRule::Reverse => Ok(reverse_payload_bytes(input)),
+        PayloadProcessingRule::Sha1Hex => {
+            ensure_projected_len(stage_bytes, Some(40), limit)?;
+            Ok(codec_util::hex_encode(&codec_util::sha1_digest(input)).into_bytes())
+        }
+        PayloadProcessingRule::Sha256Hex => {
+            ensure_projected_len(stage_bytes, Some(64), limit)?;
+            Ok(codec_util::hex_encode(&codec_util::sha256_digest(input)).into_bytes())
+        }
+        PayloadProcessingRule::Sha384Hex => {
+            ensure_projected_len(stage_bytes, Some(96), limit)?;
+            Ok(codec_util::hex_encode(&codec_util::sha384_digest(input)).into_bytes())
+        }
+        PayloadProcessingRule::Sha512Hex => {
+            ensure_projected_len(stage_bytes, Some(128), limit)?;
+            Ok(codec_util::hex_encode(&codec_util::sha512_digest(input)).into_bytes())
+        }
+        PayloadProcessingRule::Md5Hex => {
+            ensure_projected_len(stage_bytes, Some(32), limit)?;
+            Ok(codec_util::hex_encode(&codec_util::md5_digest(input)).into_bytes())
+        }
+        PayloadProcessingRule::HtmlEncode => Ok(codec_util::html_encode_bytes(input)),
+        PayloadProcessingRule::HtmlDecode => Ok(codec_util::html_decode_bytes(input)),
+        PayloadProcessingRule::Base64UrlEncode => {
+            Ok(codec_util::base64url_encode(input).into_bytes())
+        }
+        PayloadProcessingRule::Base64UrlDecode => codec_util::base64url_decode(input),
+        PayloadProcessingRule::GzipCompress => gzip_compress_bytes(input),
         PayloadProcessingRule::InvokeExtension { processor_name } => {
             anyhow::bail!("扩展处理器 {processor_name} 需要通过已加载插件通道运行")
         }
         PayloadProcessingRule::MatchReplaceRegex { replace_with, .. } => {
             let re = regex.context("MatchReplaceRegex 缺少已编译正则表达式")?;
-            return Ok(re.replace_all(input, replace_with.as_bytes()).into_owned());
+            Ok(re.replace_all(input, replace_with.as_bytes()).into_owned())
         }
         PayloadProcessingRule::AddIfNotMatchRegex { addition, .. } => {
+            let matched = regex.is_some_and(|re| re.is_match(input));
+            let projected = if matched {
+                Some(input.len())
+            } else {
+                input.len().checked_add(addition.len())
+            };
+            let out_len = ensure_projected_len(stage_bytes, projected, limit)?;
+            let mut out = Vec::with_capacity(out_len);
             out.extend_from_slice(input);
-            if !regex.is_some_and(|re| re.is_match(input)) {
+            if !matched {
                 out.extend_from_slice(addition.as_bytes());
             }
+            Ok(out)
         }
-        PayloadProcessingRule::SkipIfMatchesRegex { .. } => {
-            out.extend_from_slice(input);
-        }
+        PayloadProcessingRule::SkipIfMatchesRegex { .. } => Ok(input.to_vec()),
         PayloadProcessingRule::MatchReplace {
             match_pattern,
             replace_with,
         } => {
+            let count = literal_match_offsets(input, match_pattern.as_bytes()).count();
+            let projected = input
+                .len()
+                .checked_sub(
+                    count
+                        .checked_mul(match_pattern.len())
+                        .context("匹配长度溢出")?,
+                )
+                .and_then(|remaining| remaining.checked_add(count.checked_mul(replace_with.len())?));
+            let out_len = ensure_projected_len(stage_bytes, projected, limit)?;
+            let mut out = Vec::with_capacity(out_len);
             let mut copied = 0;
             for offset in literal_match_offsets(input, match_pattern.as_bytes()) {
                 out.extend_from_slice(&input[copied..offset]);
@@ -417,8 +323,17 @@ fn transform_payload(
                 copied = offset + match_pattern.len();
             }
             out.extend_from_slice(&input[copied..]);
+            Ok(out)
         }
         PayloadProcessingRule::UrlEncode => {
+            let extra = input
+                .iter()
+                .filter(|&&byte| !url_unreserved(byte))
+                .count()
+                .checked_mul(2)
+                .context("URL 编码长度溢出")?;
+            let out_len = ensure_projected_len(stage_bytes, input.len().checked_add(extra), limit)?;
+            let mut out = Vec::with_capacity(out_len);
             for &byte in input {
                 if url_unreserved(byte) {
                     out.push(byte);
@@ -430,92 +345,18 @@ fn transform_payload(
                     ]);
                 }
             }
+            Ok(out)
         }
-        PayloadProcessingRule::UrlDecode => {
-            for byte in url_decoded_bytes(input) {
-                out.push(byte?);
-            }
-        }
+        PayloadProcessingRule::UrlDecode => url_decoded_bytes(input).collect(),
         PayloadProcessingRule::Base64Encode => {
-            const B64: &[u8; 64] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            for chunk in input.chunks(3) {
-                let b0 = chunk[0];
-                let b1 = *chunk.get(1).unwrap_or(&0);
-                let b2 = *chunk.get(2).unwrap_or(&0);
-                out.push(B64[usize::from(b0 >> 2)]);
-                out.push(B64[usize::from(((b0 & 0x03) << 4) | (b1 >> 4))]);
-                out.push(if chunk.len() > 1 {
-                    B64[usize::from(((b1 & 0x0f) << 2) | (b2 >> 6))]
-                } else {
-                    b'='
-                });
-                out.push(if chunk.len() > 2 {
-                    B64[usize::from(b2 & 0x3f)]
-                } else {
-                    b'='
-                });
-            }
+            ensure_projected_len(stage_bytes, input.len().div_ceil(3).checked_mul(4), limit)?;
+            Ok(codec_util::base64_encode(input).into_bytes())
         }
-        PayloadProcessingRule::Base64Decode => {
-            for chunk in input.as_chunks::<4>().0 {
-                let (bytes, len) = decode_base64_quartet(chunk)?;
-                out.extend_from_slice(&bytes[..len]);
-            }
-        }
+        PayloadProcessingRule::Base64Decode => codec_util::base64_decode(input),
         PayloadProcessingRule::AsciiHexEncode => {
-            for &byte in input {
-                out.extend_from_slice(&[
-                    HEX_LOWER[usize::from(byte >> 4)],
-                    HEX_LOWER[usize::from(byte & 0x0f)],
-                ]);
-            }
+            ensure_projected_len(stage_bytes, input.len().checked_mul(2), limit)?;
+            Ok(codec_util::hex_encode(input).into_bytes())
         }
-        PayloadProcessingRule::AsciiHexDecode => {
-            let mut digits = input.iter().filter(|byte| !byte.is_ascii_whitespace());
-            while let Some(&hi) = digits.next() {
-                let lo = *digits.next().context("ASCII Hex 解码缺少低位")?;
-                let hi = hex_nibble(hi).context("ASCII Hex 解码包含非十六进制字符")?;
-                let lo = hex_nibble(lo).context("ASCII Hex 解码包含非十六进制字符")?;
-                out.push((hi << 4) | lo);
-            }
-        }
+        PayloadProcessingRule::AsciiHexDecode => codec_util::hex_decode_bytes(input),
     }
-    Ok(out)
-}
-
-fn base64_sextet(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-fn decode_base64_quartet(chunk: &[u8; 4]) -> Result<([u8; 3], usize)> {
-    let pad = chunk.iter().rev().take_while(|&&b| b == b'=').count();
-    ensure!(pad <= 2, "Base64 填充字符数量无效");
-    ensure!(
-        chunk[..4 - pad].iter().all(|&b| b != b'='),
-        "Base64 填充字符后不能再出现数据字符"
-    );
-    let s0 = base64_sextet(chunk[0]).context("Base64 包含无效字符")?;
-    let s1 = base64_sextet(chunk[1]).context("Base64 包含无效字符")?;
-    let mut out = [(s0 << 2) | (s1 >> 4), 0, 0];
-    if pad == 2 {
-        ensure!((s1 & 0x0f) == 0, "Base64 双字节填充尾位非零");
-        return Ok((out, 1));
-    }
-    let s2 = base64_sextet(chunk[2]).context("Base64 包含无效字符")?;
-    out[1] = (s1 << 4) | (s2 >> 2);
-    if pad == 1 {
-        ensure!((s2 & 0x03) == 0, "Base64 单字节填充尾位非零");
-        return Ok((out, 2));
-    }
-    let s3 = base64_sextet(chunk[3]).context("Base64 包含无效字符")?;
-    out[2] = (s2 << 6) | s3;
-    Ok((out, 3))
 }

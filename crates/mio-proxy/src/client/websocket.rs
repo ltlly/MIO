@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use mio_plugin_api::{
     Header, HttpRequest, HttpResponse, HttpVersion, Uuid, WebSocketDirection, WebSocketKind,
     WebSocketMessage,
@@ -298,10 +296,6 @@ pub(super) fn websocket_record(
         direction,
         kind,
         payload,
-        observed_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(i64::MAX as u128) as i64,
+        observed_unix_ms: crate::now_unix_ms(),
     }
 }

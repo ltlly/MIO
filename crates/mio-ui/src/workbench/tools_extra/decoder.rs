@@ -41,17 +41,18 @@ impl DecoderOp {
             Self::Binary(true) => codecs::binary_encode_bytes(bytes, MAX_DECODER_BYTES)?,
             Self::Binary(false) => codecs::binary_decode_bytes(text)?,
             Self::Hash(kind) => {
-                use sha2::{Digest, Sha384, Sha512};
                 let digest = match kind {
-                    "sha256" => editing::sha256_digest(bytes).to_vec(),
-                    "sha384" => Sha384::digest(bytes).to_vec(),
-                    "sha512" => Sha512::digest(bytes).to_vec(),
-                    "sha1" => codecs::sha1_digest(bytes).to_vec(),
-                    "crc32" => crc32fast::hash(bytes).to_be_bytes().to_vec(),
-                    "md5" => editing::md5_digest(bytes).to_vec(),
+                    "sha256" => mio_core::codec_util::sha256_digest(bytes).to_vec(),
+                    "sha384" => mio_core::codec_util::sha384_digest(bytes).to_vec(),
+                    "sha512" => mio_core::codec_util::sha512_digest(bytes).to_vec(),
+                    "sha1" => mio_core::codec_util::sha1_digest(bytes).to_vec(),
+                    "crc32" => mio_core::codec_util::crc32_checksum(bytes)
+                        .to_be_bytes()
+                        .to_vec(),
+                    "md5" => mio_core::codec_util::md5_digest(bytes).to_vec(),
                     _ => unreachable!("unsupported Decoder hash"),
                 };
-                let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                let hex = mio_core::codec_util::hex_encode(&digest);
                 return Ok((digest, Some(hex)));
             }
         };

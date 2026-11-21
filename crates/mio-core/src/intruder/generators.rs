@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail, ensure};
+use chrono::{Datelike as _, NaiveDate, TimeDelta};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_PAYLOAD_BYTES, MAX_PAYLOADS};
+use crate::codec_util;
 
 pub const MAX_DATE_SEQUENCE_ITEMS: usize = 10_000;
 pub const MAX_DATE_STEP_DAYS: u16 = 366;
@@ -420,21 +422,18 @@ pub fn generate_empty_repeats(config: &EmptyRepeatConfig) -> Result<Vec<Vec<u8>>
     Ok(vec![Vec::new(); config.count])
 }
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+fn days_in_month_chrono(year: i32, month: u32) -> u32 {
+    let (next_y, next_m) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_y, next_m, 1)
+        .and_then(|d| d.pred_opt())
+        .map_or(28, |d| d.day())
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn parse_iso_ymd(raw: &str) -> Result<(i32, u32, u32)> {
+fn parse_iso_date(raw: &str) -> Result<NaiveDate> {
     let trimmed = raw.trim();
     let parts: Vec<&str> = trimmed.split('-').collect();
     ensure!(
@@ -452,37 +451,8 @@ fn parse_iso_ymd(raw: &str) -> Result<(i32, u32, u32)> {
     let day: u32 = parts[2].parse().context("日期无效")?;
     ensure!((1..=9999).contains(&year), "年份须在 0001..=9999 之间");
     ensure!((1..=12).contains(&month), "月份须在 01..=12 之间");
-    let max_day = days_in_month(year, month);
-    ensure!(
-        (1..=max_day).contains(&day),
-        "日期超出当月最大天数：{trimmed}"
-    );
-    Ok((year, month, day))
-}
-
-fn ymd_to_days_from_ce(year: i32, month: u32, day: u32) -> i64 {
-    let y = i64::from(year) - i64::from(month <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let m = i64::from(month);
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe
-}
-
-fn days_from_ce_to_ymd(days: i64) -> (i32, u32, u32) {
-    let era = days.div_euclid(146_097);
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let mut y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    if m <= 2 {
-        y += 1;
-    }
-    (y as i32, m as u32, d as u32)
+    NaiveDate::from_ymd_opt(year, month, day)
+        .with_context(|| format!("日期超出当月最大天数：{trimmed}"))
 }
 
 fn format_ymd(year: i32, month: u32, day: u32, format: DateOutputFormat) -> String {
@@ -498,12 +468,10 @@ pub fn generate_date_sequence_payloads(config: &DateSequenceConfig) -> Result<Ve
         (1..=MAX_DATE_STEP_DAYS).contains(&config.step_days),
         "日期步长天数必须在 1..={MAX_DATE_STEP_DAYS} 之间"
     );
-    let (fy, fm, fd) = parse_iso_ymd(&config.from_date)?;
-    let (ty, tm, td) = parse_iso_ymd(&config.to_date)?;
-    let start = ymd_to_days_from_ce(fy, fm, fd);
-    let end = ymd_to_days_from_ce(ty, tm, td);
+    let start = parse_iso_date(&config.from_date)?;
+    let end = parse_iso_date(&config.to_date)?;
     let step = i64::from(config.step_days);
-    let span = (end - start).unsigned_abs();
+    let span = (end - start).num_days().unsigned_abs();
     let count_u64 = span / (step as u64) + 1;
     ensure!(
         count_u64 <= MAX_DATE_SEQUENCE_ITEMS as u64,
@@ -513,9 +481,8 @@ pub fn generate_date_sequence_payloads(config: &DateSequenceConfig) -> Result<Ve
     let direction = if start <= end { 1_i64 } else { -1_i64 };
     let mut out = Vec::with_capacity(count);
     for idx in 0..count {
-        let cur = start + (idx as i64) * step * direction;
-        let (y, m, d) = days_from_ce_to_ymd(cur);
-        out.push(format_ymd(y, m, d, config.format).into_bytes());
+        let cur = start + TimeDelta::days((idx as i64) * step * direction);
+        out.push(format_ymd(cur.year(), cur.month(), cur.day(), config.format).into_bytes());
     }
     Ok(out)
 }
@@ -1176,8 +1143,10 @@ pub fn generate_dates_with_unit_payloads(
         (1..=MAX_DATE_STEP_DAYS).contains(&step),
         "日期步长必须在 1..={MAX_DATE_STEP_DAYS} 之间"
     );
-    let (fy, fm, fd) = parse_iso_ymd(from_date)?;
-    let (ty, tm, td) = parse_iso_ymd(to_date)?;
+    let start_date = parse_iso_date(from_date)?;
+    let end_date = parse_iso_date(to_date)?;
+    let (fy, fm, fd) = (start_date.year(), start_date.month(), start_date.day());
+    let (ty, tm, _) = (end_date.year(), end_date.month(), end_date.day());
     let format_custom = |y: i32, m: u32, d: u32| -> String {
         if let Some(pat) = custom_pattern.filter(|p| !p.trim().is_empty()) {
             format_custom_date_pattern(pat, y, m, d)
@@ -1192,22 +1161,19 @@ pub fn generate_dates_with_unit_payloads(
             } else {
                 1u64
             };
-            let start = ymd_to_days_from_ce(fy, fm, fd);
-            let end = ymd_to_days_from_ce(ty, tm, td);
             let step_days = (u64::from(step) * mult) as i64;
-            let span = (end - start).unsigned_abs();
+            let span = (end_date - start_date).num_days().unsigned_abs();
             let count_u64 = span / (step_days as u64) + 1;
             ensure!(
                 count_u64 <= MAX_DATE_SEQUENCE_ITEMS as u64,
                 "生成日期数量超过 {MAX_DATE_SEQUENCE_ITEMS} 上限"
             );
             let count = count_u64 as usize;
-            let dir = if start <= end { 1i64 } else { -1i64 };
+            let dir = if start_date <= end_date { 1i64 } else { -1i64 };
             let mut out = Vec::with_capacity(count);
             for idx in 0..count {
-                let cur = start + (idx as i64) * step_days * dir;
-                let (y, m, d) = days_from_ce_to_ymd(cur);
-                out.push(format_custom(y, m, d).into_bytes());
+                let cur = start_date + TimeDelta::days((idx as i64) * step_days * dir);
+                out.push(format_custom(cur.year(), cur.month(), cur.day()).into_bytes());
             }
             Ok(out)
         }
@@ -1232,7 +1198,7 @@ pub fn generate_dates_with_unit_payloads(
                 let cur_m = start_months + (idx as i64) * step_months * dir;
                 let y = cur_m.div_euclid(12) as i32;
                 let m = (cur_m.rem_euclid(12) + 1) as u32;
-                let d = fd.min(days_in_month(y, m));
+                let d = fd.min(days_in_month_chrono(y, m));
                 out.push(format_custom(y, m, d).into_bytes());
             }
             Ok(out)
@@ -1320,44 +1286,12 @@ pub fn generate_character_frobber_payloads(
     Ok(out)
 }
 
-fn decode_hex_bytes(raw: &str) -> Result<Vec<u8>> {
-    let clean: Vec<u8> = raw.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    ensure!(clean.len().is_multiple_of(2), "十六进制输入长度必须为偶数");
-    let mut out = Vec::with_capacity(clean.len() / 2);
-    for pair in clean.chunks_exact(2) {
-        let hi = match pair[0] {
-            b'0'..=b'9' => pair[0] - b'0',
-            b'a'..=b'f' => pair[0] - b'a' + 10,
-            b'A'..=b'F' => pair[0] - b'A' + 10,
-            _ => bail!("包含无效十六进制字符"),
-        };
-        let lo = match pair[1] {
-            b'0'..=b'9' => pair[1] - b'0',
-            b'a'..=b'f' => pair[1] - b'a' + 10,
-            b'A'..=b'F' => pair[1] - b'A' + 10,
-            _ => bail!("包含无效十六进制字符"),
-        };
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn encode_hex_lower(bytes: &[u8]) -> Vec<u8> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[usize::from(b >> 4)]);
-        out.push(HEX[usize::from(b & 0x0f)]);
-    }
-    out
-}
-
 pub fn generate_bit_flipper_payloads(config: &BitFlipperConfig) -> Result<Vec<Vec<u8>>> {
     ensure!(!config.base_value.is_empty(), "Bit flipper 基础值不能为空");
     ensure!(config.bit_mask != 0, "Bit flipper 比特掩码不能为 0");
     let raw_bytes = match config.format {
         BitFlipperFormat::LiteralBytes => config.base_value.as_bytes().to_vec(),
-        BitFlipperFormat::AsciiHex => decode_hex_bytes(&config.base_value)?,
+        BitFlipperFormat::AsciiHex => codec_util::hex_decode(&config.base_value)?,
     };
     ensure!(
         !raw_bytes.is_empty() && raw_bytes.len() <= MAX_CHAR_BLOCK_BYTES,
@@ -1375,7 +1309,7 @@ pub fn generate_bit_flipper_payloads(config: &BitFlipperConfig) -> Result<Vec<Ve
             flipped[byte_idx] ^= mask;
             let payload = match config.format {
                 BitFlipperFormat::LiteralBytes => flipped,
-                BitFlipperFormat::AsciiHex => encode_hex_lower(&flipped),
+                BitFlipperFormat::AsciiHex => codec_util::hex_encode(&flipped).into_bytes(),
             };
             total_bytes = total_bytes
                 .checked_add(payload.len())
@@ -1460,7 +1394,7 @@ pub fn generate_ecb_block_shuffler_payloads(
         "ECB 块大小必须为 8、16 或 32 字节"
     );
     let raw_bytes = if config.is_hex {
-        decode_hex_bytes(&config.base_ciphertext)?
+        codec_util::hex_decode(&config.base_ciphertext)?
     } else {
         config.base_ciphertext.as_bytes().to_vec()
     };
@@ -1477,7 +1411,7 @@ pub fn generate_ecb_block_shuffler_payloads(
             continue;
         }
         let decoded = if config.is_hex {
-            decode_hex_bytes(trimmed)?
+            codec_util::hex_decode(trimmed)?
         } else {
             trimmed.as_bytes().to_vec()
         };
@@ -1490,7 +1424,7 @@ pub fn generate_ecb_block_shuffler_payloads(
     let serialize_blocks = |b_list: &[&[u8]]| -> Vec<u8> {
         let joined: Vec<u8> = b_list.iter().copied().flatten().copied().collect();
         if config.is_hex {
-            encode_hex_lower(&joined)
+            codec_util::hex_encode(&joined).into_bytes()
         } else {
             joined
         }

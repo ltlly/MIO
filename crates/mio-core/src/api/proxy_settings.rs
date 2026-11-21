@@ -645,16 +645,12 @@ impl UpstreamTlsSettings {
                 !b64.contains("-----"),
                 "每次只能添加一个 PEM 证书，不能包含其它证书或私钥块"
             );
-            let cleaned = b64
+            let cleaned: Vec<u8> = b64
                 .bytes()
                 .filter(|byte| !byte.is_ascii_whitespace())
                 .collect();
-            let decoded = crate::intruder::apply_payload_processing_rule(
-                &[cleaned],
-                &crate::intruder::PayloadProcessingRule::Base64Decode,
-            )
-            .map_err(|e| anyhow::anyhow!("PEM 证书 Base64 解码失败：{e}"))?;
-            decoded.into_iter().next().unwrap_or_default()
+            crate::codec_util::base64_decode(&cleaned)
+                .map_err(|e| anyhow::anyhow!("PEM 证书 Base64 解码失败：{e}"))?
         } else {
             // DER signature bytes are opaque and must not be trimmed as text.
             input.to_vec()

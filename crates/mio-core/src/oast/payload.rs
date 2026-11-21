@@ -108,12 +108,7 @@ impl IssuedTokenBook {
     }
 }
 
-pub(super) fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
-}
+pub(super) use crate::codec_util::now_unix_ms;
 
 pub(super) fn truncate_str(value: &str, max_chars: usize) -> &str {
     value

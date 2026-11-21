@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{
     WeakEntity,
@@ -316,16 +315,8 @@ impl TableDelegate for RecentProjectsDelegate {
     }
 }
 
-fn current_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
-
 pub(super) fn format_today_iso() -> String {
-    let seconds = current_unix_ms().div_euclid(1000);
+    let seconds = mio_core::now_unix_ms().div_euclid(1000);
     let Some(local) = crate::local_time::from_unix_seconds(seconds) else {
         return "Untitled".into();
     };

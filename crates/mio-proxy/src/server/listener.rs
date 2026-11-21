@@ -919,11 +919,7 @@ pub(in crate::server) fn new_record(model: HttpRequest) -> FlowRecord {
             state: FlowState::Pending,
             request_bytes: 0,
             response_bytes: 0,
-            started_unix_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .min(i64::MAX as u128) as i64,
+            started_unix_ms: crate::now_unix_ms(),
             elapsed_ms: 0,
         },
         request: model,

@@ -78,3 +78,11 @@ impl ProxyError {
         Self::InvalidMessage(error.to_string())
     }
 }
+
+pub(crate) fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}

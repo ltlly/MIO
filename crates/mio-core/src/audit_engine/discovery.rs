@@ -1,6 +1,6 @@
 use std::{
     collections::{HashSet, VecDeque},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -314,12 +314,7 @@ fn crawl_authorized(url: &Url, scope: &TargetScope) -> bool {
     }
 }
 
-fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
-}
+use crate::codec_util::now_unix_ms;
 
 pub(crate) fn apply_same_origin_context_headers(req: &mut HttpRequest, seed_headers: &[Header]) {
     for h in seed_headers {

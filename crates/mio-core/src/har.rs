@@ -7,6 +7,7 @@ mod tests;
 
 const MAX_RECORDS: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
 const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn export_flows_to_har(records: &[FlowRecord]) -> Result<Vec<u8>> {
@@ -272,8 +273,10 @@ fn percent_decode_query(input: &str) -> String {
             index += 1;
         } else if bytes[index] == b'%'
             && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
+            && let (Some(high), Some(low)) = (
+                crate::codec_util::hex_nibble(bytes[index + 1]),
+                crate::codec_util::hex_nibble(bytes[index + 2]),
+            )
         {
             decoded.push((high << 4) | low);
             index += 3;
@@ -283,15 +286,6 @@ fn percent_decode_query(input: &str) -> String {
         }
     }
     String::from_utf8(decoded).unwrap_or_else(|_| input.to_owned())
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn body_size(size: usize) -> Value {
@@ -336,7 +330,10 @@ fn insert_body_text(target: &mut Map<String, Value>, body: &[u8]) {
         target.insert("text".into(), Value::String(text.to_owned()));
     } else {
         target.insert("encoding".into(), Value::String("base64".into()));
-        target.insert("text".into(), Value::String(base64_encode(body)));
+        target.insert(
+            "text".into(),
+            Value::String(crate::codec_util::base64_encode(body)),
+        );
     }
 }
 
@@ -388,80 +385,8 @@ fn status_text(status: u16) -> &'static str {
     }
 }
 
-fn base64_encode(input: &[u8]) -> String {
-    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    let (chunks, remainder) = input.as_chunks::<3>();
-    for chunk in chunks {
-        let value = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
-        for shift in [18u32, 12, 6, 0] {
-            output.push(BASE64_TABLE[(value >> shift) as usize & 0x3f] as char);
-        }
-    }
-    let input = remainder;
-    match input.len() % 3 {
-        1 => {
-            let value = (input[input.len() - 1] as u32) << 16;
-            for shift in [18u32, 12] {
-                output.push(BASE64_TABLE[(value >> shift) as usize & 0x3f] as char);
-            }
-            output.push_str("==");
-        }
-        2 => {
-            let value =
-                ((input[input.len() - 2] as u32) << 16) | ((input[input.len() - 1] as u32) << 8);
-            for shift in [18u32, 12, 6] {
-                output.push(BASE64_TABLE[(value >> shift) as usize & 0x3f] as char);
-            }
-            output.push('=');
-        }
-        _ => {}
-    }
-    output
-}
-
 fn started_date_time(unix_ms: i64) -> Result<String> {
-    let seconds = unix_ms.div_euclid(1000);
-    let milliseconds = unix_ms.rem_euclid(1000);
-    let days = seconds.div_euclid(86_400);
-    let day_seconds = seconds.rem_euclid(86_400);
-    let hour = day_seconds / 3600;
-    let minute = (day_seconds % 3600) / 60;
-    let second = day_seconds % 60;
-    let (year, month, day) =
-        civil_from_days(days).context("started_unix_ms 超出 UTC 日期表示范围")?;
-    let year_text = if (0..=9999).contains(&year) {
-        format!("{year:04}")
-    } else if year < 0 {
-        format!("-{:04}", year.unsigned_abs())
-    } else {
-        format!("+{year}")
-    };
-    Ok(format!(
-        "{year_text}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milliseconds:03}Z"
-    ))
-}
-
-fn civil_from_days(days_since_epoch: i64) -> Option<(i64, u32, u32)> {
-    let z = i128::from(days_since_epoch) + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_position = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
-    let month = if month_position < 10 {
-        month_position + 3
-    } else {
-        month_position - 9
-    };
-    let year = year + i128::from(month <= 2);
-    Some((
-        i64::try_from(year).ok()?,
-        u32::try_from(month).ok()?,
-        u32::try_from(day).ok()?,
-    ))
+    Ok(crate::codec_util::format_utc_iso8601(unix_ms))
 }
 
 fn header_text(value: &[u8]) -> String {

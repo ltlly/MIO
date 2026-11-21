@@ -1,26 +1,19 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fmt::Write as _,
     ops::Range,
     rc::Rc,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::*;
 use crate::{
     HttpExtensionFilter, HttpHistoryFilter, WebSocketDirection, WebSocketHistoryFilter,
-    intruder::{PayloadProcessingRule, apply_payload_processing_rule},
-};
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    codec_util,
 };
 use rhai::{
     AST, Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, Position, Scope, Token,
 };
-use sha2::{Digest, Sha256};
 
 pub const DEFAULT_REQUEST_SCRIPT_TEMPLATE: &str =
     "request.headers[\"X-Forwarded-For\"] = \"127.0.0.1\";\nrequest";
@@ -261,32 +254,21 @@ fn set_cookie(map: &mut Map, name: &str, value: &str) -> ScriptResult<()> {
     set_header(map, "Cookie", &join_cookie_header(&pairs))
 }
 
+fn base64_encode_str(text: &str) -> String {
+    codec_util::base64_encode(text.as_bytes())
+}
+
+fn base64_decode_str(text: &str) -> ScriptResult<String> {
+    let decoded = codec_util::base64_decode(text.as_bytes()).map_err(runtime_error)?;
+    String::from_utf8(decoded).map_err(runtime_error)
+}
+
 fn base64url_encode(text: &str) -> String {
-    URL_SAFE_NO_PAD.encode(text)
+    codec_util::base64url_encode(text.as_bytes())
 }
 
 fn base64url_decode(text: &str) -> ScriptResult<String> {
-    let mut normalized = String::with_capacity(text.len() + 3);
-    for ch in text.chars() {
-        if ch.is_ascii_whitespace() {
-            continue;
-        }
-        match ch {
-            '-' => normalized.push('+'),
-            '_' => normalized.push('/'),
-            other => normalized.push(other),
-        }
-    }
-    let rem = normalized.len() % 4;
-    if rem == 1 {
-        return Err(runtime_error("Base64URL 编码长度无效"));
-    }
-    if rem > 0 {
-        for _ in 0..(4 - rem) {
-            normalized.push('=');
-        }
-    }
-    let decoded = STANDARD.decode(normalized.as_bytes()).map_err(runtime_error)?;
+    let decoded = codec_util::base64url_decode(text.as_bytes()).map_err(runtime_error)?;
     String::from_utf8(decoded).map_err(runtime_error)
 }
 
@@ -491,143 +473,40 @@ fn set_json_field(map: &mut Map, path: &str, value: Dynamic) -> ScriptResult<()>
 }
 
 fn hex_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() * 2);
-    for byte in text.as_bytes() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    codec_util::hex_encode(text.as_bytes())
 }
 
 fn hex_decode(hex: &str) -> ScriptResult<String> {
-    let clean: Vec<u8> = hex
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
-    if !clean.len().is_multiple_of(2) {
-        return Err(runtime_error("Hex 编码长度必须为偶数"));
-    }
-    let mut bytes = Vec::with_capacity(clean.len() / 2);
-    for chunk in clean.chunks_exact(2) {
-        let hi = (chunk[0] as char)
-            .to_digit(16)
-            .ok_or_else(|| runtime_error("Hex 编码包含非法字符"))?;
-        let lo = (chunk[1] as char)
-            .to_digit(16)
-            .ok_or_else(|| runtime_error("Hex 编码包含非法字符"))?;
-        bytes.push(((hi << 4) | lo) as u8);
-    }
+    let bytes = codec_util::hex_decode(hex).map_err(runtime_error)?;
     String::from_utf8(bytes).map_err(runtime_error)
 }
 
 fn html_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-fn decode_html_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        _ => {
-            let digits = entity.strip_prefix('#')?;
-            let code = if let Some(hex) = digits
-                .strip_prefix('x')
-                .or_else(|| digits.strip_prefix('X'))
-            {
-                if hex.is_empty() {
-                    return None;
-                }
-                u32::from_str_radix(hex, 16).ok()?
-            } else {
-                if digits.is_empty() {
-                    return None;
-                }
-                digits.parse::<u32>().ok()?
-            };
-            char::from_u32(code)
-        }
-    }
+    codec_util::html_encode(text)
 }
 
 fn html_decode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
-    while i < text.len() {
-        let rest = &text[i..];
-        if let Some(rel_amp) = rest.find('&') {
-            out.push_str(&rest[..rel_amp]);
-            let after_amp = &rest[rel_amp + 1..];
-            let search_window = after_amp.len().min(16);
-            if let Some(semi) = after_amp[..search_window].find(';')
-                && !after_amp[..semi].contains('&')
-                && let Some(ch) = decode_html_entity(&after_amp[..semi])
-            {
-                out.push(ch);
-                i += rel_amp + 1 + semi + 1;
-                continue;
-            }
-            out.push('&');
-            i += rel_amp + 1;
-        } else {
-            out.push_str(rest);
-            break;
-        }
-    }
-    out
+    codec_util::html_decode(text)
 }
 
-fn hmac_sha256_bytes(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut block_key = [0u8; 64];
-    if key.len() > 64 {
-        let digest = Sha256::digest(key);
-        block_key[..32].copy_from_slice(&digest);
-    } else {
-        block_key[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0x36u8; 64];
-    let mut opad = [0x5cu8; 64];
-    for idx in 0..64 {
-        ipad[idx] ^= block_key[idx];
-        opad[idx] ^= block_key[idx];
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(message);
-    let inner_digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner_digest);
-    outer.finalize().into()
+fn sha256_hex_str(text: &str) -> String {
+    codec_util::hex_encode(&codec_util::sha256_digest(text.as_bytes()))
+}
+
+fn md5_hex_str(text: &str) -> String {
+    codec_util::hex_encode(&codec_util::md5_digest(text.as_bytes()))
 }
 
 fn hmac_sha256_hex(key: &str, message: &str) -> String {
-    let mac = hmac_sha256_bytes(key.as_bytes(), message.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in mac {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    codec_util::hex_encode(&codec_util::hmac_sha256(key.as_bytes(), message.as_bytes()))
 }
 
 fn hmac_sha256_base64(key: &str, message: &str) -> String {
-    STANDARD.encode(hmac_sha256_bytes(key.as_bytes(), message.as_bytes()))
+    codec_util::base64_encode(&codec_util::hmac_sha256(key.as_bytes(), message.as_bytes()))
 }
 
 fn hmac_sha256_base64url(key: &str, message: &str) -> String {
-    URL_SAFE_NO_PAD.encode(hmac_sha256_bytes(key.as_bytes(), message.as_bytes()))
+    codec_util::base64url_encode(&codec_util::hmac_sha256(key.as_bytes(), message.as_bytes()))
 }
 
 fn jwt_decode(token: &str) -> ScriptResult<Map> {
@@ -1003,10 +882,10 @@ fn register_script_methods(engine: &mut Engine) {
         Ok(value.into_owned())
     });
     engine.register_fn("base64Encode", |_: &mut Map, text: &str| -> String {
-        STANDARD.encode(text)
+        base64_encode_str(text)
     });
     engine.register_fn("base64Decode", |_: &mut Map, text: &str| -> ScriptResult<String> {
-        String::from_utf8(STANDARD.decode(text).map_err(runtime_error)?).map_err(runtime_error)
+        base64_decode_str(text)
     });
     engine.register_fn("base64UrlEncode", |_: &mut Map, text: &str| -> String {
         base64url_encode(text)
@@ -1024,20 +903,10 @@ fn register_script_methods(engine: &mut Engine) {
     engine.register_fn("setQueryParam", set_query_param);
     engine.register_fn("removeQueryParam", remove_query_param);
     engine.register_fn("sha256Hex", |_: &mut Map, text: &str| -> ScriptResult<String> {
-        let out = apply_payload_processing_rule(
-            &[text.as_bytes().to_vec()],
-            &PayloadProcessingRule::Sha256Hex,
-        )
-        .map_err(runtime_error)?;
-        String::from_utf8(out.into_iter().next().unwrap_or_default()).map_err(runtime_error)
+        Ok(sha256_hex_str(text))
     });
     engine.register_fn("md5Hex", |_: &mut Map, text: &str| -> ScriptResult<String> {
-        let out = apply_payload_processing_rule(
-            &[text.as_bytes().to_vec()],
-            &PayloadProcessingRule::Md5Hex,
-        )
-        .map_err(runtime_error)?;
-        String::from_utf8(out.into_iter().next().unwrap_or_default()).map_err(runtime_error)
+        Ok(md5_hex_str(text))
     });
     engine.register_fn("jsonParse", |_: &mut Map, text: &str| -> ScriptResult<Dynamic> {
         json_parse(text)
@@ -1105,23 +974,19 @@ fn engine() -> Engine {
             .ok_or_else(|| runtime_error("URL 解码结果缺失"))?;
         Ok(value.into_owned())
     });
-    engine.register_fn("base64_encode", |text: &str| -> String { STANDARD.encode(text) });
-    engine.register_fn("base64_decode", |text: &str| -> ScriptResult<String> {
-        String::from_utf8(STANDARD.decode(text).map_err(runtime_error)?).map_err(runtime_error)
-    });
+    engine.register_fn("base64_encode", base64_encode_str);
+    engine.register_fn("base64_decode", base64_decode_str);
     engine.register_fn("base64url_encode", base64url_encode);
     engine.register_fn("base64url_decode", base64url_decode);
     engine.register_fn("sha256_hex", |text: &str| -> ScriptResult<String> {
-        let out = apply_payload_processing_rule(&[text.as_bytes().to_vec()], &PayloadProcessingRule::Sha256Hex)
-            .map_err(runtime_error)?;
-        String::from_utf8(out.into_iter().next().unwrap_or_default()).map_err(runtime_error)
+        Ok(sha256_hex_str(text))
     });
     engine.register_fn("md5_hex", |text: &str| -> ScriptResult<String> {
-        let out = apply_payload_processing_rule(&[text.as_bytes().to_vec()], &PayloadProcessingRule::Md5Hex)
-            .map_err(runtime_error)?;
-        String::from_utf8(out.into_iter().next().unwrap_or_default()).map_err(runtime_error)
+        Ok(md5_hex_str(text))
     });
-    engine.register_fn("crc32_hex", |text: &str| -> String { format!("{:08x}", crc32fast::hash(text.as_bytes())) });
+    engine.register_fn("crc32_hex", |text: &str| -> String {
+        format!("{:08x}", codec_util::crc32_checksum(text.as_bytes()))
+    });
     engine.register_fn("regex_matches", |text: &str, pattern: &str| -> ScriptResult<bool> {
         Ok(script_regex(pattern)?.is_match(text))
     });
@@ -1135,12 +1000,10 @@ fn engine() -> Engine {
             .map_err(runtime_error)?.unwrap_or_else(|| text.to_owned()))
     });
     engine.register_fn("unix_timestamp", || -> ScriptResult<i64> {
-        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(runtime_error)?.as_secs())
-            .map_err(runtime_error)
+        Ok(codec_util::now_unix_ms() / 1000)
     });
     engine.register_fn("unix_timestamp_ms", || -> ScriptResult<i64> {
-        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(runtime_error)?.as_millis())
-            .map_err(runtime_error)
+        Ok(codec_util::now_unix_ms())
     });
     engine.register_fn("header_value", header_value);
     engine.register_fn("set_header", set_header);
@@ -2309,12 +2172,12 @@ mod expanded_security_helpers_tests {
             None,
         )
         .unwrap();
-        let expected_b64 = STANDARD.encode([
+        let expected_b64 = codec_util::base64_encode(&[
             0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
             0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
             0x64, 0xec, 0x38, 0x43,
         ]);
-        let expected_b64u = URL_SAFE_NO_PAD.encode([
+        let expected_b64u = codec_util::base64url_encode(&[
             0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
             0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
             0x64, 0xec, 0x38, 0x43,
