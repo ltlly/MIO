@@ -142,15 +142,11 @@ impl State {
         let old_id = old.info.manifest.id.clone();
         let old_engine = old.info.manifest.engine.clone();
         let old_perms = old.package.manifest.permissions.clone();
-        let old_package = old.package.clone();
         let old_auto_reload = old.auto_reload;
         let grants = old.info.grants.clone();
         let project = self.project;
         let task_cancel = cancel.clone();
         self.plugin_job_start(operation_id, Some(instance_id), cancel, true, async move {
-            if old_engine == "native" {
-                tokio::task::spawn_blocking(move || old_package.unchanged()).await??;
-            }
             let package =
                 tokio::task::spawn_blocking(move || VerifiedPackage::read(&directory)).await??;
             ensure!(

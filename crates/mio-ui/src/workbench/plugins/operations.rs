@@ -26,7 +26,6 @@ impl Workbench {
         };
         match (operation, result) {
             (Operation::Inspect { replace }, PluginOutcome::Inspected(info)) => {
-                let is_wasm = info.manifest.engine == "wasm";
                 self.extensions.push_log(format!(
                     "已检查插件包：{} {}（engine={}）",
                     info.manifest.id, info.manifest.version, info.manifest.engine
@@ -40,11 +39,8 @@ impl Workbench {
                 self.extensions.add_panel_open = false;
                 self.extensions.page = ExtensionsPage::Installed;
                 self.tool = Tool::Extensions;
-                self.status = if is_wasm {
-                    "插件检查完成；尚未运行。请确认受限 WASM 模块与每项宿主权限。".into()
-                } else {
-                    "插件检查完成；尚未运行。请确认本地程序信任与每项宿主权限。".into()
-                };
+                self.status =
+                    "插件检查完成；尚未运行。请确认本地程序信任与每项宿主权限。".into();
             }
             (Operation::Load { replace }, PluginOutcome::Loaded { info, panel }) => {
                 if let Some(old) = replace {

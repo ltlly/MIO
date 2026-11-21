@@ -496,7 +496,7 @@ impl Running {
         let (write_progress_tx, mut write_progress_rx) = tokio::sync::watch::channel(0u64);
         let io_cancel = CancellationToken::new();
         let mut io_tasks = JoinSet::new();
-        let (mut native_child, mut wasm_worker) = match transport {
+        let mut native_child = match transport {
             WorkerTransport::Native {
                 child,
                 #[cfg(windows)]
@@ -535,19 +535,7 @@ impl Running {
                 let pair = (child, job);
                 #[cfg(not(windows))]
                 let pair = (child, ());
-                (Some(pair), None)
-            }
-            WorkerTransport::Wasm { module } => {
-                let worker = wasm::spawn_sandbox_worker(
-                    self.identity,
-                    self.plugin_id.clone(),
-                    module,
-                    writes,
-                    wire,
-                    outbound_claims.clone(),
-                    io_cancel.clone(),
-                );
-                (None, Some(worker))
+                Some(pair)
             }
             #[cfg(test)]
             WorkerTransport::Duplex { stdin, stdout } => {
@@ -561,7 +549,7 @@ impl Running {
                     &io_cancel,
                     &mut io_tasks,
                 );
-                (None, None)
+                None
             }
         };
         let result: Result<()> = async {
@@ -757,9 +745,6 @@ impl Running {
             (Ok(()), Ok(()))
         };
         io_cancel.cancel();
-        if let Some(worker) = wasm_worker.take() {
-            let _ = timeout(REAP_DEADLINE, worker).await;
-        }
         io_tasks.abort_all();
         while io_tasks.join_next().await.is_some() {}
         self.service_tasks.abort_all();

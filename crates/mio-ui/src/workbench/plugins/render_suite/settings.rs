@@ -87,11 +87,6 @@ impl Workbench {
     ) -> AnyElement {
         let dark = theme::is_dark();
         let card_border: gpui_kit::Hsla = rgb(if dark { 0x45484f } else { 0xd4d4d4 }).into();
-        let wasm_banner = self
-            .extensions
-            .inspection
-            .as_ref()
-            .is_some_and(|inspection| inspection.info.manifest.engine == "wasm");
         let plugins_dir_display = self
             .extensions
             .plugins_dir
@@ -162,7 +157,7 @@ impl Workbench {
                                     })),
                             ),
                     )
-                    .child(security_warning_callout(wasm_banner)),
+                    .child(security_warning_callout()),
             )
             .child(
                 div()

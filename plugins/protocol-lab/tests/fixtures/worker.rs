@@ -19,6 +19,9 @@ fn main() -> io::Result<()> {
     if name.contains("multiplex-e2e") {
         return run_multiplex_e2e();
     }
+    if name.contains("hook-peer") {
+        return run_hook_peer();
+    }
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let hello = read_frame(&mut input)?;
@@ -386,6 +389,108 @@ fn run_multiplex_e2e() -> io::Result<()> {
                         reply_to,
                     )?;
                 }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn run_hook_peer() -> io::Result<()> {
+    let initial = PanelSnapshot {
+        revision: 1,
+        title: "hook-peer".into(),
+        root: Some(Node::new(
+            1,
+            "root",
+            node::Kind::Text(Text {
+                text: "hook-peer-ready".into(),
+                tone: Tone::Foreground as i32,
+            }),
+        )),
+    };
+    let mut session = WorkerSession::accept(
+        io::stdin().lock(),
+        io::stdout().lock(),
+        Register {
+            plugin_id: "lab.hook-peer".into(),
+            plugin_version: "0.1.0".into(),
+            required_components: vec![Component::Text as i32],
+            panel: Some(initial),
+            supports_panel_multiplexing: false,
+        },
+    )?;
+    loop {
+        let env = match session.receive() {
+            Ok(env) => env,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        let reply_to = env.request_id;
+        let Some(body) = env.body else {
+            return Err(io::Error::other("empty envelope"));
+        };
+        match body {
+            envelope::Body::Shutdown(_) => return Ok(()),
+            envelope::Body::PayloadCall(call) => {
+                let outputs = if call.op == PayloadOp::Generate as i32 {
+                    vec![
+                        b"peer-gen-1".to_vec(),
+                        b"peer-gen-2".to_vec(),
+                        b"peer-gen-3".to_vec(),
+                    ]
+                } else {
+                    call.inputs
+                };
+                session.send(envelope::Body::PayloadResult(PayloadResult { outputs }), 1, reply_to)?;
+            }
+            envelope::Body::HttpHookCall(call) => {
+                let res = if !call.response_stage {
+                    let mut req = call.request.ok_or_else(|| io::Error::other("missing request"))?;
+                    req.headers.push(HeaderDto {
+                        name: "x-mio-peer-hook".into(),
+                        value: b"chained".to_vec(),
+                    });
+                    HttpHookResult {
+                        action: HookAction::Modify as i32,
+                        request: Some(req),
+                        response: None,
+                    }
+                } else {
+                    let mut resp = call.response.ok_or_else(|| io::Error::other("missing response"))?;
+                    resp.headers.push(HeaderDto {
+                        name: "x-mio-peer-resp".into(),
+                        value: b"verified".to_vec(),
+                    });
+                    HttpHookResult {
+                        action: HookAction::Modify as i32,
+                        request: None,
+                        response: Some(resp),
+                    }
+                };
+                session.send(envelope::Body::HttpHookResult(res), 1, reply_to)?;
+            }
+            envelope::Body::SessionActionCall(_) => {
+                session.send(
+                    envelope::Body::SessionActionResult(SessionActionResult {
+                        modified: false,
+                        request: None,
+                    }),
+                    1,
+                    reply_to,
+                )?;
+            }
+            envelope::Body::WebSocketHookCall(_) => {
+                session.send(
+                    envelope::Body::WebSocketHookResult(WebSocketHookResult {
+                        action: HookAction::Pass as i32,
+                        payload: vec![],
+                    }),
+                    1,
+                    reply_to,
+                )?;
+            }
+            envelope::Body::UiEvent(_) | envelope::Body::Resync(_) => {
+                session.send(envelope::Body::Ack(Empty {}), 1, reply_to)?;
             }
             _ => {}
         }

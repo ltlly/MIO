@@ -155,14 +155,9 @@ impl Workbench {
         let Some(inspection) = &self.extensions.inspection else {
             return;
         };
-        let is_wasm = inspection.info.manifest.engine == "wasm";
         if !inspection.trusted {
             self.fail(
-                if is_wasm {
-                    "必须明确确认信任并授权此 WASM 插件后才能加载。"
-                } else {
-                    "必须明确确认信任此 native 本地程序后才能加载。"
-                },
+                "必须明确确认信任此 native 本地程序后才能加载。",
                 cx,
             );
             return;
@@ -180,11 +175,7 @@ impl Workbench {
         {
             self.extensions.inspection = None;
             self.extensions.add_panel_open = false;
-            self.status = if is_wasm {
-                "正在加载受限 WASM 插件模块…".into()
-            } else {
-                "正在启动已确认的 native worker…".into()
-            };
+            self.status = "正在启动已确认的 native worker…".into();
         }
     }
 

@@ -289,11 +289,7 @@ impl Workbench {
             .child(item_header);
 
         if let Some(instance) = selected {
-            let ext_type = if instance.info.manifest.engine == "wasm" {
-                "WASM (受限沙箱)"
-            } else {
-                "Native worker (本地进程)"
-            };
+            let ext_type = "Native worker (本地进程)";
             let filename = instance
                 .info
                 .directory

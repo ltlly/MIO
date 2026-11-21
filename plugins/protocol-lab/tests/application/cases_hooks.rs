@@ -106,7 +106,7 @@ async fn application_independent_editors_publish_opened_content_and_commit_lates
 }
 
 #[tokio::test]
-async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() {
+async fn application_multi_native_hooks_payloads_kv_and_reorder_end_to_end() {
     use tokio::io::AsyncWriteExt;
 
     let native_dir = tempfile::tempdir().unwrap();
@@ -139,20 +139,23 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     )
     .unwrap();
 
-    let wasm_dir = tempfile::tempdir().unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_bin = std::env::var("MIO_TEST_PROTOCOL_LAB_WORKER_BIN")
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_protocol-lab-test-worker").into());
+    let peer_entry = if cfg!(windows) {
+        "hook-peer.exe"
+    } else {
+        "hook-peer"
+    };
+    fs::copy(&peer_bin, peer_dir.path().join(peer_entry)).unwrap();
     fs::write(
-        wasm_dir.path().join("sandbox.wasm"),
-        mio_core::plugins::wasm::build_demo_wasm_module(),
-    )
-    .unwrap();
-    fs::write(
-        wasm_dir.path().join("manifest.json"),
+        peer_dir.path().join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
-            "id": "lab.wasm",
+            "id": "lab.hook-peer",
             "version": "0.1.0",
             "api_version": 1,
-            "engine": "wasm",
-            "entry": "sandbox.wasm",
+            "engine": "native",
+            "entry": peer_entry,
             "permissions": ["traffic.read", "traffic.modify", "session.hook", "payload.process", "storage.kv"],
             "contributions": ["suite_panel", "http_hook", "ws_hook", "session_action", "payload_generator", "payload_processor"]
         }))
@@ -237,18 +240,18 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
         })
         .await;
 
-    // Load sandboxed WASM plugin (non-executable .wasm entry) and reorder it above native.
-    let insp_w = app
+    // Load second native plugin and reorder it above the first.
+    let insp_p = app
         .action(PluginAction::Inspect {
-            directory: wasm_dir.path().to_owned(),
+            directory: peer_dir.path().to_owned(),
         })
         .await;
-    let PluginOutcome::Inspected(insp_w) = app.outcome(insp_w).await.unwrap() else {
-        panic!("wasm inspect");
+    let PluginOutcome::Inspected(insp_p) = app.outcome(insp_p).await.unwrap() else {
+        panic!("peer inspect");
     };
-    let load_w = app
+    let load_p = app
         .action(PluginAction::Load {
-            inspection_id: insp_w.id,
+            inspection_id: insp_p.id,
             native_trusted: true,
             grants: vec![
                 Permission::TrafficRead,
@@ -261,14 +264,14 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
         })
         .await;
     let PluginOutcome::Loaded {
-        info: wasm_info, ..
-    } = app.outcome(load_w).await.unwrap()
+        info: peer_info, ..
+    } = app.outcome(load_p).await.unwrap()
     else {
-        panic!("wasm load");
+        panic!("peer load");
     };
     let reorder_op = app
         .action(PluginAction::Reorder {
-            instance_id: wasm_info.identity.instance_id,
+            instance_id: peer_info.identity.instance_id,
             move_up: true,
         })
         .await;
@@ -278,16 +281,16 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     assert_eq!(
         order,
         vec![
-            wasm_info.identity.instance_id,
+            peer_info.identity.instance_id,
             native_info.identity.instance_id
         ]
     );
 
-    // Test Payload Generate & Process on WASM and Native plugins.
+    // Test Payload Generate & Process across both native plugins.
     let tab_id = Uuid::new_v4();
     let gen_op = app
         .action(PluginAction::GeneratePayloads {
-            instance_id: wasm_info.identity.instance_id,
+            instance_id: peer_info.identity.instance_id,
             tab_id,
             config: String::new(),
             max_items: 10,
@@ -300,9 +303,9 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     assert_eq!(
         payloads,
         vec![
-            b"wasm-gen-1".to_vec(),
-            b"wasm-gen-2".to_vec(),
-            b"wasm-gen-3".to_vec()
+            b"peer-gen-1".to_vec(),
+            b"peer-gen-2".to_vec(),
+            b"peer-gen-3".to_vec()
         ]
     );
     let proc_op = app
@@ -320,9 +323,9 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     else {
         panic!("proc");
     };
-    assert_eq!(proc_out[0], b"p:wasm-gen-1");
+    assert_eq!(proc_out[0], b"p:peer-gen-1");
 
-    // Test Proxy HTTP Hook chain (WASM + Native) against real loopback origin.
+    // Test Proxy HTTP Hook chain across both native plugins against real loopback origin.
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin.local_addr().unwrap();
     let origin_task = tokio::spawn(async move {
@@ -367,7 +370,7 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     assert!(
         seen_by_origin
             .to_ascii_lowercase()
-            .contains("x-mio-wasm-hook: sandboxed")
+            .contains("x-mio-peer-hook: chained")
     );
     assert!(
         seen_by_origin
@@ -377,7 +380,7 @@ async fn application_native_and_wasm_hooks_payloads_kv_and_reorder_end_to_end() 
     assert!(
         resp_text
             .to_ascii_lowercase()
-            .contains("x-mio-wasm-resp: verified")
+            .contains("x-mio-peer-resp: verified")
     );
     assert!(
         resp_text

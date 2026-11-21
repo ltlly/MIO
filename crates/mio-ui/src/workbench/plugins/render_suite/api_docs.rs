@@ -14,8 +14,7 @@ impl Workbench {
         let header_fg: gpui_kit::Hsla = rgb(if dark { 0xd4d4d4 } else { 0x141414 }).into();
         let zebra_bg: gpui_kit::Hsla = rgb(if dark { 0x25272b } else { 0xfafafa }).into();
 
-        let api_rows: [(&str, &str); 15] = [
-            ("Engine: wasm", "受限 WASM 沙箱引擎（零 WASI，无直接 OS 文件或网络访问）"),
+        let api_rows: [(&str, &str); 14] = [
             ("Engine: native", "本地 Native worker 进程（不受 OS 沙箱限制，需用户显式信任）"),
             ("Contribution: suite_panel", "在顶部工具栏注册独立扩展标签页视图"),
             ("Contribution: tool_panel", "在 Extensions 详情页中展示扩展管理与交互面板"),
@@ -135,7 +134,7 @@ impl Workbench {
                 div()
                     .text_size(theme::ui_font_size())
                     .text_color(theme::foreground())
-                    .child("MIO 扩展协议支持受限 WASM 沙箱与 Native worker，每项宿主 API 权限均需由用户逐项显式授予。"),
+                    .child("MIO 扩展协议支持本地 Native worker，每项宿主 API 权限均需由用户逐项显式授予。"),
             )
             .child(
                 div()
@@ -179,7 +178,7 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
     let doc = serde_json::json!({
         "name": "mio-plugin-api",
         "sdk_crate": "mio-plugin-sdk",
-        "security_scope": "security isolation / sandboxing is explicitly out of scope for native workers; WASM plugins execute with zero WASI and no direct OS/network access",
+        "security_scope": "security isolation / sandboxing is explicitly out of scope for native workers; manifest permissions mediate MIO host API access only",
         "protocol": {
             "major": PROTOCOL_MAJOR,
             "minor": PROTOCOL_MINOR,
@@ -219,8 +218,8 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
                 "id": { "type": "string", "description": "Unique extension identifier (e.g. com.example.ext)" },
                 "version": { "type": "string", "description": "SemVer extension version" },
                 "api_version": { "type": "integer", "const": PROTOCOL_MAJOR },
-                "engine": { "type": "string", "enum": ["native", "wasm"] },
-                "entry": { "type": "string", "description": "Relative path to worker binary or .wasm module" },
+                "engine": { "type": "string", "enum": ["native"] },
+                "entry": { "type": "string", "description": "Relative path to native worker executable" },
                 "permissions": {
                     "type": "array",
                     "items": {
@@ -303,7 +302,7 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
 pub(in crate::workbench::plugins) fn build_mio_plugin_api_markdown() -> String {
     format!(
         "# MIO Extensions API (v{PROTOCOL_MAJOR}.{PROTOCOL_MINOR})\n\n\
-         > Native executable workers (`mio-plugin-sdk`) are trusted local processes; `wasm` modules run under a constrained sandbox with zero WASI and no direct OS file/network access.\n\n\
+         > Native executable workers (`mio-plugin-sdk`) are trusted local processes without OS sandboxing; `manifest.permissions` mediates MIO host API access only.\n\n\
          ## Transport & Framing\n\
          - Framing: 4-byte big-endian length prefix + Protobuf `Envelope`\n\
          - Default primary `panel_id`: `{PANEL_ID}` (`0` is invalid)\n\

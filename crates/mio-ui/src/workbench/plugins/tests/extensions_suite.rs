@@ -6,11 +6,7 @@ fn suite_manifest(id: &str, engine: &str, contributions: &[&str]) -> PluginManif
         version: "1.0".into(),
         api_version: 1,
         engine: engine.into(),
-        entry: PathBuf::from(if engine == "wasm" {
-            "plugin.wasm"
-        } else {
-            "worker"
-        }),
+        entry: PathBuf::from("worker"),
         permissions: vec![
             Permission::TrafficRead,
             Permission::TrafficModify,
@@ -69,20 +65,20 @@ fn install_suite_plugin(
 }
 
 #[gpui_kit::test]
-fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppContext) {
+fn native_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppContext) {
     use mio_core::{HttpRequest, HttpVersion};
 
     let mut fixture = fixture(cx, vec![tab("1")], 64);
     drain(&mut fixture.commands);
 
-    // 1. Inspect & confirm sandboxed WASM plugin via Extensions UI.
+    // 1. Inspect & confirm native plugin via Extensions UI.
     let directory = cx.read(|cx| fixture.view.read(cx).extensions.directory.clone());
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("tool-extensions", cx);
         window.click("extensions-tab-settings", cx);
         window.render_frame(cx);
         window.click(("input", directory.entity_id()), cx);
-        window.input("/tmp/mio-wasm-fixture", cx);
+        window.input("/tmp/mio-native-fixture", cx);
         window.click("plugin-inspect", cx);
     })
     .unwrap();
@@ -97,9 +93,9 @@ fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppCon
             _ => None,
         })
         .unwrap();
-    let wasm_manifest = suite_manifest(
-        "lab.wasm",
-        "wasm",
+    let first_manifest = suite_manifest(
+        "lab.first",
+        "native",
         &["suite_panel", "payload_generator", "payload_processor"],
     );
     fixture
@@ -109,9 +105,9 @@ fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppCon
             operation_id: inspect_op,
             result: Ok(PluginOutcome::Inspected(PluginInspection {
                 id: Uuid::new_v4(),
-                directory: "/tmp/mio-wasm-fixture".into(),
-                executable: "/tmp/mio-wasm-fixture/plugin.wasm".into(),
-                manifest: wasm_manifest.clone(),
+                directory: "/tmp/mio-native-fixture".into(),
+                executable: "/tmp/mio-native-fixture/worker".into(),
+                manifest: first_manifest.clone(),
             })),
         })
         .unwrap();
@@ -144,8 +140,8 @@ fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppCon
             instance_id: Uuid::new_v4(),
             project: fixture.project,
         },
-        directory: PathBuf::from("/tmp/mio-wasm-fixture"),
-        manifest: wasm_manifest,
+        directory: PathBuf::from("/tmp/mio-native-fixture"),
+        manifest: first_manifest,
         grants: vec![Permission::PayloadProcess, Permission::RepeaterOpen],
         tab_id: None,
     };
@@ -156,14 +152,14 @@ fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppCon
             operation_id: load_op,
             result: Ok(PluginOutcome::Loaded {
                 info: first.clone(),
-                panel: panel(b"wasm".to_vec()),
+                panel: panel(b"native".to_vec()),
             }),
         })
         .unwrap();
     cx.run_until_parked();
 
     // 2. Install second suite plugin, reorder, and verify Output / Errors log clear.
-    let second = install_suite_plugin(&fixture, "lab.second", "wasm", &["suite_panel"], cx);
+    let second = install_suite_plugin(&fixture, "lab.second", "native", &["suite_panel"], cx);
     drain(&mut fixture.commands);
     cx.update_window(fixture.window, |_, window, cx| {
         window.click("plugin-move-up", cx);
@@ -383,7 +379,7 @@ fn wasm_trust_reorder_logs_open_intruder_and_payload_plugins(cx: &mut TestAppCon
 #[gpui_kit::test]
 fn ext_extensions_subtabs_search_details_and_error_logs(cx: &mut TestAppContext) {
     let mut fixture = fixture(cx, vec![tab("1")], 64);
-    let alpha = install_suite_plugin(&fixture, "lab.alpha", "wasm", &["suite_panel"], cx);
+    let alpha = install_suite_plugin(&fixture, "lab.alpha", "native", &["suite_panel"], cx);
     let beta = install_suite_plugin(&fixture, "lab.beta", "native", &["suite_panel"], cx);
     drain(&mut fixture.commands);
 

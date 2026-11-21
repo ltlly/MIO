@@ -1,7 +1,5 @@
 use super::*;
 
-const MAX_WASM_BYTES: u64 = 4 * 1024 * 1024;
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -23,7 +21,6 @@ pub struct VerifiedPackage {
     pub(crate) modified: std::time::SystemTime,
     pub(crate) manifest_modified: std::time::SystemTime,
     pub(crate) manifest_bytes: Vec<u8>,
-    pub wasm_bytes: Option<Arc<[u8]>>,
     pub(crate) source_archive: Option<super::archive::ArchiveFingerprint>,
     pub(crate) _unpacked_dir: Option<Arc<tempfile::TempDir>>,
 }
@@ -65,9 +62,8 @@ impl VerifiedPackage {
             "插件 version 无效"
         );
         ensure!(
-            manifest.api_version == protocol::PROTOCOL_MAJOR
-                && matches!(manifest.engine.as_str(), "native" | "wasm"),
-            "只接受兼容的可信 native 或 wasm 插件包"
+            manifest.api_version == protocol::PROTOCOL_MAJOR && manifest.engine == "native",
+            "只接受兼容的可信 native 插件包"
         );
         ensure!(
             !manifest.entry.as_os_str().is_empty()
@@ -96,33 +92,20 @@ impl VerifiedPackage {
         ensure!(metadata.is_file(), "插件入口不是文件");
         #[cfg(test)]
         super::tests_package::after_entry_metadata();
-        let mut wasm_bytes = None;
-        if manifest.engine == "native" {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                ensure!(
-                    metadata.permissions().mode() & 0o111 != 0,
-                    "插件入口不可执行"
-                );
-            }
-            let mut magic = [0; 4];
-            entry.read_exact(&mut magic)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
             ensure!(
-                is_native_executable_magic(magic),
-                "native worker 必须是原生可执行程序（Mach-O / ELF / PE）"
+                metadata.permissions().mode() & 0o111 != 0,
+                "插件入口不可执行"
             );
-        } else {
-            ensure!(metadata.len() <= MAX_WASM_BYTES, "Wasm 模块超过 4 MiB 限额");
-            let mut bytes = Vec::new();
-            entry.take(MAX_WASM_BYTES + 1).read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len() as u64 == metadata.len(),
-                "Wasm 模块在检查时发生变化"
-            );
-            wasm::WasmModule::parse(&bytes)?;
-            wasm_bytes = Some(Arc::from(bytes));
         }
+        let mut magic = [0; 4];
+        entry.read_exact(&mut magic)?;
+        ensure!(
+            is_native_executable_magic(magic),
+            "native worker 必须是原生可执行程序（Mach-O / ELF / PE）"
+        );
         let permissions: BTreeSet<_> = manifest.permissions.iter().copied().collect();
         ensure!(
             permissions.len() == manifest.permissions.len(),
@@ -159,7 +142,6 @@ impl VerifiedPackage {
             modified: metadata.modified()?,
             manifest_modified,
             manifest_bytes,
-            wasm_bytes,
             source_archive,
             _unpacked_dir: unpacked_dir,
         })

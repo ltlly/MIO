@@ -488,20 +488,7 @@ impl PluginSupervisor {
             incoming_sequence,
             supports_panel_multiplexing,
             protocol_minor,
-        ) = if package.manifest.engine == "wasm" {
-            let module = wasm::WasmModule::parse(
-                package.wasm_bytes.as_deref().context("Wasm 字节缺失")?,
-            )?;
-            let snapshot = wasm::initial_wasm_panel(&package.manifest, &module, &trust.grants)?;
-            let state = PanelState::new(snapshot).map_err(anyhow::Error::msg)?;
-            (
-                WorkerTransport::Wasm { module },
-                state,
-                1,
-                false,
-                protocol::LEGACY_HANDSHAKE_MINOR,
-            )
-        } else {
+        ) = {
             let mut command = Command::new(&package.executable);
             command
                 .current_dir(&package.work_dir)

@@ -1996,7 +1996,7 @@ impl Workbench {
                 .w(theme::scaled_px(87.))
                 .tooltip(|window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(
-                        "加载并管理 WASM 沙箱插件与本地 Native 扩展，控制宿主 API 权限",
+                        "加载并管理本地 Native 扩展，控制宿主 API 权限",
                     )
                     .build(window, cx)
                 })

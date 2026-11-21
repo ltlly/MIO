@@ -466,7 +466,7 @@ impl Workbench {
                                             .child("已安装扩展 (Extensions)"),
                                     )
                                     .child("点击「添加」选择包含 manifest.json 的本地插件包，检查权限后再显式授权加载。")
-                                    .child("WASM 插件在受限沙箱中运行（零 WASI）；Native worker 是可信本地进程，不受 OS 沙箱限制。")
+                                    .child("Native worker 是可信本地进程，不受 OS 沙箱限制，授权仅控制 MIO 宿主 API。")
                                     .child("使用「上移」「下移」调整流量/载荷钩子链中的执行顺序。")
                             }),
                     ),
@@ -565,11 +565,7 @@ impl Workbench {
         let is_movable =
             live && instance.info.tab_id.is_none() && instance.context_owner.is_none();
         let auto_reload = self.extensions.auto_reload.contains(&id);
-        let engine_label = if instance.info.manifest.engine == "wasm" {
-            "WASM"
-        } else {
-            "Native"
-        };
+        let engine_label = "Native";
         let context_suffix = match instance.context_owner {
             Some(owner) => format!(" · {owner}"),
             None => instance.info.tab_id.map_or_else(String::new, |tab| {
@@ -833,7 +829,6 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if let Some(inspection) = &self.extensions.inspection {
-            let is_wasm = inspection.info.manifest.engine == "wasm";
             let mut panel = div()
                 .id("plugin-inspection-panel")
                 .test_support()
@@ -873,14 +868,10 @@ impl Workbench {
                                 .child(inspection.info.executable.display().to_string()),
                         ),
                 )
-                .child(security_warning_callout(is_wasm))
+                .child(security_warning_callout())
                 .child(
                     Checkbox::new("plugin-native-trust")
-                        .label(if is_wasm {
-                            "我确认加载此受限 WASM 插件模块（零 WASI，无直接 OS 文件/网络访问）"
-                        } else {
-                            "我信任此本地 native 程序，并理解它不受 OS 沙箱限制"
-                        })
+                        .label("我信任此本地 native 程序，并理解它不受 OS 沙箱限制")
                         .checked(inspection.trusted)
                         .on_click(cx.listener(|this, value, _, cx| {
                             if let Some(inspection) = &mut this.extensions.inspection {
@@ -1002,7 +993,7 @@ impl Workbench {
                                     })),
                             ),
                     )
-                    .child(security_warning_callout(false))
+                    .child(security_warning_callout())
                     .into_any_element(),
             );
         }

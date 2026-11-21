@@ -1,12 +1,18 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use mio_plugin_api::protocol::Permission;
 
 use super::{
     NativeTrust, VerifiedPackage,
     registry::{InstalledPluginEntry, PluginRegistryStore},
-    wasm::build_demo_wasm_module,
 };
+
+#[cfg(windows)]
+const NATIVE_MAGIC: [u8; 4] = [b'M', b'Z', 0, 0];
+#[cfg(not(windows))]
+const NATIVE_MAGIC: [u8; 4] = [0xcf, 0xfa, 0xed, 0xfe];
 
 fn build_tar_gz(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
     use std::io::Write;
@@ -47,15 +53,18 @@ fn build_tar_gz(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
     gz.finish().unwrap()
 }
 
-fn write_wasm_dir(dir: &std::path::Path, id: &str, version: &str) {
+fn write_native_dir(dir: &std::path::Path, id: &str, version: &str) {
     fs::create_dir_all(dir).unwrap();
-    fs::write(dir.join("plugin.wasm"), build_demo_wasm_module()).unwrap();
+    let worker = dir.join("worker");
+    fs::write(&worker, NATIVE_MAGIC).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
     let manifest = serde_json::json!({
         "id": id,
         "version": version,
         "api_version": 1,
-        "engine": "wasm",
-        "entry": "plugin.wasm",
+        "engine": "native",
+        "entry": "worker",
         "permissions": ["traffic.read"],
         "contributions": ["suite_panel"],
     });
@@ -73,7 +82,7 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
     let store = PluginRegistryStore::new(Some(plugins_root.clone()));
 
     let src_dir = temp.path().join("src-dir");
-    write_wasm_dir(&src_dir, "lab.dir", "1.0.0");
+    write_native_dir(&src_dir, "lab.dir", "1.0.0");
     let dir_pkg = VerifiedPackage::read(&src_dir).unwrap();
     let (staged_dir_pkg, dir_staging) = store.stage_install_package(&dir_pkg).unwrap().unwrap();
     assert_eq!(dir_staging.package_dir, "lab.dir");
@@ -81,7 +90,7 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
         .upsert(InstalledPluginEntry {
             id: "lab.dir".into(),
             version: "1.0.0".into(),
-            engine: "wasm".into(),
+            engine: "native".into(),
             package_dir: dir_staging.package_dir.clone(),
             original_source: Some(dir_pkg.directory.clone()),
             grants: vec![Permission::TrafficRead],
@@ -92,14 +101,13 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
     dir_staging.commit();
     assert!(NativeTrust::confirmed(&staged_dir_pkg, [Permission::TrafficRead]).is_ok());
 
-    let wasm_bytes = build_demo_wasm_module();
-    let arch_manifest = br#"{"id":"lab.arch","version":"0.2.0","api_version":1,"engine":"wasm","entry":"bin/plugin.wasm","permissions":["traffic.read"],"contributions":["suite_panel"]}"#;
+    let arch_manifest = br#"{"id":"lab.arch","version":"0.2.0","api_version":1,"engine":"native","entry":"bin/worker","permissions":["traffic.read"],"contributions":["suite_panel"]}"#;
     let arch_path = temp.path().join("plugin.tar.gz");
     fs::write(
         &arch_path,
         build_tar_gz(&[
             ("manifest.json", 0o644, arch_manifest),
-            ("bin/plugin.wasm", 0o644, &wasm_bytes),
+            ("bin/worker", 0o755, &NATIVE_MAGIC),
         ]),
     )
     .unwrap();
@@ -109,7 +117,7 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
         .upsert(InstalledPluginEntry {
             id: "lab.arch".into(),
             version: "0.2.0".into(),
-            engine: "wasm".into(),
+            engine: "native".into(),
             package_dir: arch_staging.package_dir.clone(),
             original_source: Some(arch_pkg.directory.clone()),
             grants: vec![Permission::TrafficRead],
@@ -139,7 +147,7 @@ fn registry_rejects_symlinks_in_source_directory() {
     let temp = tempfile::tempdir().unwrap();
     let store = PluginRegistryStore::new(Some(temp.path().join("user-plugins")));
     let src_dir = temp.path().join("sym-src");
-    write_wasm_dir(&src_dir, "lab.sym", "1.0.0");
+    write_native_dir(&src_dir, "lab.sym", "1.0.0");
     let pkg = VerifiedPackage::read(&src_dir).unwrap();
     std::os::unix::fs::symlink("/etc/passwd", src_dir.join("extra-link")).unwrap();
     let err = store
@@ -156,14 +164,14 @@ fn registry_mutations_and_staging_rollback_work() {
     let store = PluginRegistryStore::new(Some(plugins_root));
 
     let src1 = temp.path().join("src1");
-    write_wasm_dir(&src1, "lab.one", "1.0.0");
+    write_native_dir(&src1, "lab.one", "1.0.0");
     let pkg1 = VerifiedPackage::read(&src1).unwrap();
     let (_staged1, staging1) = store.stage_install_package(&pkg1).unwrap().unwrap();
     store
         .upsert(InstalledPluginEntry {
             id: "lab.one".into(),
             version: "1.0.0".into(),
-            engine: "wasm".into(),
+            engine: "native".into(),
             package_dir: staging1.package_dir.clone(),
             original_source: Some(src1.clone()),
             grants: vec![Permission::TrafficRead],
@@ -175,7 +183,7 @@ fn registry_mutations_and_staging_rollback_work() {
 
     // Failed fresh install rolls back newly created directory.
     let src2 = temp.path().join("src2");
-    write_wasm_dir(&src2, "lab.two", "1.0.0");
+    write_native_dir(&src2, "lab.two", "1.0.0");
     let pkg2 = VerifiedPackage::read(&src2).unwrap();
     let (_, staging2) = store.stage_install_package(&pkg2).unwrap().unwrap();
     let pkg2_dir = staging2.final_dir.clone();
@@ -189,7 +197,7 @@ fn registry_mutations_and_staging_rollback_work() {
         .upsert(InstalledPluginEntry {
             id: "lab.two".into(),
             version: "1.0.0".into(),
-            engine: "wasm".into(),
+            engine: "native".into(),
             package_dir: staging2.package_dir.clone(),
             original_source: Some(src2.clone()),
             grants: vec![Permission::TrafficRead],
@@ -200,14 +208,14 @@ fn registry_mutations_and_staging_rollback_work() {
     staging2.commit();
 
     let src3 = temp.path().join("src3");
-    write_wasm_dir(&src3, "lab.three", "1.0.0");
+    write_native_dir(&src3, "lab.three", "1.0.0");
     let pkg3 = VerifiedPackage::read(&src3).unwrap();
     let (_, staging3) = store.stage_install_package(&pkg3).unwrap().unwrap();
     store
         .upsert(InstalledPluginEntry {
             id: "lab.three".into(),
             version: "1.0.0".into(),
-            engine: "wasm".into(),
+            engine: "native".into(),
             package_dir: staging3.package_dir.clone(),
             original_source: Some(src3.clone()),
             grants: vec![Permission::TrafficRead],
@@ -231,7 +239,7 @@ fn registry_mutations_and_staging_rollback_work() {
 
     // Upgrade rollback restores previous v1.0.0 package.
     let src1_v2 = temp.path().join("src1-v2");
-    write_wasm_dir(&src1_v2, "lab.one", "2.0.0");
+    write_native_dir(&src1_v2, "lab.one", "2.0.0");
     let pkg1_v2 = VerifiedPackage::read(&src1_v2).unwrap();
     let (staged_v2, staging_v2) = store.stage_install_package(&pkg1_v2).unwrap().unwrap();
     assert_eq!(staged_v2.manifest.version, "2.0.0");

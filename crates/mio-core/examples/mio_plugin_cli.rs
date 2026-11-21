@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use flate2::{Compression, write::GzEncoder};
 use mio_core::{
-    plugins::{PluginManifest, VerifiedPackage, wasm::build_envelope_wasm_module},
+    plugins::{PluginManifest, VerifiedPackage},
     protocol::Permission,
 };
 use serde::{Deserialize, Serialize};
@@ -32,12 +32,6 @@ const SHA256_K: [u32; 64] = [
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EngineKind {
-    Wasm,
-    Native,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackSummary {
@@ -119,18 +113,15 @@ fn validate_plugin_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn scaffold(dir: &Path, plugin_id: &str, engine: EngineKind) -> Result<PluginManifest> {
+pub fn scaffold(dir: &Path, plugin_id: &str) -> Result<PluginManifest> {
     validate_plugin_id(plugin_id)?;
     fs::create_dir_all(dir.join("src")).context("无法创建插件脚手架目录")?;
-    let (engine_str, entry_name) = match engine {
-        EngineKind::Wasm => ("wasm", "plugin.wasm"),
-        EngineKind::Native => ("native", "worker"),
-    };
+    let entry_name = "worker";
     let manifest = PluginManifest {
         id: plugin_id.to_owned(),
         version: "0.1.0".into(),
         api_version: 1,
-        engine: engine_str.into(),
+        engine: "native".into(),
         entry: PathBuf::from(entry_name),
         permissions: vec![Permission::TrafficRead, Permission::Storage],
         contributions: vec!["suite_panel".into(), "passive_check".into()],
@@ -139,43 +130,23 @@ pub fn scaffold(dir: &Path, plugin_id: &str, engine: EngineKind) -> Result<Plugi
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
-    match engine {
-        EngineKind::Wasm => {
-            fs::write(
-                dir.join("Cargo.toml"),
-                format!(
-                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[profile.release]\npanic = \"abort\"\nlto = true\n",
-                    plugin_id.replace('.', "-")
-                ),
-            )?;
-            fs::write(
-                dir.join("src/lib.rs"),
-                format!(
-                    "//! MIO WASM plugin `{plugin_id}` (`wasm32-unknown-unknown`, zero-WASI).\n#![no_std]\n\n#[cfg(not(test))]\n#[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! {{\n    core::arch::wasm32::unreachable()\n}}\n\n#[link(wasm_import_module = \"mio_host\")]\nunsafe extern \"C\" {{\n    fn host_call(ptr: *mut u8, req_len: usize, out_cap: usize) -> i32;\n}}\n\n#[unsafe(no_mangle)]\npub extern \"C\" fn mio_alloc(_len: usize) -> *mut u8 {{\n    0x4000 as *mut u8\n}}\n\n#[unsafe(no_mangle)]\npub extern \"C\" fn mio_dispatch(_ptr: *const u8, _len: usize) -> u64 {{\n    let _ = host_call as usize;\n    0\n}}\n"
-                ),
-            )?;
-            fs::write(dir.join(entry_name), build_envelope_wasm_module())?;
-        }
-        EngineKind::Native => {
-            fs::write(
-                dir.join("Cargo.toml"),
-                format!(
-                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nmio-plugin-sdk = \"0.1.0\" # Or: mio-plugin-sdk = {{ path = \"/path/to/MIO/crates/mio-plugin-sdk\" }}\n",
-                    plugin_id.replace('.', "-")
-                ),
-            )?;
-            fs::write(
-                dir.join("src/main.rs"),
-                format!(
-                    "//! MIO Native Worker plugin `{plugin_id}` built with `mio-plugin-sdk`.\nuse std::io;\nuse mio_plugin_sdk::{{HostClient, MioPlugin, protocol::*, run_stdio, ui}};\n\nstruct Plugin;\n\nimpl MioPlugin for Plugin {{\n    fn id(&self) -> &str {{\n        \"{plugin_id}\"\n    }}\n\n    fn on_passive_check(\n        &mut self,\n        _ctx: &mut dyn HostClient,\n        call: PassiveCheckCall,\n    ) -> Result<PassiveCheckResult, String> {{\n        Ok(PassiveCheckResult {{\n            findings: vec![],\n            log_line: format!(\"checked {{}}\", call.url),\n        }})\n    }}\n}}\n\nfn main() -> io::Result<()> {{\n    run_stdio(Plugin)\n}}\n"
-                ),
-            )?;
-            let worker = dir.join(entry_name);
-            fs::write(&worker, [0xcf, 0xfa, 0xed, 0xfe])?;
-            #[cfg(unix)]
-            fs::set_permissions(&worker, fs::Permissions::from_mode(0o755))?;
-        }
-    }
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nmio-plugin-sdk = \"0.1.0\" # Or: mio-plugin-sdk = {{ path = \"/path/to/MIO/crates/mio-plugin-sdk\" }}\n",
+            plugin_id.replace('.', "-")
+        ),
+    )?;
+    fs::write(
+        dir.join("src/main.rs"),
+        format!(
+            "//! MIO Native Worker plugin `{plugin_id}` built with `mio-plugin-sdk`.\nuse std::io;\nuse mio_plugin_sdk::{{HostClient, MioPlugin, protocol::*, run_stdio, ui}};\n\nstruct Plugin;\n\nimpl MioPlugin for Plugin {{\n    fn id(&self) -> &str {{\n        \"{plugin_id}\"\n    }}\n\n    fn on_passive_check(\n        &mut self,\n        _ctx: &mut dyn HostClient,\n        call: PassiveCheckCall,\n    ) -> Result<PassiveCheckResult, String> {{\n        Ok(PassiveCheckResult {{\n            findings: vec![],\n            log_line: format!(\"checked {{}}\", call.url),\n        }})\n    }}\n}}\n\nfn main() -> io::Result<()> {{\n    run_stdio(Plugin)\n}}\n"
+        ),
+    )?;
+    let worker = dir.join(entry_name);
+    fs::write(&worker, [0xcf, 0xfa, 0xed, 0xfe])?;
+    #[cfg(unix)]
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755))?;
     Ok(manifest)
 }
 
@@ -303,12 +274,7 @@ pub fn pack_package(src_dir: &Path, dest_dir: &Path) -> Result<PackSummary> {
         let mut tar = Vec::new();
         append_tar_entry(&mut tar, "manifest.json", 0o644, &manifest_bytes)?;
         let entry_rel = pkg.manifest.entry.to_string_lossy().replace('\\', "/");
-        let entry_mode = if pkg.manifest.engine == "native" {
-            0o755
-        } else {
-            0o644
-        };
-        append_tar_entry(&mut tar, &entry_rel, entry_mode, &entry_bytes)?;
+        append_tar_entry(&mut tar, &entry_rel, 0o755, &entry_bytes)?;
         append_tar_entry(&mut tar, "sha256-manifest.json", 0o644, &summary_bytes)?;
         tar.resize(tar.len() + 1024, 0);
         let file = fs::File::create(dest_dir).context("无法创建 .tar.gz 归档文件")?;
@@ -333,9 +299,7 @@ pub fn pack_package(src_dir: &Path, dest_dir: &Path) -> Result<PackSummary> {
     fs::write(&dest_manifest, &manifest_bytes)?;
     fs::write(&dest_entry, &entry_bytes)?;
     #[cfg(unix)]
-    if pkg.manifest.engine == "native" {
-        fs::set_permissions(&dest_entry, fs::Permissions::from_mode(0o755))?;
-    }
+    fs::set_permissions(&dest_entry, fs::Permissions::from_mode(0o755))?;
     fs::write(canon_dest.join("sha256-manifest.json"), &summary_bytes)?;
     check_package(&canon_dest)?;
     Ok(summary)
@@ -353,14 +317,13 @@ pub fn run_cli<I: IntoIterator<Item = OsString>>(args: I, out: &mut impl Write) 
         Some("scaffold") => {
             ensure!(
                 (3..=4).contains(&args.len()),
-                "用法: scaffold <dir> <plugin_id> [--wasm|--native]"
+                "用法: scaffold <dir> <plugin_id> [--native]"
             );
-            let engine = match args.get(3).map(String::as_str) {
-                None | Some("--wasm") => EngineKind::Wasm,
-                Some("--native") => EngineKind::Native,
-                Some(flag) => bail!("未知引擎参数: {flag}（支持 --wasm 或 --native）"),
-            };
-            let manifest = scaffold(Path::new(&args[1]), &args[2], engine)?;
+            match args.get(3).map(String::as_str) {
+                None | Some("--native") => {}
+                Some(flag) => bail!("未知引擎参数: {flag}（仅支持 --native）"),
+            }
+            let manifest = scaffold(Path::new(&args[1]), &args[2])?;
             writeln!(
                 out,
                 "scaffolded {} ({}) -> {}",
@@ -385,7 +348,7 @@ pub fn run_cli<I: IntoIterator<Item = OsString>>(args: I, out: &mut impl Write) 
             writeln!(out, "{}", serde_json::to_string_pretty(&summary)?)?;
         }
         _ => bail!(
-            "用法: mio_plugin_cli <scaffold <dir> <id> [--wasm|--native] | check <dir> | pack <src> <dest>>"
+            "用法: mio_plugin_cli <scaffold <dir> <id> [--native] | check <dir> | pack <src> <dest>>"
         ),
     }
     Ok(())
@@ -406,90 +369,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scaffold_check_and_pack_wasm_and_native_packages() {
+    fn scaffold_check_and_pack_native_package() {
         let tmp = tempfile::tempdir().unwrap();
-        let wasm_src = tmp.path().join("src-wasm");
-        let wasm_out = tmp.path().join("dist-wasm");
+        let native_src = tmp.path().join("src-native");
+        let native_out = tmp.path().join("dist-native");
         let mut buf = Vec::new();
         run_cli(
-            [
-                "scaffold",
-                wasm_src.to_str().unwrap(),
-                "lab.cli.wasm",
-                "--wasm",
-            ]
-            .map(OsString::from),
+            ["scaffold", native_src.to_str().unwrap(), "lab.cli.native"].map(OsString::from),
             &mut buf,
         )
         .unwrap();
-        assert!(wasm_src.join("src/lib.rs").is_file());
+        assert!(native_src.join("src/main.rs").is_file());
 
         buf.clear();
         run_cli(
-            ["check", wasm_src.to_str().unwrap()].map(OsString::from),
+            ["check", native_src.to_str().unwrap()].map(OsString::from),
             &mut buf,
         )
         .unwrap();
-        assert!(String::from_utf8_lossy(&buf).contains("checked lab.cli.wasm"));
+        assert!(String::from_utf8_lossy(&buf).contains("checked lab.cli.native"));
 
         buf.clear();
         run_cli(
             [
                 "pack",
-                wasm_src.to_str().unwrap(),
-                wasm_out.to_str().unwrap(),
+                native_src.to_str().unwrap(),
+                native_out.to_str().unwrap(),
             ]
             .map(OsString::from),
             &mut buf,
         )
         .unwrap();
         let summary: PackSummary = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(summary.id, "lab.cli.wasm");
-        assert_eq!(summary.engine, "wasm");
+        assert_eq!(summary.id, "lab.cli.native");
+        assert_eq!(summary.engine, "native");
         assert_eq!(summary.manifest_sha256.len(), 64);
         assert_eq!(summary.entry_sha256.len(), 64);
-        assert!(wasm_out.join("sha256-manifest.json").is_file());
-        check_package(&wasm_out).unwrap();
-        let wasm_tgz = tmp.path().join("lab.cli.wasm.tar.gz");
-        pack_package(&wasm_src, &wasm_tgz).unwrap();
-        let tgz_bytes = fs::read(&wasm_tgz).unwrap();
+        assert!(native_out.join("sha256-manifest.json").is_file());
+        check_package(&native_out).unwrap();
+        let native_tgz = tmp.path().join("lab.cli.native.tar.gz");
+        pack_package(&native_src, &native_tgz).unwrap();
+        let tgz_bytes = fs::read(&native_tgz).unwrap();
         assert_eq!(
             &tgz_bytes[..2],
             &[0x1f, 0x8b],
             "must write real gzip archive"
         );
+        check_package(&native_tgz).unwrap();
 
         // Tampering entry after pack fails sha256-manifest.json verification.
-        fs::write(wasm_out.join("plugin.wasm"), build_envelope_wasm_module()).unwrap();
+        fs::write(native_out.join("worker"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(native_out.join("worker"), fs::Permissions::from_mode(0o755))
+            .unwrap();
         let mut bad_summary = summary.clone();
         bad_summary.entry_sha256 = "0".repeat(64);
         fs::write(
-            wasm_out.join("sha256-manifest.json"),
+            native_out.join("sha256-manifest.json"),
             serde_json::to_vec_pretty(&bad_summary).unwrap(),
         )
         .unwrap();
-        assert!(check_package(&wasm_out).is_err());
+        assert!(check_package(&native_out).is_err());
 
-        let native_src = tmp.path().join("src-native");
-        scaffold(&native_src, "lab.cli.native", EngineKind::Native).unwrap();
+        let flagged_src = tmp.path().join("src-native-flag");
+        buf.clear();
+        run_cli(
+            [
+                "scaffold",
+                flagged_src.to_str().unwrap(),
+                "lab.cli.flag",
+                "--native",
+            ]
+            .map(OsString::from),
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(
-            check_package(&native_src).unwrap().manifest.engine,
+            check_package(&flagged_src).unwrap().manifest.engine,
             "native"
+        );
+
+        let bad_flag_src = tmp.path().join("src-bad-flag");
+        assert!(
+            run_cli(
+                [
+                    "scaffold",
+                    bad_flag_src.to_str().unwrap(),
+                    "lab.cli.bad",
+                    "--unknown",
+                ]
+                .map(OsString::from),
+                &mut buf,
+            )
+            .is_err()
         );
     }
 
     #[test]
-    fn check_rejects_path_traversal_symlink_escape_and_invalid_wasm() {
+    fn check_rejects_path_traversal_symlink_escape_and_invalid_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bad-escape");
-        scaffold(&dir, "lab.escape", EngineKind::Wasm).unwrap();
+        scaffold(&dir, "lab.escape").unwrap();
 
         // 1. Relative `..` path traversal rejected
-        let outside = tmp.path().join("outside.wasm");
-        fs::write(&outside, build_envelope_wasm_module()).unwrap();
+        let outside = tmp.path().join("outside-worker");
+        fs::write(&outside, [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             dir.join("manifest.json"),
-            br#"{"id":"lab.escape","version":"0.1.0","api_version":1,"engine":"wasm","entry":"../outside.wasm","permissions":[],"contributions":["suite_panel"]}"#,
+            br#"{"id":"lab.escape","version":"0.1.0","api_version":1,"engine":"native","entry":"../outside-worker","permissions":[],"contributions":["suite_panel"]}"#,
         )
         .unwrap();
         assert!(check_package(&dir).is_err());
@@ -497,19 +486,32 @@ mod tests {
         // 2. Symlink escape inside package directory rejected
         #[cfg(unix)]
         {
-            fs::remove_file(dir.join("plugin.wasm")).unwrap();
-            std::os::unix::fs::symlink(&outside, dir.join("plugin.wasm")).unwrap();
+            fs::remove_file(dir.join("worker")).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("worker")).unwrap();
             fs::write(
-            dir.join("manifest.json"),
-            br#"{"id":"lab.escape","version":"0.1.0","api_version":1,"engine":"wasm","entry":"plugin.wasm","permissions":[],"contributions":["suite_panel"]}"#,
-        )
-        .unwrap();
+                dir.join("manifest.json"),
+                br#"{"id":"lab.escape","version":"0.1.0","api_version":1,"engine":"native","entry":"worker","permissions":[],"contributions":["suite_panel"]}"#,
+            )
+            .unwrap();
             assert!(check_package(&dir).is_err());
         }
 
-        // 3. Corrupted WASM binary rejected
-        let _ = fs::remove_file(dir.join("plugin.wasm"));
-        fs::write(dir.join("plugin.wasm"), b"NOT_WASM").unwrap();
+        // 3. Corrupted native binary rejected
+        let _ = fs::remove_file(dir.join("worker"));
+        fs::write(dir.join("worker"), b"NOT_BIN!").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(dir.join("worker"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check_package(&dir).is_err());
+
+        // 4. Unsupported engine rejected
+        fs::write(dir.join("worker"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(dir.join("worker"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            dir.join("manifest.json"),
+            br#"{"id":"lab.escape","version":"0.1.0","api_version":1,"engine":"unsupported","entry":"worker","permissions":[],"contributions":["suite_panel"]}"#,
+        )
+        .unwrap();
         assert!(check_package(&dir).is_err());
     }
 }

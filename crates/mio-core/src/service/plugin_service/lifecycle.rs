@@ -478,7 +478,7 @@ impl State {
                     manifest_size,
                     entry_modified,
                     entry_size,
-                    auto_reload: info.manifest.engine == "wasm",
+                    auto_reload: false,
                     trust,
                     info,
                     panel,

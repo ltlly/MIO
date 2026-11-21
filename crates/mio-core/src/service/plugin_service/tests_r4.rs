@@ -1,25 +1,397 @@
-use std::fs;
+use std::{fs, sync::OnceLock};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use mio_plugin_api::panel::{Empty, UiEvent, ui_event};
 
 use super::*;
-use crate::plugins::wasm::{build_demo_wasm_module, build_envelope_wasm_module};
 
-pub(super) fn write_wasm_package(
+#[cfg(windows)]
+const NATIVE_MAGIC: [u8; 4] = [b'M', b'Z', 0, 0];
+#[cfg(not(windows))]
+const NATIVE_MAGIC: [u8; 4] = [0xcf, 0xfa, 0xed, 0xfe];
+
+fn native_entry_name() -> &'static str {
+    if cfg!(windows) {
+        "worker.exe"
+    } else {
+        "worker"
+    }
+}
+
+const NATIVE_TEST_WORKER_SRC: &str = r#"
+use std::fs;
+use std::io::{self, Read, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn varint(mut v: u64, out: &mut Vec<u8>) {
+    loop {
+        let mut b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn tag_varint(field: u32, val: u64, out: &mut Vec<u8>) {
+    varint((field as u64) << 3, out);
+    varint(val, out);
+}
+
+fn tag_bytes(field: u32, data: &[u8], out: &mut Vec<u8>) {
+    varint(((field as u64) << 3) | 2, out);
+    varint(data.len() as u64, out);
+    out.extend_from_slice(data);
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> u64 {
+    let mut val = 0u64;
+    let mut shift = 0u32;
+    while *pos < buf.len() {
+        let b = buf[*pos];
+        *pos += 1;
+        val |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    val
+}
+
+fn skip_field(wire: u64, buf: &[u8], pos: &mut usize) {
+    match wire {
+        0 => {
+            let _ = read_varint(buf, pos);
+        }
+        1 => *pos = (*pos + 8).min(buf.len()),
+        2 => {
+            let len = read_varint(buf, pos) as usize;
+            *pos = (*pos + len).min(buf.len());
+        }
+        5 => *pos = (*pos + 4).min(buf.len()),
+        _ => *pos = buf.len(),
+    }
+}
+
+fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut prefix = [0u8; 4];
+    match r.read_exact(&mut prefix) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    Ok(Some(buf))
+}
+
+fn write_frame(w: &mut impl Write, msg: &[u8]) -> io::Result<()> {
+    w.write_all(&(msg.len() as u32).to_be_bytes())?;
+    w.write_all(msg)?;
+    w.flush()
+}
+
+fn json_field(json: &str, key: &str) -> String {
+    let needle = format!("\"{key}\"");
+    let Some(idx) = json.find(&needle) else {
+        return String::new();
+    };
+    let rest = &json[idx + needle.len()..];
+    let Some(colon) = rest.find(':') else {
+        return String::new();
+    };
+    let after = rest[colon + 1..].trim_start();
+    let Some(stripped) = after.strip_prefix('"') else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut chars = stripped.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => break,
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    out.push(esc);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn panel_snapshot(rev: u64, title: &str) -> Vec<u8> {
+    let mut btn = Vec::new();
+    tag_bytes(1, b"save", &mut btn);
+    tag_varint(2, 1, &mut btn);
+    let mut node = Vec::new();
+    tag_varint(1, 10, &mut node);
+    tag_bytes(2, b"save", &mut node);
+    tag_bytes(15, &btn, &mut node);
+    let mut snap = Vec::new();
+    tag_varint(1, rev, &mut snap);
+    tag_bytes(2, title.as_bytes(), &mut snap);
+    tag_bytes(3, &node, &mut snap);
+    snap
+}
+
+fn encode_env(
+    req_id: u64,
+    instance_id: &[u8],
+    project_id: &[u8],
+    project_gen: u64,
+    rev: u64,
+    in_reply_to: u64,
+    body_field: u32,
+    body_bytes: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    tag_varint(1, 1, &mut out);
+    tag_varint(2, 5, &mut out);
+    tag_varint(3, req_id, &mut out);
+    tag_bytes(4, instance_id, &mut out);
+    tag_bytes(5, project_id, &mut out);
+    tag_varint(6, project_gen, &mut out);
+    tag_varint(7, 1, &mut out);
+    tag_varint(8, rev, &mut out);
+    tag_varint(9, unix_ms().saturating_add(5000), &mut out);
+    if in_reply_to != 0 {
+        tag_varint(10, in_reply_to, &mut out);
+    }
+    tag_bytes(body_field, body_bytes, &mut out);
+    out
+}
+
+#[derive(Default)]
+struct EnvMeta {
+    req_id: u64,
+    in_reply_to: u64,
+    instance_id: Vec<u8>,
+    project_id: Vec<u8>,
+    project_gen: u64,
+    has_ui_event: bool,
+    has_host_result: bool,
+    has_shutdown: bool,
+}
+
+fn parse_env(buf: &[u8]) -> EnvMeta {
+    let mut meta = EnvMeta::default();
+    let mut pos = 0;
+    while pos < buf.len() {
+        let key = read_varint(buf, &mut pos);
+        let field = (key >> 3) as u32;
+        let wire = key & 7;
+        match (field, wire) {
+            (3, 0) => meta.req_id = read_varint(buf, &mut pos),
+            (4, 2) => {
+                let len = read_varint(buf, &mut pos) as usize;
+                let end = (pos + len).min(buf.len());
+                meta.instance_id = buf[pos..end].to_vec();
+                pos = end;
+            }
+            (5, 2) => {
+                let len = read_varint(buf, &mut pos) as usize;
+                let end = (pos + len).min(buf.len());
+                meta.project_id = buf[pos..end].to_vec();
+                pos = end;
+            }
+            (6, 0) => meta.project_gen = read_varint(buf, &mut pos),
+            (10, 0) => meta.in_reply_to = read_varint(buf, &mut pos),
+            (25, 2) => {
+                meta.has_ui_event = true;
+                skip_field(wire, buf, &mut pos);
+            }
+            (30, 2) => {
+                meta.has_host_result = true;
+                skip_field(wire, buf, &mut pos);
+            }
+            (32, 2) => {
+                meta.has_shutdown = true;
+                skip_field(wire, buf, &mut pos);
+            }
+            _ => skip_field(wire, buf, &mut pos),
+        }
+    }
+    meta
+}
+
+fn main() -> io::Result<()> {
+    let manifest_json = fs::read_to_string("manifest.json").unwrap_or_default();
+    let plugin_id = json_field(&manifest_json, "id");
+    let plugin_version = json_field(&manifest_json, "version");
+
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
+
+    let Some(hello_buf) = read_frame(&mut stdin)? else {
+        return Ok(());
+    };
+    let hello = parse_env(&hello_buf);
+
+    let mut reg = Vec::new();
+    tag_bytes(1, plugin_id.as_bytes(), &mut reg);
+    tag_bytes(2, plugin_version.as_bytes(), &mut reg);
+    tag_bytes(4, &panel_snapshot(1, &plugin_id), &mut reg);
+    let mut next_req = 1u64;
+    let mut rev = 1u64;
+    let reg_env = encode_env(
+        next_req,
+        &hello.instance_id,
+        &hello.project_id,
+        hello.project_gen,
+        rev,
+        hello.req_id,
+        21,
+        &reg,
+    );
+    write_frame(&mut stdout, &reg_env)?;
+
+    while let Some(buf) = read_frame(&mut stdin)? {
+        let env = parse_env(&buf);
+        if env.has_shutdown {
+            break;
+        }
+        if env.has_ui_event {
+            next_req += 1;
+            let call_id = next_req;
+            let mut pref_entry = Vec::new();
+            tag_bytes(1, b"native_tag", &mut pref_entry);
+            tag_bytes(2, b"native-v1", &mut pref_entry);
+            let mut host_call = Vec::new();
+            tag_bytes(10, &pref_entry, &mut host_call);
+            tag_varint(20, env.req_id, &mut host_call);
+            let call_env = encode_env(
+                call_id,
+                &hello.instance_id,
+                &hello.project_id,
+                hello.project_gen,
+                rev,
+                0,
+                29,
+                &host_call,
+            );
+            write_frame(&mut stdout, &call_env)?;
+
+            while let Some(reply_buf) = read_frame(&mut stdin)? {
+                let reply = parse_env(&reply_buf);
+                if reply.has_shutdown {
+                    return Ok(());
+                }
+                if reply.has_host_result && reply.in_reply_to == call_id {
+                    break;
+                }
+            }
+
+            rev += 1;
+            next_req += 1;
+            let snap_env = encode_env(
+                next_req,
+                &hello.instance_id,
+                &hello.project_id,
+                hello.project_gen,
+                rev,
+                env.req_id,
+                23,
+                &panel_snapshot(rev, &plugin_id),
+            );
+            write_frame(&mut stdout, &snap_env)?;
+        }
+    }
+    Ok(())
+}
+"#;
+
+fn native_test_worker_bytes() -> &'static [u8] {
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("worker.rs");
+        let bin = tmp.path().join(native_entry_name());
+        fs::write(&src, NATIVE_TEST_WORKER_SRC).unwrap();
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let status = std::process::Command::new(rustc)
+            .args([
+                "--edition=2024",
+                "-C",
+                "opt-level=0",
+                "-C",
+                "debuginfo=0",
+                "-o",
+            ])
+            .arg(&bin)
+            .arg(&src)
+            .status()
+            .expect("spawn rustc for native test worker");
+        assert!(status.success(), "rustc failed compiling native test worker");
+        fs::read(&bin).unwrap()
+    })
+}
+
+pub(super) fn write_native_package(
     dir: &std::path::Path,
     id: &str,
     version: &str,
-    wasm_bytes: &[u8],
     permissions: &[&str],
     contributions: &[&str],
 ) {
-    fs::write(dir.join("plugin.wasm"), wasm_bytes).unwrap();
+    let entry_name = native_entry_name();
+    let entry_path = dir.join(entry_name);
+    let worker_bytes = native_test_worker_bytes();
+    if fs::read(&entry_path).ok().as_deref() != Some(worker_bytes) {
+        let tmp_entry = dir.join(format!(".{entry_name}.tmp"));
+        fs::write(&tmp_entry, worker_bytes).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&tmp_entry, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&tmp_entry, &entry_path).unwrap();
+    }
     let manifest = serde_json::json!({
         "id": id,
         "version": version,
         "api_version": 1,
-        "engine": "wasm",
-        "entry": "plugin.wasm",
+        "engine": "native",
+        "entry": entry_name,
+        "permissions": permissions,
+        "contributions": contributions,
+    });
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_native_stub_package(
+    dir: &std::path::Path,
+    id: &str,
+    version: &str,
+    permissions: &[&str],
+    contributions: &[&str],
+) {
+    let entry_name = native_entry_name();
+    let entry_path = dir.join(entry_name);
+    fs::write(&entry_path, NATIVE_MAGIC).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&entry_path, fs::Permissions::from_mode(0o755)).unwrap();
+    let manifest = serde_json::json!({
+        "id": id,
+        "version": version,
+        "api_version": 1,
+        "engine": "native",
+        "entry": entry_name,
         "permissions": permissions,
         "contributions": contributions,
     });
@@ -61,11 +433,10 @@ fn runtime_start_with_preferences_persists_plugin_prefs_across_project_switches(
 
     let pkg_dir = canonical.join("pkg-prefs");
     fs::create_dir_all(&pkg_dir).unwrap();
-    write_wasm_package(
+    write_native_package(
         &pkg_dir,
         "lab.prefs",
         "0.1.0",
-        &build_envelope_wasm_module(),
         &["storage.kv"],
         &["suite_panel"],
     );
@@ -179,19 +550,18 @@ fn runtime_start_with_preferences_persists_plugin_prefs_across_project_switches(
 
     let reopened = PluginPreferencesStore::new(Some(plugin_pref_path));
     assert_eq!(
-        reopened.get("lab.prefs", "wasm_tag").unwrap().as_deref(),
-        Some(&b"envelope-v13"[..])
+        reopened.get("lab.prefs", "native_tag").unwrap().as_deref(),
+        Some(&b"native-v1"[..])
     );
 }
 
 #[tokio::test]
 async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_subset() {
     let dir = tempfile::tempdir().unwrap();
-    write_wasm_package(
+    write_native_package(
         dir.path(),
         "lab.autoreload",
         "0.1.0",
-        &build_demo_wasm_module(),
         &["traffic.read"],
         &["suite_panel"],
     );
@@ -237,15 +607,37 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
     };
     let first_id = info.identity.instance_id;
 
+    let ar_op = Uuid::new_v4();
+    state
+        .plugin_command(
+            state.project,
+            ar_op,
+            PluginAction::SetAutoReload {
+                instance_id: first_id,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+    let PluginOutcome::AutoReloadUpdated {
+        instance_id: ar_id,
+        enabled: true,
+    } = drain_until_plugin_op(&mut state, &mut rx, ar_op)
+        .await
+        .unwrap()
+    else {
+        panic!("expected AutoReloadUpdated(true)");
+    };
+    assert_eq!(ar_id, first_id);
+
     // Fill dummy instances up to MAX_INSTANCES (16) and verify Reload still succeeds.
     let mut filler_guards = Vec::new();
     while state.plugins.instances.len() < MAX_INSTANCES {
         let filler_dir = tempfile::tempdir().unwrap();
-        write_wasm_package(
+        write_native_stub_package(
             filler_dir.path(),
             "lab.filler",
             "1.0.0",
-            &build_demo_wasm_module(),
             &["traffic.read"],
             &["suite_panel"],
         );
@@ -323,11 +715,10 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
 
     // Auto-reload detects safe version update on disk.
     assert!(state.check_auto_reload().is_empty());
-    write_wasm_package(
+    write_native_package(
         dir.path(),
         "lab.autoreload",
-        "0.2.0",
-        &build_envelope_wasm_module(),
+        "0.2.0-next",
         &["traffic.read"],
         &["suite_panel"],
     );
@@ -340,15 +731,14 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
     else {
         panic!("expected auto-reload completion");
     };
-    assert_eq!(v2_info.manifest.version, "0.2.0");
+    assert_eq!(v2_info.manifest.version, "0.2.0-next");
     let third_id = v2_info.identity.instance_id;
 
     // Auto-reload blocks silent permission escalation.
-    write_wasm_package(
+    write_native_package(
         dir.path(),
         "lab.autoreload",
         "0.3.0",
-        &build_envelope_wasm_module(),
         &["traffic.read", "network.send"],
         &["suite_panel"],
     );
@@ -362,18 +752,19 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
     state.stop_plugins().await.unwrap();
 }
 
-fn build_wasm_tar_gz(id: &str, version: &str) -> Vec<u8> {
+fn build_native_tar_gz(id: &str, version: &str) -> Vec<u8> {
     use std::io::Write;
 
     use flate2::{Compression, write::GzEncoder};
 
-    let wasm = build_demo_wasm_module();
+    let entry_name = native_entry_name();
+    let worker = native_test_worker_bytes();
     let manifest = serde_json::json!({
         "id": id,
         "version": version,
         "api_version": 1,
-        "engine": "wasm",
-        "entry": "plugin.wasm",
+        "engine": "native",
+        "entry": entry_name,
         "permissions": ["traffic.read"],
         "contributions": ["suite_panel"],
     })
@@ -381,7 +772,7 @@ fn build_wasm_tar_gz(id: &str, version: &str) -> Vec<u8> {
     let mut tar = Vec::new();
     for (name, mode, data) in [
         ("manifest.json", 0o644u32, manifest.as_bytes()),
-        ("plugin.wasm", 0o644u32, wasm.as_slice()),
+        (entry_name, 0o755u32, worker),
     ] {
         let mut header = [0u8; 512];
         header[..name.len()].copy_from_slice(name.as_bytes());
@@ -423,7 +814,7 @@ fn persistent_plugins_survive_runtime_restart_toggle_disable_extensions_and_unin
     let plugins_dir = profile_dir.join("plugins");
     let archive_path = canonical.join("downloads").join("lab.persist.tar.gz");
     fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
-    fs::write(&archive_path, build_wasm_tar_gz("lab.persist", "0.1.0")).unwrap();
+    fs::write(&archive_path, build_native_tar_gz("lab.persist", "0.1.0")).unwrap();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

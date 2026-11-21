@@ -116,7 +116,7 @@ impl Workbench {
                     "已安装",
                     None,
                     page == ExtensionsPage::Installed,
-                    "管理当前项目中已安装的 WASM 与本地 Native 扩展",
+                    "管理当前项目中已安装的本地 Native 扩展",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.extensions.page = ExtensionsPage::Installed;
@@ -191,7 +191,7 @@ impl Workbench {
                     "扩展设置",
                     Some(IconName::Settings),
                     page == ExtensionsPage::Settings,
-                    "配置手动加载路径、查看安全沙箱策略并打开全局设置",
+                    "配置手动加载路径、查看安全策略并打开全局设置",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.extensions.page = ExtensionsPage::Settings;
@@ -377,7 +377,7 @@ pub(in crate::workbench::plugins) fn mio_neutral_button(
         .child(label)
 }
 
-pub(super) fn security_warning_callout(is_wasm: bool) -> gpui_kit::Div {
+pub(super) fn security_warning_callout() -> gpui_kit::Div {
     div()
         .w_full()
         .px(px(10.))
@@ -388,11 +388,7 @@ pub(super) fn security_warning_callout(is_wasm: bool) -> gpui_kit::Div {
         .border_color(theme::danger_border())
         .text_size(px(12.))
         .text_color(theme::danger_fg())
-        .child(if is_wasm {
-            "WASM 插件在受限沙箱中运行：零 WASI，无直接 OS 文件或网络访问。下面的授权只限制 MIO 宿主 API。"
-        } else {
-            "Native worker 是可信本地程序，不受 OS 沙箱限制，可直接使用当前用户的文件与网络权限。下面的授权只限制 MIO 宿主 API，并不能沙箱化进程。"
-        })
+        .child("Native worker 是可信本地程序，不受 OS 沙箱限制，可直接使用当前用户的文件与网络权限。下面的授权只限制 MIO 宿主 API，并不能沙箱化进程。")
 }
 
 pub(super) fn permission_short_name(permission: Permission) -> &'static str {

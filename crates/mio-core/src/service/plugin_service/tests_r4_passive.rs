@@ -1,10 +1,9 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
-    tests_r4::{drain_until_plugin_op, write_wasm_package},
+    tests_r4::{drain_until_plugin_op, write_native_package},
     *,
 };
-use crate::plugins::wasm::build_demo_wasm_module;
 
 #[tokio::test]
 async fn plugin_send_increments_depth_header_and_passive_findings_persist_to_audit() {
@@ -25,11 +24,10 @@ async fn plugin_send_increments_depth_header_and_passive_findings_persist_to_aud
     });
 
     let dir = tempfile::tempdir().unwrap();
-    write_wasm_package(
+    write_native_package(
         dir.path(),
         "lab.net",
         "0.1.0",
-        &build_demo_wasm_module(),
         &["network.send", "traffic.read"],
         &["suite_panel"],
     );

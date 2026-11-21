@@ -60,7 +60,6 @@ mod running;
 mod running_host;
 mod runtime;
 mod supervisor;
-pub mod wasm;
 
 pub use broker::{PermissionBroker, PluginEvent, ServiceOperation, ServiceRequest, ServiceResult};
 use handle::ControlOrderState;
@@ -279,9 +278,6 @@ enum WorkerTransport {
         stdin: tokio::process::ChildStdin,
         stdout: tokio::process::ChildStdout,
         stderr: tokio::process::ChildStderr,
-    },
-    Wasm {
-        module: wasm::WasmModule,
     },
     #[cfg(test)]
     Duplex {

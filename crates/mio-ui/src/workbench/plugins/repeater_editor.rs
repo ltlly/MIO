@@ -354,13 +354,7 @@ impl Workbench {
                 PanelEvent::Edited => cx.notify(),
                 PanelEvent::Error(error) => this.fail(error.clone(), cx),
             });
-        let default_auto_reload =
-            info.manifest.engine == "wasm" && info.tab_id.is_none() && context_owner.is_none();
-        let status = if info.manifest.engine == "wasm" {
-            "已加载 · 受限 WASM 沙箱（零 WASI，无直接 OS 文件/网络访问）".into()
-        } else {
-            "已加载 · native worker 未受 OS 沙箱限制".into()
-        };
+        let status = "已加载 · native worker 未受 OS 沙箱限制".into();
         let is_suite = info.tab_id.is_none() && context_owner.is_none();
         self.extensions.instances.push(Instance {
             info,
@@ -373,9 +367,6 @@ impl Workbench {
             context_owner,
             _subscription: subscription,
         });
-        if default_auto_reload {
-            self.extensions.auto_reload.insert(id);
-        }
         if is_suite {
             self.extensions.selected = Some(id);
         }
