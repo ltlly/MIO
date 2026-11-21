@@ -20,6 +20,8 @@ mod organiser;
 pub use organiser::*;
 mod plugin_types;
 pub use plugin_types::*;
+mod project_settings_json;
+pub use project_settings_json::*;
 mod provenance;
 pub use provenance::*;
 mod proxy_settings;

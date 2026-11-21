@@ -1153,44 +1153,6 @@ pub use mio_plugin_api::protocol::{MatchAndReplaceRule, MatchReplaceTarget};
 
 const MAX_SCOPE_JSON_BYTES: usize = 256 * 1024;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictScopeRuleJson {
-    id: Uuid,
-    enabled: bool,
-    prefix: String,
-    #[serde(default)]
-    include_subdomains: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictAdvancedScopeRuleJson {
-    id: Uuid,
-    enabled: bool,
-    #[serde(default)]
-    protocol: ScopeProtocol,
-    #[serde(default)]
-    host: String,
-    #[serde(default)]
-    port: String,
-    #[serde(default)]
-    file: String,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct StrictTargetScopeJson {
-    include: Vec<StrictScopeRuleJson>,
-    exclude: Vec<StrictScopeRuleJson>,
-    advanced_mode: bool,
-    advanced_include: Vec<StrictAdvancedScopeRuleJson>,
-    advanced_exclude: Vec<StrictAdvancedScopeRuleJson>,
-    drop_out_of_scope: bool,
-    out_of_scope_use_custom: bool,
-    out_of_scope_custom_rules: Vec<StrictScopeRuleJson>,
-}
-
 pub fn export_target_scope_json(scope: &TargetScope) -> Result<String, String> {
     scope.validate().map_err(|err| err.to_string())?;
     serde_json::to_string_pretty(scope).map_err(|err| format!("序列化 Scope JSON 失败：{err}"))
@@ -1212,67 +1174,18 @@ pub fn parse_target_scope_json(raw: &str) -> Result<TargetScope, String> {
     if obj.is_empty() {
         return Err("Scope JSON 不能为空对象 `{}`。".into());
     }
-    let strict: StrictTargetScopeJson =
-        serde_json::from_value(value).map_err(|err| format!("Scope JSON 字段无效：{err}"))?;
-    let scope = TargetScope {
-        include: strict
-            .include
-            .into_iter()
-            .map(|r| ScopeRule {
-                id: r.id,
-                enabled: r.enabled,
-                prefix: r.prefix,
-                include_subdomains: r.include_subdomains,
-            })
-            .collect(),
-        exclude: strict
-            .exclude
-            .into_iter()
-            .map(|r| ScopeRule {
-                id: r.id,
-                enabled: r.enabled,
-                prefix: r.prefix,
-                include_subdomains: r.include_subdomains,
-            })
-            .collect(),
-        advanced_mode: strict.advanced_mode,
-        advanced_include: strict
-            .advanced_include
-            .into_iter()
-            .map(|r| AdvancedScopeRule {
-                id: r.id,
-                enabled: r.enabled,
-                protocol: r.protocol,
-                host: r.host,
-                port: r.port,
-                file: r.file,
-            })
-            .collect(),
-        advanced_exclude: strict
-            .advanced_exclude
-            .into_iter()
-            .map(|r| AdvancedScopeRule {
-                id: r.id,
-                enabled: r.enabled,
-                protocol: r.protocol,
-                host: r.host,
-                port: r.port,
-                file: r.file,
-            })
-            .collect(),
-        drop_out_of_scope: strict.drop_out_of_scope,
-        out_of_scope_use_custom: strict.out_of_scope_use_custom,
-        out_of_scope_custom_rules: strict
-            .out_of_scope_custom_rules
-            .into_iter()
-            .map(|r| ScopeRule {
-                id: r.id,
-                enabled: r.enabled,
-                prefix: r.prefix,
-                include_subdomains: r.include_subdomains,
-            })
-            .collect(),
-    };
+    let mut unknown_paths = Vec::new();
+    let mut decoder = serde_json::Deserializer::from_str(trimmed);
+    let scope: TargetScope = serde_ignored::deserialize(&mut decoder, |path| {
+        unknown_paths.push(path.to_string());
+    })
+    .map_err(|err| format!("Scope JSON 字段无效：{err}"))?;
+    decoder
+        .end()
+        .map_err(|err| format!("Scope JSON 存在尾随内容：{err}"))?;
+    if let Some(first) = unknown_paths.first() {
+        return Err(format!("Scope JSON 包含未知字段 `{first}`。"));
+    }
     scope.validate().map_err(|err| err.to_string())?;
     Ok(scope)
 }
@@ -1476,5 +1389,74 @@ mod tests {
                 .iter()
                 .any(|h| h.name == "Connection" && h.value == b"close")
         );
+    }
+
+    #[test]
+    fn parse_target_scope_json_roundtrip_and_strict_validation() {
+        let scope = TargetScope {
+            include: vec![ScopeRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                prefix: "https://example.invalid".into(),
+                include_subdomains: true,
+            }],
+            exclude: vec![ScopeRule {
+                id: Uuid::new_v4(),
+                enabled: false,
+                prefix: "https://example.invalid/logout".into(),
+                include_subdomains: false,
+            }],
+            advanced_mode: true,
+            advanced_include: vec![AdvancedScopeRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                protocol: ScopeProtocol::Https,
+                host: "^app\\.example\\.invalid$".into(),
+                port: "443".into(),
+                file: "^/api/.*$".into(),
+            }],
+            advanced_exclude: vec![],
+            drop_out_of_scope: true,
+            out_of_scope_use_custom: true,
+            out_of_scope_custom_rules: vec![ScopeRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                prefix: "https://allow.example.invalid".into(),
+                include_subdomains: false,
+            }],
+        };
+
+        let json = export_target_scope_json(&scope).expect("export scope must succeed");
+        let parsed = parse_target_scope_json(&json).expect("roundtrip parse must succeed");
+        assert_eq!(parsed, scope);
+
+        let rule_id = Uuid::new_v4();
+        let bad_cases = [
+            "",
+            "{}",
+            "[]",
+            r#"{"unknown":1}"#,
+            &format!(
+                r#"{{"include":[{{"id":"{rule_id}","enabled":true,"prefix":"https://example.invalid","extra":1}}]}}"#
+            ),
+            &format!(
+                r#"{{"advanced_include":[{{"id":"{rule_id}","enabled":true,"host":"^example\\.invalid$","extra":1}}]}}"#
+            ),
+            r#"{"advanced_mode":true,"advanced_mode":false}"#,
+        ];
+        for case in bad_cases {
+            assert!(
+                parse_target_scope_json(case).is_err(),
+                "expected failure for scope JSON: {case}"
+            );
+        }
+
+        let oversized_prefix = "a".repeat(MAX_SCOPE_JSON_BYTES);
+        let oversized = format!(
+            r#"{{"include":[{{"id":"{rule_id}","enabled":true,"prefix":"https://example.invalid/{oversized_prefix}"}}]}}"#
+        );
+        assert!(oversized.len() > MAX_SCOPE_JSON_BYTES);
+        let err = parse_target_scope_json(&oversized).expect_err("oversized scope JSON must fail");
+        assert!(err.contains("256 KiB"));
     }
 }
