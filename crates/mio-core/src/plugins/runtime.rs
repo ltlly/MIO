@@ -150,15 +150,10 @@ impl Running {
         ) {
             self.broker.release_panel_resource(panel_id, true);
             if let Ok(ServiceResult::Resource { id, .. }) = &completed.result {
-                let revoked = if panel_id == PANEL_ID {
-                    self.revoked_resources
-                        .get(id)
-                        .is_some_and(|barrier| completed.request_id <= *barrier)
-                } else {
-                    self.panel_revoked_resources
-                        .get(&(panel_id, *id))
-                        .is_some_and(|barrier| completed.request_id <= *barrier)
-                };
+                let revoked = self
+                    .panel_revoked_resources
+                    .get(&(panel_id, *id))
+                    .is_some_and(|barrier| completed.request_id <= *barrier);
                 if revoked {
                     completed.result = Err(Failure::new(
                         ErrorCode::Stale,
@@ -177,18 +172,7 @@ impl Running {
                 "宿主调用已取消；迟到结果未重新授权资源",
             ));
         }
-        let oldest_open_main = self
-            .service_cancels
-            .iter()
-            .filter_map(|(request, service)| {
-                (service.panel_id == PANEL_ID
-                    && matches!(service.binding, Some(PendingResource::OpenRepeater)))
-                .then_some(*request)
-            })
-            .min();
         // Retain close barriers only while an earlier resource-creating call can still complete.
-        self.revoked_resources
-            .retain(|_, barrier| oldest_open_main.is_some_and(|oldest| oldest <= *barrier));
         self.panel_revoked_resources.retain(|(p, _), barrier| {
             self.service_cancels
                 .iter()
@@ -288,8 +272,6 @@ impl Running {
         let mut sync_panels = BTreeSet::new();
         for (id, panel_id, _, resync_seq, is_pointer_cancel) in expired {
             let is_resync = resync_seq.is_some();
-            let legacy_main_resync =
-                panel_id == PANEL_ID && is_resync && self.protocol_minor < protocol::PROTOCOL_MINOR;
             let is_destroy_close = self.requests.get(&id).is_some_and(|p| {
                 matches!(
                     p.kind,
@@ -331,19 +313,17 @@ impl Running {
             let (retracted_unsent, reverted_optimistic, cancel_to_send) =
                 self.cancel_pending_request_inner(
                     id,
-                    if legacy_main_resync {
-                        "v1.4 旧版插件重同步操作超时"
-                    } else if is_resync {
+                    if is_resync {
                         "面板重同步操作超时"
                     } else if is_pointer_cancel {
                         "面板指针手势取消操作超时"
                     } else {
                         "插件子面板操作超时；已取消此面板请求，未影响共享实例"
                     },
-                    !is_destroy_close && !legacy_main_resync && !already_confirmed_viewport,
+                    !is_destroy_close && !already_confirmed_viewport,
                     true,
                 );
-            if reverted_optimistic || is_optimistic || legacy_main_resync {
+            if reverted_optimistic || is_optimistic {
                 sync_panels.insert(panel_id);
                 if (reverted_optimistic || (is_optimistic && !already_confirmed_viewport))
                     && ui_event_seq != 0
@@ -358,10 +338,6 @@ impl Running {
             if let Some(cancel) = cancel_to_send {
                 cancels_to_send.push(cancel);
             }
-            if legacy_main_resync && let Some(seq) = resync_seq {
-                self.record_v14_degraded_resync(id);
-                self.mark_panel_resync_incompatible(PANEL_ID, seq);
-            }
             if needs_new_resync
                 && !already_confirmed_viewport
                 && (!retracted_unsent || mutated_host_panel)
@@ -369,20 +345,16 @@ impl Running {
                 self.schedule_panel_resync(panel_id);
             }
             self.settle_pointer_capture_on_failure(panel_id, pointer_capture, retracted_unsent);
-            let diag = if legacy_main_resync {
-                Self::v14_resync_degrade_failure(None)
-            } else {
-                Failure::new(
-                    ErrorCode::Cancelled,
-                    if is_resync {
-                        "面板重同步操作超时"
-                    } else if is_pointer_cancel {
-                        "面板指针手势取消操作超时"
-                    } else {
-                        "插件子面板操作超时"
-                    },
-                )
-            };
+            let diag = Failure::new(
+                ErrorCode::Cancelled,
+                if is_resync {
+                    "面板重同步操作超时"
+                } else if is_pointer_cancel {
+                    "面板指针手势取消操作超时"
+                } else {
+                    "插件子面板操作超时"
+                },
+            );
             diagnostics.push((panel_id, diag));
         }
         for (c_panel, c_req, for_resync, snap_rev) in cancels_to_send {
@@ -588,8 +560,7 @@ impl Running {
                             return Err(err);
                         }
                         if let Some((panel_id, rejected)) = self.pending_panel_syncs.pop_first()
-                            && (panel_id == PANEL_ID
-                                || !self.panels.get(&panel_id).is_some_and(|s| s.closing))
+                            && !self.panels.get(&panel_id).is_some_and(|s| s.closing)
                             && let Some(snapshot) = self.ui_panel_snapshot(panel_id)
                         {
                             let synced_ui_seq = self.contiguous_processed_ui_seq(panel_id);
@@ -665,7 +636,7 @@ impl Running {
                 self.fail_control_command(cmd.command, &reason);
             }
         }
-        let mut deferred = std::mem::take(&mut self.main_deferred_commands);
+        let mut deferred = std::collections::VecDeque::new();
         for slot in self.panels.values_mut() {
             deferred.extend(slot.deferred_commands.drain(..));
         }

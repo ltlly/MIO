@@ -12,7 +12,12 @@ impl Lab {
             .ok_or_else(|| io::Error::other("面板 revision 耗尽"))?;
         let panel = self.snapshot();
         panel.validate().map_err(io::Error::other)?;
-        session.send(envelope::Body::Snapshot(panel), self.revision, reply)?;
+        session.send_on_panel(
+            self.panel_id,
+            envelope::Body::Snapshot(panel),
+            self.revision,
+            reply,
+        )?;
         Ok(())
     }
 
@@ -22,7 +27,8 @@ impl Lab {
         operation: host_call::Operation,
         pending: PendingService,
     ) -> io::Result<()> {
-        let id = session.send(
+        let id = session.send_on_panel(
+            self.panel_id,
             envelope::Body::HostCall(HostCall {
                 operation: Some(operation),
                 parent_request_id: 0,
@@ -69,7 +75,12 @@ impl Lab {
                 },
             ],
         };
-        session.send(envelope::Body::Patch(patch), self.revision, reply)?;
+        session.send_on_panel(
+            self.panel_id,
+            envelope::Body::Patch(patch),
+            self.revision,
+            reply,
+        )?;
         Ok(())
     }
 
@@ -248,7 +259,8 @@ impl Lab {
                 }
                 for id in ids {
                     session
-                        .send(
+                        .send_on_panel(
+                            self.panel_id,
                             envelope::Body::Cancel(Cancel { request_id: id }),
                             self.revision,
                             0,
@@ -417,7 +429,12 @@ impl Lab {
                 )
             )
         {
-            session.send(envelope::Body::Ack(Empty {}), self.revision, reply)?;
+            session.send_on_panel(
+                self.panel_id,
+                envelope::Body::Ack(Empty {}),
+                self.revision,
+                reply,
+            )?;
         } else if matches!(event.event, Some(ui_event::Event::Pointer(_))) {
             self.publish_canvas(session, reply)?;
         } else {

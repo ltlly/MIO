@@ -163,10 +163,9 @@ pub trait MioPlugin {
     fn on_active_check(
         &mut self,
         _ctx: &mut dyn HostClient,
-        call: ActiveCheckCall,
+        _call: ActiveCheckCall,
     ) -> Result<ActiveCheckResult, String> {
         Ok(ActiveCheckResult {
-            call_id: call.call_id,
             findings: Vec::new(),
         })
     }
@@ -794,8 +793,8 @@ mod tests {
             }
             let findings = vec![ui::finding(
                 "SDK Demo Finding",
-                "High",
-                "Certain",
+                protocol::FindingSeverity::High,
+                protocol::FindingConfidence::Certain,
                 "Matched test marker",
                 "Fix it",
                 "body",
@@ -875,7 +874,7 @@ mod tests {
             4,
             0,
             envelope::Body::PassiveCheckCall(PassiveCheckCall {
-                flow_id: Uuid::new_v4().to_string(),
+                flow_id: Uuid::new_v4().as_bytes().to_vec(),
                 url: req.url.clone(),
                 request: Some(req.clone()),
                 response: Some(resp),

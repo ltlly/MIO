@@ -401,6 +401,7 @@ pub(super) fn permission_short_name(permission: Permission) -> &'static str {
         Permission::SessionHook => "session.hook",
         Permission::PayloadProcess => "payload.process",
         Permission::Storage => "storage.kv",
+        Permission::AuditWrite => "audit.write",
     }
 }
 
@@ -414,5 +415,6 @@ pub(super) fn permission_label(permission: Permission) -> &'static str {
         Permission::SessionHook => "session.hook：在发送前后执行会话处理动作",
         Permission::PayloadProcess => "payload.process：提供 Intruder payload 生成与处理规则",
         Permission::Storage => "storage.kv：读写当前项目内此插件专属键值存储",
+        Permission::AuditWrite => "audit.write：向当前项目审计面板提交安全发现",
     }
 }

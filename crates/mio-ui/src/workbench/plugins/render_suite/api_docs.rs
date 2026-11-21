@@ -232,7 +232,8 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
                             "traffic.modify",
                             "session.hook",
                             "payload.process",
-                            "storage.kv"
+                            "storage.kv",
+                            "audit.write"
                         ]
                     }
                 },
@@ -265,7 +266,8 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
             { "id": "traffic.modify", "description": permission_label(Permission::TrafficModify) },
             { "id": "session.hook", "description": permission_label(Permission::SessionHook) },
             { "id": "payload.process", "description": permission_label(Permission::PayloadProcess) },
-            { "id": "storage.kv", "description": permission_label(Permission::Storage) }
+            { "id": "storage.kv", "description": permission_label(Permission::Storage) },
+            { "id": "audit.write", "description": permission_label(Permission::AuditWrite) }
         ],
         "ui_components": [
             "Row", "Column", "Split", "Tabs", "Text", "Button", "Editor",
@@ -328,7 +330,8 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_markdown() -> String {
          - `traffic.modify`: {}\n\
          - `session.hook`: {}\n\
          - `payload.process`: {}\n\
-         - `storage.kv`: {}\n\n\
+         - `storage.kv`: {}\n\
+         - `audit.write`: {}\n\n\
          ## Contribution Points\n\
          `suite_panel`, `message_editor`, `message_response_editor`, `context_menu`, `http_hook`, `ws_hook`, \
          `session_action`, `payload_generator`, `payload_processor`, `passive_check`, `active_check`\n\n\
@@ -348,5 +351,6 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_markdown() -> String {
         permission_label(Permission::SessionHook),
         permission_label(Permission::PayloadProcess),
         permission_label(Permission::Storage),
+        permission_label(Permission::AuditWrite),
     )
 }

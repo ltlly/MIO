@@ -37,7 +37,6 @@ const OUTBOUND_CONTROL_SOFT_LIMIT: usize = OUTBOUND_BUFFER_CAPACITY - MAX_SERVIC
 const RESERVED_CONTROL_OUTGOING: usize = 32;
 const MAX_RESYNC_RETRIES: u8 = 3;
 const MAX_DEFERRED_PANEL_COMMANDS: usize = 32;
-const MAX_V14_DEGRADED_RESYNC_IDS: usize = 8;
 const MAX_SERVICE_CALLS: usize = 16;
 const MAX_MULTIPLEXED_PANELS: usize = 64;
 const MAX_TRACKED_DESTROY_SEQS: usize = 256;
@@ -51,12 +50,15 @@ const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
 mod archive;
 mod broker;
+mod control;
+mod editor_ops;
+mod frame_dispatch;
 mod handle;
-mod io;
+mod outbound;
 mod package;
+mod panel_sync;
 mod prefs_store;
 mod registry;
-mod running;
 mod running_host;
 mod runtime;
 mod supervisor;
@@ -457,7 +459,6 @@ struct PanelSlot {
     pending_pointer_cancels: std::collections::VecDeque<PendingPointerCancel>,
     cancelled_state_requests: std::collections::VecDeque<(u64, CancelledStateEntry)>,
     cancelled_resync_requests: std::collections::VecDeque<CancelledResyncEntry>,
-    resync_incompatible: bool,
     processed_ui_seq: u64,
     deferred_commands: std::collections::VecDeque<SequencedControl>,
 }
@@ -470,9 +471,7 @@ pub(super) enum Wire {
 struct Running {
     identity: ChannelIdentity,
     plugin_id: String,
-    protocol_minor: u32,
     supports_panel_multiplexing: bool,
-    panel: PanelState,
     panels: HashMap<u64, PanelSlot>,
     broker: PermissionBroker,
     services: mpsc::Sender<ServiceRequest>,
@@ -480,29 +479,15 @@ struct Running {
     cancel: CancellationToken,
     outgoing_sequence: u64,
     incoming_sequence: u64,
-    active_resource: Option<(Uuid, u64)>,
-    opening_request: Option<u64>,
     rate_epoch: Instant,
     frame_count: usize,
     requests: HashMap<u64, Pending>,
     cancelled_requests: std::collections::VecDeque<(u64, u64)>,
     cancel_notifications: std::collections::VecDeque<CancelNotification>,
-    v14_degraded_resync_ids: std::collections::VecDeque<u64>,
-    main_cancelled_state_requests: std::collections::VecDeque<(u64, CancelledStateEntry)>,
-    main_cancelled_resync_requests: std::collections::VecDeque<CancelledResyncEntry>,
-    main_resync_incompatible: bool,
-    main_deferred_commands: std::collections::VecDeque<SequencedControl>,
     outbound_queue: std::collections::VecDeque<Envelope>,
     outbound_claims: Option<Arc<OutboundWriteClaims>>,
     pending_revokes: std::collections::VecDeque<PendingRevoke>,
-    main_resync_needed_seq: u64,
-    main_resync_attempts: u8,
-    main_resync_semantic_drift: bool,
-    main_resync_snapshot_confirmed: bool,
-    main_last_snapshot_rev: u64,
-    main_pending_pointer_cancels: std::collections::VecDeque<PendingPointerCancel>,
     next_resync_seq: u64,
-    main_processed_ui_seq: u64,
     pending_panel_syncs: std::collections::BTreeMap<u64, BTreeSet<u64>>,
     defer_panel_sync_for_publish: bool,
     child_headroom_blocked: bool,
@@ -517,7 +502,6 @@ struct Running {
     panel_revoke_snapshots: HashMap<u64, std::collections::VecDeque<(u64, Arc<PanelSnapshot>)>>,
     panel_revoke_snapshot_floor: HashMap<u64, u64>,
     service_cancels: HashMap<u64, ActiveService>,
-    revoked_resources: HashMap<Uuid, u64>,
     panel_revoked_resources: HashMap<(u64, Uuid), u64>,
     service_tasks: JoinSet<ServiceCompletion>,
 }

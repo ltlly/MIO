@@ -39,10 +39,8 @@ struct Instance {
     entry_modified: SystemTime,
     entry_size: u64,
     auto_reload: bool,
-    trust: NativeTrust,
     info: LoadedPlugin,
     panel: std::sync::Arc<PanelSnapshot>,
-    source: Option<Uuid>,
     resources: HashMap<Uuid, u64>,
 }
 
@@ -58,35 +56,6 @@ struct Candidate {
     autoload: bool,
     enable_installed: bool,
     persist_install: Option<PersistInstallCommit>,
-    open: Option<(TabId, u64)>,
-    context_open: Option<(Uuid, u64, bool, HttpRequest)>,
-    response_open: Option<(Uuid, u64, bool, HttpResponse)>,
-}
-
-enum LaunchTarget {
-    Suite {
-        replace: Option<Uuid>,
-        reloaded: bool,
-    },
-    Editor {
-        source: Uuid,
-        tab_id: TabId,
-        revision: u64,
-    },
-    ContextViewer {
-        source: Uuid,
-        context_id: Uuid,
-        revision: u64,
-        read_only: bool,
-        request: HttpRequest,
-    },
-    ResponseViewer {
-        source: Uuid,
-        context_id: Uuid,
-        revision: u64,
-        read_only: bool,
-        response: HttpResponse,
-    },
 }
 
 struct Operation {
@@ -98,7 +67,6 @@ struct Operation {
     cleanup_failed: bool,
     background_passive: bool,
     is_suite_start: bool,
-    is_child_start: bool,
     replaces_existing: bool,
     autoload_plugin_id: Option<String>,
     binding: Option<(TabId, u64, Option<u64>)>,
@@ -210,15 +178,12 @@ pub(super) enum Signal {
     Service(ServiceRequest),
     Network(CallKey, Result<FlowRecord, JoinError>),
     WorkspaceExpired(CallKey),
-    PassiveFlow(ProjectKey, Box<FlowRecord>),
     AutoReloadTick,
 }
 
 pub(super) struct PluginState {
     pub(crate) prefs: PluginPreferencesStore,
     pub(crate) registry: PluginRegistryStore,
-    pub(crate) passive_tx: mpsc::Sender<(ProjectKey, Box<FlowRecord>)>,
-    passive_rx: mpsc::Receiver<(ProjectKey, Box<FlowRecord>)>,
     last_auto_reload_check: Option<Instant>,
     auto_reload_timer: Option<Pin<Box<tokio::time::Sleep>>>,
     inspections: HashMap<Uuid, VerifiedPackage>,

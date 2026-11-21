@@ -262,7 +262,7 @@ pub(super) async fn handshake_native<W, R>(
     identity: ChannelIdentity,
     manifest: &PluginManifest,
     grants: &BTreeSet<Permission>,
-) -> Result<(PanelState, u64, bool, u32)>
+) -> Result<(PanelState, u64, bool)>
 where
     W: tokio::io::AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
@@ -278,8 +278,7 @@ where
             host_minor: protocol::PROTOCOL_MINOR,
         }),
         MAX_OPERATION,
-    )
-    .with_minor(protocol::LEGACY_HANDSHAKE_MINOR);
+    );
     stdin.write_all(&protocol::encode_frame(&hello)?).await?;
     stdin.flush().await?;
     let registration = read_async_frame(stdout).await?;
@@ -326,25 +325,20 @@ where
         ensure!(registration.revision == panel.revision, "注册 revision 不匹配");
         PanelState::new(panel).map_err(anyhow::Error::msg)?
     };
-    let session_minor = registration.minor.min(protocol::PROTOCOL_MINOR);
     let mut ready = Envelope::new(
         identity,
         2,
         state.snapshot().revision,
         envelope::Body::Ready(panel::Empty {}),
         MAX_OPERATION,
-    )
-    .with_minor(session_minor);
+    );
     ready.in_reply_to = registration.request_id;
     stdin.write_all(&protocol::encode_frame(&ready)?).await?;
     stdin.flush().await?;
-    let supports_panel_multiplexing =
-        register.supports_panel_multiplexing && session_minor >= protocol::PROTOCOL_MINOR;
     Ok((
         state,
         registration.request_id,
-        supports_panel_multiplexing,
-        session_minor,
+        register.supports_panel_multiplexing,
     ))
 }
 
@@ -356,13 +350,12 @@ pub(crate) async fn spawn_test_duplex_supervisor(
     mut stdin: tokio::io::DuplexStream,
     mut stdout: tokio::io::DuplexStream,
 ) -> Result<(PluginSupervisor, mpsc::Receiver<ServiceRequest>)> {
-    let (panel_state, incoming_sequence, supports_panel_multiplexing, protocol_minor) =
-        timeout(
-            MAX_OPERATION,
-            handshake_native(&mut stdin, &mut stdout, identity, &manifest, &grants),
-        )
-        .await
-        .context("测试插件握手超时")??;
+    let (panel_state, incoming_sequence, supports_panel_multiplexing) = timeout(
+        MAX_OPERATION,
+        handshake_native(&mut stdin, &mut stdout, identity, &manifest, &grants),
+    )
+    .await
+    .context("测试插件握手超时")??;
     let initial_panel = Arc::new(panel_state.snapshot().clone());
     let (services, service_receiver) = mpsc::channel(QUEUE_CAPACITY);
     let (control, commands) = mpsc::channel(QUEUE_CAPACITY);
@@ -376,60 +369,18 @@ pub(crate) async fn spawn_test_duplex_supervisor(
         control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
         cancel: cancel.clone(),
     };
-    let runtime = Running {
+    let runtime = Running::new(
         identity,
-        plugin_id: manifest.id.clone(),
-        protocol_minor,
+        manifest.id.clone(),
         supports_panel_multiplexing,
-        panel: panel_state,
-        panels: HashMap::new(),
-        broker: PermissionBroker::new(identity, grants),
+        panel_state,
+        PermissionBroker::new(identity, grants),
         services,
         events,
         cancel,
-        outgoing_sequence: 2,
+        2,
         incoming_sequence,
-        active_resource: None,
-        opening_request: None,
-        rate_epoch: Instant::now(),
-        frame_count: 0,
-        requests: HashMap::new(),
-        cancelled_requests: std::collections::VecDeque::new(),
-        cancel_notifications: std::collections::VecDeque::new(),
-        v14_degraded_resync_ids: std::collections::VecDeque::new(),
-        main_cancelled_state_requests: std::collections::VecDeque::new(),
-        main_cancelled_resync_requests: std::collections::VecDeque::new(),
-        main_resync_incompatible: false,
-        main_deferred_commands: std::collections::VecDeque::new(),
-        outbound_queue: std::collections::VecDeque::new(),
-        outbound_claims: None,
-        pending_revokes: std::collections::VecDeque::new(),
-        main_resync_needed_seq: 0,
-        main_resync_attempts: 0,
-        main_resync_semantic_drift: false,
-        main_resync_snapshot_confirmed: false,
-        main_last_snapshot_rev: 0,
-        main_pending_pointer_cancels: std::collections::VecDeque::new(),
-        next_resync_seq: 0,
-        main_processed_ui_seq: 0,
-        pending_panel_syncs: std::collections::BTreeMap::new(),
-        defer_panel_sync_for_publish: false,
-        child_headroom_blocked: false,
-        urgent_commands: None,
-        panel_destroy_control_seq: HashMap::new(),
-        panel_destroy_seq_floor: 0,
-        resource_revoke_control_seq: HashMap::new(),
-        resource_revoke_seq_floor: 0,
-        cancelled_op_control_seq: HashMap::new(),
-        cancelled_op_seq_floor: 0,
-        panel_resource_open_seq: HashMap::new(),
-        panel_revoke_snapshots: HashMap::new(),
-        panel_revoke_snapshot_floor: HashMap::new(),
-        service_cancels: HashMap::new(),
-        revoked_resources: HashMap::new(),
-        panel_revoked_resources: HashMap::new(),
-        service_tasks: JoinSet::new(),
-    };
+    );
     let task = tokio::spawn(runtime.run(
         WorkerTransport::Duplex { stdin, stdout },
         commands,
@@ -482,13 +433,7 @@ impl PluginSupervisor {
             instance_id: Uuid::new_v4(),
             project,
         };
-        let (
-            transport,
-            panel_state,
-            incoming_sequence,
-            supports_panel_multiplexing,
-            protocol_minor,
-        ) = {
+        let (transport, panel_state, incoming_sequence, supports_panel_multiplexing) = {
             let mut command = Command::new(&package.executable);
             command
                 .current_dir(&package.work_dir)
@@ -529,7 +474,7 @@ impl PluginSupervisor {
                 &trust.grants,
             );
             match timeout(MAX_OPERATION, handshake).await {
-                Ok(Ok((state, seq, multiplexing, minor))) => (
+                Ok(Ok((state, seq, multiplexing))) => (
                     WorkerTransport::Native {
                         child,
                         #[cfg(windows)]
@@ -541,7 +486,6 @@ impl PluginSupervisor {
                     state,
                     seq,
                     multiplexing,
-                    minor,
                 ),
                 result => {
                     #[cfg(windows)]
@@ -574,60 +518,18 @@ impl PluginSupervisor {
             cancel: cancel.clone(),
         };
         let manifest = package.manifest;
-        let runtime = Running {
+        let runtime = Running::new(
             identity,
-            plugin_id: manifest.id.clone(),
-            protocol_minor,
+            manifest.id.clone(),
             supports_panel_multiplexing,
-            panel: panel_state,
-            panels: HashMap::new(),
-            broker: PermissionBroker::new(identity, trust.grants),
+            panel_state,
+            PermissionBroker::new(identity, trust.grants),
             services,
             events,
             cancel,
-            outgoing_sequence: 2,
+            2,
             incoming_sequence,
-            active_resource: None,
-            opening_request: None,
-            rate_epoch: Instant::now(),
-            frame_count: 0,
-            requests: HashMap::new(),
-            cancelled_requests: std::collections::VecDeque::new(),
-            cancel_notifications: std::collections::VecDeque::new(),
-            v14_degraded_resync_ids: std::collections::VecDeque::new(),
-            main_cancelled_state_requests: std::collections::VecDeque::new(),
-            main_cancelled_resync_requests: std::collections::VecDeque::new(),
-            main_resync_incompatible: false,
-            main_deferred_commands: std::collections::VecDeque::new(),
-            outbound_queue: std::collections::VecDeque::new(),
-            outbound_claims: None,
-            pending_revokes: std::collections::VecDeque::new(),
-            main_resync_needed_seq: 0,
-            main_resync_attempts: 0,
-            main_resync_semantic_drift: false,
-            main_resync_snapshot_confirmed: false,
-            main_last_snapshot_rev: 0,
-            main_pending_pointer_cancels: std::collections::VecDeque::new(),
-            next_resync_seq: 0,
-            main_processed_ui_seq: 0,
-            pending_panel_syncs: std::collections::BTreeMap::new(),
-            defer_panel_sync_for_publish: false,
-            child_headroom_blocked: false,
-            urgent_commands: None,
-            panel_destroy_control_seq: HashMap::new(),
-            panel_destroy_seq_floor: 0,
-            resource_revoke_control_seq: HashMap::new(),
-            resource_revoke_seq_floor: 0,
-            cancelled_op_control_seq: HashMap::new(),
-            cancelled_op_seq_floor: 0,
-            panel_resource_open_seq: HashMap::new(),
-            panel_revoke_snapshots: HashMap::new(),
-            panel_revoke_snapshot_floor: HashMap::new(),
-            service_cancels: HashMap::new(),
-            revoked_resources: HashMap::new(),
-            panel_revoked_resources: HashMap::new(),
-            service_tasks: JoinSet::new(),
-        };
+        );
         let task = tokio::spawn(runtime.run(transport, commands, urgent_commands));
         Ok(Self {
             identity,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::ControlFlow};
 
 use super::{validators::*, *};
 
@@ -12,79 +12,114 @@ impl Node {
         }
     }
 
-    pub fn find(&self, id: u64) -> Option<&Node> {
-        if self.id == id {
-            return Some(self);
-        }
-        match &self.kind {
-            Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
-                c.children.iter().find_map(|n| n.find(id))
-            }
-            Some(node::Kind::Split(s)) => s
-                .first
-                .as_deref()
-                .and_then(|n| n.find(id))
-                .or_else(|| s.second.as_deref().and_then(|n| n.find(id))),
-            Some(node::Kind::Tabs(t)) => t
-                .tabs
-                .iter()
-                .find_map(|t| t.content.as_deref().and_then(|n| n.find(id))),
-            _ => None,
-        }
-    }
-
-    pub(super) fn collect_ids(&self, out: &mut HashSet<u64>) {
-        out.insert(self.id);
+    fn visit_children<'a, B>(
+        &'a self,
+        f: &mut impl FnMut(&'a Node) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
         match &self.kind {
             Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
                 for child in &c.children {
-                    child.collect_ids(out);
+                    f(child)?;
                 }
             }
             Some(node::Kind::Split(s)) => {
                 if let Some(first) = &s.first {
-                    first.collect_ids(out);
+                    f(first)?;
                 }
                 if let Some(second) = &s.second {
-                    second.collect_ids(out);
+                    f(second)?;
                 }
             }
             Some(node::Kind::Tabs(t)) => {
                 for tab in &t.tabs {
                     if let Some(content) = &tab.content {
-                        content.collect_ids(out);
+                        f(content)?;
                     }
                 }
             }
             _ => {}
         }
+        ControlFlow::Continue(())
     }
 
-    pub fn editors<'a>(&'a self, output: &mut Vec<(u64, &'a Editor)>) {
-        match &self.kind {
-            Some(node::Kind::Editor(editor)) => output.push((self.id, editor)),
+    fn visit_children_mut<'a, B>(
+        &'a mut self,
+        f: &mut impl FnMut(&'a mut Node) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match &mut self.kind {
             Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
-                for n in &c.children {
-                    n.editors(output);
+                for child in &mut c.children {
+                    f(child)?;
                 }
             }
             Some(node::Kind::Split(s)) => {
-                if let Some(n) = &s.first {
-                    n.editors(output);
+                if let Some(first) = s.first.as_deref_mut() {
+                    f(first)?;
                 }
-                if let Some(n) = &s.second {
-                    n.editors(output);
+                if let Some(second) = s.second.as_deref_mut() {
+                    f(second)?;
                 }
             }
             Some(node::Kind::Tabs(t)) => {
-                for tab in &t.tabs {
-                    if let Some(n) = &tab.content {
-                        n.editors(output);
+                for tab in &mut t.tabs {
+                    if let Some(content) = tab.content.as_deref_mut() {
+                        f(content)?;
                     }
                 }
             }
             _ => {}
         }
+        ControlFlow::Continue(())
+    }
+
+    pub fn try_visit<'a, B>(
+        &'a self,
+        f: &mut impl FnMut(&'a Node) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        f(self)?;
+        self.visit_children(&mut |child| child.try_visit(f))
+    }
+
+    pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
+        let _ = self.try_visit(&mut |node| {
+            f(node);
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    pub fn visit_mut(&mut self, f: &mut impl FnMut(&mut Node)) {
+        f(self);
+        let _ = self.visit_children_mut(&mut |child| {
+            child.visit_mut(f);
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    pub fn find(&self, id: u64) -> Option<&Node> {
+        match self.try_visit(&mut |node| {
+            if node.id == id {
+                ControlFlow::Break(node)
+            } else {
+                ControlFlow::Continue(())
+            }
+        }) {
+            ControlFlow::Break(node) => Some(node),
+            ControlFlow::Continue(()) => None,
+        }
+    }
+
+    pub(super) fn collect_ids(&self, out: &mut HashSet<u64>) {
+        self.visit(&mut |node| {
+            out.insert(node.id);
+        });
+    }
+
+    pub fn editors<'a>(&'a self, output: &mut Vec<(u64, &'a Editor)>) {
+        self.visit(&mut |node| {
+            if let Some(node::Kind::Editor(editor)) = &node.kind {
+                output.push((node.id, editor));
+            }
+        });
     }
 
     pub(super) fn preserve_table_revisions_with(
@@ -92,59 +127,34 @@ impl Node {
         next_root: &Node,
         allow_vp: &mut impl FnMut(u64, &VirtualTable, &VirtualTable) -> bool,
     ) -> Result<(), String> {
-        if let Some(node::Kind::VirtualTable(previous)) = &self.kind
-            && let Some(node::Kind::VirtualTable(next)) =
-                next_root.find(self.id).and_then(|node| node.kind.as_ref())
-        {
-            check(
-                allow_vp(self.id, previous, next),
-                "表格 viewport revision 已过期；需要重新同步",
-            )?;
+        match self.try_visit(&mut |node| {
+            if let Some(node::Kind::VirtualTable(previous)) = &node.kind
+                && let Some(node::Kind::VirtualTable(next)) =
+                    next_root.find(node.id).and_then(|n| n.kind.as_ref())
+                && let Err(err) = check(
+                    allow_vp(node.id, previous, next),
+                    "表格 viewport revision 已过期；需要重新同步",
+                )
+            {
+                return ControlFlow::Break(err);
+            }
+            ControlFlow::Continue(())
+        }) {
+            ControlFlow::Break(err) => Err(err),
+            ControlFlow::Continue(()) => Ok(()),
         }
-        match &self.kind {
-            Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
-                for node in &c.children {
-                    node.preserve_table_revisions_with(next_root, allow_vp)?;
-                }
-            }
-            Some(node::Kind::Split(split)) => {
-                if let Some(node) = &split.first {
-                    node.preserve_table_revisions_with(next_root, allow_vp)?;
-                }
-                if let Some(node) = &split.second {
-                    node.preserve_table_revisions_with(next_root, allow_vp)?;
-                }
-            }
-            Some(node::Kind::Tabs(tabs)) => {
-                for tab in &tabs.tabs {
-                    if let Some(node) = &tab.content {
-                        node.preserve_table_revisions_with(next_root, allow_vp)?;
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(())
     }
 
     pub(super) fn find_mut(&mut self, id: u64) -> Option<&mut Node> {
         if self.id == id {
             return Some(self);
         }
-        match &mut self.kind {
-            Some(node::Kind::Row(c) | node::Kind::Column(c) | node::Kind::ScrollColumn(c)) => {
-                c.children.iter_mut().find_map(|n| n.find_mut(id))
-            }
-            Some(node::Kind::Split(s)) => s
-                .first
-                .as_deref_mut()
-                .and_then(|n| n.find_mut(id))
-                .or_else(|| s.second.as_deref_mut().and_then(|n| n.find_mut(id))),
-            Some(node::Kind::Tabs(t)) => t
-                .tabs
-                .iter_mut()
-                .find_map(|t| t.content.as_deref_mut().and_then(|n| n.find_mut(id))),
-            _ => None,
+        match self.visit_children_mut(&mut |child| match child.find_mut(id) {
+            Some(found) => ControlFlow::Break(found),
+            None => ControlFlow::Continue(()),
+        }) {
+            ControlFlow::Break(found) => Some(found),
+            ControlFlow::Continue(()) => None,
         }
     }
 
@@ -426,5 +436,73 @@ impl PanelSnapshot {
             &mut HashSet::new(),
             &mut HashSet::new(),
         )
+    }
+}
+
+#[cfg(test)]
+mod visit_tests {
+    use super::*;
+
+    #[test]
+    fn visit_and_visit_mut_traverse_all_container_variants() {
+        let mut root = Node::new(
+            1,
+            "root",
+            node::Kind::Split(Split {
+                axis: Axis::Horizontal as i32,
+                fraction: 0.5,
+                first: Some(Box::new(Node::new(
+                    2,
+                    "col",
+                    node::Kind::Column(Container {
+                        children: vec![Node::new(
+                            3,
+                            "txt",
+                            node::Kind::Text(Text {
+                                text: "a".into(),
+                                tone: Tone::Foreground as i32,
+                            }),
+                        )],
+                    }),
+                ))),
+                second: Some(Box::new(Node::new(
+                    4,
+                    "tabs",
+                    node::Kind::Tabs(Tabs {
+                        axis: Axis::Horizontal as i32,
+                        active: 5,
+                        tabs: vec![Tab {
+                            title: "t".into(),
+                            content: Some(Box::new(Node::new(
+                                5,
+                                "leaf",
+                                node::Kind::Text(Text {
+                                    text: "b".into(),
+                                    tone: Tone::Foreground as i32,
+                                }),
+                            ))),
+                        }],
+                    }),
+                ))),
+            }),
+        );
+        let mut seen = Vec::new();
+        root.visit(&mut |n| seen.push(n.id));
+        assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+        assert_eq!(root.find(5).unwrap().id, 5);
+
+        root.visit_mut(&mut |n| {
+            if let Some(node::Kind::Text(t)) = &mut n.kind {
+                t.text.push('!');
+            }
+        });
+        assert!(matches!(
+            root.find(3).and_then(|n| n.kind.as_ref()),
+            Some(node::Kind::Text(t)) if t.text == "a!"
+        ));
+        assert!(matches!(
+            root.find(5).and_then(|n| n.kind.as_ref()),
+            Some(node::Kind::Text(t)) if t.text == "b!"
+        ));
     }
 }

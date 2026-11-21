@@ -304,12 +304,9 @@ pub(super) async fn run_scan(
     let semaphore = Arc::new(Semaphore::new(ACTIVE_CONCURRENCY));
     let mut probes = JoinSet::<ProbeOutcome>::new();
 
-    let mut plugin_call_seq = 0_u64;
     for target in crawl_stage.targets {
         for point in target.points {
             if !plugin_active_hooks.is_empty() && !cancel.is_cancelled() {
-                plugin_call_seq = plugin_call_seq.saturating_add(1);
-                let call_id = plugin_call_seq;
                 let hooks = plugin_active_hooks.clone();
                 let req_copy = target.request.clone();
                 let resp_copy = target.base_response.clone();
@@ -331,8 +328,7 @@ pub(super) async fn run_scan(
                             break;
                         }
                         let call = protocol::ActiveCheckCall {
-                            call_id,
-                            flow_id: probe_flow_id.to_string(),
+                            flow_id: probe_flow_id.as_bytes().to_vec(),
                             base_request: Some(req_dto.clone()),
                             base_response: Some(resp_dto.clone()),
                             parameter_name: pt.name.clone(),
@@ -341,7 +337,6 @@ pub(super) async fn run_scan(
                         if let Ok(res) = handle
                             .call_active_check_with_cancel(call, child_cancel.child_token())
                             .await
-                            && res.call_id == call_id
                             && !res.findings.is_empty()
                         {
                             plugin_hits.extend(convert_plugin_findings_for_phase(

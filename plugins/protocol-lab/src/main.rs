@@ -74,6 +74,7 @@ enum PendingService {
 }
 
 struct Lab {
+    panel_id: u64,
     revision: u64,
     raw: Editor,
     decoded: Editor,
@@ -112,8 +113,13 @@ fn empty_editor(document_id: u64, read_only: bool) -> Editor {
 
 impl Lab {
     fn new() -> Self {
+        Self::for_panel(PANEL_ID, 1, vec![])
+    }
+
+    fn for_panel(panel_id: u64, revision: u64, grants: Vec<Permission>) -> Self {
         Self {
-            revision: 1,
+            panel_id,
+            revision,
             raw: empty_editor(RAW_DOCUMENT, false),
             decoded: empty_editor(DECODED_DOCUMENT, false),
             response: None,
@@ -140,7 +146,7 @@ impl Lab {
             status: "选择项目流量，或在 Raw / Decoded 中输入内容进行 Base64 编解码。尚未发送请求。"
                 .into(),
             error: false,
-            grants: vec![],
+            grants,
             pending: HashMap::new(),
         }
     }
@@ -156,26 +162,43 @@ mod tests_hooks;
 mod tests_state;
 
 fn main() -> io::Result<()> {
-    let mut lab = Lab::new();
+    let mut main_lab = Lab::new();
     let registration = Register {
         plugin_id: "lab.protocol".into(),
         plugin_version: "0.1.0".into(),
         required_components: (0..=13).collect(),
-        panel: Some(lab.snapshot()),
-        supports_panel_multiplexing: false,
+        panel: Some(main_lab.snapshot()),
+        supports_panel_multiplexing: true,
     };
     let mut session = WorkerSession::accept(io::stdin().lock(), io::stdout().lock(), registration)?;
-    lab.grants.clone_from(&session.grants);
-    lab.publish(&mut session, 0)?;
-    if lab.grants.contains(&Permission::TrafficRead) {
-        lab.query(&mut session, 0, 64)?;
+    main_lab.grants.clone_from(&session.grants);
+    main_lab.publish(&mut session, 0)?;
+    if main_lab.grants.contains(&Permission::TrafficRead) {
+        main_lab.query(&mut session, 0, 64)?;
     }
+    let mut panels: HashMap<u64, Lab> = HashMap::from([(PANEL_ID, main_lab)]);
     loop {
         let envelope = session.receive()?;
         let reply = envelope.request_id;
+        let panel_id = envelope.panel_id;
         match envelope.body.ok_or_else(|| io::Error::other("空消息"))? {
-            envelope::Body::UiEvent(event) => lab.event(&mut session, event, reply)?,
+            envelope::Body::UiEvent(event) => {
+                if let Some(lab) = panels.get_mut(&panel_id) {
+                    lab.event(&mut session, event, reply)?;
+                } else {
+                    session.send_on_panel(
+                        panel_id,
+                        envelope::Body::Error(Failure::new(ErrorCode::Stale, "面板已关闭")),
+                        0,
+                        reply,
+                    )?;
+                }
+            }
             envelope::Body::OpenRequest(open) => {
+                let grants = session.grants.clone();
+                let lab = panels
+                    .entry(panel_id)
+                    .or_insert_with(|| Lab::for_panel(panel_id, 0, grants));
                 let result = (|| {
                     lab.load(Context {
                         resource: protocol::uuid(&open.resource_id)?,
@@ -190,16 +213,23 @@ fn main() -> io::Result<()> {
                     Err(error) => {
                         lab.status.clone_from(&error);
                         lab.error = true;
-                        session.send(
+                        session.send_on_panel(
+                            panel_id,
                             envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                             lab.revision,
                             reply,
                         )?;
-                        lab.publish(&mut session, 0)?;
+                        if panel_id == PANEL_ID || lab.revision > 0 {
+                            lab.publish(&mut session, 0)?;
+                        }
                     }
                 }
             }
             envelope::Body::OpenResponse(open) => {
+                let grants = session.grants.clone();
+                let lab = panels
+                    .entry(panel_id)
+                    .or_insert_with(|| Lab::for_panel(panel_id, 0, grants));
                 let result = (|| {
                     lab.load_response(ResponseContext {
                         resource: protocol::uuid(&open.resource_id)?,
@@ -213,97 +243,158 @@ fn main() -> io::Result<()> {
                     Err(error) => {
                         lab.status.clone_from(&error);
                         lab.error = true;
-                        session.send(
+                        session.send_on_panel(
+                            panel_id,
                             envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                             lab.revision,
                             reply,
                         )?;
-                        lab.publish(&mut session, 0)?;
+                        if panel_id == PANEL_ID || lab.revision > 0 {
+                            lab.publish(&mut session, 0)?;
+                        }
                     }
                 }
             }
             envelope::Body::CommitEditor(commit) => {
+                let Some(lab) = panels.get_mut(&panel_id) else {
+                    session.send_on_panel(
+                        panel_id,
+                        envelope::Body::Error(Failure::new(ErrorCode::Stale, "面板已关闭")),
+                        0,
+                        reply,
+                    )?;
+                    continue;
+                };
                 let body = match lab.commit(commit) {
                     Ok(committed) => envelope::Body::Committed(committed),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Stale, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(panel_id, body, lab.revision, reply)?;
             }
             envelope::Body::CommitResponseEditor(commit) => {
+                let Some(lab) = panels.get_mut(&panel_id) else {
+                    session.send_on_panel(
+                        panel_id,
+                        envelope::Body::Error(Failure::new(ErrorCode::Stale, "面板已关闭")),
+                        0,
+                        reply,
+                    )?;
+                    continue;
+                };
                 let body = match lab.commit_response(commit) {
                     Ok(committed) => envelope::Body::ResponseCommitted(committed),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Stale, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(panel_id, body, lab.revision, reply)?;
             }
             envelope::Body::ContextMenuCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.context_menu(call) {
                     Ok(result) => envelope::Body::ContextMenuResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::HttpHookCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.http_hook(call) {
                     Ok(result) => envelope::Body::HttpHookResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::WebSocketHookCall(call) => {
-                session.send(
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
+                session.send_on_panel(
+                    PANEL_ID,
                     envelope::Body::WebSocketHookResult(lab.ws_hook(call)),
                     lab.revision,
                     reply,
                 )?;
             }
             envelope::Body::SessionActionCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.session_action(call) {
                     Ok(result) => envelope::Body::SessionActionResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::PayloadCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.payload(call) {
                     Ok(result) => envelope::Body::PayloadResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::PassiveCheckCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.passive_check(call) {
                     Ok(result) => envelope::Body::PassiveCheckResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::ActiveCheckCall(call) => {
+                let lab = panels.get_mut(&PANEL_ID).unwrap();
                 let body = match lab.active_check(call) {
                     Ok(result) => envelope::Body::ActiveCheckResult(result),
                     Err(error) => envelope::Body::Error(Failure::new(ErrorCode::Invalid, error)),
                 };
-                session.send(body, lab.revision, reply)?;
+                session.send_on_panel(PANEL_ID, body, lab.revision, reply)?;
             }
             envelope::Body::CloseRequest(close) => {
                 let resource = protocol::uuid(&close.resource_id).map_err(io::Error::other)?;
-                if lab.close(&mut session, resource)? {
-                    lab.publish(&mut session, reply)?;
+                if close.destroy_panel && panel_id != PANEL_ID {
+                    let rev = if let Some(mut lab) = panels.remove(&panel_id) {
+                        let _ = lab.close(&mut session, resource)?;
+                        lab.revision
+                    } else {
+                        0
+                    };
+                    session.send_on_panel(panel_id, envelope::Body::Ack(Empty {}), rev, reply)?;
+                } else if let Some(lab) = panels.get_mut(&panel_id) {
+                    if lab.close(&mut session, resource)? {
+                        lab.publish(&mut session, reply)?;
+                    } else {
+                        session.send_on_panel(
+                            panel_id,
+                            envelope::Body::Ack(Empty {}),
+                            lab.revision,
+                            reply,
+                        )?;
+                    }
                 } else {
-                    session.send(envelope::Body::Ack(Empty {}), lab.revision, reply)?;
+                    session.send_on_panel(panel_id, envelope::Body::Ack(Empty {}), 0, reply)?;
                 }
             }
             envelope::Body::HostResult(result) => {
-                lab.host_result(&mut session, envelope.in_reply_to, result)?
+                if let Some(lab) = panels.get_mut(&panel_id) {
+                    lab.host_result(&mut session, envelope.in_reply_to, result)?;
+                }
             }
             envelope::Body::Cancel(_) => {
-                lab.status = "操作已取消；不会自动重发。".into();
-                lab.error = false;
-                lab.publish(&mut session, reply)?;
+                if let Some(lab) = panels.get_mut(&panel_id) {
+                    lab.status = "操作已取消；不会自动重发。".into();
+                    lab.error = false;
+                    lab.publish(&mut session, reply)?;
+                } else {
+                    session.send_on_panel(panel_id, envelope::Body::Ack(Empty {}), 0, reply)?;
+                }
             }
             envelope::Body::Resync(snapshot) => {
-                lab.resync(&snapshot)?;
-                lab.publish(&mut session, reply)?;
+                if let Some(lab) = panels.get_mut(&panel_id) {
+                    lab.resync(&snapshot)?;
+                    lab.publish(&mut session, reply)?;
+                } else {
+                    session.send_on_panel(
+                        panel_id,
+                        envelope::Body::Error(Failure::new(ErrorCode::Stale, "面板已关闭")),
+                        0,
+                        reply,
+                    )?;
+                }
             }
             envelope::Body::Shutdown(_) => break,
             _ => return Err(io::Error::other("worker 收到方向无效的消息")),

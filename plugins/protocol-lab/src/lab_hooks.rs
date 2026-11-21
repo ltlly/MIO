@@ -296,6 +296,7 @@ impl Lab {
         &self,
         call: PassiveCheckCall,
     ) -> Result<PassiveCheckResult, String> {
+        let flow_id = protocol::uuid(&call.flow_id)?;
         let req = call.request.ok_or("缺少请求")?;
         req.validate()?;
         let resp = call.response.ok_or("缺少响应")?;
@@ -331,28 +332,26 @@ impl Lab {
                 title: "插件被动合规检查命中敏感标记".into(),
                 detail: format!(
                     "lab.protocol 在流量 {} ({}) 的响应中检测到调试或漏洞标记 `{}`。",
-                    call.flow_id, call.url, evidence
+                    flow_id, call.url, evidence
                 ),
                 remediation: "移除响应中的 x-plugin-audit-flag 调试头与 PLUGIN_VULN_MARKER 标记。"
                     .into(),
-                severity: "High".into(),
-                confidence: "Certain".into(),
+                severity: FindingSeverity::High as i32,
+                confidence: FindingConfidence::Certain as i32,
                 parameter,
                 evidence,
             });
         }
         let log_line = format!(
             "lab.protocol passive_check: flow={} findings={}",
-            call.flow_id,
+            flow_id,
             findings.len()
         );
         Ok(PassiveCheckResult { findings, log_line })
     }
 
     pub fn active_check(&self, call: ActiveCheckCall) -> Result<ActiveCheckResult, String> {
-        if call.call_id == 0 || call.flow_id.is_empty() {
-            return Err("主动检查 call_id 或 flow_id 无效".into());
-        }
+        let flow_id = protocol::uuid(&call.flow_id)?;
         let req = call.base_request.ok_or("缺少基准请求")?;
         req.validate()?;
         if let Some(resp) = &call.base_response {
@@ -385,19 +384,16 @@ impl Lab {
                 title: "插件主动扫描检查命中注入或回显点".into(),
                 detail: format!(
                     "lab.protocol 在流量 {} ({}) 的参数 `{}` 上检测到主动扫描特征 `{}`。",
-                    call.flow_id, req.url, param_name, evidence
+                    flow_id, req.url, param_name, evidence
                 ),
                 remediation: "对参数输入执行上下文转义与白名单校验。".into(),
-                severity: "High".into(),
-                confidence: "Firm".into(),
+                severity: FindingSeverity::High as i32,
+                confidence: FindingConfidence::Firm as i32,
                 parameter: param_name,
                 evidence,
             });
         }
-        Ok(ActiveCheckResult {
-            call_id: call.call_id,
-            findings,
-        })
+        Ok(ActiveCheckResult { findings })
     }
 }
 
@@ -408,6 +404,7 @@ mod active_check_tests {
     #[test]
     fn active_check_detects_reflected_or_flagged_parameter() {
         let lab = Lab::new();
+        let flow_id = Uuid::new_v4().as_bytes().to_vec();
         let base_request = Some(HttpRequestDto {
             method: "GET".into(),
             url: "http://127.0.0.1/item?id=1".into(),
@@ -422,29 +419,25 @@ mod active_check_tests {
         });
         let hit = lab
             .active_check(ActiveCheckCall {
-                call_id: 42,
-                flow_id: "flow-1".into(),
+                flow_id: flow_id.clone(),
                 base_request: base_request.clone(),
                 base_response,
                 parameter_name: "id".into(),
                 parameter_value: "probe_token_123".into(),
             })
             .unwrap();
-        assert_eq!(hit.call_id, 42);
         assert_eq!(hit.findings.len(), 1);
         assert_eq!(hit.findings[0].parameter, "id");
 
         let clean = lab
             .active_check(ActiveCheckCall {
-                call_id: 43,
-                flow_id: "flow-1".into(),
+                flow_id,
                 base_request,
                 base_response: None,
                 parameter_name: "id".into(),
                 parameter_value: "harmless".into(),
             })
             .unwrap();
-        assert_eq!(clean.call_id, 43);
         assert!(clean.findings.is_empty());
     }
 }

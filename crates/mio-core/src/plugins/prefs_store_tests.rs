@@ -61,6 +61,38 @@ fn plugin_preferences_persist_across_reopen_isolate_namespaces_and_enforce_limit
     assert!(sibling_json.is_file());
     let on_disk = std::fs::read_to_string(&sibling_json).unwrap();
     assert!(on_disk.contains("mio.gamma"));
+    let expected_b64 = crate::codec_util::base64_encode(b"persisted-across-projects");
+    assert!(
+        on_disk.contains(&format!("\"{expected_b64}\"")),
+        "values must be persisted as Base64 strings, got: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("[112,101,"),
+        "values must not be persisted as JSON byte arrays"
+    );
+
+    // Populate in-memory cache via get(), then verify repeated get() serves from cache
+    // without re-reading disk, and set() invalidates the cache.
+    assert_eq!(
+        derived.get("mio.gamma", "token").unwrap().as_deref(),
+        Some(&b"persisted-across-projects"[..])
+    );
+    let saved_json = std::fs::read(&sibling_json).unwrap();
+    std::fs::remove_file(&sibling_json).unwrap();
+    assert_eq!(
+        derived.get("mio.gamma", "token").unwrap().as_deref(),
+        Some(&b"persisted-across-projects"[..]),
+        "cached read should not hit disk"
+    );
+    std::fs::write(&sibling_json, &saved_json).unwrap();
+    derived
+        .set("mio.gamma", "token", b"updated-token", &cancel)
+        .unwrap();
+    assert_eq!(
+        derived.get("mio.gamma", "token").unwrap().as_deref(),
+        Some(&b"updated-token"[..]),
+        "write must invalidate cache"
+    );
 }
 
 #[test]

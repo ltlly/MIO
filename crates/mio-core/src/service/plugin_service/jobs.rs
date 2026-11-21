@@ -194,14 +194,10 @@ impl State {
             || self.plugins.stopping;
         match output {
             Output::Started(mut candidate) => {
-                let source_valid = candidate
-                    .instance
-                    .source
-                    .is_none_or(|source| self.plugins.instances.contains_key(&source));
                 let replace_valid = candidate
                     .replace
                     .is_none_or(|id| self.plugins.instances.contains_key(&id));
-                if invalid || !source_valid || !replace_valid {
+                if invalid || !replace_valid {
                     if let Some(commit) = candidate.persist_install.take() {
                         commit.staging.rollback();
                     }
@@ -488,15 +484,12 @@ impl State {
             autoload,
             enable_installed,
             persist_install,
-            open,
-            context_open,
-            response_open,
         } = candidate;
         let id = instance.info.identity.instance_id;
         let info = instance.info.clone();
         let panel = instance.panel.clone();
         let auto_reload = instance.auto_reload;
-        let is_suite = info.tab_id.is_none() && context_open.is_none() && response_open.is_none();
+        let is_suite = info.tab_id.is_none();
         if let Some(commit) = persist_install {
             let entry = InstalledPluginEntry {
                 id: info.manifest.id.clone(),
@@ -537,62 +530,7 @@ impl State {
             self.sort_plugin_order_by_registry();
             self.sync_proxy_plugin_hooks();
         }
-        if let Some((tab_id, revision)) = open {
-            if let Err(error) = self.start_plugin_open(
-                operation_id,
-                id,
-                tab_id,
-                revision,
-                true,
-                operation.cancel.clone(),
-            ) {
-                let reason = error.to_string();
-                let (retired, retired_multiplexed) = self.take_plugin_family(id, &reason);
-                self.plugin_job_start(
-                    operation_id,
-                    Some(id),
-                    operation.cancel,
-                    operation.report,
-                    retire(retired, retired_multiplexed, None, None, reason),
-                );
-            }
-        } else if context_open.is_some() || response_open.is_some() {
-            let (context_id, revision, read_only) = context_open
-                .as_ref()
-                .map(|(c, r, ro, _)| (*c, *r, *ro))
-                .unwrap_or_else(|| {
-                    let (c, r, ro, _) = response_open.as_ref().unwrap();
-                    (*c, *r, *ro)
-                });
-            self.plugins
-                .context_viewers
-                .insert(id, (context_id, revision, read_only));
-            let handle = self.plugins.instances[&id].worker.handle();
-            let pending_open = handle.begin_open(mio_plugin_api::protocol::PANEL_ID, context_id);
-            let identity = info.identity;
-            let task_cancel = operation.cancel.clone();
-            self.plugin_job_start(operation_id, Some(id), operation.cancel, operation.report, async move {
-                let opened = async {
-                    if let Some((_, _, _, req)) = context_open {
-                        let panel = pending_open.open_request(revision, read_only, req).await?;
-                        Ok(Output::ContextOpened { identity, context_id, revision, panel })
-                    } else {
-                        let (_, _, _, resp) = response_open.unwrap();
-                        let panel = pending_open.open_response(revision, read_only, resp).await?;
-                        Ok(Output::ResponseOpened { identity, context_id, revision, panel })
-                    }
-                };
-                tokio::pin!(opened);
-                tokio::select! {
-                    biased;
-                    _ = task_cancel.cancelled() => { handle.cancel(); anyhow::bail!("打开插件上下文已取消；实例正在回收"); }
-                    result = &mut opened => result,
-                }
-            });
-            if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
-                op.cleanup_failed = true;
-            }
-        } else if autoload {
+        if autoload {
             self.emit(Event::PluginAutoLoaded {
                 project: operation.project,
                 info,

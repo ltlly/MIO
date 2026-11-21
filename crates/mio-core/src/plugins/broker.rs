@@ -80,6 +80,46 @@ pub enum ServiceOperation {
     },
 }
 
+macro_rules! define_operation_permissions {
+    ( $( $variant:ident => $perm:expr ),+ $(,)? ) => {
+        pub(crate) fn host_call_permission(operation: &host_call::Operation) -> Permission {
+            match operation {
+                $( host_call::Operation::$variant(_) => $perm, )+
+            }
+        }
+
+        impl ServiceOperation {
+            pub fn required_permission(&self) -> Permission {
+                match self {
+                    $( Self::$variant { .. } => $perm, )+
+                }
+            }
+        }
+    };
+}
+
+define_operation_permissions! {
+    QueryHistory => Permission::TrafficRead,
+    ReadFlow => Permission::TrafficRead,
+    ScopeCheck => Permission::TrafficRead,
+    QuerySiteMap => Permission::TrafficRead,
+    ReadAnnotations => Permission::TrafficRead,
+    SubmitAuditIssue => Permission::AuditWrite,
+    UpdateDraft => Permission::DraftWrite,
+    UpdateAnnotations => Permission::DraftWrite,
+    OpenRepeater => Permission::RepeaterOpen,
+    OpenIntruder => Permission::RepeaterOpen,
+    OpenOrganiser => Permission::RepeaterOpen,
+    NetworkSend => Permission::NetworkSend,
+    CollaboratorGenerate => Permission::NetworkSend,
+    CollaboratorPoll => Permission::NetworkSend,
+    ScopeUpdate => Permission::TrafficModify,
+    StorageGet => Permission::Storage,
+    StorageSet => Permission::Storage,
+    PreferencesGet => Permission::Storage,
+    PreferencesSet => Permission::Storage,
+}
+
 #[derive(Clone, Debug)]
 pub enum ServiceResult {
     History {
@@ -460,28 +500,7 @@ impl PermissionBroker {
         let operation = call
             .operation
             .ok_or_else(|| invalid("缺少服务操作".into()))?;
-        let permission = match &operation {
-            host_call::Operation::QueryHistory(_)
-            | host_call::Operation::ReadFlow(_)
-            | host_call::Operation::ScopeCheck(_)
-            | host_call::Operation::QuerySiteMap(_)
-            | host_call::Operation::ReadAnnotations(_)
-            | host_call::Operation::SubmitAuditIssue(_) => Permission::TrafficRead,
-            host_call::Operation::UpdateDraft(_) | host_call::Operation::UpdateAnnotations(_) => {
-                Permission::DraftWrite
-            }
-            host_call::Operation::OpenRepeater(_)
-            | host_call::Operation::OpenIntruder(_)
-            | host_call::Operation::OpenOrganiser(_) => Permission::RepeaterOpen,
-            host_call::Operation::NetworkSend(_)
-            | host_call::Operation::CollaboratorGenerate(_)
-            | host_call::Operation::CollaboratorPoll(_) => Permission::NetworkSend,
-            host_call::Operation::ScopeUpdate(_) => Permission::TrafficModify,
-            host_call::Operation::StorageGet(_)
-            | host_call::Operation::StorageSet(_)
-            | host_call::Operation::PreferencesGet(_)
-            | host_call::Operation::PreferencesSet(_) => Permission::Storage,
-        };
+        let permission = host_call_permission(&operation);
         if !self.grants.contains(&permission) {
             return Err(Failure::new(ErrorCode::Denied, "插件尚未获准此宿主能力"));
         }

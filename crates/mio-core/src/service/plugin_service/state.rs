@@ -9,12 +9,9 @@ impl PluginState {
         prefs: PluginPreferencesStore,
         registry: PluginRegistryStore,
     ) -> Self {
-        let (passive_tx, passive_rx) = mpsc::channel(64);
         Self {
             prefs,
             registry,
-            passive_tx,
-            passive_rx,
             last_auto_reload_check: None,
             auto_reload_timer: None,
             inspections: HashMap::new(),
@@ -61,9 +58,6 @@ impl PluginState {
                 if pending.expired.as_mut().poll(cx).is_ready() {
                     return Poll::Ready(Signal::WorkspaceExpired(*key));
                 }
-            }
-            if let Poll::Ready(Some((project, record))) = self.passive_rx.poll_recv(cx) {
-                return Poll::Ready(Signal::PassiveFlow(project, record));
             }
             for instance in self.instances.values_mut() {
                 match instance.worker.events.poll_recv(cx) {
@@ -225,7 +219,6 @@ impl State {
                 cleanup_failed: false,
                 background_passive: false,
                 is_suite_start: false,
-                is_child_start: false,
                 replaces_existing: false,
                 autoload_plugin_id: None,
                 binding: None,
@@ -242,20 +235,6 @@ impl State {
             Signal::AutoReloadTick => {
                 self.plugins.last_auto_reload_check = Some(Instant::now());
                 let _ = self.check_auto_reload();
-            }
-            Signal::PassiveFlow(project, record) => {
-                if project == self.project {
-                    while let Some(done) =
-                        std::future::poll_fn(|cx| match self.jobs.poll_join_next(cx) {
-                            Poll::Ready(item) => Poll::Ready(item),
-                            Poll::Pending => Poll::Ready(None),
-                        })
-                        .await
-                    {
-                        self.repeater_completed(done).await;
-                    }
-                    self.spawn_plugin_passive_checks(&record);
-                }
             }
             Signal::Network(key, result) => {
                 if let Some(network) = self.plugins.network.remove(&key) {
@@ -665,7 +644,6 @@ impl State {
         self.plugins.stopping = true;
         self.plugins.auto_reload_timer = None;
         self.plugins.inspections.clear();
-        while self.plugins.passive_rx.try_recv().is_ok() {}
         for operation in self.plugins.operations.values() {
             operation.cancel.cancel();
         }

@@ -4,7 +4,7 @@ use super::*;
 #[tokio::test]
 async fn panel_provenance_uses_only_the_exact_validated_event() {
     let (mut running, _calls, mut updates) = running();
-    let mut initial = running.panel.snapshot().clone();
+    let mut initial = running.main_panel().snapshot().clone();
     initial.root = Some(panel::Node::new(
         3,
         "layout",
@@ -23,7 +23,7 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
             ],
         }),
     ));
-    running.panel = PanelState::new(initial).unwrap();
+    *running.main_panel_mut() = PanelState::new(initial).unwrap();
     let (outgoing, mut wire) = mpsc::channel(QUEUE_CAPACITY);
     let changed = EditorSnapshot {
         document_id: 1,
@@ -75,7 +75,7 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
         (2, first, vec![changed]),
         (3, second, vec![clicked]),
     ] {
-        let mut snapshot = running.panel.snapshot().clone();
+        let mut snapshot = running.main_panel().snapshot().clone();
         snapshot.revision += 1;
         let mut frame = Envelope::new(
             running.identity,
@@ -107,7 +107,7 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
     assert!(running.requests.is_empty());
 
     // A consumed correlation cannot authorize another panel, even at a newer revision.
-    let before = running.panel.snapshot().clone();
+    let before = running.main_panel().snapshot().clone();
     let mut repeated = before.clone();
     repeated.revision += 1;
     let mut frame = Envelope::new(
@@ -119,7 +119,7 @@ async fn panel_provenance_uses_only_the_exact_validated_event() {
     );
     frame.in_reply_to = first;
     running.frame(frame, &outgoing).await.unwrap();
-    assert_eq!(running.panel.snapshot(), &before);
+    assert_eq!(running.main_panel().snapshot(), &before);
     assert!(matches!(
         updates.try_recv().unwrap(),
         PluginEvent::Error { .. }
@@ -144,8 +144,8 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     let (outgoing, mut wire) = mpsc::channel(QUEUE_CAPACITY);
     let resource = Uuid::new_v4();
     running.broker.bind_resource(resource, 1, false).unwrap();
-    running.active_resource = Some((resource, 1));
-    let retained = running.panel.snapshot().clone();
+    running.set_active_resource_for(PANEL_ID, Some((resource, 1)));
+    let retained = running.main_panel().snapshot().clone();
     let call = HostCall {
         operation: Some(host_call::Operation::UpdateDraft(protocol::DraftUpdate {
             resource_id: resource.as_bytes().to_vec(),
@@ -248,8 +248,8 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     let closing = closing.expect("revoke must emit CloseRequest");
     assert!(opened.try_recv().unwrap().is_err());
     assert!(committed.try_recv().unwrap().is_err());
-    assert!(running.active_resource.is_none());
-    assert!(running.opening_request.is_none());
+    assert!(running.active_resource_for(PANEL_ID).is_none());
+    assert!(running.opening_request_for(PANEL_ID).is_none());
     assert!(!running.broker.resources.contains_key(&resource));
 
     let mut late_panel = retained.clone();
@@ -272,7 +272,7 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     );
     late.in_reply_to = committing.request_id;
     running.frame(late, &outgoing).await.unwrap();
-    assert_eq!(running.panel.snapshot(), &retained);
+    assert_eq!(running.main_panel().snapshot(), &retained);
     assert!(!running.broker.resources.contains_key(&resource));
 
     let mut failure = Envelope::new(
@@ -285,7 +285,7 @@ async fn revoke_discards_pending_opens_commits_and_late_resource_results() {
     failure.in_reply_to = closing.request_id;
     running.frame(failure, &outgoing).await.unwrap();
     assert!(closed.try_recv().unwrap().is_err());
-    assert_eq!(running.panel.snapshot(), &retained);
+    assert_eq!(running.main_panel().snapshot(), &retained);
     assert!(!running.broker.resources.contains_key(&resource));
 
     let (reply, mut reopened) = oneshot::channel();

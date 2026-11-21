@@ -15,28 +15,7 @@ impl State {
             instance.info.identity == call.identity && instance.info.manifest.id == call.plugin_id,
             "插件服务身份不匹配"
         );
-        let permission = match &call.operation {
-            ServiceOperation::QueryHistory { .. }
-            | ServiceOperation::ReadFlow { .. }
-            | ServiceOperation::ScopeCheck { .. }
-            | ServiceOperation::QuerySiteMap { .. }
-            | ServiceOperation::ReadAnnotations { .. }
-            | ServiceOperation::SubmitAuditIssue { .. } => Permission::TrafficRead,
-            ServiceOperation::UpdateDraft { .. } | ServiceOperation::UpdateAnnotations { .. } => {
-                Permission::DraftWrite
-            }
-            ServiceOperation::OpenRepeater { .. }
-            | ServiceOperation::OpenIntruder { .. }
-            | ServiceOperation::OpenOrganiser { .. } => Permission::RepeaterOpen,
-            ServiceOperation::NetworkSend { .. }
-            | ServiceOperation::CollaboratorGenerate { .. }
-            | ServiceOperation::CollaboratorPoll { .. } => Permission::NetworkSend,
-            ServiceOperation::ScopeUpdate { .. } => Permission::TrafficModify,
-            ServiceOperation::StorageGet { .. }
-            | ServiceOperation::StorageSet { .. }
-            | ServiceOperation::PreferencesGet { .. }
-            | ServiceOperation::PreferencesSet { .. } => Permission::Storage,
-        };
+        let permission = call.operation.required_permission();
         ensure!(
             instance.info.grants.contains(&permission),
             "插件未获准此宿主能力"

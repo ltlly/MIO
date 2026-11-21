@@ -63,7 +63,7 @@ impl Envelope {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.major != PROTOCOL_MAJOR || self.minor > PROTOCOL_MINOR {
+        if self.major != PROTOCOL_MAJOR || self.minor != PROTOCOL_MINOR {
             return Err("插件协议版本不兼容".into());
         }
         self.identity()?;
@@ -203,12 +203,9 @@ impl Envelope {
                 }
             }
             envelope::Body::PassiveCheckCall(call) => {
-                if call.flow_id.is_empty()
-                    || call.flow_id.len() > 128
-                    || call.url.is_empty()
-                    || call.url.len() > 16 * 1024
-                {
-                    return Err("被动检查调用身份或 URL 无效".into());
+                uuid(&call.flow_id)?;
+                if call.url.is_empty() || call.url.len() > 16 * 1024 {
+                    return Err("被动检查调用 URL 无效".into());
                 }
                 call.request.as_ref().ok_or("缺少请求")?.validate()?;
                 call.response.as_ref().ok_or("缺少响应")?.validate()?;
@@ -220,12 +217,8 @@ impl Envelope {
                 validate_findings(&res.findings)?;
             }
             envelope::Body::ActiveCheckCall(call) => {
-                if call.call_id == 0
-                    || call.flow_id.is_empty()
-                    || call.flow_id.len() > 128
-                    || call.parameter_name.len() > 512
-                    || call.parameter_value.len() > 16 * 1024
-                {
+                uuid(&call.flow_id)?;
+                if call.parameter_name.len() > 512 || call.parameter_value.len() > 16 * 1024 {
                     return Err("主动检查调用参数无效或超限".into());
                 }
                 call.base_request
@@ -237,8 +230,8 @@ impl Envelope {
                 }
             }
             envelope::Body::ActiveCheckResult(res) => {
-                if res.call_id == 0 || res.findings.len() > 64 {
-                    return Err("主动检查返回结果无效或超过限额".into());
+                if res.findings.len() > 64 {
+                    return Err("主动检查返回结果超过限额".into());
                 }
                 validate_findings(&res.findings)?;
             }
@@ -284,12 +277,13 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 pub fn validate_finding(finding: &PluginFindingDto) -> Result<(), String> {
+    FindingSeverity::try_from(finding.severity).map_err(|_| "插件检查告警 severity 无效")?;
+    FindingConfidence::try_from(finding.confidence)
+        .map_err(|_| "插件检查告警 confidence 无效")?;
     if finding.title.is_empty()
         || finding.title.len() > 512
         || finding.detail.len() > 8192
         || finding.remediation.len() > 4096
-        || finding.severity.len() > 64
-        || finding.confidence.len() > 64
         || finding.parameter.len() > 512
         || finding.evidence.len() > 4096
     {
@@ -353,7 +347,6 @@ pub struct WorkerSession<R, W> {
     writer: W,
     pub identity: ChannelIdentity,
     pub grants: Vec<Permission>,
-    negotiated_minor: u32,
     incoming_sequence: u64,
     outgoing_sequence: u64,
     timeout: Duration,
@@ -361,7 +354,7 @@ pub struct WorkerSession<R, W> {
 
 impl<R: Read, W: Write> WorkerSession<R, W> {
     pub fn negotiated_minor(&self) -> u32 {
-        self.negotiated_minor
+        PROTOCOL_MINOR
     }
 
     pub fn accept(mut reader: R, mut writer: W, registration: Register) -> io::Result<Self> {
@@ -374,7 +367,9 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
         if limits.max_frame_bytes as usize != MAX_FRAME_BYTES || limits.max_operation_ms == 0 {
             return Err(invalid("宿主协议限额不兼容"));
         }
-        let negotiated_minor = limits.host_minor.max(hello.minor).min(PROTOCOL_MINOR);
+        if limits.host_minor != 0 && limits.host_minor != PROTOCOL_MINOR {
+            return Err(invalid("宿主协议版本不兼容"));
+        }
         let grants = limits
             .granted_permissions
             .iter()
@@ -393,17 +388,13 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             registration.panel.as_ref().unwrap().revision,
             envelope::Body::Register(registration),
             timeout,
-        )
-        .with_minor(negotiated_minor);
+        );
         register.in_reply_to = hello.request_id;
         write_frame(&mut writer, &register)?;
         let ready = read_frame(&mut reader)?;
         ready
             .check_channel(identity, hello.request_id)
             .map_err(invalid)?;
-        if ready.minor > negotiated_minor {
-            return Err(invalid("宿主 Ready 协议版本超过协商上限"));
-        }
         if ready.in_reply_to != 1 || !matches!(ready.body, Some(envelope::Body::Ready(_))) {
             return Err(invalid("宿主未确认插件注册"));
         }
@@ -412,7 +403,6 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             writer,
             identity,
             grants,
-            negotiated_minor,
             incoming_sequence: ready.request_id,
             outgoing_sequence: 1,
             timeout,
@@ -424,9 +414,6 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
         envelope
             .check_channel_header(self.identity, self.incoming_sequence)
             .map_err(invalid)?;
-        if envelope.minor > self.negotiated_minor {
-            return Err(invalid("宿主消息协议版本超过协商上限"));
-        }
         self.incoming_sequence = envelope.request_id;
         Ok(envelope)
     }
@@ -458,7 +445,6 @@ impl<R: Read, W: Write> WorkerSession<R, W> {
             body,
             self.timeout,
         )
-        .with_minor(self.negotiated_minor)
         .with_panel_id(panel_id);
         envelope.in_reply_to = in_reply_to;
         write_frame(&mut self.writer, &envelope)?;

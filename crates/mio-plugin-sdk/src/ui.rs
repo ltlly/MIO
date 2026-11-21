@@ -3,7 +3,7 @@ use mio_plugin_api::{
         BadgeNode, Button, CheckboxNode, Container, Layout, Node, PanelSnapshot, ProgressNode,
         SelectNode, Text, Tone, node,
     },
-    protocol::PluginFindingDto,
+    protocol::{FindingConfidence, FindingSeverity, PluginFindingDto},
 };
 
 pub fn snapshot(revision: u64, title: impl Into<String>, root: Node) -> PanelSnapshot {
@@ -138,8 +138,8 @@ pub fn scroll_column(id: u64, label: impl Into<String>, children: Vec<Node>, gap
 
 pub fn finding(
     title: impl Into<String>,
-    severity: impl Into<String>,
-    confidence: impl Into<String>,
+    severity: FindingSeverity,
+    confidence: FindingConfidence,
     detail: impl Into<String>,
     remediation: impl Into<String>,
     parameter: impl Into<String>,
@@ -149,8 +149,8 @@ pub fn finding(
         title: title.into(),
         detail: detail.into(),
         remediation: remediation.into(),
-        severity: severity.into(),
-        confidence: confidence.into(),
+        severity: severity as i32,
+        confidence: confidence as i32,
         parameter: parameter.into(),
         evidence: evidence.into(),
     }

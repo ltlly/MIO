@@ -7,19 +7,19 @@ use crate::{store::audit::merge_audit_findings, target_issues::IssueSeverity};
 pub(super) const PLUGIN_PASSIVE_ISSUE_ID: &str = "0x00900100";
 pub(in crate::service) const PLUGIN_ACTIVE_ISSUE_ID: &str = "0x00900101";
 
-fn parse_plugin_severity(raw: &str) -> IssueSeverity {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "high" | "高危" => IssueSeverity::High,
-        "medium" | "中危" => IssueSeverity::Medium,
-        "low" | "低危" => IssueSeverity::Low,
+fn map_plugin_severity(raw: i32) -> IssueSeverity {
+    match protocol::FindingSeverity::try_from(raw) {
+        Ok(protocol::FindingSeverity::High) => IssueSeverity::High,
+        Ok(protocol::FindingSeverity::Medium) => IssueSeverity::Medium,
+        Ok(protocol::FindingSeverity::Low) => IssueSeverity::Low,
         _ => IssueSeverity::Information,
     }
 }
 
-fn parse_plugin_confidence(raw: &str) -> IssueConfidence {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "certain" | "确信" => IssueConfidence::Certain,
-        "tentative" | "疑似" => IssueConfidence::Tentative,
+fn map_plugin_confidence(raw: i32) -> IssueConfidence {
+    match protocol::FindingConfidence::try_from(raw) {
+        Ok(protocol::FindingConfidence::Certain) => IssueConfidence::Certain,
+        Ok(protocol::FindingConfidence::Tentative) => IssueConfidence::Tentative,
         _ => IssueConfidence::Firm,
     }
 }
@@ -75,8 +75,8 @@ pub(in crate::service) fn convert_plugin_findings_for_phase(
         .min(i64::MAX as u128) as i64;
     dtos.into_iter()
         .map(|dto| {
-            let sev = parse_plugin_severity(&dto.severity);
-            let confidence = parse_plugin_confidence(&dto.confidence);
+            let sev = map_plugin_severity(dto.severity);
+            let confidence = map_plugin_confidence(dto.confidence);
             let title = if dto.title.trim().is_empty() {
                 if phase == AuditPhase::Active {
                     "插件主动扫描检查告警".to_owned()
@@ -169,7 +169,7 @@ impl State {
         let flow_id = record.summary.id;
         let url = record.request.url.clone();
         let call = protocol::PassiveCheckCall {
-            flow_id: flow_id.to_string(),
+            flow_id: flow_id.as_bytes().to_vec(),
             url: url.clone(),
             request: Some(request_dto),
             response: Some(response_dto),

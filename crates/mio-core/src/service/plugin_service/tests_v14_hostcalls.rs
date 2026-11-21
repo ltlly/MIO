@@ -8,7 +8,7 @@ use mio_plugin_api::protocol::{Envelope, HostCall, envelope, host_call};
 
 use super::*;
 use crate::plugins::{
-    NativeTrust, PermissionBroker, ServiceOperation, ServiceRequest, ServiceResult, VerifiedPackage,
+    PermissionBroker, ServiceOperation, ServiceRequest, ServiceResult, VerifiedPackage,
 };
 
 struct V14Fixture {
@@ -26,11 +26,10 @@ fn setup_v14_fixture(grants: Vec<Permission>) -> V14Fixture {
     fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(
         dir.path().join("manifest.json"),
-        br#"{"id":"lab.v14-test","version":"1.0.0","api_version":1,"engine":"native","entry":"v14-worker","permissions":["traffic.read","traffic.modify","draft.write","repeater.open","network.send"],"contributions":["suite_panel"]}"#,
+        br#"{"id":"lab.v14-test","version":"1.0.0","api_version":1,"engine":"native","entry":"v14-worker","permissions":["traffic.read","traffic.modify","draft.write","repeater.open","network.send","audit.write"],"contributions":["suite_panel"]}"#,
     )
     .unwrap();
     let package = VerifiedPackage::read(dir.path()).unwrap();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, _rx) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -74,10 +73,8 @@ fn setup_v14_fixture(grants: Vec<Permission>) -> V14Fixture {
             entry_modified,
             entry_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -118,6 +115,7 @@ async fn v14_scope_sitemap_annotations_organiser_audit_and_collaborator_work_end
         Permission::DraftWrite,
         Permission::RepeaterOpen,
         Permission::NetworkSend,
+        Permission::AuditWrite,
     ]);
 
     // 1. Scope check + update
@@ -304,8 +302,8 @@ async fn v14_scope_sitemap_annotations_organiser_audit_and_collaborator_work_end
                 title: "Standalone Plugin Issue".into(),
                 detail: "Found by v1.4 plugin".into(),
                 remediation: "Validate authorization".into(),
-                severity: "High".into(),
-                confidence: "Certain".into(),
+                severity: protocol::FindingSeverity::High as i32,
+                confidence: protocol::FindingConfidence::Certain as i32,
                 parameter: "id".into(),
                 evidence: "ok".into(),
             },
@@ -409,6 +407,19 @@ async fn v14_broker_and_host_enforce_permissions() {
         },
         ServiceOperation::CollaboratorGenerate {
             label: "x".into(),
+        },
+        ServiceOperation::SubmitAuditIssue {
+            flow_id: None,
+            url: "https://example.invalid/".into(),
+            finding: protocol::PluginFindingDto {
+                title: "Denied without audit.write".into(),
+                detail: "Should be denied".into(),
+                remediation: String::new(),
+                severity: protocol::FindingSeverity::Low as i32,
+                confidence: protocol::FindingConfidence::Firm as i32,
+                parameter: String::new(),
+                evidence: String::new(),
+            },
         },
     ]
     .into_iter()

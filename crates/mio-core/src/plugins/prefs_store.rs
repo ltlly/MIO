@@ -5,6 +5,7 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::Mutex,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -19,12 +20,57 @@ const MAX_PLUGINS: usize = 64;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 
+type PluginPrefsMap = BTreeMap<String, BTreeMap<String, Vec<u8>>>;
+
+mod base64_plugin_map {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::PluginPrefsMap;
+
+    pub fn serialize<S>(plugins: &PluginPrefsMap, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded: BTreeMap<&str, BTreeMap<&str, String>> = plugins
+            .iter()
+            .map(|(plugin_id, entries)| {
+                let map = entries
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), crate::codec_util::base64_encode(v)))
+                    .collect();
+                (plugin_id.as_str(), map)
+            })
+            .collect();
+        encoded.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PluginPrefsMap, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = BTreeMap::<String, BTreeMap<String, String>>::deserialize(deserializer)?;
+        let mut out = BTreeMap::new();
+        for (plugin_id, entries) in raw {
+            let mut decoded_entries = BTreeMap::new();
+            for (k, v) in entries {
+                let bytes = crate::codec_util::base64_decode(v.as_bytes())
+                    .map_err(serde::de::Error::custom)?;
+                decoded_entries.insert(k, bytes);
+            }
+            out.insert(plugin_id, decoded_entries);
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedPluginPrefs {
     version: u32,
-    #[serde(default)]
-    plugins: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    #[serde(default, with = "base64_plugin_map")]
+    plugins: PluginPrefsMap,
 }
 
 impl Default for PersistedPluginPrefs {
@@ -49,7 +95,8 @@ pub fn default_plugin_preferences_path() -> Result<PathBuf> {
 
 pub struct PluginPreferencesStore {
     path: Option<PathBuf>,
-    memory: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    memory: PluginPrefsMap,
+    cache: Mutex<Option<PluginPrefsMap>>,
 }
 
 impl Default for PluginPreferencesStore {
@@ -63,6 +110,7 @@ impl PluginPreferencesStore {
         Self {
             path,
             memory: BTreeMap::new(),
+            cache: Mutex::new(None),
         }
     }
 
@@ -80,18 +128,33 @@ impl PluginPreferencesStore {
         Self::new(user_preferences_path.map(|p| p.with_file_name("plugin-preferences.json")))
     }
 
+    fn invalidate_cache(&mut self) {
+        *self
+            .cache
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     #[cfg(test)]
     pub fn set_path(&mut self, path: Option<PathBuf>) {
         self.path = path;
+        self.invalidate_cache();
     }
 
     pub fn get(&self, plugin_id: &str, key: &str) -> Result<Option<Vec<u8>>> {
         validate_plugin_and_key(plugin_id, key)?;
         if let Some(path) = &self.path {
-            let data = read_file(path)?;
-            return Ok(data
-                .plugins
-                .get(plugin_id)
+            let mut guard = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_none() {
+                let data = read_file(path)?;
+                *guard = Some(data.plugins);
+            }
+            return Ok(guard
+                .as_ref()
+                .and_then(|plugins| plugins.get(plugin_id))
                 .and_then(|ns| ns.get(key))
                 .cloned());
         }
@@ -115,8 +178,9 @@ impl PluginPreferencesStore {
             value.len() <= MAX_STORAGE_VALUE_BYTES,
             "插件偏好单值超过 64 KiB 限额"
         );
-        if let Some(path) = &self.path {
-            write_file_with(path, cancel, |current| {
+        if let Some(path) = self.path.clone() {
+            self.invalidate_cache();
+            write_file_with(&path, cancel, |current| {
                 let mut next = current.clone();
                 apply_mutation(&mut next.plugins, plugin_id, key, value)?;
                 Ok(next)

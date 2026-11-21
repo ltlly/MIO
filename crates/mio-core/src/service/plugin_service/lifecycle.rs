@@ -113,9 +113,7 @@ impl State {
             .instances
             .iter()
             .filter(|(id, inst)| {
-                inst.source.is_none()
-                    && inst.info.tab_id.is_none()
-                    && !self.plugins.context_viewers.contains_key(id)
+                inst.info.tab_id.is_none() && !self.plugins.context_viewers.contains_key(id)
             })
             .count();
         let suite_ops = self
@@ -130,26 +128,7 @@ impl State {
     }
 
     pub(super) fn plugin_child_capacity(&self) -> Result<()> {
-        let legacy_children = self
-            .plugins
-            .instances
-            .iter()
-            .filter(|(id, inst)| {
-                inst.source.is_some()
-                    || inst.info.tab_id.is_some()
-                    || self.plugins.context_viewers.contains_key(id)
-            })
-            .count();
-        let child_ops = self
-            .plugins
-            .operations
-            .values()
-            .filter(|op| !op.background_passive && op.is_child_start)
-            .count();
-        let occupied = legacy_children
-            + self.plugins.multiplexed.len()
-            + self.plugins.closing_panels.len()
-            + child_ops;
+        let occupied = self.plugins.multiplexed.len() + self.plugins.closing_panels.len();
         ensure!(
             occupied < MAX_CHILD_EDITORS,
             "插件子编辑器或查看器实例达到 64 个限额"
@@ -336,67 +315,26 @@ impl State {
         triggered
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_plugin(
         &mut self,
         operation_id: Uuid,
         package: VerifiedPackage,
         trust: NativeTrust,
         grants: Vec<Permission>,
-        target: LaunchTarget,
+        replace: Option<Uuid>,
+        reloaded: bool,
         cancel: CancellationToken,
     ) {
-        let is_suite_target = matches!(target, LaunchTarget::Suite { .. });
-        let (replace, reloaded, source, open, context_open, response_open) = match target {
-            LaunchTarget::Suite { replace, reloaded } => {
-                (replace, reloaded, None, None, None, None)
-            }
-            LaunchTarget::Editor {
-                source,
-                tab_id,
-                revision,
-            } => (
-                None,
-                false,
-                Some(source),
-                Some((tab_id, revision)),
-                None,
-                None,
-            ),
-            LaunchTarget::ContextViewer {
-                source,
-                context_id,
-                revision,
-                read_only,
-                request,
-            } => (
-                None,
-                false,
-                Some(source),
-                None,
-                Some((context_id, revision, read_only, request)),
-                None,
-            ),
-            LaunchTarget::ResponseViewer {
-                source,
-                context_id,
-                revision,
-                read_only,
-                response,
-            } => (
-                None,
-                false,
-                Some(source),
-                None,
-                None,
-                Some((context_id, revision, read_only, response)),
-            ),
-        };
         let project = self.project;
         let task_cancel = cancel.clone();
         let replaces_existing = replace.is_some();
-        let registry_opt = (is_suite_target && self.plugins.registry.is_persistent())
+        let registry_opt = self
+            .plugins
+            .registry
+            .is_persistent()
             .then(|| self.plugins.registry.clone());
-        self.plugin_job_start(operation_id, replace.or(source), cancel, true, async move {
+        self.plugin_job_start(operation_id, replace, cancel, true, async move {
             let mut staging_opt = None;
             let (package, trust, original_source) = if let Some(registry) = registry_opt {
                 let original_source = package.directory.clone();
@@ -427,14 +365,9 @@ impl State {
                 (package, trust, None)
             };
             let (services, receiver) = mpsc::channel(16);
-            let mut worker = match PluginSupervisor::start(
-                package.clone(),
-                project,
-                trust.clone(),
-                services,
-            )
-            .await
-            {
+            let mut worker =
+                match PluginSupervisor::start(package.clone(), project, trust, services).await
+                {
                 Ok(worker) => worker,
                 Err(err) => {
                     if let Some(s) = staging_opt.take() {
@@ -459,7 +392,7 @@ impl State {
                 directory: package.directory.clone(),
                 manifest: package.manifest.clone(),
                 grants,
-                tab_id: open.map(|(tab, _)| tab),
+                tab_id: None,
             };
             let panel = worker.initial_panel.clone();
             let (manifest_modified, manifest_size, entry_modified, entry_size) =
@@ -479,10 +412,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: false,
-                    trust,
                     info,
                     panel,
-                    source,
                     resources: HashMap::new(),
                 },
                 replace,
@@ -490,14 +421,10 @@ impl State {
                 autoload: false,
                 enable_installed: false,
                 persist_install,
-                open,
-                context_open,
-                response_open,
             })))
         });
         if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
-            op.is_suite_start = is_suite_target;
-            op.is_child_start = !is_suite_target;
+            op.is_suite_start = true;
             if replaces_existing {
                 op.replaces_existing = true;
             }
@@ -530,7 +457,7 @@ impl State {
             let trust = NativeTrust::confirmed(&package, allowed.iter().copied())?;
             let (services, receiver) = mpsc::channel(16);
             let mut worker =
-                PluginSupervisor::start(package.clone(), project, trust.clone(), services).await?;
+                PluginSupervisor::start(package.clone(), project, trust, services).await?;
             if task_cancel.is_cancelled() {
                 worker.stop().await?;
                 anyhow::bail!("持久化插件加载已取消；新进程已回收");
@@ -560,10 +487,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: entry.auto_reload,
-                    trust,
                     info,
                     panel,
-                    source: None,
                     resources: HashMap::new(),
                 },
                 replace: None,
@@ -571,9 +496,6 @@ impl State {
                 autoload,
                 enable_installed: !autoload,
                 persist_install: None,
-                open: None,
-                context_open: None,
-                response_open: None,
             })))
         });
         if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
@@ -853,10 +775,9 @@ impl State {
         let ids: Vec<_> = self
             .plugins
             .instances
-            .iter()
-            .filter_map(|(id, instance)| {
-                (*id == instance_id || instance.source == Some(instance_id)).then_some(*id)
-            })
+            .contains_key(&instance_id)
+            .then_some(instance_id)
+            .into_iter()
             .collect();
         let mut retired = Vec::new();
         for id in ids {

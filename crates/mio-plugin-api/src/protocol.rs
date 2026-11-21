@@ -9,7 +9,6 @@ use crate::{ProjectKey, Uuid, panel::*};
 
 pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL_MINOR: u32 = 5;
-pub const LEGACY_HANDSHAKE_MINOR: u32 = 4;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_BODY: usize = 512 * 1024;
 pub const MAX_STORAGE_KEY_BYTES: usize = 256;
@@ -98,6 +97,8 @@ pub enum Permission {
     PayloadProcess = 6,
     #[serde(rename = "storage.kv")]
     Storage = 7,
+    #[serde(rename = "audit.write")]
+    AuditWrite = 8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enumeration)]

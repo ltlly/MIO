@@ -168,7 +168,7 @@ impl State {
             let trust = NativeTrust::confirmed(&package, allowed.iter().copied())?;
             let (services, receiver) = mpsc::channel(16);
             let mut worker =
-                PluginSupervisor::start(package.clone(), project, trust.clone(), services).await?;
+                PluginSupervisor::start(package.clone(), project, trust, services).await?;
             if task_cancel.is_cancelled() {
                 worker.stop().await?;
                 anyhow::bail!("插件热重载已取消；新实例已回收");
@@ -198,10 +198,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: old_auto_reload,
-                    trust,
                     info,
                     panel,
-                    source: None,
                     resources: HashMap::new(),
                 },
                 replace: Some(instance_id),
@@ -209,9 +207,6 @@ impl State {
                 autoload: false,
                 enable_installed: false,
                 persist_install: None,
-                open: None,
-                context_open: None,
-                response_open: None,
             })))
         });
         if let Some(op) = self.plugins.operations.get_mut(&operation_id) {

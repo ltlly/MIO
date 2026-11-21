@@ -112,14 +112,7 @@ impl State {
                 if let Some(event) = self.audit_inspect_live_flow(&record) {
                     self.queue_repeater_event(Event::Audit(event));
                 }
-                if record.summary.state == FlowState::Complete
-                    && !self.passive_check_hooks().is_empty()
-                {
-                    let _ = self
-                        .plugins
-                        .passive_tx
-                        .try_send((done.project, Box::new(record.clone())));
-                }
+                self.spawn_plugin_passive_checks(&record);
                 if !self.history_dirty {
                     self.history_dirty = true;
                     self.queue_repeater_event(Event::HistoryChanged {

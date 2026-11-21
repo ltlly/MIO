@@ -69,7 +69,6 @@ fn fixture() -> Fixture {
     fs::write(directory.path().join("manifest.json"), br#"{"id":"lab.queue-test","version":"1","api_version":1,"engine":"native","entry":"fixture-worker","permissions":["traffic.read"],"contributions":["suite_panel","message_editor"]}"#).unwrap();
     let package = VerifiedPackage::read(directory.path()).unwrap();
     let grants = vec![Permission::TrafficRead];
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, receiver) = mpsc::channel(128);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let mut workspace = state.store.workspace().unwrap();
@@ -131,10 +130,8 @@ fn fixture() -> Fixture {
             entry_modified,
             entry_size,
             auto_reload: true,
-            trust,
             info,
             panel: initial.clone(),
-            source: None,
             resources: HashMap::from([(tab_id, 1)]),
         },
     );

@@ -185,7 +185,7 @@ fn v13_preferences_response_editor_and_context_menu_frames_validate_limits() {
     }
     bad_ctx.validate().unwrap();
     bad_ctx.minor = 2;
-    bad_ctx.validate().unwrap();
+    assert!(bad_ctx.validate().is_err());
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn passive_check_frames_validate_fields_and_round_trip() {
             generation: 1,
         },
     };
-    let flow_id = Uuid::new_v4().to_string();
+    let flow_id = Uuid::new_v4().as_bytes().to_vec();
     let req = HttpRequestDto {
         method: "GET".into(),
         url: "http://127.0.0.1/check".into(),
@@ -234,8 +234,8 @@ fn passive_check_frames_validate_fields_and_round_trip() {
                 title: "插件被动检查告警".into(),
                 detail: "检测到测试标记".into(),
                 remediation: "移除调试标记".into(),
-                severity: "Medium".into(),
-                confidence: "Firm".into(),
+                severity: FindingSeverity::Medium as i32,
+                confidence: FindingConfidence::Firm as i32,
                 parameter: "body".into(),
                 evidence: "PLUGIN_VULN_MARKER".into(),
             }],
@@ -245,6 +245,11 @@ fn passive_check_frames_validate_fields_and_round_trip() {
     );
     res_env.validate().unwrap();
     if let Some(envelope::Body::PassiveCheckResult(res)) = &mut res_env.body {
+        res.findings[0].severity = 999;
+    }
+    assert!(res_env.validate().is_err());
+    if let Some(envelope::Body::PassiveCheckResult(res)) = &mut res_env.body {
+        res.findings[0].severity = FindingSeverity::Medium as i32;
         res.findings[0].title.clear();
     }
     assert!(res_env.validate().is_err());
@@ -305,8 +310,7 @@ fn active_check_frames_validate_fields_and_round_trip() {
         1,
         1,
         envelope::Body::ActiveCheckCall(ActiveCheckCall {
-            call_id: 7,
-            flow_id: Uuid::new_v4().to_string(),
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
             base_request: Some(req),
             base_response: Some(resp),
             parameter_name: "q".into(),
@@ -317,7 +321,7 @@ fn active_check_frames_validate_fields_and_round_trip() {
     let raw_call = encode_frame(&call_env).unwrap();
     assert_eq!(read_frame(&mut raw_call.as_slice()).unwrap(), call_env);
     if let Some(envelope::Body::ActiveCheckCall(call)) = &mut call_env.body {
-        call.call_id = 0;
+        call.flow_id.clear();
     }
     assert!(call_env.validate().is_err());
 
@@ -326,13 +330,12 @@ fn active_check_frames_validate_fields_and_round_trip() {
         2,
         1,
         envelope::Body::ActiveCheckResult(ActiveCheckResult {
-            call_id: 7,
             findings: vec![PluginFindingDto {
                 title: "插件主动检查告警".into(),
                 detail: "主动探测参数注入命中".into(),
                 remediation: "对输入参数做严格校验".into(),
-                severity: "High".into(),
-                confidence: "Firm".into(),
+                severity: FindingSeverity::High as i32,
+                confidence: FindingConfidence::Firm as i32,
                 parameter: "q".into(),
                 evidence: "PLUGIN_ACTIVE_PROBE".into(),
             }],
@@ -342,7 +345,7 @@ fn active_check_frames_validate_fields_and_round_trip() {
     let raw_res = encode_frame(&res_env).unwrap();
     assert_eq!(read_frame(&mut raw_res.as_slice()).unwrap(), res_env);
     if let Some(envelope::Body::ActiveCheckResult(res)) = &mut res_env.body {
-        res.call_id = 0;
+        res.findings[0].confidence = 999;
     }
     assert!(res_env.validate().is_err());
 }
@@ -395,8 +398,8 @@ fn v14_plugin_host_calls_and_results_roundtrip_and_validate() {
                 title: "Issue".into(),
                 detail: "Detail".into(),
                 remediation: "Fix".into(),
-                severity: "High".into(),
-                confidence: "Certain".into(),
+                severity: FindingSeverity::High as i32,
+                confidence: FindingConfidence::Certain as i32,
                 parameter: "id".into(),
                 evidence: "poc".into(),
             }),
@@ -551,7 +554,7 @@ fn v15_panel_multiplexing_envelope_and_register_wire_compatibility() {
 }
 
 #[test]
-fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
+fn handshake_strictly_requires_current_protocol_minor() {
     let identity = ChannelIdentity {
         instance_id: Uuid::new_v4(),
         project: ProjectKey {
@@ -560,29 +563,8 @@ fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
         },
     };
     let dur = Duration::from_secs(5);
-
-    // 1. Legacy v1.4 host (hello.minor = 4, host_minor = 0) -> new v1.5 WorkerSession downgrades to 4.
-    let v14_hello = Envelope::new(
-        identity,
-        1,
-        0,
-        envelope::Body::Hello(Hello {
-            max_frame_bytes: MAX_FRAME_BYTES as u32,
-            max_operation_ms: 5000,
-            granted_permissions: vec![],
-            host_minor: 0,
-        }),
-        dur,
-    )
-    .with_minor(LEGACY_HANDSHAKE_MINOR);
-    let mut v14_ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur)
-        .with_minor(LEGACY_HANDSHAKE_MINOR);
-    v14_ready.in_reply_to = 1;
-    let mut host_to_worker = encode_frame(&v14_hello).unwrap();
-    host_to_worker.extend(encode_frame(&v14_ready).unwrap());
-    let mut worker_out = Vec::new();
     let reg = Register {
-        plugin_id: "lab.compat".into(),
+        plugin_id: "lab.strict".into(),
         plugin_version: "1.0.0".into(),
         required_components: vec![Component::Text as i32],
         panel: Some(PanelSnapshot {
@@ -599,22 +581,9 @@ fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
         }),
         supports_panel_multiplexing: true,
     };
-    let mut session =
-        WorkerSession::accept(std::io::Cursor::new(host_to_worker), &mut worker_out, reg.clone())
-            .unwrap();
-    assert_eq!(session.negotiated_minor(), 4);
-    session
-        .send_on_panel(PANEL_ID, envelope::Body::Ack(Empty {}), 1, 0)
-        .unwrap();
-    drop(session);
-    let mut cursor = std::io::Cursor::new(worker_out);
-    let sent_reg = read_frame(&mut cursor).unwrap();
-    let sent_ack = read_frame(&mut cursor).unwrap();
-    assert_eq!(sent_reg.minor, 4);
-    assert_eq!(sent_ack.minor, 4);
 
-    // 2. New v1.5 host (envelope.minor = 4, host_minor = 5) -> new v1.5 WorkerSession negotiates 5.
-    let v15_hello = Envelope::new(
+    // 1. Current PROTOCOL_MINOR handshake succeeds and allows receiving expired frames in sequence.
+    let hello = Envelope::new(
         identity,
         1,
         0,
@@ -625,23 +594,24 @@ fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
             host_minor: PROTOCOL_MINOR,
         }),
         dur,
-    )
-    .with_minor(LEGACY_HANDSHAKE_MINOR);
-    let mut v15_ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur);
-    v15_ready.in_reply_to = 1;
-    let mut host_to_worker = encode_frame(&v15_hello).unwrap();
-    host_to_worker.extend(encode_frame(&v15_ready).unwrap());
-    // An expired inbound frame arrives with sequence 3, followed by a valid sequence 4 frame.
+    );
+    let mut ready = Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur);
+    ready.in_reply_to = 1;
+    let mut host_to_worker = encode_frame(&hello).unwrap();
+    host_to_worker.extend(encode_frame(&ready).unwrap());
     let mut expired_in = Envelope::new(identity, 3, 1, envelope::Body::Shutdown(Empty {}), dur);
     expired_in.deadline_unix_ms = 1;
     let valid_next = Envelope::new(identity, 4, 1, envelope::Body::Shutdown(Empty {}), dur);
     host_to_worker.extend(encode_frame(&expired_in).unwrap());
     host_to_worker.extend(encode_frame(&valid_next).unwrap());
     let mut worker_out = Vec::new();
-    let mut session =
-        WorkerSession::accept(std::io::Cursor::new(host_to_worker), &mut worker_out, reg.clone())
-            .unwrap();
-    assert_eq!(session.negotiated_minor(), 5);
+    let mut session = WorkerSession::accept(
+        std::io::Cursor::new(host_to_worker),
+        &mut worker_out,
+        reg.clone(),
+    )
+    .unwrap();
+    assert_eq!(session.negotiated_minor(), PROTOCOL_MINOR);
     let r1 = session.receive().unwrap();
     assert!(r1.is_expired());
     assert_eq!(r1.request_id, 3);
@@ -650,33 +620,43 @@ fn v15_handshake_negotiates_down_with_v14_peers_in_both_directions() {
     assert_eq!(r2.request_id, 4);
     drop(session);
     let sent_reg = read_frame(&mut std::io::Cursor::new(worker_out)).unwrap();
-    assert_eq!(sent_reg.minor, 5);
+    assert_eq!(sent_reg.minor, PROTOCOL_MINOR);
 
-    // 3. After negotiating v1.4, Ready or subsequent inbound frame claiming v1.5 must be rejected.
-    let mut bad_ready =
-        Envelope::new(identity, 2, 1, envelope::Body::Ready(Empty {}), dur).with_minor(5);
-    bad_ready.in_reply_to = 1;
-    let mut bad_handshake = encode_frame(&v14_hello).unwrap();
-    bad_handshake.extend(encode_frame(&bad_ready).unwrap());
+    // 2. Older minor version envelopes are rejected during validation and handshake.
+    let stale_minor = Envelope::new(
+        identity,
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![],
+            host_minor: PROTOCOL_MINOR - 1,
+        }),
+        dur,
+    )
+    .with_minor(PROTOCOL_MINOR - 1);
+    assert!(stale_minor.validate().is_err());
+
+    let bad_host_minor = Envelope::new(
+        identity,
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![],
+            host_minor: PROTOCOL_MINOR - 1,
+        }),
+        dur,
+    );
     let mut bad_out = Vec::new();
     assert!(
         WorkerSession::accept(
-            std::io::Cursor::new(bad_handshake),
+            std::io::Cursor::new(encode_frame(&bad_host_minor).unwrap()),
             &mut bad_out,
-            reg.clone()
+            reg,
         )
         .is_err()
     );
-
-    let mut good_v14 = encode_frame(&v14_hello).unwrap();
-    good_v14.extend(encode_frame(&v14_ready).unwrap());
-    good_v14.extend(
-        encode_frame(&Envelope::new(identity, 3, 1, envelope::Body::Shutdown(Empty {}), dur).with_minor(5))
-            .unwrap(),
-    );
-    let mut downgraded_out = Vec::new();
-    let mut downgraded =
-        WorkerSession::accept(std::io::Cursor::new(good_v14), &mut downgraded_out, reg).unwrap();
-    assert_eq!(downgraded.negotiated_minor(), 4);
-    assert!(downgraded.receive().is_err());
 }

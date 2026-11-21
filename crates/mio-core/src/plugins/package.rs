@@ -123,7 +123,6 @@ impl VerifiedPackage {
                     | "session_action"
                     | "payload_generator"
                     | "payload_processor"
-                    | "proxy_hook"
                     | "passive_check"
                     | "active_check"
             )),

@@ -383,7 +383,7 @@ fn passive_check_detects_audit_header_and_body_markers() {
     };
     let clean = lab
         .passive_check(PassiveCheckCall {
-            flow_id: Uuid::new_v4().to_string(),
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
             url: "http://127.0.0.1/clean".into(),
             request: Some(request().into()),
             response: Some(clean_resp.clone()),
@@ -398,7 +398,7 @@ fn passive_check_detects_audit_header_and_body_markers() {
     });
     let by_header = lab
         .passive_check(PassiveCheckCall {
-            flow_id: Uuid::new_v4().to_string(),
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
             url: "http://127.0.0.1/hdr".into(),
             request: Some(request().into()),
             response: Some(header_resp),
@@ -411,7 +411,7 @@ fn passive_check_detects_audit_header_and_body_markers() {
     body_resp.body = b"prefix PLUGIN_VULN_MARKER suffix".to_vec();
     let by_body = lab
         .passive_check(PassiveCheckCall {
-            flow_id: Uuid::new_v4().to_string(),
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
             url: "http://127.0.0.1/body".into(),
             request: Some(request().into()),
             response: Some(body_resp),

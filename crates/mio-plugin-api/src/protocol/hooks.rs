@@ -649,14 +649,31 @@ pub struct ContextMenuResult {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct PassiveCheckCall {
-    #[prost(string, tag = "1")]
-    pub flow_id: String,
+    #[prost(bytes = "vec", tag = "1")]
+    pub flow_id: Vec<u8>,
     #[prost(string, tag = "2")]
     pub url: String,
     #[prost(message, optional, tag = "3")]
     pub request: Option<HttpRequestDto>,
     #[prost(message, optional, tag = "4")]
     pub response: Option<HttpResponseDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enumeration, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum FindingSeverity {
+    Information = 0,
+    Low = 1,
+    Medium = 2,
+    High = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enumeration, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum FindingConfidence {
+    Firm = 0,
+    Tentative = 1,
+    Certain = 2,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -667,10 +684,10 @@ pub struct PluginFindingDto {
     pub detail: String,
     #[prost(string, tag = "3")]
     pub remediation: String,
-    #[prost(string, tag = "4")]
-    pub severity: String,
-    #[prost(string, tag = "5")]
-    pub confidence: String,
+    #[prost(enumeration = "FindingSeverity", tag = "4")]
+    pub severity: i32,
+    #[prost(enumeration = "FindingConfidence", tag = "5")]
+    pub confidence: i32,
     #[prost(string, tag = "6")]
     pub parameter: String,
     #[prost(string, tag = "7")]
@@ -687,24 +704,20 @@ pub struct PassiveCheckResult {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ActiveCheckCall {
-    #[prost(uint64, tag = "1")]
-    pub call_id: u64,
-    #[prost(string, tag = "2")]
-    pub flow_id: String,
-    #[prost(message, optional, tag = "3")]
+    #[prost(bytes = "vec", tag = "1")]
+    pub flow_id: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
     pub base_request: Option<HttpRequestDto>,
-    #[prost(message, optional, tag = "4")]
+    #[prost(message, optional, tag = "3")]
     pub base_response: Option<HttpResponseDto>,
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub parameter_name: String,
-    #[prost(string, tag = "6")]
+    #[prost(string, tag = "5")]
     pub parameter_value: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ActiveCheckResult {
-    #[prost(uint64, tag = "1")]
-    pub call_id: u64,
-    #[prost(message, repeated, tag = "2")]
+    #[prost(message, repeated, tag = "1")]
     pub findings: Vec<PluginFindingDto>,
 }

@@ -26,7 +26,6 @@ fn setup_multiplex_state() -> (
     .unwrap();
     let package = VerifiedPackage::read(dir.path()).unwrap();
     let grants = vec![Permission::TrafficRead, Permission::DraftWrite];
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, receiver) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -64,10 +63,8 @@ fn setup_multiplex_state() -> (
             entry_modified: e_mod,
             entry_size: e_sz,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -383,7 +380,7 @@ async fn suite_instance_ceiling_and_child_editor_budget_are_independent() {
     for idx in 1..MAX_INSTANCES {
         let pkg = VerifiedPackage::read(dir.path()).unwrap();
         let grants = vec![Permission::TrafficRead];
-        let trust = NativeTrust::confirmed(&pkg, grants.clone()).unwrap();
+        let _ = NativeTrust::confirmed(&pkg, grants.clone()).unwrap();
         let identity = ChannelIdentity {
             instance_id: Uuid::new_v4(),
             project: state.project,
@@ -411,7 +408,6 @@ async fn suite_instance_ceiling_and_child_editor_budget_are_independent() {
                 entry_modified: e_mod,
                 entry_size: e_sz,
                 auto_reload: false,
-                trust,
                 info: LoadedPlugin {
                     identity,
                     directory: dir.path().to_path_buf(),
@@ -420,7 +416,6 @@ async fn suite_instance_ceiling_and_child_editor_budget_are_independent() {
                     tab_id: None,
                 },
                 panel,
-                source: None,
                 resources: HashMap::new(),
             },
         );
@@ -634,7 +629,7 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
         Permission::RepeaterOpen,
     ];
     let grants_set: BTreeSet<Permission> = grants.iter().copied().collect();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
+    let _ = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, mut rx) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -840,10 +835,8 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -1155,7 +1148,7 @@ async fn failed_multiplex_init_propagates_close_error_diagnostic_and_keeps_closi
     let package = VerifiedPackage::read(dir.path()).unwrap();
     let grants = vec![Permission::TrafficRead];
     let grants_set: BTreeSet<Permission> = grants.iter().copied().collect();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
+    let _ = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, mut rx) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -1260,10 +1253,8 @@ async fn failed_multiplex_init_propagates_close_error_diagnostic_and_keeps_closi
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -1464,7 +1455,7 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
     let package = VerifiedPackage::read(dir.path()).unwrap();
     let grants = vec![Permission::TrafficRead];
     let grants_set: BTreeSet<Permission> = grants.iter().copied().collect();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
+    let _ = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, mut rx) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -1525,10 +1516,8 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -1752,7 +1741,7 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
     let package = VerifiedPackage::read(dir.path()).unwrap();
     let grants = vec![Permission::TrafficRead, Permission::DraftWrite];
     let grants_set: BTreeSet<Permission> = grants.iter().copied().collect();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
+    let _ = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events, mut rx) = mpsc::channel(256);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
     let identity = ChannelIdentity {
@@ -1803,10 +1792,8 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -1968,7 +1955,7 @@ async fn setup_duplex_service_state(
     let package = VerifiedPackage::read(dir.path()).unwrap();
     let grants = vec![Permission::TrafficRead, Permission::DraftWrite];
     let grants_set: BTreeSet<Permission> = grants.iter().copied().collect();
-    let trust = NativeTrust::confirmed(&package, grants.clone()).unwrap();
+    let _ = NativeTrust::confirmed(&package, grants.clone()).unwrap();
     let (events_tx, rx) = mpsc::channel(event_capacity);
     let events_tx_clone = events_tx.clone();
     let mut state = State::new(events_tx, CancellationToken::new()).unwrap();
@@ -2005,10 +1992,8 @@ async fn setup_duplex_service_state(
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
-            trust,
             info,
             panel: initial,
-            source: None,
             resources: HashMap::new(),
         },
     );
@@ -3242,7 +3227,7 @@ async fn service_workspace_close_two_tabs_on_same_panel_cancels_deferred_second_
         )
         .await
         .unwrap();
-    // Wait until Running pops Open(tab_b, rev=2) from `handle.control` and parks it in `main_deferred_commands`.
+    // Wait until Running pops Open(tab_b, rev=2) from `handle.control` and parks it in `panels[&PANEL_ID].deferred_commands`.
     tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(
         received_opens

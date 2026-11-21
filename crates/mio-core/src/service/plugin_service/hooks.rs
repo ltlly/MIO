@@ -169,7 +169,7 @@ impl State {
                         .manifest
                         .contributions
                         .iter()
-                        .any(|c| matches!(c.as_str(), "http_hook" | "proxy_hook"))
+                        .any(|c| c == "http_hook")
             })
             .map(|inst| (inst.info.manifest.id.clone(), inst.worker.handle()))
             .collect();

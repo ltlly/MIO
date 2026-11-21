@@ -109,10 +109,9 @@ impl State {
             .is_ok()
             .then(|| self.audit_inspect_live_flow(&completion.record))
             .flatten();
-        let passive_record = (saved.is_ok()
-            && completion.record.summary.state == FlowState::Complete
-            && !self.passive_check_hooks().is_empty())
-        .then(|| Box::new(completion.record.clone()));
+        if saved.is_ok() {
+            self.spawn_plugin_passive_checks(&completion.record);
+        }
         self.queue_repeater_event(Event::SendFinished {
             project: completion.project,
             tab_id: completion.tab_id,
@@ -128,12 +127,6 @@ impl State {
         }
         if let Some(event) = audit_event {
             self.queue_repeater_event(Event::Audit(event));
-        }
-        if let Some(record) = passive_record {
-            let _ = self
-                .plugins
-                .passive_tx
-                .try_send((completion.project, record));
         }
         saved
     }

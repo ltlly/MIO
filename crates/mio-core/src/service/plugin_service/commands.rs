@@ -145,10 +145,8 @@ impl State {
                     package,
                     trust,
                     grants,
-                    LaunchTarget::Suite {
-                        replace: effective_replace,
-                        reloaded: false,
-                    },
+                    effective_replace,
+                    false,
                     cancel,
                 );
             }
@@ -173,79 +171,53 @@ impl State {
                     source.info.grants.contains(&Permission::TrafficRead),
                     "自定义编辑器需要单独授权 traffic.read"
                 );
-                let supports_multiplex = source.worker.supports_panel_multiplexing;
-                let (package, trust, grants) = (
-                    source.package.clone(),
-                    source.trust.clone(),
-                    source.info.grants.clone(),
-                );
                 self.plugin_child_capacity()?;
-                if supports_multiplex {
-                    let request =
-                        parse_request(&tab.draft.raw, &tab.draft.target, tab.draft.version)?;
-                    let (virtual_id, panel_id, identity, handle, info) =
-                        self.allocate_multiplexed_child(source_instance, Some(tab_id))?;
-                    let placeholder = std::sync::Arc::new(PanelSnapshot {
-                        revision: 0,
-                        title: info.manifest.id.clone(),
-                        root: None,
-                    });
-                    self.plugins.multiplexed.insert(
-                        virtual_id,
-                        MultiplexedChild {
-                            source_instance,
-                            panel_id,
-                            primary_resource: tab_id,
-                            info,
-                            panel: placeholder,
-                            resources: HashMap::from([(tab_id, draft_revision)]),
-                        },
-                    );
-                    self.plugins
-                        .panel_routes
-                        .insert((source_instance, panel_id), virtual_id);
-                    let pending_open = handle.begin_open(panel_id, tab_id);
-                    let task_cancel = cancel.clone();
-                    self.plugin_job_start(operation_id, Some(virtual_id), cancel, true, async move {
-                        let opened = pending_open.open_request(
-                            draft_revision,
-                            false,
-                            request,
-                        );
-                        tokio::pin!(opened);
-                        let panel = tokio::select! {
-                            biased;
-                            _ = task_cancel.cancelled() => {
-                                let _ = handle.revoke_panel_resource(panel_id, tab_id, true).await;
-                                anyhow::bail!("打开插件多路复用编辑器已取消");
-                            }
-                            result = &mut opened => result?,
-                        };
-                        Ok(Output::Opened {
-                            identity,
-                            tab_id,
-                            revision: draft_revision,
-                            loading: true,
-                            panel,
-                        })
-                    });
-                    if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
-                        op.multiplexed_cleanup_on_fail = Some(virtual_id);
-                        op.binding = Some((tab_id, draft_revision, None));
-                    }
-                } else {
-                    self.start_plugin(
-                        operation_id,
-                        package,
-                        trust,
-                        grants,
-                        LaunchTarget::Editor {
-                            source: source_instance,
-                            tab_id,
-                            revision: draft_revision,
-                        },
-                        cancel,
-                    );
+                let request = parse_request(&tab.draft.raw, &tab.draft.target, tab.draft.version)?;
+                let (virtual_id, panel_id, identity, handle, info) =
+                    self.allocate_multiplexed_child(source_instance, Some(tab_id))?;
+                let placeholder = std::sync::Arc::new(PanelSnapshot {
+                    revision: 0,
+                    title: info.manifest.id.clone(),
+                    root: None,
+                });
+                self.plugins.multiplexed.insert(
+                    virtual_id,
+                    MultiplexedChild {
+                        source_instance,
+                        panel_id,
+                        primary_resource: tab_id,
+                        info,
+                        panel: placeholder,
+                        resources: HashMap::from([(tab_id, draft_revision)]),
+                    },
+                );
+                self.plugins
+                    .panel_routes
+                    .insert((source_instance, panel_id), virtual_id);
+                let pending_open = handle.begin_open(panel_id, tab_id);
+                let task_cancel = cancel.clone();
+                self.plugin_job_start(operation_id, Some(virtual_id), cancel, true, async move {
+                    let opened = pending_open.open_request(draft_revision, false, request);
+                    tokio::pin!(opened);
+                    let panel = tokio::select! {
+                        biased;
+                        _ = task_cancel.cancelled() => {
+                            let _ = handle.revoke_panel_resource(panel_id, tab_id, true).await;
+                            anyhow::bail!("打开插件多路复用编辑器已取消");
+                        }
+                        result = &mut opened => result?,
+                    };
+                    Ok(Output::Opened {
+                        identity,
+                        tab_id,
+                        revision: draft_revision,
+                        loading: true,
+                        panel,
+                    })
+                });
+                if let Some(op) = self.plugins.operations.get_mut(&operation_id) {
+                    op.multiplexed_cleanup_on_fail = Some(virtual_id);
+                    op.binding = Some((tab_id, draft_revision, None));
                 }
             }
             PluginAction::Disable { instance_id } => {

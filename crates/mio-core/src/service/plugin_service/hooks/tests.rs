@@ -190,7 +190,7 @@ async fn http_only_plugins_trigger_intruder_pre_send_without_session_permission(
     let root = tempfile::tempdir().unwrap();
     let (events, _rx) = mpsc::channel(128);
     let mut state = State::new(events, CancellationToken::new()).unwrap();
-    let (package, trust, worker, service_rx, worker_thread) = spawn_hook_worker(
+    let (package, _trust, worker, service_rx, worker_thread) = spawn_hook_worker(
         root.path(),
         state.project,
         &["traffic.modify"],
@@ -222,10 +222,8 @@ async fn http_only_plugins_trigger_intruder_pre_send_without_session_permission(
             entry_modified,
             entry_size,
             auto_reload: false,
-            trust,
             info,
             panel,
-            source: None,
             resources: HashMap::new(),
         },
     );

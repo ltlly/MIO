@@ -642,7 +642,6 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
             &["suite_panel"],
         );
         let pkg = VerifiedPackage::read(filler_dir.path()).unwrap();
-        let trust = NativeTrust::confirmed(&pkg, [Permission::TrafficRead]).unwrap();
         let id = ChannelIdentity {
             instance_id: Uuid::new_v4(),
             project: state.project,
@@ -677,9 +676,7 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
                 entry_modified: e_mod,
                 entry_size: e_sz,
                 auto_reload: false,
-                trust,
                 panel,
-                source: None,
                 resources: HashMap::new(),
             },
         );

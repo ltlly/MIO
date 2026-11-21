@@ -196,7 +196,8 @@ impl Lab {
                 | PendingService::WriteBack { context_generation, .. }
                 if *context_generation == previous_generation)
             {
-                session.send(
+                session.send_on_panel(
+                    self.panel_id,
                     envelope::Body::Cancel(Cancel { request_id: id }),
                     self.revision,
                     0,
