@@ -16,7 +16,6 @@ impl ProjectStore {
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        store::schema_guard::validate_intruder_discard(&transaction)?;
         ensure!(
             store::metadata::project_id(&transaction)? == project.id,
             "项目 ID 已改变；数据保留"
@@ -66,51 +65,31 @@ impl ProjectStore {
             .filter_map(|tab| tab.last_flow)
             .chain(store::plugin_storage::audit_pinned_flows(&transaction)?)
             .collect();
+        let mut data = SessionData::load_from_project(&transaction, id, cancel)?;
         let mut disk_flows = BTreeSet::new();
-        visit_flows(&transaction, id, |flow| {
+        for flow in data.flow_ids_in_order() {
             if shared_discard_flow(&transaction, id, flow, &pinned)? {
                 disk_flows.insert(flow);
             }
             for existing in self.intruder_sessions.runs.values() {
-                if has_flow(&existing.connection, flow)? {
+                if existing.data.has_flow(flow) {
                     disk_flows.insert(flow);
                     validate_ticket(&transaction, self.id, existing)?;
                     ensure!(
-                        same_flow(&transaction, &existing.connection, flow, true)?,
+                        existing.data.matches_disk_flow(&transaction, flow, true)?,
                         "Intruder Session 已保留不同的同 ID 消息版本；数据保留"
                     );
                 }
             }
-            Ok(())
-        })?;
-        let connection = session_connection()?;
-        let memory = connection.unchecked_transaction()?;
-        for &(table, columns, selector) in DATA {
-            copy_rows(&transaction, &memory, table, columns, selector, id, cancel)?;
-        }
-        // Flow selectors need the result links copied after their foreign-key parents.
-        for &(table, columns, selector) in DATA {
-            ensure!(
-                same_rows(&transaction, &memory, &select(table, columns, selector), id)?,
-                "Intruder 源数据类型或内容在 RAM 中改变；数据保留"
-            );
         }
         ensure!(
-            validate_dataset(&memory, id, cancel)? == run,
-            "Intruder RAM 快照摘要不一致"
+            data.logical_bytes()? == logical_bytes,
+            "Intruder 源数据类型或内容在 RAM 中改变；数据保留"
         );
-        let changed = memory.execute(
-            "UPDATE main.intruder_runs SET revision=?1 WHERE id=?2 AND revision=?3",
-            params![revision, id.to_string(), expected_revision],
-        )?;
-        ensure!(changed == 1, "Intruder RAM revision 冲突");
-        memory.commit()?;
-        connection.pragma_update(None, "query_only", true)?;
-        let mut retained = run;
-        retained.revision = revision;
-        retained.retention = IntruderRetention::Session;
+        data.run.revision = revision;
+        let retained = data.run.clone();
         let dataset = SessionDataset {
-            connection,
+            data,
             owner: project,
             run: retained.clone(),
             logical_bytes,
@@ -119,6 +98,12 @@ impl ProjectStore {
             reservations: BTreeMap::new(),
             state_reserve: 0,
             reactivated_baseline: None,
+            #[cfg(test)]
+            reject_writes: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            write_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            body_reads: std::sync::atomic::AtomicUsize::new(0),
         };
         validate_workspace_links(&transaction, &self.intruder_sessions, &workspace)?;
         // Reserve runtime ownership before disk deletion; a failed transaction removes only this stage.
@@ -175,15 +160,12 @@ impl ProjectStore {
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        store::schema_guard::validate_intruder_discard(&transaction)?;
         validate_ticket(&transaction, self.id, dataset)?;
         ensure!(
-            dataset_logical_bytes(&dataset.connection, id, dataset.logical_bytes, cancel)?
-                == dataset.logical_bytes,
+            dataset.data.logical_bytes()? == dataset.logical_bytes,
             "Intruder RAM 数据计量已改变；数据保留"
         );
-        let mut retained = validate_dataset_snapshot(&dataset.connection, id, cancel, true)?;
-        retained.retention = IntruderRetention::Session;
+        let retained = dataset.data.validate_snapshot(cancel, true)?;
         ensure!(retained == dataset.run, "Intruder RAM 摘要已改变；数据保留");
         let previous = store::metadata::workspace_for_update(&transaction)?;
         ensure!(
@@ -192,84 +174,29 @@ impl ProjectStore {
         );
         workspace.validate()?;
         ensure_no_run_rows(&transaction, id)?;
-        for &(table, columns, selector) in &DATA[..2] {
-            copy_rows(
-                &dataset.connection,
-                &transaction,
-                table,
-                columns,
-                selector,
-                id,
-                cancel,
-            )?;
-        }
-        visit_flows(&dataset.connection, id, |flow| {
-            ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；数据保留");
-            if has_flow(&transaction, flow)? {
+        dataset.data.write_to_project(
+            &transaction,
+            &dataset.disk_flows,
+            revision,
+            cancel,
+            |flow| {
                 ensure!(
-                    dataset.disk_flows.contains(&flow),
-                    "Intruder flow ID 被其它数据占用；RAM 保留"
-                );
-                ensure!(
-                    same_flow(&transaction, &dataset.connection, flow, true)?,
+                    dataset.data.matches_disk_flow(&transaction, flow, true)?,
                     "Intruder 共享 flow revision、消息或未知数据已改变；RAM 保留"
                 );
-            } else {
-                let orphan: bool = transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM main.messages WHERE flow=?1)
-                     OR EXISTS(SELECT 1 FROM main.intruder_results WHERE flow=?1)
-                     OR EXISTS(SELECT 1 FROM main.websocket_messages WHERE flow=?1)
-                     OR EXISTS(SELECT 1 FROM main.websocket_connections WHERE flow=?1)
-                     OR EXISTS(SELECT 1 FROM main.repeater_history WHERE flow=?1)",
-                    [flow.to_string()],
-                    |row| row.get(0),
-                )?;
-                ensure!(!orphan, "Intruder flow 存在无主引用；RAM 保留");
-                copy_rows(
-                    &dataset.connection,
-                    &transaction,
-                    "flows",
-                    DATA[2].1,
-                    "id=?1",
-                    flow,
-                    cancel,
-                )?;
-                copy_rows(
-                    &dataset.connection,
-                    &transaction,
-                    "messages",
-                    DATA[3].1,
-                    "flow=?1 ORDER BY side",
-                    flow,
-                    cancel,
-                )?;
-            }
-            Ok(())
-        })?;
-        copy_rows(
-            &dataset.connection,
-            &transaction,
-            DATA[4].0,
-            DATA[4].1,
-            DATA[4].2,
-            id,
-            cancel,
+                Ok(())
+            },
         )?;
-        if let Some((revision, started)) = dataset.disk_ticket {
+        if let Some((ticket_revision, started)) = dataset.disk_ticket {
             let removed = transaction.execute(
                 "DELETE FROM main.metadata WHERE key=?1 AND value=?2",
                 params![
                     retirement_key(id),
-                    ticket_bytes(revision, started).as_slice()
+                    ticket_bytes(ticket_revision, started).as_slice()
                 ],
             )?;
             ensure!(removed == 1, "Intruder retirement receipt 已改变；RAM 保留");
         }
-        let changed = transaction.execute(
-            "UPDATE main.intruder_runs SET revision=?1 WHERE id=?2 AND revision=?3",
-            params![revision, id.to_string(), expected_revision],
-        )?;
-        ensure!(changed == 1, "Intruder 项目 revision 冲突；RAM 保留");
         let mut run = dataset.run.clone();
         validate_pool_binding(&transaction, &run)?;
         run.revision = revision;
@@ -312,7 +239,6 @@ impl ProjectStore {
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        store::schema_guard::validate_intruder_discard(&transaction)?;
         validate_ticket(&transaction, self.id, dataset)?;
         for tab in workspace
             .intruder
@@ -329,7 +255,7 @@ impl ProjectStore {
             .collect();
         let mut deleted_flows = 0;
         let mut retained_flows = 0;
-        visit_flows(&dataset.connection, id, |flow| {
+        for flow in dataset.data.flow_ids_in_order() {
             ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
             let on_disk = has_flow(&transaction, flow)?;
             ensure!(
@@ -343,15 +269,14 @@ impl ProjectStore {
                 .values()
                 .filter(|other| other.run.id != id)
             {
-                shared |= has_flow(&other.connection, flow)?;
+                shared |= other.data.has_flow(flow);
             }
             if shared {
                 retained_flows += 1;
             } else {
                 deleted_flows += 1;
             }
-            Ok(())
-        })?;
+        }
         validate_workspace_links(&transaction, &self.intruder_sessions, &workspace)?;
         store::write_workspace(&transaction, &workspace)?;
         let mut retired = dataset.run.clone();

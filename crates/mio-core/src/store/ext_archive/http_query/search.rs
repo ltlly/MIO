@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use tokio_util::sync::CancellationToken;
 
@@ -56,11 +56,13 @@ impl ProjectStore {
         query: &crate::GlobalSearchQuery,
         pending: &[(crate::FlowRecord, crate::OriginalMessages)],
         websocket_pending: &[(crate::WebSocketSummary, crate::store::CapturedWebSocket)],
+        shutdown: &CancellationToken,
         cancel: &CancellationToken,
     ) -> Result<crate::GlobalSearchResult> {
+        let is_cancelled = || shutdown.is_cancelled() || cancel.is_cancelled();
         ensure!(!query.term.trim().is_empty() && query.term.len() <= 4096, "搜索关键词须为 1–4096 字节");
         ensure!((1..=10_000).contains(&query.limit), "全局搜索显示上限须为 1–10000");
-        ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+        ensure!(!is_cancelled(), "全局搜索已取消");
         let pattern = if query.regex { query.term.clone() } else { regex::escape(&query.term) };
         let matcher = regex::bytes::RegexBuilder::new(&pattern).unicode(false)
             .case_insensitive(!query.case_sensitive).size_limit(1024 * 1024)
@@ -69,15 +71,19 @@ impl ProjectStore {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.busy_timeout(std::time::Duration::from_millis(500))?;
         connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
-        let interrupt = cancel.clone();
-        connection.progress_handler(1000, Some(move || interrupt.is_cancelled()));
+        let interrupt_shutdown = shutdown.clone();
+        let interrupt_op = cancel.clone();
+        connection.progress_handler(
+            1000,
+            Some(move || interrupt_shutdown.is_cancelled() || interrupt_op.is_cancelled()),
+        );
         let transaction = connection.unchecked_transaction()?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let app: i32 = transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
         ensure!(schema == crate::store::SCHEMA && app == crate::store::APPLICATION_ID
             && crate::store::metadata::project_id(&transaction)? == query.project.id,
             "全局搜索项目身份或版本已变化");
-        crate::store::schema_guard::validate(&transaction, schema)?;
+        crate::store::schema_guard::validate(&transaction)?;
         let scope = &query.workspace.scope;
         let mut collector = GlobalSearchCollector { query, matcher, scope, result: Default::default() };
         let annotations = crate::store::plugin_storage::read_live_http_annotations(&transaction)?;
@@ -106,7 +112,7 @@ impl ProjectStore {
             scan_flow(record, original)?;
         }
         while let Some(row) = live_rows.next()? {
-            ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+            ensure!(!is_cancelled(), "全局搜索已取消");
             let id = Uuid::parse_str(row.get_ref(0)?.as_str()?)?;
             if !seen.insert(id) { continue; }
             let summary: FlowSummary = serde_json::from_slice(row.get_ref(2)?.as_blob()?)?;
@@ -123,7 +129,7 @@ impl ProjectStore {
             let mut statement = transaction.prepare(&format!("{CANONICAL} SELECT id FROM canonical ORDER BY item_index DESC,id"))?;
             let mut rows = statement.query([source.to_string()])?;
             while let Some(row) = rows.next()? {
-                ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+                ensure!(!is_cancelled(), "全局搜索已取消");
                 let id = Uuid::parse_str(row.get_ref(0)?.as_str()?)?;
                 let history = proxy_row(&transaction, source, id)?;
                 let HistoryRow::ExtProxy(archive) = &history else { unreachable!() };
@@ -166,7 +172,7 @@ impl ProjectStore {
         let mut explicit = transaction.prepare("SELECT id,revision,row,detail FROM site_map_entries ORDER BY id")?;
         let mut explicit_rows = explicit.query([])?;
         while let Some(row) = explicit_rows.next()? {
-            ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+            ensure!(!is_cancelled(), "全局搜索已取消");
             let id = Uuid::parse_str(row.get_ref(0)?.as_str()?)?;
             let revision = row.get::<_, u64>(1)?;
             let history: HistoryRow = serde_json::from_slice(row.get_ref(2)?.as_blob()?)?;
@@ -204,7 +210,7 @@ impl ProjectStore {
             LEFT JOIN websocket_notes n ON w.id=n.message ORDER BY w.ordinal ASC")?;
         let mut ws_rows = ws_stmt.query([])?;
         while let Some(row) = ws_rows.next()? {
-            ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+            ensure!(!is_cancelled(), "全局搜索已取消");
             let id = Uuid::parse_str(row.get_ref(0)?.as_str()?)?;
             if !seen_ws.insert(id) { continue; }
             let direction = if row.get::<_, i64>(4)? == 0 { crate::WebSocketDirection::ClientToServer } else { crate::WebSocketDirection::ServerToClient };
@@ -242,7 +248,12 @@ impl ProjectStore {
         let websocket_query = crate::WebSocketHistoryQuery { project: query.project, query_revision: query.query_revision,
             filter: crate::WebSocketHistoryFilter { term: query.term.clone(), regex: query.regex, case_sensitive: query.case_sensitive,
                 ..Default::default() }, flow_id: None, offset: 0, limit: query.limit, selected_message_id: None };
-        let websocket = ProjectStore::websocket_query_snapshot(path, &websocket_query, websocket_pending, cancel)?;
+        ensure!(!is_cancelled(), "全局搜索已取消");
+        let websocket = if shutdown.is_cancelled() {
+            bail!("全局搜索已取消");
+        } else {
+            ProjectStore::websocket_query_snapshot(path, &websocket_query, websocket_pending, cancel)?
+        };
         for row in websocket.rows {
             if !seen_ws.insert(row.id) { continue; }
             if query.in_scope_only && !scope.is_url_in_scope(&row.url) { continue; }
@@ -256,7 +267,7 @@ impl ProjectStore {
                 collector.result.hits.push(hit);
             }
         }
-        ensure!(!cancel.is_cancelled(), "全局搜索已取消");
+        ensure!(!is_cancelled(), "全局搜索已取消");
         Ok(collector.result)
     }
 }

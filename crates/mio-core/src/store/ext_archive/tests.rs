@@ -1,9 +1,6 @@
-use std::{fs, path::Path};
+use std::fs;
 
-use rusqlite::{
-    OpenFlags,
-    hooks::{AuthAction, AuthContext, Authorization},
-};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 
@@ -121,61 +118,4 @@ fn deny_archive_reads(context: AuthContext<'_>) -> Authorization {
         } => Authorization::Deny,
         _ => Authorization::Allow,
     }
-}
-
-fn downgrade_fixture(
-    path: &Path,
-    schema: i32,
-) -> (Uuid, crate::FlowRecord, Option<WebSocketMessage>) {
-    let mut store = ProjectStore::create(Some(path)).unwrap();
-    let flow = super::super::tests::record();
-    store.put(&flow).unwrap();
-    let websocket = (schema == 2).then(|| WebSocketMessage {
-        id: Uuid::new_v4(),
-        revision: 1,
-        flow_id: flow.summary.id,
-        sequence: 1,
-        direction: WebSocketDirection::ServerToClient,
-        kind: WebSocketKind::Binary,
-        payload: vec![0, 255],
-        observed_unix_ms: 5,
-    });
-    if let Some(message) = &websocket {
-        store.put_websocket(message).unwrap();
-    }
-    store
-        .connection
-        .execute_batch(
-            "DROP TABLE intruder_results; DROP TABLE intruder_payloads; DROP TABLE intruder_runs;",
-        )
-        .unwrap();
-    store.connection.execute_batch("DROP TABLE ext_messages; DROP TABLE ext_items; DROP TABLE ext_source_chunks; DROP TABLE ext_sources;").unwrap();
-    store
-        .connection
-        .execute_batch(
-            "DROP TABLE site_map_entries; DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes;",
-        )
-        .unwrap();
-    if schema == 1 {
-        store
-            .connection
-            .execute_batch("DROP TABLE websocket_payloads; DROP TABLE websocket_messages;")
-            .unwrap();
-    }
-    store
-        .connection
-        .execute_batch("DROP TABLE websocket_connections;")
-        .unwrap();
-    store
-        .connection
-        .pragma_update(None, "user_version", schema)
-        .unwrap();
-    store.checkpoint().unwrap();
-    store
-        .connection
-        .execute_batch("PRAGMA journal_mode=DELETE;")
-        .unwrap();
-    let id = store.id;
-    store.close().unwrap();
-    (id, flow, websocket)
 }

@@ -376,67 +376,42 @@ fn workspace_reads_and_writes_bind_to_main_metadata() {
 }
 
 #[test]
-fn migration_revalidates_reopened_metadata_before_schema_writes() {
+fn reopen_revalidates_metadata_readonly_before_writes() {
     for invalid_id in [false, true] {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(&format!(
-                "PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1;
-                 CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
-                 CREATE TABLE flows(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,
-                     started INTEGER NOT NULL,url TEXT NOT NULL,method TEXT NOT NULL,
-                     state TEXT NOT NULL,summary BLOB NOT NULL);
-                 CREATE TABLE messages(flow TEXT NOT NULL REFERENCES flows(id),
-                     side INTEGER NOT NULL,head BLOB NOT NULL,body BLOB NOT NULL,
-                     PRIMARY KEY(flow,side));"
-            ))
-            .unwrap();
-        let id = Uuid::new_v4();
-        let stored_id = if invalid_id { Uuid::new_v4() } else { id };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reopen-metadata.mio");
+        let store = ProjectStore::create(Some(&path)).unwrap();
+        store.close().unwrap();
+
+        let connection = Connection::open(&path).unwrap();
         let workspace = Workspace {
             active: (!invalid_id).then(Uuid::new_v4),
             ..Workspace::default()
         };
         let bytes = serde_json::to_vec(&workspace).unwrap();
+        if invalid_id {
+            connection
+                .execute(
+                    "UPDATE metadata SET value='not-a-uuid' WHERE key='id'",
+                    [],
+                )
+                .unwrap();
+        }
         connection
-            .execute(
-                "INSERT INTO metadata VALUES ('id',?1),('workspace',?2)",
-                params![stored_id.to_string(), &bytes],
-            )
+            .execute("UPDATE metadata SET value=?1 WHERE key='workspace'", [&bytes])
             .unwrap();
-        let mut store = ProjectStore {
-            connection,
-            id,
-            path: None,
-            temporary: None,
-            intruder_sessions: super::super::intruder::IntruderSessions::default(),
-            cached_workspace: std::sync::Mutex::new(None),
-        };
+        connection.close().unwrap();
 
-        let error = store.migrate().unwrap_err().to_string();
-        assert_eq!(
-            error,
-            if invalid_id {
-                "项目 ID 在重新打开后已变化；未迁移或保存"
+        let before = std::fs::read(&path).unwrap();
+        let error = ProjectStore::open(&path).err().unwrap().to_string();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            error.contains(if invalid_id {
+                "项目 ID"
             } else {
                 "当前工作标签不存在"
-            }
+            }),
+            "unexpected error for invalid_id={invalid_id}: {error}"
         );
-
-        let schema: i32 = store
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(schema, 1);
-        let table_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE type='table'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table_count, 3, "no migration tables may be created");
-        assert_eq!(stored_workspace(&store), bytes);
     }
 }

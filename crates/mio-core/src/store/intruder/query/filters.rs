@@ -358,7 +358,7 @@ pub(super) fn matching_ordinals(
     Ok((total, selected_rank, ordinals))
 }
 
-fn search_matcher(
+pub(in crate::store::intruder) fn search_matcher(
     filter: &crate::IntruderResultFilter,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Option<regex::bytes::Regex>> {
@@ -442,7 +442,7 @@ pub(super) fn read_search_response(
     }))
 }
 
-fn page_from_ordinals(
+pub(in crate::store::intruder) fn page_from_ordinals(
     query: &IntruderResultViewQuery,
     ordinals: Vec<u64>,
 ) -> (usize, Option<usize>, Vec<u64>) {

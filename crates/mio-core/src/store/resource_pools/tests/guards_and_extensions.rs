@@ -119,7 +119,7 @@ fn existing_pool_start_uses_a_confirmed_catalog_without_recreating_or_defaulting
 
 #[test]
 fn pool_catalog_unknown_fields_type_and_case_aliases_are_rejected_without_replacement() {
-    for mutation in ["unknown", "type", "alias", "oversized"] {
+    for mutation in ["unknown", "type", "oversized"] {
         let mut store = ProjectStore::create(None).unwrap();
         let catalog = store
             .set_intruder_resource_pools(
@@ -147,12 +147,6 @@ fn pool_catalog_unknown_fields_type_and_case_aliases_are_rejected_without_replac
                     .execute("UPDATE metadata SET value='invalid' WHERE key=?1", [KEY])
                     .unwrap();
             }
-            "alias" => {
-                store
-                    .connection
-                    .execute("UPDATE metadata SET key=upper(key) WHERE key=?1", [KEY])
-                    .unwrap();
-            }
             "oversized" => {
                 store
                     .connection
@@ -164,7 +158,7 @@ fn pool_catalog_unknown_fields_type_and_case_aliases_are_rejected_without_replac
             }
             _ => unreachable!(),
         }
-        let before: (String, String, Vec<u8>) = store.connection.query_row("SELECT key,typeof(value),CAST(value AS BLOB) FROM metadata WHERE key=?1 COLLATE NOCASE", [KEY], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let before: (String, String, Vec<u8>) = store.connection.query_row("SELECT key,typeof(value),CAST(value AS BLOB) FROM metadata WHERE key=?1", [KEY], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
         assert!(store.intruder_resource_pools().is_err(), "{mutation}");
         assert!(
             store
@@ -172,14 +166,14 @@ fn pool_catalog_unknown_fields_type_and_case_aliases_are_rejected_without_replac
                 .is_err(),
             "{mutation}"
         );
-        let after: (String, String, Vec<u8>) = store.connection.query_row("SELECT key,typeof(value),CAST(value AS BLOB) FROM metadata WHERE key=?1 COLLATE NOCASE", [KEY], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let after: (String, String, Vec<u8>) = store.connection.query_row("SELECT key,typeof(value),CAST(value AS BLOB) FROM metadata WHERE key=?1", [KEY], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
         assert_eq!(before, after);
     }
 }
 
 #[test]
-fn schema_twelve_pool_migration_preserves_legacy_caps_and_rejects_future_key_readonly() {
-    for future_key in [false, true] {
+fn schema_one_preserves_pools_and_rejects_legacy_user_version_twelve_readonly() {
+    for legacy_version in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy-pool.mio");
         let mut store = ProjectStore::create(Some(&path)).unwrap();
@@ -189,28 +183,22 @@ fn schema_twelve_pool_migration_preserves_legacy_caps_and_rejects_future_key_rea
         let run = store
             .create_intruder_run(Uuid::new_v4(), tab, &input, 1)
             .unwrap();
-        store.connection.execute_batch("DROP TABLE site_map_entries; ALTER TABLE intruder_runs DROP COLUMN pool_revision; ALTER TABLE intruder_runs DROP COLUMN pool_id; DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port; ALTER TABLE intruder_results DROP COLUMN highlight_revision; ALTER TABLE intruder_results DROP COLUMN highlight; ALTER TABLE intruder_results DROP COLUMN notes_revision; ALTER TABLE intruder_results DROP COLUMN notes; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes; DROP TABLE websocket_connections; PRAGMA user_version=12;").unwrap();
-        if future_key {
+        store.save(None).unwrap();
+        if legacy_version {
             store
                 .connection
-                .execute(
-                    "INSERT INTO metadata(key,value) VALUES(?1,?2)",
-                    params![
-                        KEY,
-                        serde_json::to_vec(&IntruderResourcePools::default()).unwrap()
-                    ],
-                )
+                .pragma_update(None, "user_version", 12)
+                .unwrap();
+            store.checkpoint().unwrap();
+            store
+                .connection
+                .execute_batch("PRAGMA journal_mode=DELETE;")
                 .unwrap();
         }
-        store.checkpoint().unwrap();
-        store
-            .connection
-            .execute_batch("PRAGMA journal_mode=DELETE;")
-            .unwrap();
         store.close().unwrap();
         let before = std::fs::read(&path).unwrap();
         let opened = ProjectStore::open(&path);
-        if future_key {
+        if legacy_version {
             assert!(opened.is_err());
             assert_eq!(std::fs::read(&path).unwrap(), before);
         } else {
@@ -274,81 +262,5 @@ fn pool_catalog_update_preserves_inbound_metadata_values_and_allows_unrelated_ex
             .query_row::<String, _, _>("SELECT key FROM extension_keys", [], |row| row.get(0))
             .unwrap(),
         KEY
-    );
-
-    let mut observations = Vec::new();
-    for action in ["CASCADE", "SET NULL", "SET DEFAULT"] {
-        let mut store = ProjectStore::create(None).unwrap();
-        let mut input = pool();
-        let catalog = store
-            .set_intruder_resource_pools(
-                project(&store),
-                0,
-                vec![input.clone()],
-                &CancellationToken::new(),
-            )
-            .unwrap();
-        store.connection.execute_batch(&format!(
-            "CREATE UNIQUE INDEX extension_unique_metadata_value ON metadata(value);
-             INSERT INTO metadata(key,value) VALUES('extension_default',X'F00D');
-             CREATE TABLE extension_catalog_values(id INTEGER PRIMARY KEY,
-                 value BLOB DEFAULT X'F00D' REFERENCES metadata(value) ON UPDATE {action});
-             INSERT INTO extension_catalog_values SELECT 1,value FROM metadata WHERE key='intruder_resource_pools';"
-        )).unwrap();
-        let before: Option<Vec<u8>> = store
-            .connection
-            .query_row(
-                "SELECT value FROM extension_catalog_values WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(before, Some(serde_json::to_vec(&catalog).unwrap()));
-        input.max_concurrent_requests = Some(1);
-        let result = store.set_intruder_resource_pools(
-            project(&store),
-            catalog.revision,
-            vec![input],
-            &CancellationToken::new(),
-        );
-        let after: Option<Vec<u8>> = store
-            .connection
-            .query_row(
-                "SELECT value FROM extension_catalog_values WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let catalog_unchanged = store.intruder_resource_pools().unwrap() == catalog;
-        let foreign_keys: bool = store
-            .connection
-            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
-            .unwrap();
-        let violations: usize = store
-            .connection
-            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        observations.push((
-            action,
-            result.is_ok(),
-            before == after,
-            catalog_unchanged,
-            foreign_keys,
-            violations,
-            after.as_ref().map(Vec::len),
-        ));
-    }
-    assert!(
-        observations.iter().all(
-            |(_, accepted, values_unchanged, catalog_unchanged, foreign_keys, violations, _)| {
-                *values_unchanged
-                    && (*accepted || *catalog_unchanged)
-                    && *foreign_keys
-                    && *violations == 0
-            }
-        ),
-        "catalog updates must not mutate dependent extension values; (action,accepted,value_preserved,catalog_preserved,FK_enabled,violations,after_bytes)={observations:?}"
     );
 }

@@ -135,60 +135,42 @@ fn task_title_cas_rejects_stale_invalid_cancelled_and_failed_writes_without_retr
 }
 
 #[test]
-fn task_title_schema_nine_migrates_without_changing_existing_rows_and_conflicts_stay_readonly() {
-    for conflict in [false, true] {
+fn task_title_schema_one_persists_across_reopen_and_legacy_version_stays_readonly() {
+    for legacy_conflict in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy-nine.mio");
         let mut store = ProjectStore::create(Some(&path)).unwrap();
         let attack = run(&mut store, 1);
         let workspace = store.workspace().unwrap();
-        store
-            .connection
-            .execute_batch(
+        store.save(None).unwrap();
+        store.close().unwrap();
+
+        let reopened = ProjectStore::open(&path).unwrap();
+        assert_eq!(reopened.read_intruder_run(attack.id).unwrap(), attack);
+        assert_eq!(reopened.workspace().unwrap(), workspace);
+        assert_eq!(reopened.read_intruder_spec(attack.id).unwrap(), spec(1));
+        assert_eq!(
+            reopened
+                .connection
+                .pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            super::super::super::SCHEMA
+        );
+        reopened.close().unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        if legacy_conflict {
+            conn.execute_batch(
                 "ALTER TABLE intruder_runs DROP COLUMN title;
-             ALTER TABLE intruder_runs DROP COLUMN title_revision;
-             ALTER TABLE intruder_runs DROP COLUMN baseline_ordinal;
-             ALTER TABLE intruder_runs DROP COLUMN pool_revision;
-             ALTER TABLE intruder_runs DROP COLUMN pool_id;
-             DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port;
-             ALTER TABLE intruder_results DROP COLUMN highlight_revision;
-             ALTER TABLE intruder_results DROP COLUMN highlight;
-             ALTER TABLE intruder_results DROP COLUMN notes_revision;
-             ALTER TABLE intruder_results DROP COLUMN notes;
-             DROP TABLE site_map_entries; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes; DROP TABLE websocket_connections; PRAGMA user_version=9;",
+                 ALTER TABLE intruder_runs ADD COLUMN title BLOB DEFAULT X'FF00';",
             )
             .unwrap();
-        if conflict {
-            store
-                .connection
-                .execute_batch("ALTER TABLE intruder_runs ADD COLUMN title BLOB DEFAULT X'FF00';")
-                .unwrap();
         }
-        store.checkpoint().unwrap();
-        store
-            .connection
-            .execute_batch("PRAGMA journal_mode=DELETE;")
-            .unwrap();
-        store.close().unwrap();
+        conn.close().unwrap();
         let before = std::fs::read(&path).unwrap();
-        let opened = ProjectStore::open(&path);
-        if conflict {
-            assert!(opened.is_err());
-            assert_eq!(std::fs::read(&path).unwrap(), before);
-        } else {
-            let restored = opened.unwrap();
-            assert_eq!(restored.read_intruder_run(attack.id).unwrap(), attack);
-            assert_eq!(restored.workspace().unwrap(), workspace);
-            assert_eq!(restored.read_intruder_spec(attack.id).unwrap(), spec(1));
-            assert_eq!(
-                restored
-                    .connection
-                    .pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
-                    .unwrap(),
-                super::super::super::SCHEMA
-            );
-            restored.close().unwrap();
-        }
+        assert!(ProjectStore::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
 

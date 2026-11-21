@@ -141,10 +141,10 @@ impl ProjectStore {
     }
 
     pub fn read_intruder_run(&self, id: Uuid) -> Result<IntruderRunSummary> {
-        let (connection, retention) = self.intruder_connection(id)?;
-        let mut run = read_run(connection, id)?;
-        run.retention = retention;
-        Ok(run)
+        if let Some(dataset) = self.session_dataset(id)? {
+            return Ok(dataset.data.run.clone());
+        }
+        read_run(&self.connection, id)
     }
 
     /// The caller excludes pending result recovery before changing an independent binding.
@@ -184,8 +184,11 @@ impl ProjectStore {
 
     #[cfg(test)]
     pub(crate) fn test_intruder_connection(&self, id: Uuid) -> Result<&Connection> {
-        self.intruder_connection(id)
-            .map(|(connection, _)| connection)
+        ensure!(
+            !self.intruder_sessions.contains(id),
+            "Intruder Session 运行无 SQLite 连接"
+        );
+        Ok(&self.connection)
     }
 
     /// The caller excludes pending recovery before this explicit admission.
@@ -227,11 +230,10 @@ impl ProjectStore {
     }
 
     pub fn find_intruder_run(&self, id: Uuid) -> Result<Option<IntruderRunSummary>> {
-        let (connection, retention) = self.intruder_connection(id)?;
-        Ok(find_run(connection, id)?.map(|mut run| {
-            run.retention = retention;
-            run
-        }))
+        if let Some(dataset) = self.session_dataset(id)? {
+            return Ok(Some(dataset.data.run.clone()));
+        }
+        find_run(&self.connection, id)
     }
 
     pub fn intruder_runs(&self, after: Option<Uuid>, limit: usize) -> Result<IntruderRunPage> {
@@ -291,11 +293,8 @@ impl ProjectStore {
     }
 
     pub fn read_intruder_spec(&self, id: Uuid) -> Result<IntruderSpec> {
-        let (connection, _) = self.intruder_connection(id)?;
-        let transaction = connection.unchecked_transaction()?;
-        let spec = read_spec(&transaction, id)?;
-        transaction.commit()?;
-        Ok(spec)
+        self.read_intruder_spec_with_settings(id)
+            .map(|(spec, _, _)| spec)
     }
 
     pub(crate) fn read_intruder_run_settings_only(
@@ -305,8 +304,10 @@ impl ProjectStore {
         crate::IntruderAttackSettings,
         Vec<crate::IntruderPayloadSetConfig>,
     )> {
-        let (connection, _) = self.intruder_connection(id)?;
-        read_run_settings_only(connection, id)
+        if let Some(dataset) = self.session_dataset(id)? {
+            return dataset.data.read_settings_only();
+        }
+        read_run_settings_only(&self.connection, id)
     }
 
     pub(crate) fn read_intruder_spec_with_settings(
@@ -317,8 +318,10 @@ impl ProjectStore {
         crate::IntruderAttackSettings,
         Vec<crate::IntruderPayloadSetConfig>,
     )> {
-        let (connection, _) = self.intruder_connection(id)?;
-        let transaction = connection.unchecked_transaction()?;
+        if let Some(dataset) = self.session_dataset(id)? {
+            return dataset.data.read_spec_with_settings();
+        }
+        let transaction = self.connection.unchecked_transaction()?;
         let out = read_spec_with_settings(&transaction, id)?;
         transaction.commit()?;
         Ok(out)

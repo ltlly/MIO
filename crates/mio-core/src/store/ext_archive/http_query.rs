@@ -68,27 +68,38 @@ fn extract_url_ip_literal(url: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(in crate::store) fn live_row_metadata(
+fn live_row_metadata_checked(
     connection: &Connection,
     summary: &FlowSummary,
     fallback_listener_port: Option<u16>,
+    verify_revision: bool,
+) -> Result<HttpHistoryRowMetadata> {
+    let stored_meta = crate::store::messages::read_http_history_metadata(connection, summary.id)?;
+    if verify_revision && let Some(stored) = &stored_meta {
+        ensure!(
+            stored.revision == summary.revision,
+            "HTTP 历史元数据 revision 与流量不一致"
+        );
+    }
+    live_row_metadata_with_stored(connection, summary, fallback_listener_port, stored_meta.as_ref())
+}
+
+pub(in crate::store) fn live_row_metadata_with_stored(
+    connection: &Connection,
+    summary: &FlowSummary,
+    fallback_listener_port: Option<u16>,
+    stored_meta: Option<&crate::store::messages::StoredHttpHistoryMetadata>,
 ) -> Result<HttpHistoryRowMetadata> {
     let id = summary.id.to_string();
-    let schema: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let stored_port: Option<u16> = if schema >= 25 {
-        connection
-            .query_row(
-                "SELECT listener_port FROM flows WHERE id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten()
-    } else {
-        None
-    };
+    let stored_port: Option<u16> = connection
+        .query_row(
+            "SELECT listener_port FROM flows WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
     let listener_port = stored_port.or(fallback_listener_port);
-    let stored_meta = crate::store::messages::read_http_history_metadata(connection, summary.id)?;
 
     let mut stmt = connection.prepare(
         "SELECT side,
@@ -266,10 +277,11 @@ pub(in crate::store::ext_archive::http_query) fn row_metadata_for_entry_cached(
     match row {
         HistoryRow::Live(summary) => {
             let pending = pending_by_id.get(&summary.id).copied();
-            let mut meta = live_row_metadata(
+            let mut meta = live_row_metadata_checked(
                 connection,
                 summary,
                 pending.and_then(|p| p.listener_port),
+                pending.is_none(),
             )?;
             if let Some(pending) = pending {
                 let request_present: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE flow=?1 AND side IN (0,2))", [summary.id.to_string()], |row| row.get(0))?;
@@ -531,7 +543,7 @@ fn query_connection(
         app == crate::store::APPLICATION_ID && schema == crate::store::SCHEMA,
         "HTTP 历史查询项目版本已变化"
     );
-    crate::store::schema_guard::validate(&transaction, schema)?;
+    crate::store::schema_guard::validate(&transaction)?;
     ensure!(
         crate::store::metadata::project_id(&transaction)? == query.project.id,
         "HTTP 历史查询项目 ID 已变化"

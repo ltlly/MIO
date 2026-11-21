@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in crate::store) fn workspace_arc_in_tx(
-    cache_mutex: &std::sync::Mutex<Option<CachedWorkspace>>,
+    cache: &std::sync::Mutex<StoreCache>,
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<Arc<Workspace>> {
     let data_version: i64 =
@@ -9,8 +9,7 @@ pub(in crate::store) fn workspace_arc_in_tx(
     let schema_version: i64 =
         transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
     let total_changes = query_total_changes(transaction)?;
-    let state = conn_cache_for(cache_mutex, transaction);
-    if let Ok(guard) = state.lock()
+    if let Ok(guard) = cache.lock()
         && let Some(cached) = guard.workspace.as_ref()
         && cached.data_version == data_version
         && cached.schema_version == schema_version
@@ -19,7 +18,7 @@ pub(in crate::store) fn workspace_arc_in_tx(
         return Ok(Arc::clone(&cached.workspace));
     }
     let workspace = Arc::new(metadata::workspace(transaction)?);
-    if let Ok(mut guard) = state.lock() {
+    if let Ok(mut guard) = cache.lock() {
         guard.workspace = Some(WorkspaceCacheEntry {
             data_version,
             schema_version,
@@ -43,8 +42,7 @@ impl ProjectStore {
             self.connection
                 .pragma_query_value(None, "schema_version", |row| row.get(0))?;
         let total_changes = query_total_changes(&self.connection)?;
-        let state = conn_cache_for(&self.cached_workspace, &self.connection);
-        if let Ok(guard) = state.lock()
+        if let Ok(guard) = self.cache.lock()
             && let Some(cached) = guard.workspace.as_ref()
             && cached.data_version == data_version
             && cached.schema_version == schema_version
@@ -60,7 +58,7 @@ impl ProjectStore {
         let tx_tc = query_total_changes(&transaction)?;
         let workspace = Arc::new(metadata::workspace(&transaction)?);
         transaction.commit()?;
-        if let Ok(mut guard) = state.lock() {
+        if let Ok(mut guard) = self.cache.lock() {
             guard.workspace = Some(WorkspaceCacheEntry {
                 data_version: tx_dv,
                 schema_version: tx_sv,
@@ -72,16 +70,12 @@ impl ProjectStore {
     }
 
     pub(in crate::store) fn invalidate_workspace_cache(&self) {
-        if let Ok(guard) = self.cached_workspace.lock()
-            && let Some(cw) = guard.as_ref()
-            && let Ok(mut state) = cw.state.lock()
-        {
-            state.workspace = None;
+        if let Ok(mut guard) = self.cache.lock() {
+            guard.workspace = None;
         }
     }
 
     fn update_workspace_cache(&self, workspace: &Workspace) {
-        let state = conn_cache_for(&self.cached_workspace, &self.connection);
         let versions = (|| -> Result<(i64, i64, i64)> {
             let dv: i64 =
                 self.connection
@@ -92,7 +86,7 @@ impl ProjectStore {
             let tc = query_total_changes(&self.connection)?;
             Ok((dv, sv, tc))
         })();
-        if let Ok(mut guard) = state.lock() {
+        if let Ok(mut guard) = self.cache.lock() {
             guard.workspace = match versions {
                 Ok((data_version, schema_version, total_changes)) => Some(WorkspaceCacheEntry {
                     data_version,
@@ -189,70 +183,22 @@ impl ProjectStore {
         let receipts = if let Some(destination) =
             destination.filter(|p| self.path.as_deref() != Some(p))
         {
-            ensure!(
-                !crate::is_external_archive_file(destination),
-                "不能覆盖外部归档项目文件"
-            );
-            check_new_project_path(destination)?;
-            self.check_path_outside_temporary(destination)?;
-            let parent = destination
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            let temporary = NamedTempFile::new_in(parent)?;
-            let mut snapshot = Connection::open(temporary.path())?;
-            {
-                let backup = rusqlite::backup::Backup::new(&self.connection, &mut snapshot)?;
-                loop {
-                    ensure!(!cancel.is_cancelled(), "项目保存已取消");
-                    let step = backup.step(64)?;
-                    ensure!(!cancel.is_cancelled(), "项目保存已取消");
-                    match step {
-                        rusqlite::backup::StepResult::Done => break,
-                        rusqlite::backup::StepResult::More => {}
-                        _ => bail!("项目快照未完成"),
-                    }
-                }
-            }
-            snapshot.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
-            let mut staged = Self {
-                connection: snapshot,
-                id: self.id,
-                path: Some(temporary.path().to_owned()),
-                temporary: None,
-                intruder_sessions: intruder::IntruderSessions::default(),
-                cached_workspace: std::sync::Mutex::new(None),
-            };
-            staged.cancel_queries_with(cancel.clone());
-            let receipts = staged.apply_pending_with_notes(
-                edits,
-                records,
-                websocket_records,
-                intruder_mutations,
+            let (reopened, receipts) = self.stage_backup_and_publish(
+                destination,
                 cancel,
-            )?;
-            staged.clear_connection_cache();
-            staged.connection.close().map_err(|(_, err)| err)?;
-            temporary.as_file().sync_all()?;
-            check_new_project_path(destination)?;
-            self.check_path_outside_temporary(destination)?;
-            // A successful publish wins cancellation arriving after this check.
-            ensure!(!cancel.is_cancelled(), "项目保存已取消");
-            temporary
-                .persist_noclobber(destination)
-                .map_err(|error| error.error)?;
-            #[cfg(unix)]
-            fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .with_context(|| {
-                    format!(
-                        "完整快照已发布至 {}，但目录同步失败，不能确认掉电持久性；原项目仍在使用",
-                        destination.display()
+                "项目保存已取消",
+                "项目快照未完成",
+                &format!("快照已保存在 {}，但无法切换到新项目", destination.display()),
+                |staged| {
+                    staged.apply_pending_with_notes(
+                        edits,
+                        records,
+                        websocket_records,
+                        intruder_mutations,
+                        cancel,
                     )
-                })?;
-            let reopened = Self::open(destination).with_context(|| {
-                format!("快照已保存在 {}，但无法切换到新项目", destination.display())
-            })?;
+                },
+            )?;
             self.adopt_snapshot(reopened)?;
             receipts
         } else {
@@ -273,6 +219,77 @@ impl ProjectStore {
         };
         let path = self.path.clone().context("临时项目需要选择保存路径")?;
         Ok((path, self.total_bytes()?, receipts))
+    }
+
+    pub(super) fn stage_backup_and_publish<T>(
+        &self,
+        destination: &Path,
+        cancel: &CancellationToken,
+        cancel_msg: &str,
+        backup_err_msg: &str,
+        open_err_msg: &str,
+        mutate: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<(Self, T)> {
+        ensure!(
+            !crate::is_external_archive_file(destination),
+            "不能覆盖外部归档项目文件"
+        );
+        check_new_project_path(destination)?;
+        self.check_path_outside_temporary(destination)?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = NamedTempFile::new_in(parent)?;
+        let mut snapshot = Connection::open(temporary.path())?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut snapshot)?;
+            loop {
+                ensure!(!cancel.is_cancelled(), "{cancel_msg}");
+                let step = backup.step(64)?;
+                ensure!(!cancel.is_cancelled(), "{cancel_msg}");
+                match step {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => {}
+                    _ => bail!("{backup_err_msg}"),
+                }
+            }
+        }
+        snapshot.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;",
+        )?;
+        let mut staged = Self {
+            cache: Mutex::new(StoreCache::default()),
+            connection: snapshot,
+            id: self.id,
+            path: Some(temporary.path().to_owned()),
+            temporary: None,
+            intruder_sessions: intruder::IntruderSessions::default(),
+        };
+        staged.cancel_queries_with(cancel.clone());
+        let output = mutate(&mut staged)?;
+        ensure!(!cancel.is_cancelled(), "{cancel_msg}");
+        staged.clear_connection_cache();
+        staged.connection.close().map_err(|(_, err)| err)?;
+        temporary.as_file().sync_all()?;
+        check_new_project_path(destination)?;
+        self.check_path_outside_temporary(destination)?;
+        // A successful publish wins cancellation arriving after this check.
+        ensure!(!cancel.is_cancelled(), "{cancel_msg}");
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|error| error.error)?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "完整快照已发布至 {}，但目录同步失败，不能确认掉电持久性；原项目仍在使用",
+                    destination.display()
+                )
+            })?;
+        let reopened = Self::open(destination).with_context(|| open_err_msg.to_owned())?;
+        Ok((reopened, output))
     }
 
     pub(super) fn adopt_snapshot(&mut self, mut reopened: Self) -> Result<()> {
@@ -325,13 +342,14 @@ impl ProjectStore {
         {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
+        let before_tc = query_total_changes(&self.connection)?;
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !notes.is_empty() || !http_notes.is_empty() || !highlights.is_empty() {
             let schema: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
             ensure!(schema == SCHEMA, "项目注解版本已改变；未保存");
-            schema_guard::validate(&tx, schema)?;
+            schema_guard::validate(&tx)?;
             ensure!(
                 metadata::project_id(&tx)? == self.id,
                 "项目注解 ID 已改变；未保存"
@@ -384,6 +402,8 @@ impl ProjectStore {
         tx.commit()?;
         if let Some(workspace) = workspace {
             self.update_workspace_cache(workspace);
+        } else if !records.is_empty() || !websocket_records.is_empty() {
+            self.advance_workspace_cache_changes(before_tc)?;
         }
         Ok((receipts, http_receipts, highlight_receipts))
     }
@@ -478,7 +498,6 @@ fn write_workspace_with_mode(
             );
         }
     }
-    validate_metadata_value_update_deps(transaction, &CancellationToken::new())?;
     transaction.execute(
         "UPDATE main.metadata SET value=?1 WHERE key='workspace'",
         [serde_json::to_vec(workspace)?],

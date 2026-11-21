@@ -109,12 +109,6 @@ impl ProjectStore {
         check_cancel(cancel)?;
         write_record(&transaction, pending)?;
         if ordinal < count {
-            schema_guard::validate_update_dependencies(
-                &transaction,
-                "repeater_history",
-                &["ordinal"],
-                cancel,
-            )?;
             // Move the affected suffix above its old range, then settle at old ordinal + 1.
             let shift = count.checked_add(1).context("Repeater 历史顺序溢出")?;
             i64::try_from(count.checked_add(shift).context("Repeater 历史顺序溢出")?)?;

@@ -3,11 +3,10 @@ use std::io::{Read, Write};
 use anyhow::{Context, Result, bail, ensure};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use tokio_util::sync::CancellationToken;
 
-use crate::{FlowId, FlowProvenance, Uuid};
+use crate::{FlowId, FlowProvenance};
 
-use super::{ProjectStore, schema_guard};
+use super::ProjectStore;
 
 pub(in crate::store) const PREFIX: &str = "flow_provenance:";
 const ZLIB_HEADER: &[u8; 2] = b"Z\x01";
@@ -93,12 +92,6 @@ pub(in crate::store) fn write_flow_provenance(
 ) -> Result<()> {
     ensure!(!flow_id.is_nil(), "修改溯源链 Flow ID 不能为空");
     let key = provenance_key(flow_id);
-    schema_guard::validate_update_dependencies(
-        transaction,
-        "metadata",
-        &["value"],
-        &CancellationToken::new(),
-    )?;
     if provenance.request_steps.len() < 2 && provenance.response_steps.len() < 2 {
         transaction.execute(
             "DELETE FROM main.metadata WHERE key=?1 COLLATE BINARY",
@@ -125,34 +118,6 @@ pub(in crate::store) fn remove_flow_provenance(
     let mut stmt = transaction.prepare("DELETE FROM main.metadata WHERE key=?1 COLLATE BINARY")?;
     for &id in flow_ids {
         stmt.execute([provenance_key(id)])?;
-    }
-    Ok(())
-}
-
-pub(in crate::store) fn validate_all(transaction: &Transaction<'_>) -> Result<()> {
-    let mut stmt = transaction.prepare(
-        "SELECT key, typeof(value),
-                CASE WHEN typeof(value)='blob' AND length(value)<=?1 THEN value END
-         FROM main.metadata WHERE key GLOB 'flow_provenance:*'",
-    )?;
-    let mut rows = stmt.query([MAX_COMPRESSED_BYTES as i64])?;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let suffix = key.strip_prefix(PREFIX).context("修改溯源链键前缀无效")?;
-        let id = Uuid::parse_str(suffix).context("修改溯源链 UUID 无效")?;
-        ensure!(
-            !id.is_nil() && key == provenance_key(id),
-            "修改溯源链键必须使用规范非空 UUID"
-        );
-        ensure!(
-            row.get::<_, String>(1)? == "blob",
-            "修改溯源链存储必须为 BLOB"
-        );
-        let bytes = row
-            .get_ref(2)?
-            .as_blob()
-            .context("修改溯源链数据超过 16 MiB 限额")?;
-        decode_provenance(bytes)?;
     }
     Ok(())
 }

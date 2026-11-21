@@ -195,18 +195,20 @@ async fn cancelled_foreign_and_invalid_view_queries_do_not_read_the_store() {
 async fn project_and_session_queries_return_payloads_without_reading_message_bodies() {
     for retention in [IntruderRetention::Project, IntruderRetention::Session] {
         let (mut state, mut events, id, records) = fixture(retention);
-        state
-            .store
-            .test_intruder_connection(id)
-            .unwrap()
-            .authorizer(Some(|context: AuthContext<'_>| match context.action {
-                AuthAction::Read {
-                    table_name: "messages",
-                    column_name: "body",
-                    ..
-                } => Authorization::Deny,
-                _ => Authorization::Allow,
-            }));
+        if retention == IntruderRetention::Project {
+            state
+                .store
+                .test_intruder_connection(id)
+                .unwrap()
+                .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                    AuthAction::Read {
+                        table_name: "messages",
+                        column_name: "body",
+                        ..
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }));
+        }
         let mut view = query(state.project, id, 1);
         view.limit = 1;
         view.sort = IntruderResultSort {
@@ -217,11 +219,13 @@ async fn project_and_session_queries_return_payloads_without_reading_message_bod
         let page = request(&mut state, &mut events, view, CancellationToken::new())
             .await
             .unwrap();
-        state
-            .store
-            .test_intruder_connection(id)
-            .unwrap()
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        if retention == IntruderRetention::Project {
+            state
+                .store
+                .test_intruder_connection(id)
+                .unwrap()
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        }
         assert_eq!(page.run.id, id);
         assert_eq!(page.run.retention, retention);
         assert_eq!(page.persisted, retention == IntruderRetention::Project);

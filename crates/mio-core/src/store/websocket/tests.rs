@@ -3,20 +3,19 @@ mod migrations;
 mod search;
 mod search_corruption;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use rusqlite::{
     Connection, OpenFlags,
     hooks::{AuthAction, AuthContext, Authorization},
-    params,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::super::{APPLICATION_ID, SCHEMA, intruder, tests::record as flow_record};
+use super::super::{SCHEMA, tests::record as flow_record};
 use super::query::{byte_character_view, history_sql, search_page};
 use super::records::MAX_EXCLUDED_IDS;
 use super::*;
-use crate::{FlowState, Workspace, http::MAX_BODY};
+use crate::{FlowState, http::MAX_BODY};
 
 pub(super) fn query(store: &ProjectStore, filter: WebSocketHistoryFilter) -> WebSocketHistoryQuery {
     WebSocketHistoryQuery {
@@ -43,39 +42,6 @@ pub(super) fn message(flow_id: FlowId, sequence: u64) -> WebSocketMessage {
         kind: WebSocketKind::Binary,
         payload: vec![0, 255],
         observed_unix_ms: 50,
-    }
-}
-
-pub(super) fn legacy_store(path: &Path) -> ProjectStore {
-    let connection = Connection::open(path).unwrap();
-    connection.execute_batch(&format!(
-        "PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1; PRAGMA foreign_keys=ON;
-        CREATE TABLE metadata (key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
-        CREATE TABLE flows (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, started INTEGER NOT NULL,
-            url TEXT NOT NULL, method TEXT NOT NULL, state TEXT NOT NULL, summary BLOB NOT NULL);
-        CREATE INDEX flows_started ON flows(started DESC,id);
-        CREATE INDEX flows_state ON flows(state);
-        CREATE TABLE messages (flow TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
-            side INTEGER NOT NULL, head BLOB NOT NULL, body BLOB NOT NULL,
-            PRIMARY KEY(flow,side)) WITHOUT ROWID;"
-    )).unwrap();
-    let id = Uuid::new_v4();
-    connection
-        .execute("INSERT INTO metadata VALUES('id',?1)", [id.to_string()])
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO metadata VALUES('workspace',?1)",
-            [serde_json::to_vec(&Workspace::default()).unwrap()],
-        )
-        .unwrap();
-    ProjectStore {
-        connection,
-        id,
-        path: Some(path.to_owned()),
-        temporary: None,
-        intruder_sessions: intruder::IntruderSessions::default(),
-        cached_workspace: std::sync::Mutex::new(None),
     }
 }
 

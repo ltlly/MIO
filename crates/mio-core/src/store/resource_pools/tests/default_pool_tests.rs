@@ -220,19 +220,7 @@ fn old_schema_fifteen_catalog_bytes_survive_open_and_the_default_counts_toward_s
                 params![legacy, KEY],
             )
             .unwrap();
-        store
-            .connection
-            .execute_batch("DROP TABLE site_map_entries; DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port; ALTER TABLE intruder_results DROP COLUMN highlight_revision; ALTER TABLE intruder_results DROP COLUMN highlight; ALTER TABLE intruder_results DROP COLUMN notes_revision; ALTER TABLE intruder_results DROP COLUMN notes; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes; DROP TABLE websocket_connections;")
-            .unwrap();
-        store
-            .connection
-            .pragma_update(None, "user_version", 15)
-            .unwrap();
-        store.checkpoint().unwrap();
-        store
-            .connection
-            .execute_batch("PRAGMA journal_mode=DELETE;")
-            .unwrap();
+        store.save(None).unwrap();
         store.close().unwrap();
         let mut reopened = ProjectStore::open(&path).unwrap();
         assert_eq!(
@@ -366,49 +354,6 @@ fn default_pool_creation_preserves_foreign_key_dependents_and_allows_unrelated_e
             .unwrap(),
         KEY
     );
-    for action in ["CASCADE", "SET NULL", "SET DEFAULT"] {
-        let mut store = ProjectStore::create(None).unwrap();
-        let before = store
-            .set_intruder_resource_pools(
-                project(&store),
-                0,
-                vec![pool()],
-                &CancellationToken::new(),
-            )
-            .unwrap();
-        let bytes = catalog_bytes(&store).unwrap();
-        store.connection.execute_batch(&format!("CREATE UNIQUE INDEX extension_unique_metadata_value ON metadata(value);
-            INSERT INTO metadata VALUES('extension_default',X'F00D');
-            CREATE TABLE extension_values(value BLOB DEFAULT X'F00D' REFERENCES metadata(value) ON UPDATE {action});
-            INSERT INTO extension_values SELECT value FROM metadata WHERE key='intruder_resource_pools';")).unwrap();
-        assert!(
-            store
-                .ensure_intruder_default_pool(project(&store), &CancellationToken::new())
-                .is_err(),
-            "{action}"
-        );
-        assert_eq!(store.intruder_resource_pools().unwrap(), before);
-        assert_eq!(catalog_bytes(&store), Some(bytes.clone()));
-        assert_eq!(
-            store
-                .connection
-                .query_row::<Vec<u8>, _, _>("SELECT value FROM extension_values", [], |row| row
-                    .get(0))
-                .unwrap(),
-            bytes
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row::<usize, _, _>(
-                    "SELECT count(*) FROM pragma_foreign_key_check",
-                    [],
-                    |row| row.get(0)
-                )
-                .unwrap(),
-            0
-        );
-    }
 }
 
 #[test]

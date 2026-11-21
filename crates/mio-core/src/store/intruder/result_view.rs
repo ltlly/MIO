@@ -3,7 +3,7 @@ use crate::intruder::{
     PayloadPosition, payload_positions, payload_request_count, validate_positions,
 };
 
-const PREVIEW_BYTES: usize = 1024;
+pub(in crate::store::intruder) const PREVIEW_BYTES: usize = 1024;
 const PREVIEW_CHARACTERS: usize = 256;
 
 /// A bounded prefix plus exact coordinates into the immutable payload table.
@@ -21,16 +21,16 @@ pub(crate) struct ResultPayloads {
     pub payloads: Vec<PayloadSummary>,
 }
 
-pub(super) struct PayloadOrder {
-    attack_type: AttackType,
-    position_count: usize,
-    lengths: Vec<usize>,
-    ranks: Vec<Vec<u32>>,
-    baseline: Option<u64>,
+pub(in crate::store::intruder) struct PayloadOrder {
+    pub(in crate::store::intruder) attack_type: AttackType,
+    pub(in crate::store::intruder) position_count: usize,
+    pub(in crate::store::intruder) lengths: Vec<usize>,
+    pub(in crate::store::intruder) ranks: Vec<Vec<u32>>,
+    pub(in crate::store::intruder) baseline: Option<u64>,
 }
 
 impl PayloadOrder {
-    pub(super) fn request_index(&self, ordinal: u64) -> Result<Option<usize>> {
+    pub(in crate::store::intruder) fn request_index(&self, ordinal: u64) -> Result<Option<usize>> {
         let count = payload_request_count(self.attack_type, self.position_count, &self.lengths)?;
         let index = match self.baseline {
             Some(baseline) => {
@@ -179,8 +179,13 @@ impl ProjectStore {
             unique.len() == ordinals.len(),
             "Intruder payload 查询结果序号重复"
         );
-        let (connection, _) = self.intruder_connection(id)?;
-        let transaction = connection.unchecked_transaction()?;
+        if let Some(dataset) = self.session_dataset(id)? {
+            return dataset.data.payload_summaries(&dataset.run, ordinals, &|| {
+                ensure!(!cancel.is_cancelled(), "Intruder payload 读取已取消");
+                Ok(())
+            });
+        }
+        let transaction = self.connection.unchecked_transaction()?;
         let run = read_run(&transaction, id)?;
         let output = payload_summaries(&transaction, &run, ordinals, &|| {
             ensure!(!cancel.is_cancelled(), "Intruder payload 读取已取消");
@@ -352,7 +357,7 @@ fn payload_shape(
     Ok((meta, lengths))
 }
 
-fn preview(mut bytes: Vec<u8>, complete: bool) -> Vec<u8> {
+pub(in crate::store::intruder) fn preview(mut bytes: Vec<u8>, complete: bool) -> Vec<u8> {
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => Some(text),
         Err(error) if !complete && error.error_len().is_none() => {

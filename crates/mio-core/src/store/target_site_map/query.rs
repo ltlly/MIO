@@ -109,7 +109,7 @@ impl crate::store::ProjectStore {
         let transaction = self.connection.unchecked_transaction()?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == crate::store::SCHEMA, "Site Map 项目版本已变化");
-        crate::store::schema_guard::validate(&transaction, schema)?;
+        crate::store::schema_guard::validate(&transaction)?;
         ensure!(
             crate::store::metadata::project_id(&transaction)? == self.id,
             "Site Map 项目 ID 已变化"

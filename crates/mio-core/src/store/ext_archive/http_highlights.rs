@@ -39,7 +39,7 @@ fn project_guard(transaction: &Transaction<'_>, project: ProjectKey, expected: U
         schema == crate::store::SCHEMA,
         "外部归档 HTTP 高亮项目版本已改变"
     );
-    crate::store::schema_guard::validate(transaction, schema)?;
+    crate::store::schema_guard::validate(transaction)?;
     ensure!(
         crate::store::metadata::project_id(transaction)? == project.id,
         "外部归档 HTTP 高亮项目 ID 已改变"
@@ -256,12 +256,6 @@ fn write_batch(
                     params![owner.to_string(), revision, change.color],
                 )?;
             } else {
-                crate::store::schema_guard::validate_update_dependencies(
-                    transaction,
-                    "ext_http_highlights",
-                    &["revision", "color"],
-                    cancel,
-                )?;
                 let count = transaction.execute("UPDATE main.ext_http_highlights SET revision=?1,color=?2 WHERE item=?3 AND revision=?4",params![revision,change.color,owner.to_string(),stored.revision])?;
                 ensure!(count == 1, "外部归档 HTTP 高亮归属或 revision 已改变；未修改");
             }

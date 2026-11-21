@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, ensure};
 use mio_plugin_api::protocol::{MAX_STORAGE_KEY_BYTES, MAX_STORAGE_VALUE_BYTES};
 use rusqlite::{Connection, Transaction, params};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer as _, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::{FlowId, TrafficSource, Uuid, store::schema_guard};
+use crate::{FlowId, TrafficSource, Uuid};
 
 mod ops;
 
@@ -18,7 +18,7 @@ const MAX_LIVE_NOTE_BYTES: usize = 64 * 1024;
 const MAX_ENTRIES: usize = 256;
 const MAX_NAMESPACES: usize = 64;
 
-pub(super) use ops::{audit_pinned_flows, read_audit_state, validate_all};
+pub(super) use ops::{audit_pinned_flows, read_audit_state};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +136,29 @@ fn namespace_count(transaction: &Transaction<'_>) -> Result<usize> {
     Ok(usize::try_from(count)?)
 }
 
+struct LiveAnnotationsVisitor;
+
+impl<'de> serde::de::Visitor<'de> for LiveAnnotationsVisitor {
+    type Value = BTreeMap<Uuid, LiveHttpAnnotation>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("实时 HTTP 注解 JSON 对象")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut map = BTreeMap::new();
+        while let Some((key, value)) = access.next_entry::<Uuid, LiveHttpAnnotation>()? {
+            if map.insert(key, value).is_some() {
+                return Err(serde::de::Error::custom("实时 HTTP 注解包含重复键"));
+            }
+        }
+        Ok(map)
+    }
+}
+
 pub(in crate::store) fn read_live_http_annotations(
     connection: &Connection,
 ) -> Result<BTreeMap<Uuid, LiveHttpAnnotation>> {
@@ -163,12 +186,14 @@ pub(in crate::store) fn read_live_http_annotations(
         .get_ref(2)?
         .as_blob()
         .context("实时 HTTP 注解类型无效或超过 8 MiB 限额")?;
-    let raw: serde_json::Value =
-        serde_json::from_slice(bytes).context("实时 HTTP 注解 JSON 损坏")?;
-    let obj = raw.as_object().context("实时 HTTP 注解不是 JSON 对象")?;
-    let map: BTreeMap<Uuid, LiveHttpAnnotation> =
-        serde_json::from_slice(bytes).context("实时 HTTP 注解结构或字段无效")?;
-    ensure!(map.len() == obj.len(), "实时 HTTP 注解包含重复键");
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let map = deserializer
+        .deserialize_map(LiveAnnotationsVisitor)
+        .and_then(|map| {
+            deserializer.end()?;
+            Ok(map)
+        })
+        .context("实时 HTTP 注解结构或字段无效")?;
     ensure!(rows.next()?.is_none(), "实时 HTTP 注解记录重复");
     for (id, entry) in &map {
         ensure!(!id.is_nil(), "实时 HTTP 注解包含空 Flow ID");
@@ -206,7 +231,6 @@ pub(in crate::store) fn write_live_http_annotations(
         encoded.len() <= MAX_LIVE_ANNOTATIONS_BYTES,
         "实时 HTTP 注解超过 8 MiB 限额"
     );
-    schema_guard::validate_update_dependencies(transaction, "metadata", &["value"], cancel)?;
     ensure!(!cancel.is_cancelled(), "实时 HTTP 注解写入已取消");
     if map.is_empty() {
         transaction.execute(

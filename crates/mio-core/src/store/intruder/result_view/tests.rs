@@ -87,18 +87,30 @@ fn payload_summaries_are_bounded_binary_source_values_and_keep_baseline_identity
         store
             .set_intruder_state(run.id, IntruderRunState::Completed)
             .unwrap();
-        let connection = store.intruder_connection(run.id).unwrap().0;
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "messages",
-                ..
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        if !session {
+            store.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "messages",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }));
+        }
         let summaries = store
             .intruder_payload_summaries(run.id, &[3, 0, 1, 2], &CancellationToken::new())
             .unwrap();
-        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        if session {
+            assert_eq!(
+                store.intruder_sessions.runs[&run.id]
+                    .body_reads
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        } else {
+            store
+                .connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        }
         assert_eq!(
             summaries.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
             [3, 0, 1, 2]

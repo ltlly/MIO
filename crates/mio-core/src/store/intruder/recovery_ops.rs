@@ -151,19 +151,6 @@ pub(in crate::store::intruder) fn request_baseline<T>(
         )
         .context("Intruder 配置元数据类型或长度无效；未追加基准请求")?;
     let _: SpecMeta = retention::strict_json(&metadata)?;
-    super::super::schema_guard::validate_update_dependencies(
-        transaction,
-        "intruder_runs",
-        &[
-            "baseline_ordinal",
-            "total",
-            "revision",
-            "state",
-            "error",
-            "paused",
-        ],
-        cancel,
-    )?;
     let spec = read_spec(transaction, id)?;
     let mut expected = 0;
     let mut completed = 0;
@@ -234,12 +221,6 @@ pub(in crate::store::intruder) fn bind_resource_pool(
         "Intruder 已绑定此资源池；未重复修改"
     );
     let revision = next_revision(expected)?;
-    super::super::schema_guard::validate_update_dependencies(
-        transaction,
-        "intruder_runs",
-        &["pool_id", "pool_revision"],
-        cancel,
-    )?;
     let changed = transaction.execute(
         "UPDATE intruder_runs SET pool_id=?1,pool_revision=?2 WHERE id=?3 AND pool_revision=?4",
         params![pool_id.to_string(), revision, id.to_string(), expected],

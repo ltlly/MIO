@@ -1,24 +1,24 @@
 use super::*;
 
 impl ProjectStore {
-    pub(in crate::store) fn intruder_connection(
+    pub(in crate::store::intruder) fn session_dataset(
         &self,
         id: Uuid,
-    ) -> Result<(&Connection, IntruderRetention)> {
-        if let Some(dataset) = self.intruder_sessions.runs.get(&id) {
-            if dataset.disk_ticket.is_some() {
-                let transaction = self.connection.unchecked_transaction()?;
-                validate_ticket(&transaction, self.id, dataset)?;
-                transaction.commit()?;
-            } else {
-                ensure!(
-                    dataset.owner.id == self.id,
-                    "Intruder Session 项目归属已改变"
-                );
-            }
-            return Ok((&dataset.connection, IntruderRetention::Session));
+    ) -> Result<Option<&SessionDataset>> {
+        let Some(dataset) = self.intruder_sessions.runs.get(&id) else {
+            return Ok(None);
+        };
+        if dataset.disk_ticket.is_some() {
+            let transaction = self.connection.unchecked_transaction()?;
+            validate_ticket(&transaction, self.id, dataset)?;
+            transaction.commit()?;
+        } else {
+            ensure!(
+                dataset.owner.id == self.id,
+                "Intruder Session 项目归属已改变"
+            );
         }
-        Ok((&self.connection, IntruderRetention::Project))
+        Ok(Some(dataset))
     }
 
     pub(in crate::store) fn merge_session_intruder_runs(
@@ -131,7 +131,9 @@ impl ProjectStore {
                 "Intruder Session flow ID 与项目数据冲突"
             );
             ensure!(
-                same_flow(&self.connection, &dataset.connection, flow, messages)?,
+                dataset
+                    .data
+                    .matches_disk_flow(&self.connection, flow, messages)?,
                 "Intruder 共享 flow revision 或消息已改变；未返回不一致的数据"
             );
         }
@@ -145,14 +147,14 @@ impl ProjectStore {
         let transaction = self.connection.unchecked_transaction()?;
         let mut found: Option<&SessionDataset> = None;
         for dataset in self.intruder_sessions.runs.values() {
-            if !has_flow(&dataset.connection, id)? {
+            if !dataset.data.has_flow(id) {
                 continue;
             }
             validate_ticket(&transaction, self.id, dataset)?;
             self.validate_session_disk_flow(dataset, id, true)?;
             if let Some(previous) = found {
                 ensure!(
-                    same_flow(&previous.connection, &dataset.connection, id, true)?,
+                    previous.data.matches_other_flow(&dataset.data, id),
                     "Intruder Session 的共享 flow 消息不一致"
                 );
             }
@@ -168,7 +170,14 @@ impl ProjectStore {
     ) -> Result<Option<FlowRecord>> {
         self.session_with_flow(id)?
             .map(|dataset| {
-                store::read_record(&dataset.connection, id)?.context("Intruder Session 流量缺失")
+                #[cfg(test)]
+                dataset
+                    .body_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                dataset
+                    .data
+                    .read_flow_record(id)?
+                    .context("Intruder Session 流量缺失")
             })
             .transpose()
     }
@@ -178,7 +187,13 @@ impl ProjectStore {
         id: FlowId,
     ) -> Result<Option<OriginalMessages>> {
         self.session_with_flow(id)?
-            .map(|dataset| store::read_original(&dataset.connection, id))
+            .map(|dataset| {
+                #[cfg(test)]
+                dataset
+                    .body_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                dataset.data.read_original(id)
+            })
             .transpose()
     }
 
@@ -186,10 +201,24 @@ impl ProjectStore {
         validate_workspace_links(&self.connection, &self.intruder_sessions, workspace)
     }
 
+    #[cfg(test)]
+    pub(in crate::store) fn test_read_session_flow_raw(
+        &self,
+        run_id: Uuid,
+        id: FlowId,
+    ) -> Result<Option<FlowRecord>> {
+        self.intruder_sessions
+            .runs
+            .get(&run_id)
+            .context("Intruder Session 不存在")?
+            .data
+            .read_flow_record(id)
+    }
+
     pub fn reject_session_intruder_flow_write(&self, id: FlowId) -> Result<()> {
         for dataset in self.intruder_sessions.runs.values() {
             ensure!(
-                !has_flow(&dataset.connection, id)?,
+                !dataset.data.has_flow(id),
                 "Intruder Session 流量不能被覆盖或通过普通保存写回项目；请显式转换保留方式"
             );
         }

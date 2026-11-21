@@ -186,75 +186,26 @@ fn paused_save_as_reopen_and_atomic_recovery_preserve_results_without_replay() {
     }
 }
 
-fn schema_six(store: &mut ProjectStore, id: Uuid) {
-    store.connection.execute_batch(
-        "ALTER TABLE intruder_runs DROP COLUMN paused;
-         ALTER TABLE intruder_runs DROP COLUMN title;
-         ALTER TABLE intruder_runs DROP COLUMN title_revision;
-         ALTER TABLE intruder_runs DROP COLUMN baseline_ordinal;
-         ALTER TABLE intruder_runs DROP COLUMN pool_revision;
-         ALTER TABLE intruder_runs DROP COLUMN pool_id;
-         ALTER TABLE intruder_runs ADD COLUMN extension BLOB;
-         CREATE INDEX intruder_extension ON intruder_runs(extension,id);
-         CREATE TABLE retained_notes(run TEXT PRIMARY KEY REFERENCES intruder_runs(id),data BLOB NOT NULL);
-         DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port;
-         ALTER TABLE intruder_results DROP COLUMN highlight_revision;
-         ALTER TABLE intruder_results DROP COLUMN highlight;
-         ALTER TABLE intruder_results DROP COLUMN notes_revision;
-         ALTER TABLE intruder_results DROP COLUMN notes;
-         DROP TABLE site_map_entries; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes; DROP TABLE websocket_connections; PRAGMA user_version=6;"
-    ).unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE intruder_runs SET extension=?1 WHERE id=?2",
-            params![[0u8, 255, 10].as_slice(), id.to_string()],
-        )
-        .unwrap();
-    store
-        .connection
-        .execute(
-            "INSERT INTO retained_notes VALUES(?1,?2)",
-            params![id.to_string(), [255u8, 0, 7].as_slice()],
-        )
-        .unwrap();
-}
-
-fn assert_extensions(store: &ProjectStore, id: Uuid) {
-    let values: (Vec<u8>, Vec<u8>) = store
-        .connection
-        .query_row(
-            "SELECT extension,data FROM intruder_runs JOIN retained_notes ON run=id WHERE id=?1",
-            [id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(values, (vec![0, 255, 10], vec![255, 0, 7]));
-    let index: String = store
-        .connection
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='intruder_extension'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        index,
-        "CREATE INDEX intruder_extension ON intruder_runs(extension,id)"
-    );
-    let violation = store
-        .connection
-        .prepare("PRAGMA foreign_key_check")
-        .unwrap()
-        .exists([])
-        .unwrap();
-    assert!(!violation);
-}
-
 #[test]
-fn schema_six_upgrade_preserves_unknown_columns_indices_foreign_keys_payloads_and_bodies() {
+fn legacy_schema_six_is_rejected_readonly_and_schema_one_pause_state_persists() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy-six.mio");
+    let legacy_path = directory.path().join("legacy-six.mio");
+    let mut store = ProjectStore::create(Some(&legacy_path)).unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 6)
+        .unwrap();
+    store.checkpoint().unwrap();
+    store
+        .connection
+        .execute_batch("PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    store.close().unwrap();
+    let before = std::fs::read(&legacy_path).unwrap();
+    assert!(ProjectStore::open(&legacy_path).is_err());
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), before);
+
+    let path = directory.path().join("schema-one-pause.mio");
     let mut store = ProjectStore::create(Some(&path)).unwrap();
     let run = run(&mut store, 3);
     let request = pending();
@@ -263,18 +214,9 @@ fn schema_six_upgrade_preserves_unknown_columns_indices_foreign_keys_payloads_an
     let prior = store.put_intruder_result(run.id, 1, Ok(&observed)).unwrap();
     let input = store.read_intruder_spec(run.id).unwrap();
     let workspace = store.workspace().unwrap();
-    schema_six(&mut store, run.id);
-    store.checkpoint().unwrap();
+    store.save(None).unwrap();
     store.close().unwrap();
-    let legacy =
-        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(
-        legacy
-            .pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
-            .unwrap(),
-        6
-    );
-    legacy.close().unwrap();
+
     let mut restored = ProjectStore::open(&path).unwrap();
     assert_eq!(
         restored
@@ -289,60 +231,16 @@ fn schema_six_upgrade_preserves_unknown_columns_indices_foreign_keys_payloads_an
     assert_eq!(restored.read(request.summary.id).unwrap(), request);
     assert_eq!(restored.read(observed.summary.id).unwrap(), observed);
     assert_eq!(stored_phase(&restored, run.id), (0, 0));
-    assert_extensions(&restored, run.id);
     restored
         .set_intruder_state(run.id, IntruderRunState::Paused)
         .unwrap();
     assert_eq!(stored_phase(&restored, run.id), (0, 1));
-    assert_extensions(&restored, run.id);
+    restored.save(None).unwrap();
     restored.close().unwrap();
-}
 
-fn deny_version_write(context: AuthContext<'_>) -> Authorization {
-    match context.action {
-        AuthAction::Pragma {
-            pragma_name: "user_version",
-            pragma_value: Some(_),
-        } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }
-}
-
-#[test]
-fn failed_upgrade_rolls_back_the_added_column_version_and_existing_data() {
-    let mut store = store();
-    let run = run(&mut store, 1);
-    let input = store.read_intruder_spec(run.id).unwrap();
-    schema_six(&mut store, run.id);
-    store.connection.authorizer(Some(deny_version_write));
-    assert!(store.migrate().is_err());
-    store
-        .connection
-        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-    assert_eq!(
-        store
-            .connection
-            .pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
-            .unwrap(),
-        6
-    );
-    let paused_exists: bool = store
-        .connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('intruder_runs') WHERE name='paused')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        !paused_exists,
-        "ALTER TABLE and version promotion must roll back together"
-    );
-    assert_extensions(&store, run.id);
-    store.migrate().unwrap();
-    assert_eq!(store.read_intruder_run(run.id).unwrap(), run);
-    assert_eq!(store.read_intruder_spec(run.id).unwrap(), input);
-    assert_extensions(&store, run.id);
+    let reopened = ProjectStore::open(&path).unwrap();
+    assert_eq!(stored_phase(&reopened, run.id), (0, 1));
+    reopened.close().unwrap();
 }
 
 #[test]

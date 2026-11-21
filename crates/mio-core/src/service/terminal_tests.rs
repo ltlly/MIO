@@ -87,7 +87,7 @@ async fn full_ui_queue_cannot_interrupt_durable_proxy_stop_drain() {
     assert!(
         matches!(notifications[3], Event::ProxyState { project, address: None, .. } if project == state.project)
     );
-    assert!(state.proxy_notifications.lock().unwrap().is_empty());
+    assert!(state.proxy_notifications.is_empty());
     assert!(received.try_recv().is_err());
 }
 
@@ -261,7 +261,7 @@ async fn proxy_stop_outbox_preserves_each_storage_error_and_blocks_new_command_a
         notifications[3],
         Event::ProxyState { address: None, .. }
     ));
-    assert!(state.proxy_notifications.lock().unwrap().is_empty());
+    assert!(state.proxy_notifications.is_empty());
 }
 
 #[tokio::test]

@@ -151,7 +151,7 @@ impl ProjectStore {
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        crate::store::schema_guard::validate(&tx, crate::store::SCHEMA)?;
+        crate::store::schema_guard::validate(&tx)?;
         let workspace = crate::store::metadata::workspace(&tx)?;
         let pinned_flows: std::collections::HashSet<FlowId> = workspace
             .tabs
@@ -232,7 +232,7 @@ impl ProjectStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        crate::store::schema_guard::validate(&tx, crate::store::SCHEMA)?;
+        crate::store::schema_guard::validate(&tx)?;
         let workspace = crate::store::metadata::workspace(&tx)?;
         let pinned_flows: std::collections::HashSet<FlowId> = workspace
             .tabs

@@ -158,11 +158,19 @@ impl ProjectStore {
         limit: usize,
     ) -> Result<IntruderResultPage> {
         ensure!((1..=500).contains(&limit), "Intruder 分页大小必须为 1–500");
-        let (connection, retention) = self.intruder_connection(id)?;
-        let persisted = retention == IntruderRetention::Project;
-        let transaction = connection.unchecked_transaction()?;
-        let mut run = read_run(&transaction, id)?;
-        run.retention = retention;
+        if let Some(dataset) = self.session_dataset(id)? {
+            let (rows, next_after) = dataset.data.results_page(after, limit)?;
+            self.validate_session_intruder_summaries(id, &rows)?;
+            return Ok(IntruderResultPage {
+                run: dataset.data.run.clone(),
+                rows,
+                next_after,
+                persisted: false,
+            });
+        }
+        let persisted = true;
+        let transaction = self.connection.unchecked_transaction()?;
+        let run = read_run(&transaction, id)?;
         ensure!(
             after.is_none_or(|value| value < run.total),
             "Intruder 分页游标超出计划"
@@ -207,9 +215,6 @@ impl ProjectStore {
         }
         ensure!(more || expected >= run.dispatched, "Intruder 结果记录缺失");
         let next_after = more.then(|| output.last().expect("nonempty bounded page").ordinal);
-        if !persisted {
-            self.validate_session_intruder_summaries(id, &output)?;
-        }
         transaction.commit()?;
         Ok(IntruderResultPage {
             run,

@@ -34,7 +34,7 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
         }
         assert!(state.proxy.is_none());
         assert_eq!(received.len(), 1);
-        assert_eq!(state.proxy_notifications.lock().unwrap().len(), 3);
+        assert_eq!(state.proxy_notifications.len(), 3);
         {
             let mut waiting = Box::pin(proxy_completion(&mut state.proxy));
             std::future::poll_fn(|cx| {
@@ -43,7 +43,7 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
             })
             .await;
         }
-        assert_eq!(state.proxy_notifications.lock().unwrap().len(), 3);
+        assert_eq!(state.proxy_notifications.len(), 3);
         assert!(matches!(received.try_recv().unwrap(), Event::Stopped));
         let (_, notifications) = tokio::join!(state.flush_proxy_notifications(), async {
             let mut notifications = Vec::new();
@@ -55,7 +55,7 @@ async fn completed_proxy_is_reaped_once_without_overtaking_the_waiting_notificat
         assert!(matches!(notifications[0], Event::InterceptResolved { flow_id: id, .. } if id == flow_id));
         assert!(matches!(notifications[1], Event::HistoryChanged { .. }));
         assert!(matches!(notifications[2], Event::ProxyState { address: None, cancel: None, .. }));
-        assert!(state.proxy_notifications.lock().unwrap().is_empty());
+        assert!(state.proxy_notifications.is_empty());
     })
     .await
     .expect("completed-runner reclamation and FIFO delivery are bounded");
@@ -94,7 +94,7 @@ async fn joined_proxy_failure_keeps_its_root_cause_when_terminal_storage_also_fa
         assert_eq!(received.len(), 1);
         assert_eq!(state.read_flow(record.summary.id).unwrap(), record);
         assert_eq!(state.recovery.len(), 1);
-        let notifications = state.proxy_notifications.lock().unwrap();
+        let notifications = &state.proxy_notifications;
         assert_eq!(notifications.len(), 4);
         assert!(matches!(notifications.front(), Some(Event::Error { operation: "capture", .. })));
         assert!(matches!(notifications[2], Event::ProxyState { address: None, cancel: None, .. }));
@@ -207,7 +207,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
             ensure!(initial.summary.state == FlowState::Pending);
             ensure!(initial.request.body == BODY && initial.request.url == target);
             ensure!(received.len() == 1);
-            ensure!(state.proxy_notifications.lock().unwrap().len() == 2);
+            ensure!(state.proxy_notifications.len() == 2);
             ensure!(matches!(received.try_recv()?, Event::Stopped));
             let (_, notices) = tokio::join!(state.error("stop_proxy", &error), async {
                 let mut notices = Vec::new();
@@ -230,7 +230,7 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
                 state.proxy.is_some(),
                 "no stopped ACK before releasing the runner"
             );
-            ensure!(received.is_empty() && state.proxy_notifications.lock().unwrap().is_empty());
+            ensure!(received.is_empty() && state.proxy_notifications.is_empty());
 
             state.events.try_send(Event::Stopped)?;
             release.send(())?;
@@ -276,14 +276,14 @@ async fn stop_deadline_retains_real_proxy_until_event_permit_or_shutdown_reaps_i
             let reopened = ProjectStore::open(&state.store.test_actual_path())?;
             ensure!(reopened.read(initial.summary.id)? == terminal);
             ensure!(state.proxy_events.is_empty());
-            ensure!(state.proxy_notifications.lock().unwrap().len() == 1);
+            ensure!(state.proxy_notifications.len() == 1);
             ensure!(matches!(received.try_recv()?, Event::Stopped));
             state.flush_proxy_notifications().await;
             ensure!(matches!(received.try_recv()?, Event::ProxyState {
                 project, address: None, cancel: None, ..
             } if project == state.project));
             state.finish_proxy_shutdown().await?;
-            ensure!(state.proxy_notifications.lock().unwrap().is_empty());
+            ensure!(state.proxy_notifications.is_empty());
             ensure!(received.is_empty());
             Ok::<_, anyhow::Error>(())
         })

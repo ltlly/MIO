@@ -135,7 +135,7 @@ struct State {
     cancel: CancellationToken,
     proxy_events: mpsc::Receiver<ProxyEvent>,
     proxy_sender: mpsc::Sender<ProxyEvent>,
-    proxy_notifications: Mutex<VecDeque<Event>>,
+    proxy_notifications: VecDeque<Event>,
     proxy: Option<ProxyHandle>,
     primary_proxy_id: Option<Uuid>,
     ca: Option<MitmAuthority>,

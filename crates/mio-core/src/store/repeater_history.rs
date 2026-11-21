@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{ProjectStore, ext_archive, metadata, schema_guard, write_record};
+use super::{ProjectStore, ext_archive, metadata, write_record};
 use crate::{
     ExtMessageSummary, ExtResponseRef, Draft, FlowId, FlowRecord, FlowState, FlowSummary,
     HttpVersion, RepeaterHistory, RepeaterHistoryCursor, RepeaterHistoryEntry,

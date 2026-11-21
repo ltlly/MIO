@@ -3,6 +3,7 @@ pub mod audit_engine;
 mod authority;
 pub mod codec_util;
 pub mod ext_archive;
+pub(crate) mod fs_atomic;
 pub mod har;
 mod http;
 pub mod intruder;

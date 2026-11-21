@@ -19,18 +19,21 @@ pub(super) struct Reservation {
 impl ProjectStore {
     #[cfg(test)]
     pub(crate) fn reject_session_intruder_writes(&self, id: Uuid, reject: bool) {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        let connection = &self.intruder_sessions.runs[&id].connection;
-        if reject {
-            connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-                AuthAction::Insert { .. }
-                | AuthAction::Update { .. }
-                | AuthAction::Delete { .. } => Authorization::Deny,
-                _ => Authorization::Allow,
-            }));
-        } else {
-            connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        }
+        self.intruder_sessions.runs[&id]
+            .reject_writes
+            .store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_intruder_write_hook(
+        &self,
+        id: Uuid,
+        hook: Option<super::session_data::SessionWriteHook>,
+    ) {
+        *self.intruder_sessions.runs[&id]
+            .write_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
     }
 
     pub fn is_session_intruder_run(&self, id: Uuid) -> bool {
@@ -135,12 +138,9 @@ impl ProjectStore {
             }),
             "Intruder 配置与已保存开放标签不一致；未开始"
         );
-        let connection = session_connection()?;
-        let transaction = connection.unchecked_transaction()?;
         let (pool, catalog) =
             store::resource_pools::resolve_start(&source, spec.resource_pool.as_ref(), cancel)?;
-        let mut run = insert_intruder_run_with_settings(
-            &transaction,
+        let data = SessionData::from_spec(
             id,
             tab_id,
             spec,
@@ -157,21 +157,23 @@ impl ProjectStore {
             .and_then(|bytes| bytes.checked_sub(self.intruder_sessions.reserved_bytes))
             .and_then(|bytes| bytes.checked_sub(STATE_RESERVE))
             .context("Intruder Session 容量不足；未开始")?;
-        let logical_bytes = dataset_logical_bytes(&transaction, id, available, cancel)?;
-        transaction.pragma_update(None, "query_only", true)?;
-        transaction.commit()?;
+        let logical_bytes = data.logical_bytes()?;
+        ensure!(
+            logical_bytes <= available,
+            "Intruder Session 逻辑 RAM 数据配额不足（需要 {logical_bytes}，可用 {available} 字节）；未复制、驱逐或溢写到磁盘"
+        );
         ensure!(
             !cancel.is_cancelled(),
             "Intruder Start 已取消；未创建资源池或运行"
         );
         source.commit()?;
-        run.retention = IntruderRetention::Session;
+        let run = data.run.clone();
         self.intruder_sessions.logical_bytes += logical_bytes;
         self.intruder_sessions.reserved_bytes += STATE_RESERVE;
         self.intruder_sessions.runs.insert(
             id,
             SessionDataset {
-                connection,
+                data,
                 owner: project,
                 run: run.clone(),
                 logical_bytes,
@@ -180,6 +182,12 @@ impl ProjectStore {
                 reservations: BTreeMap::new(),
                 state_reserve: STATE_RESERVE,
                 reactivated_baseline: None,
+                #[cfg(test)]
+                reject_writes: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                write_hook: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                body_reads: std::sync::atomic::AtomicUsize::new(0),
             },
         );
         Ok((run, catalog))
@@ -204,45 +212,33 @@ impl ProjectStore {
             catalog.find(pool_id).is_some(),
             "Intruder 资源池不存在；未绑定"
         );
-        let mut stored = read_run(&dataset.connection, id)?;
-        stored.retention = IntruderRetention::Session;
         ensure!(
-            stored == dataset.run,
+            dataset.data.run == dataset.run,
             "Intruder RAM 摘要已改变；未绑定资源池"
         );
-        let before = mutable_bytes(&dataset.connection, id, None)?;
+        #[cfg(test)]
         ensure!(
-            dataset
-                .connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))?,
-            "Intruder RAM 只读保护已改变"
+            !dataset
+                .reject_writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "Intruder RAM 只读保护已启用"
         );
-        dataset
-            .connection
-            .pragma_update(None, "query_only", false)?;
-        let operation = (|| -> Result<(IntruderRunSummary, u64)> {
-            let transaction = dataset.connection.unchecked_transaction()?;
-            let run = bind_resource_pool(&transaction, id, expected, pool_id, cancel)?;
-            let after = mutable_bytes(&transaction, id, None)?;
-            let growth = after.saturating_sub(before);
-            ensure!(
-                growth
-                    <= self.intruder_sessions.quota.saturating_sub(
-                        self.intruder_sessions.logical_bytes
-                            + self.intruder_sessions.reserved_bytes
-                    ),
-                "Intruder Session 配额不足；资源池绑定未改变"
-            );
-            ensure!(!cancel.is_cancelled(), "Intruder 资源池绑定已取消");
-            transaction.pragma_update(None, "query_only", true)?;
-            transaction.commit()?;
-            Ok((run, growth))
-        })();
-        if operation.is_err() {
-            dataset.connection.pragma_update(None, "query_only", true)?;
-        }
-        let (mut run, growth) = operation?;
+        let before = dataset.data.mutable_bytes(None)?;
+        let mut staged = dataset.data.clone();
+        let mut run = staged.bind_resource_pool(expected, pool_id, cancel)?;
+        let after = staged.mutable_bytes(None)?;
+        let growth = after.saturating_sub(before);
+        ensure!(
+            growth
+                <= self.intruder_sessions.quota.saturating_sub(
+                    self.intruder_sessions.logical_bytes
+                        + self.intruder_sessions.reserved_bytes
+                ),
+            "Intruder Session 配额不足；资源池绑定未改变"
+        );
+        ensure!(!cancel.is_cancelled(), "Intruder 资源池绑定已取消");
         run.retention = IntruderRetention::Session;
+        dataset.data = staged;
         dataset.run = run.clone();
         dataset.logical_bytes += growth;
         self.intruder_sessions.logical_bytes += growth;
@@ -265,10 +261,8 @@ impl ProjectStore {
         let ticket = self.connection.unchecked_transaction()?;
         validate_ticket(&ticket, self.id, dataset)?;
         validate_pool_binding(&ticket, &dataset.run)?;
-        let mut stored = read_run(&dataset.connection, id)?;
-        stored.retention = IntruderRetention::Session;
         ensure!(
-            stored == dataset.run,
+            dataset.data.run == dataset.run,
             "Intruder RAM 摘要已改变；未追加基准请求"
         );
         let state_reserve = if dataset.run.state == IntruderRunState::Completed {
@@ -276,43 +270,32 @@ impl ProjectStore {
         } else {
             0
         };
-        let before = mutable_bytes(&dataset.connection, id, None)?;
+        #[cfg(test)]
         ensure!(
-            dataset
-                .connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))?,
-            "Intruder RAM 只读保护已改变"
+            !dataset
+                .reject_writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "Intruder RAM 只读保护已启用"
         );
-        dataset
-            .connection
-            .pragma_update(None, "query_only", false)?;
-        let operation = (|| -> Result<(IntruderRunSummary, u64, T)> {
-            let transaction = dataset.connection.unchecked_transaction()?;
-            let (run, prepared) =
-                request_baseline(&transaction, id, expected_revision, cancel, prepare)?;
-            let after = mutable_bytes(&transaction, id, None)?;
-            let growth = after
-                .checked_sub(before)
-                .context("Intruder 基准请求字节计量回退")?;
-            let available = self.intruder_sessions.quota.saturating_sub(
-                self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
-            );
-            ensure!(
-                growth
-                    .checked_add(state_reserve)
-                    .is_some_and(|needed| needed <= available),
-                "Intruder Session 状态余量不足；未追加基准请求"
-            );
-            ensure!(!cancel.is_cancelled(), "Intruder 基准请求已取消；未追加");
-            transaction.pragma_update(None, "query_only", true)?;
-            transaction.commit()?;
-            Ok((run, growth, prepared))
-        })();
-        if operation.is_err() {
-            dataset.connection.pragma_update(None, "query_only", true)?;
-        }
-        let (mut run, growth, prepared) = operation?;
+        let before = dataset.data.mutable_bytes(None)?;
+        let mut staged = dataset.data.clone();
+        let (mut run, prepared) = staged.request_baseline(expected_revision, cancel, prepare)?;
+        let after = staged.mutable_bytes(None)?;
+        let growth = after
+            .checked_sub(before)
+            .context("Intruder 基准请求字节计量回退")?;
+        let available = self.intruder_sessions.quota.saturating_sub(
+            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        );
+        ensure!(
+            growth
+                .checked_add(state_reserve)
+                .is_some_and(|needed| needed <= available),
+            "Intruder Session 状态余量不足；未追加基准请求"
+        );
+        ensure!(!cancel.is_cancelled(), "Intruder 基准请求已取消；未追加");
         run.retention = IntruderRetention::Session;
+        dataset.data = staged;
         if dataset.disk_ticket.is_some() {
             dataset.reactivated_baseline = run.baseline.map(|baseline| baseline.ordinal);
         }
@@ -321,47 +304,7 @@ impl ProjectStore {
         dataset.state_reserve += state_reserve;
         self.intruder_sessions.logical_bytes += growth;
         self.intruder_sessions.reserved_bytes += state_reserve;
-        // The read transaction only pins the existing ticket; no fallible work follows RAM commit.
         drop(ticket);
         Ok((run, prepared))
     }
-}
-
-pub(super) fn mutable_bytes(
-    connection: &Connection,
-    id: Uuid,
-    ordinal: Option<u64>,
-) -> Result<u64> {
-    let run: u64 = connection.query_row(
-        "SELECT length(CAST(title AS BLOB))+COALESCE(length(CAST(error AS BLOB)),0)+COALESCE(length(CAST(pool_id AS BLOB)),0)+CASE WHEN baseline_ordinal IS NULL THEN 0 ELSE 8 END
-         + COALESCE((SELECT sum(CASE typeof(notes) WHEN 'null' THEN 0 ELSE length(CAST(notes AS BLOB)) END + 8 + CASE typeof(highlight) WHEN 'null' THEN 0 ELSE 8 END + 8) FROM intruder_results WHERE run=?1), 0)
-         FROM intruder_runs WHERE id=?1", [id.to_string()], |row| row.get(0))?;
-    let Some(ordinal) = ordinal else {
-        return Ok(run);
-    };
-    let mut bytes = run;
-    for (table, columns, selector) in [
-        (
-            "intruder_results",
-            "run,ordinal,flow,error",
-            "run=?1 AND ordinal=?2",
-        ),
-        (
-            "flows",
-            "id,revision,started,url,method,state,summary",
-            "id=(SELECT flow FROM intruder_results WHERE run=?1 AND ordinal=?2)",
-        ),
-        (
-            "messages",
-            "flow,side,head,body",
-            "flow=(SELECT flow FROM intruder_results WHERE run=?1 AND ordinal=?2)",
-        ),
-    ] {
-        let sizes = columns.split(',').map(|column| format!("CASE typeof({column}) WHEN 'null' THEN 0 WHEN 'integer' THEN 8 WHEN 'real' THEN 8 ELSE length(CAST({column} AS BLOB)) END")).collect::<Vec<_>>().join("+");
-        let size: u64 = connection.query_row(&format!("SELECT COALESCE(sum({sizes}+{ROW_ACCOUNTING_BYTES}),0) FROM {table} WHERE {selector}"), params![id.to_string(), ordinal], |row| row.get(0))?;
-        bytes = bytes
-            .checked_add(size)
-            .context("Intruder RAM 字节计量溢出")?;
-    }
-    Ok(bytes)
 }

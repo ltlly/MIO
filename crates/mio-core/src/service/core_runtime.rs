@@ -139,7 +139,7 @@ pub(super) async fn proxy_completion(
 pub(super) async fn extra_proxy_completion(
     proxies: &mut [(Uuid, ProxyHandle)],
 ) -> Result<(), mio_proxy::ProxyError> {
-    let mut futures: Vec<_> = proxies
+    let futures: Vec<_> = proxies
         .iter_mut()
         .filter(|(_, proxy)| !proxy.is_joined())
         .map(|(_, proxy)| Box::pin(proxy.join()))
@@ -147,15 +147,7 @@ pub(super) async fn extra_proxy_completion(
     if futures.is_empty() {
         return std::future::pending().await;
     }
-    std::future::poll_fn(|cx| {
-        for fut in &mut futures {
-            if let std::task::Poll::Ready(res) = fut.as_mut().poll(cx) {
-                return std::task::Poll::Ready(res);
-            }
-        }
-        std::task::Poll::Pending
-    })
-    .await
+    futures_util::future::select_all(futures).await.0
 }
 
 pub(super) fn annotated_flows_tracker(
@@ -251,7 +243,7 @@ impl State {
             cancel,
             proxy_sender,
             proxy_events,
-            proxy_notifications: Mutex::new(VecDeque::new()),
+            proxy_notifications: VecDeque::new(),
             proxy: None,
             primary_proxy_id: None,
             ca: None,
@@ -346,38 +338,23 @@ impl State {
         }
     }
 
-    pub(super) fn queue_proxy_notification(&self, event: Event) {
-        let mut pending = self
-            .proxy_notifications
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if Self::coalesce_history_notification(&pending, &event) {
+    pub(super) fn queue_proxy_notification(&mut self, event: Event) {
+        if Self::coalesce_history_notification(&self.proxy_notifications, &event) {
             return;
         }
-        assert!(
-            pending.len() < MAX_PROXY_NOTIFICATIONS,
-            "Proxy notifications exceeded their admitted producer budget"
-        );
-        pending.push_back(event);
+        while self.proxy_notifications.len() >= MAX_PROXY_NOTIFICATIONS {
+            self.proxy_notifications.pop_front();
+        }
+        self.proxy_notifications.push_back(event);
     }
 
     pub(super) async fn flush_proxy_notifications(&mut self) {
-        loop {
-            if self
-                .proxy_notifications
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-            {
-                return;
-            }
+        while !self.proxy_notifications.is_empty() {
             let Some(permit) = self.event_permit().await else {
                 return;
             };
             let event = self
                 .proxy_notifications
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
                 .expect("only the service task consumes Proxy notifications");
             permit.send(event);

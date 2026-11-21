@@ -10,7 +10,7 @@ fn retention_result_write_cannot_reuse_a_session_flow_in_another_run() {
         .create_intruder_run(Uuid::new_v4(), run.tab_id, &spec, 2)
         .unwrap();
     let before = raw_dataset(&store.connection, pending.id);
-    let memory = raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id);
+    let memory = store.intruder_sessions.runs[&run.id].data.clone();
     let quota = store.intruder_sessions.logical_bytes;
 
     let result = store.put_intruder_result(pending.id, 0, Ok(&flow));
@@ -20,10 +20,7 @@ fn retention_result_write_cannot_reuse_a_session_flow_in_another_run() {
         "another run must not write a Session-owned flow back to disk"
     );
     assert_eq!(raw_dataset(&store.connection, pending.id), before);
-    assert_eq!(
-        raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-        memory
-    );
+    assert_eq!(store.intruder_sessions.runs[&run.id].data, memory);
     assert_eq!(store.intruder_sessions.logical_bytes, quota);
     assert_eq!(store.read_intruder_run(pending.id).unwrap(), pending);
     assert_eq!(store.read_intruder_run(run.id).unwrap(), session.run);
@@ -46,7 +43,7 @@ fn retention_recovery_write_cannot_publish_a_session_flow_in_save_or_save_as() {
             .unwrap();
         let before = raw_dataset(&store.connection, pending.id);
         let workspace = workspace_bytes(&store);
-        let memory = raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id);
+        let memory = store.intruder_sessions.runs[&run.id].data.clone();
         let quota = store.intruder_sessions.logical_bytes;
         let mut completed = pending.clone();
         completed.revision += 1;
@@ -75,10 +72,7 @@ fn retention_recovery_write_cannot_publish_a_session_flow_in_save_or_save_as() {
         assert!(!destination.exists());
         assert_eq!(raw_dataset(&store.connection, pending.id), before);
         assert_eq!(workspace_bytes(&store), workspace);
-        assert_eq!(
-            raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-            memory
-        );
+        assert_eq!(store.intruder_sessions.runs[&run.id].data, memory);
         assert_eq!(store.intruder_sessions.logical_bytes, quota);
         assert_eq!(store.read_intruder_run(pending.id).unwrap(), pending);
         assert_eq!(store.read_intruder_run(run.id).unwrap(), session.run);
@@ -117,27 +111,14 @@ fn retention_snapshot_adoption_rejects_changed_session_flows() {
             )
             .unwrap();
         } else {
-            let memory = &store.intruder_sessions.runs[&run.id].connection;
-            copy_rows(
-                memory,
-                &copy,
-                "flows",
-                DATA[2].1,
-                "id=?1",
-                flow.summary.id,
-                &CancellationToken::new(),
-            )
-            .unwrap();
-            copy_rows(
-                memory,
-                &copy,
-                "messages",
-                DATA[3].1,
-                "flow=?1 ORDER BY side",
-                flow.summary.id,
-                &CancellationToken::new(),
-            )
-            .unwrap();
+            let record = store.intruder_sessions.runs[&run.id]
+                .data
+                .read_flow_record(flow.summary.id)
+                .unwrap()
+                .unwrap();
+            let tx = copy.transaction().unwrap();
+            store::messages::write_record(&tx, &record).unwrap();
+            tx.commit().unwrap();
         }
         copy.close().unwrap();
         let reopened = ProjectStore::open(&destination).unwrap();
@@ -275,25 +256,7 @@ fn retention_round_trip_preserves_frozen_data_and_all_message_versions() {
     assert_eq!(page.run, receipt.run);
     let memory = &store.intruder_sessions.runs[&first.id];
     assert_eq!(memory.owner, owner);
-    assert_eq!(
-        memory
-            .connection
-            .pragma_query_value::<i32, _>(None, "temp_store", |row| row.get(0))
-            .unwrap(),
-        2
-    );
-    let files: Vec<String> = memory
-        .connection
-        .prepare("PRAGMA database_list")
-        .unwrap()
-        .query_map([], |row| row.get(2))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert!(
-        files.iter().all(String::is_empty),
-        "Session SQLite must have no filesystem backing"
-    );
+    assert_eq!(memory.data.logical_bytes().unwrap(), memory.logical_bytes);
     assert!(receipt.session_logical_bytes > 0);
     assert_eq!(
         receipt.session_logical_bytes,

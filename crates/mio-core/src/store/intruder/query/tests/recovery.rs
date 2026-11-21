@@ -54,7 +54,7 @@ fn result_query_reads_recovery_responses_for_length_without_reading_bodies() {
     let recovery_responses: BTreeMap<u64, &HttpResponse> =
         BTreeMap::from([(1, &recovered_response)]);
 
-    let connection = store.intruder_connection(run.id).unwrap().0;
+    let connection = store.test_intruder_connection(run.id).unwrap();
     let bodies = Arc::new(AtomicUsize::new(0));
     connection.authorizer(Some({
         let bodies = bodies.clone();
@@ -251,45 +251,62 @@ fn result_query_never_filters_away_corrupt_original_summaries_or_missing_ordinal
             store
                 .put_intruder_result(run.id, 1, Err("not sent"))
                 .unwrap();
-            let connection = store.intruder_connection(run.id).unwrap().0;
-            let read_only = connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-                .unwrap();
-            assert_eq!(read_only, session);
-            connection.pragma_update(None, "query_only", false).unwrap();
-            match corruption {
-                "duplicate" => {
-                    let bytes = serde_json::to_string(&record.summary).unwrap();
-                    let bytes =
-                        bytes.replacen("\"status\":404", "\"status\":404,\"status\":200", 1);
-                    connection
-                        .execute(
-                            "UPDATE flows SET summary=?1 WHERE id=?2",
-                            params![bytes.as_bytes(), record.summary.id.to_string()],
-                        )
-                        .unwrap();
+            if session {
+                let dataset = store.intruder_sessions.runs.get_mut(&run.id).unwrap();
+                match corruption {
+                    "duplicate" => {
+                        let bytes = serde_json::to_string(&record.summary).unwrap();
+                        let bytes =
+                            bytes.replacen("\"status\":404", "\"status\":404,\"status\":200", 1);
+                        dataset
+                            .data
+                            .flows
+                            .get_mut(&record.summary.id)
+                            .unwrap()
+                            .summary_json = bytes.into_bytes();
+                    }
+                    "missing" => {
+                        dataset.data.results.remove(&0);
+                    }
+                    "count" => {
+                        dataset.data.run.completed = 0;
+                        dataset.run.completed = 0;
+                    }
+                    _ => unreachable!(),
                 }
-                "missing" => {
-                    connection
-                        .execute(
-                            "DELETE FROM intruder_results WHERE run=?1 AND ordinal=0",
-                            [run.id.to_string()],
-                        )
-                        .unwrap();
+            } else {
+                let connection = store.test_intruder_connection(run.id).unwrap();
+                match corruption {
+                    "duplicate" => {
+                        let bytes = serde_json::to_string(&record.summary).unwrap();
+                        let bytes =
+                            bytes.replacen("\"status\":404", "\"status\":404,\"status\":200", 1);
+                        connection
+                            .execute(
+                                "UPDATE flows SET summary=?1 WHERE id=?2",
+                                params![bytes.as_bytes(), record.summary.id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "missing" => {
+                        connection
+                            .execute(
+                                "DELETE FROM intruder_results WHERE run=?1 AND ordinal=0",
+                                [run.id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "count" => {
+                        connection
+                            .execute(
+                                "UPDATE intruder_runs SET completed=0 WHERE id=?1",
+                                [run.id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
                 }
-                "count" => {
-                    connection
-                        .execute(
-                            "UPDATE intruder_runs SET completed=0 WHERE id=?1",
-                            [run.id.to_string()],
-                        )
-                        .unwrap();
-                }
-                _ => unreachable!(),
             }
-            connection
-                .pragma_update(None, "query_only", read_only)
-                .unwrap();
             let mut query = query(&store, &run);
             query.filter.status_classes = [true, false, false, false];
             assert!(

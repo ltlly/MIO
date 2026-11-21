@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     fs,
+    io::{BufWriter, Write as _},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -8,8 +9,27 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crate::{Header, HttpRequest, HttpResponse, HttpVersion};
 use mio_proxy::{ProxyCredentials, ProxyEndpoint, SendConfig, UpstreamRoute, UpstreamTls};
+use rama::{
+    Service,
+    extensions::ExtensionsRef as _,
+    graceful::Shutdown,
+    http::{
+        Body, Request,
+        body::util::BodyExt,
+        client::{EasyHttpWebClient, proxy::layer::SetProxyAuthHttpHeaderLayer},
+    },
+    net::{
+        Protocol,
+        address::{Host, HostWithPort, ProxyAddress},
+        client::ProxyRoute,
+        user::{Basic, ProxyCredential},
+    },
+    rt::Executor,
+    tls::client::TlsClientConfig,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_RELEASES_API_URL: &str =
@@ -495,17 +515,66 @@ pub(crate) fn parse_scutil_proxy_output(
     None
 }
 
-#[cfg(target_os = "macos")]
-fn resolve_macos_system_proxy(is_https: bool, host: &str) -> Option<UpstreamRoute> {
-    let output = std::process::Command::new("/usr/sbin/scutil")
-        .arg("--proxy")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+struct UpdateRouteContext {
+    fallback: UpstreamRoute,
+    #[cfg(target_os = "macos")]
+    scutil_output: Option<Option<String>>,
+}
+
+impl UpdateRouteContext {
+    fn new(fallback: UpstreamRoute) -> Self {
+        Self {
+            fallback,
+            #[cfg(target_os = "macos")]
+            scutil_output: None,
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_scutil_proxy_output(&text, is_https, host)
+
+    #[cfg(target_os = "macos")]
+    async fn resolve_macos_system_proxy(&mut self, is_https: bool, host: &str) -> Option<UpstreamRoute> {
+        if self.scutil_output.is_none() {
+            let output = tokio::process::Command::new("/usr/sbin/scutil")
+                .arg("--proxy")
+                .output()
+                .await
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+            self.scutil_output = Some(output);
+        }
+        let text = self.scutil_output.as_ref()?.as_deref()?;
+        parse_scutil_proxy_output(text, is_https, host)
+    }
+
+    async fn resolve(&mut self, target_url: &str) -> UpstreamRoute {
+        let Ok(parsed) = url::Url::parse(target_url) else {
+            return self.fallback.clone();
+        };
+        let no_proxy = std::env::var("NO_PROXY")
+            .ok()
+            .or_else(|| std::env::var("no_proxy").ok());
+        if is_loopback_or_no_proxy_with(&parsed, no_proxy.as_deref()) {
+            return UpstreamRoute::Direct;
+        }
+        let is_https = parsed.scheme().eq_ignore_ascii_case("https");
+        let keys: &[&str] = if is_https {
+            &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        } else {
+            &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        };
+        if let Some(route) = env_proxy_var(keys) {
+            return route;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(host) = parsed.host_str()
+            && let Some(route) = self
+                .resolve_macos_system_proxy(is_https, host.trim_matches(['[', ']']))
+                .await
+        {
+            return route;
+        }
+        self.fallback.clone()
+    }
 }
 
 fn env_proxy_var(keys: &[&str]) -> Option<UpstreamRoute> {
@@ -519,40 +588,12 @@ fn env_proxy_var(keys: &[&str]) -> Option<UpstreamRoute> {
     None
 }
 
-fn resolve_update_route(target_url: &str, fallback: &UpstreamRoute) -> UpstreamRoute {
-    let Ok(parsed) = url::Url::parse(target_url) else {
-        return fallback.clone();
-    };
-    let no_proxy = std::env::var("NO_PROXY")
-        .ok()
-        .or_else(|| std::env::var("no_proxy").ok());
-    if is_loopback_or_no_proxy_with(&parsed, no_proxy.as_deref()) {
-        return UpstreamRoute::Direct;
-    }
-    let is_https = parsed.scheme().eq_ignore_ascii_case("https");
-    let keys: &[&str] = if is_https {
-        &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-    } else {
-        &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
-    };
-    if let Some(route) = env_proxy_var(keys) {
-        return route;
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(host) = parsed.host_str()
-        && let Some(route) = resolve_macos_system_proxy(is_https, host.trim_matches(['[', ']']))
-    {
-        return route;
-    }
-    fallback.clone()
-}
-
 async fn http_get_bytes(
     initial_url: &str,
     accept: &str,
     timeout: Duration,
     max_body_bytes: usize,
-    fallback_route: &UpstreamRoute,
+    route_ctx: &mut UpdateRouteContext,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let mut current_url = initial_url.to_owned();
@@ -582,7 +623,7 @@ async fn http_get_bytes(
                 value: host_hdr.into_bytes(),
             });
         }
-        let upstream_route = resolve_update_route(&current_url, fallback_route);
+        let upstream_route = route_ctx.resolve(&current_url).await;
         let req = HttpRequest {
             method: "GET".into(),
             url: current_url.clone(),
@@ -620,6 +661,295 @@ async fn http_get_bytes(
             );
         }
         return Ok(resp.body);
+    }
+    bail!("更新请求重定向次数过多（超过 {MAX_REDIRECTS} 次）")
+}
+
+struct DownloadedAsset {
+    file: NamedTempFile,
+    received_bytes: u64,
+    sha256_hex: String,
+}
+
+fn upstream_to_rama_proxy_route(route: &UpstreamRoute, target_url: &str) -> Result<ProxyRoute> {
+    let target_host = url::Url::parse(target_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    let effective = target_host
+        .as_deref()
+        .map_or_else(|| route.clone(), |h| route.resolve_for_host(h));
+    let (endpoint, protocol, socks) = match effective {
+        UpstreamRoute::Direct => return Ok(ProxyRoute::Direct),
+        UpstreamRoute::Http(ep) => (ep, Protocol::HTTP, false),
+        UpstreamRoute::Https { endpoint, .. } => (endpoint, Protocol::HTTPS, false),
+        UpstreamRoute::Socks5(ep) => (ep, Protocol::SOCKS5H, true),
+        UpstreamRoute::Socks5LocalDns(ep) => (ep, Protocol::SOCKS5, true),
+        UpstreamRoute::Socks5WithBypass {
+            endpoint,
+            local_dns,
+            ..
+        } => (
+            endpoint,
+            if local_dns {
+                Protocol::SOCKS5
+            } else {
+                Protocol::SOCKS5H
+            },
+            true,
+        ),
+    };
+    ensure!(
+        endpoint.port > 0 && endpoint.host.len() <= 253,
+        "上游代理主机或端口无效"
+    );
+    let host: Host = endpoint
+        .host
+        .parse()
+        .map_err(|_| anyhow!("上游代理需要纯主机名或 IP"))?;
+    let credential = endpoint
+        .credentials
+        .as_ref()
+        .map(|creds| {
+            let max = if socks { 255 } else { 4096 };
+            ensure!(
+                !creds.username.is_empty()
+                    && creds.username.len() <= max
+                    && creds.password.len() <= max
+                    && (!socks || !creds.password.is_empty())
+                    && (socks || !creds.username.contains(':'))
+                    && !creds
+                        .username
+                        .bytes()
+                        .chain(creds.password.bytes())
+                        .any(|b| matches!(b, b'\r' | b'\n' | 0)),
+                "上游代理凭据无效"
+            );
+            let username = creds
+                .username
+                .clone()
+                .try_into()
+                .map_err(|_| anyhow!("上游代理用户名无效"))?;
+            let basic = if creds.password.is_empty() {
+                Basic::new_insecure(username)
+            } else {
+                Basic::new(
+                    username,
+                    creds
+                        .password
+                        .clone()
+                        .try_into()
+                        .map_err(|_| anyhow!("上游代理密码无效"))?,
+                )
+            };
+            Ok::<_, anyhow::Error>(ProxyCredential::Basic(basic))
+        })
+        .transpose()?;
+    Ok(ProxyRoute::Proxy(ProxyAddress {
+        protocol: Some(protocol),
+        address: HostWithPort::new(host, endpoint.port),
+        credential,
+    }))
+}
+
+async fn http_download_to_temp_file<F>(
+    initial_url: &str,
+    accept: &str,
+    timeout: Duration,
+    max_body_bytes: usize,
+    hint_total_bytes: Option<u64>,
+    route_ctx: &mut UpdateRouteContext,
+    mut on_progress: F,
+    cancel: &CancellationToken,
+) -> Result<DownloadedAsset>
+where
+    F: FnMut(u64, Option<u64>) + Send,
+{
+    let mut current_url = initial_url.to_owned();
+    let deadline = tokio::time::Instant::now() + timeout;
+    for _hop in 0..=MAX_REDIRECTS {
+        if cancel.is_cancelled() {
+            bail!("更新操作已取消");
+        }
+        let upstream_route = route_ctx.resolve(&current_url).await;
+        let proxy_route = upstream_to_rama_proxy_route(&upstream_route, &current_url)?;
+        let req_cancel = cancel.child_token();
+        let shutdown = Shutdown::new(req_cancel.clone().cancelled_owned());
+        let _cancel_on_drop = req_cancel.clone().drop_guard();
+        let exec = Executor::graceful(shutdown.guard());
+
+        let client = EasyHttpWebClient::connector_builder()
+            .with_default_transport_connector()
+            .with_default_dns_connector()
+            .with_tls_proxy_support_using_rustls()
+            .with_proxy_support()
+            .with_tls_support_using_rustls(TlsClientConfig::default_http())
+            .with_default_http_connector::<Body>(exec)
+            .without_connection_pool()
+            .build_client()
+            .with_jit_layer(SetProxyAuthHttpHeaderLayer::new());
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(current_url.as_str())
+            .header("User-Agent", format!("MIO/{CURRENT_VERSION}"))
+            .header("Accept", accept)
+            .body(Body::empty())
+            .context("构造更新下载请求失败")?;
+        request.extensions().insert(proxy_route);
+
+        let response = {
+            let mut serve = Box::pin(client.serve(request));
+            tokio::select! {
+                biased;
+                _ = req_cancel.cancelled() => Err(anyhow!("更新操作已取消")),
+                _ = tokio::time::sleep_until(deadline) => {
+                    req_cancel.cancel();
+                    Err(anyhow!("请求更新服务器超时"))
+                }
+                res = serve.as_mut() => res.map_err(|err| {
+                    req_cancel.cancel();
+                    anyhow!("请求更新服务器失败：{err}")
+                }),
+            }
+        };
+        drop(client);
+        let response = match response {
+            Ok(resp) => resp,
+            Err(err) => {
+                shutdown.shutdown().await;
+                return Err(err);
+            }
+        };
+
+        let status = response.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let loc = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_owned())
+                .context("更新服务器返回重定向响应，但缺少 Location 响应头")?;
+            drop(response);
+            req_cancel.cancel();
+            shutdown.shutdown().await;
+            let next = url::Url::parse(&current_url)
+                .with_context(|| format!("无效的请求 URL：{current_url}"))?
+                .join(&loc)
+                .with_context(|| format!("无效的重定向地址：{loc}"))?;
+            current_url = next.to_string();
+            continue;
+        }
+
+        if !(200..300).contains(&status) {
+            let mut body = response.into_body();
+            let mut snippet = Vec::with_capacity(200);
+            while snippet.len() < 200 {
+                let Some(Ok(frame)) = body.frame().await else {
+                    break;
+                };
+                if let Ok(data) = frame.into_data() {
+                    let take = (200 - snippet.len()).min(data.len());
+                    snippet.extend_from_slice(&data[..take]);
+                }
+            }
+            drop(body);
+            req_cancel.cancel();
+            shutdown.shutdown().await;
+            let text = String::from_utf8_lossy(&snippet);
+            bail!("更新服务器返回 HTTP {status}：{}", text.trim());
+        }
+
+        let content_length = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        if let Some(len) = content_length
+            && len > max_body_bytes as u64
+        {
+            drop(response);
+            req_cancel.cancel();
+            shutdown.shutdown().await;
+            bail!("安装包超过 {max_body_bytes} 字节上限");
+        }
+        let total_bytes = content_length.or(hint_total_bytes);
+
+        let temp_file = NamedTempFile::new().context("无法创建更新包临时文件")?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<rama::bytes::Bytes>(8);
+        let writer_handle = tokio::task::spawn_blocking(move || -> Result<NamedTempFile> {
+            let mut writer = BufWriter::with_capacity(64 * 1024, temp_file);
+            while let Some(chunk) = rx.blocking_recv() {
+                writer.write_all(&chunk).context("写入更新包临时文件失败")?;
+            }
+            writer.flush().context("刷新更新包临时文件缓冲失败")?;
+            let file = writer
+                .into_inner()
+                .map_err(|err| anyhow!("完成更新包写入失败：{}", err.error()))?;
+            file.as_file()
+                .sync_all()
+                .context("同步更新包临时文件到磁盘失败")?;
+            Ok(file)
+        });
+
+        let mut hasher = Sha256::new();
+        let mut received = 0u64;
+        let mut body = response.into_body();
+        let stream_result: Result<()> = loop {
+            tokio::select! {
+                biased;
+                _ = req_cancel.cancelled() => break Err(anyhow!("更新操作已取消")),
+                _ = tokio::time::sleep_until(deadline) => break Err(anyhow!("下载更新包超时")),
+                frame = body.frame() => match frame {
+                    None => break Ok(()),
+                    Some(Err(err)) => {
+                        break Err(if req_cancel.is_cancelled() {
+                            anyhow!("更新操作已取消")
+                        } else {
+                            anyhow!("读取更新包响应流失败：{err}")
+                        });
+                    }
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data() && !data.is_empty() {
+                            let next = received
+                                .checked_add(data.len() as u64)
+                                .context("更新包大小溢出")?;
+                            if next > max_body_bytes as u64 {
+                                break Err(anyhow!("安装包超过 {max_body_bytes} 字节上限"));
+                            }
+                            hasher.update(&data);
+                            received = next;
+                            if tx.send(data).await.is_err() {
+                                break Err(anyhow!("更新包磁盘写入任务意外退出"));
+                            }
+                            on_progress(received, total_bytes);
+                        }
+                    }
+                }
+            }
+        };
+
+        drop(tx);
+        drop(body);
+        req_cancel.cancel();
+        let writer_res = writer_handle
+            .await
+            .map_err(|e| anyhow!("更新包写入线程异常退出：{e}"))
+            .and_then(|r| r);
+        shutdown.shutdown().await;
+        stream_result?;
+        let file = writer_res?;
+
+        let digest = hasher.finalize();
+        let mut sha256_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(sha256_hex, "{byte:02x}");
+        }
+        return Ok(DownloadedAsset {
+            file,
+            received_bytes: received,
+            sha256_hex,
+        });
     }
     bail!("更新请求重定向次数过多（超过 {MAX_REDIRECTS} 次）")
 }
@@ -703,12 +1033,13 @@ pub async fn check_for_updates_with_route(
             std::env::consts::ARCH
         ));
     }
+    let mut route_ctx = UpdateRouteContext::new(fallback_route);
     let json_bytes = match http_get_bytes(
         api_url,
         "application/vnd.github+json",
         Duration::from_secs(20),
         API_MAX_BYTES,
-        &fallback_route,
+        &mut route_ctx,
         cancel,
     )
     .await
@@ -727,7 +1058,7 @@ pub async fn check_for_updates_with_route(
             "text/plain, */*",
             Duration::from_secs(15),
             API_MAX_BYTES,
-            &fallback_route,
+            &mut route_ctx,
             cancel,
         )
         .await
@@ -744,13 +1075,15 @@ pub async fn verify_archive_checksum(
     archive_bytes: &[u8],
     cancel: &CancellationToken,
 ) -> Result<String> {
-    verify_archive_checksum_with_route(info, archive_bytes, &UpstreamRoute::Direct, cancel).await
+    let mut route_ctx = UpdateRouteContext::new(UpstreamRoute::Direct);
+    let actual = sha256_hex(archive_bytes);
+    verify_digest_with_route(info, &actual, &mut route_ctx, cancel).await
 }
 
-async fn verify_archive_checksum_with_route(
+async fn verify_digest_with_route(
     info: &UpdateInfo,
-    archive_bytes: &[u8],
-    fallback_route: &UpstreamRoute,
+    actual_sha256: &str,
+    route_ctx: &mut UpdateRouteContext,
     cancel: &CancellationToken,
 ) -> Result<String> {
     let expected = if let Some(expected) = info.asset_sha256.clone() {
@@ -761,7 +1094,7 @@ async fn verify_archive_checksum_with_route(
             "text/plain, */*",
             Duration::from_secs(20),
             API_MAX_BYTES,
-            fallback_route,
+            route_ctx,
             cancel,
         )
         .await
@@ -773,12 +1106,11 @@ async fn verify_archive_checksum_with_route(
     } else {
         bail!("Release 缺少 SHA256SUMS.txt 校验文件，已拒绝安装未校验的更新包");
     };
-    let actual = sha256_hex(archive_bytes);
     ensure!(
-        actual.eq_ignore_ascii_case(&expected),
-        "安装包 SHA-256 校验失败：期望 {expected}，实际 {actual}"
+        actual_sha256.eq_ignore_ascii_case(&expected),
+        "安装包 SHA-256 校验失败：期望 {expected}，实际 {actual_sha256}"
     );
-    Ok(actual)
+    Ok(actual_sha256.to_owned())
 }
 
 /// Downloads, verifies SHA-256, extracts, swaps, and schedules relaunch.
@@ -804,36 +1136,47 @@ where
     F: FnMut(UpdateStatus) + Send,
 {
     let version = info.latest_version.clone();
+    let hint_total = (info.asset_size > 0).then_some(info.asset_size);
     on_status(UpdateStatus::Downloading {
         version: version.clone(),
         received_bytes: 0,
-        total_bytes: (info.asset_size > 0).then_some(info.asset_size),
+        total_bytes: hint_total,
     });
 
-    let bytes = match http_get_bytes(
+    let mut route_ctx = UpdateRouteContext::new(fallback_route);
+    let downloaded = match http_download_to_temp_file(
         &info.asset_url,
         "application/octet-stream, */*",
         Duration::from_secs(300),
         ASSET_MAX_BYTES,
-        &fallback_route,
+        hint_total,
+        &mut route_ctx,
+        |received_bytes, total_bytes| {
+            on_status(UpdateStatus::Downloading {
+                version: version.clone(),
+                received_bytes,
+                total_bytes,
+            });
+        },
         cancel,
     )
     .await
     {
-        Ok(b) => b,
+        Ok(asset) => asset,
         Err(err) => return UpdateStatus::Error(err.to_string()),
     };
 
     on_status(UpdateStatus::Downloading {
         version: version.clone(),
-        received_bytes: bytes.len() as u64,
-        total_bytes: Some(bytes.len() as u64),
+        received_bytes: downloaded.received_bytes,
+        total_bytes: Some(downloaded.received_bytes),
     });
     on_status(UpdateStatus::Verifying {
         version: version.clone(),
     });
 
-    if let Err(err) = verify_archive_checksum_with_route(info, &bytes, &fallback_route, cancel).await
+    if let Err(err) =
+        verify_digest_with_route(info, &downloaded.sha256_hex, &mut route_ctx, cancel).await
     {
         return UpdateStatus::Error(err.to_string());
     }
@@ -842,10 +1185,12 @@ where
         version: version.clone(),
     });
 
-    let install_result = tokio::task::spawn_blocking(move || install_archive_and_relaunch(&bytes))
-        .await
-        .map_err(|e| anyhow!("安装更新任务异常中止：{e}"))
-        .and_then(|res| res);
+    let archive = downloaded.file;
+    let install_result =
+        tokio::task::spawn_blocking(move || install_archive_and_relaunch_from_file(archive))
+            .await
+            .map_err(|e| anyhow!("安装更新任务异常中止：{e}"))
+            .and_then(|res| res);
 
     match install_result {
         Ok(relaunched) => UpdateStatus::RestartRequired {
@@ -884,8 +1229,16 @@ fn resolve_macos_app_bundle(exe_path: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn stage_archive_file(archive: NamedTempFile, target: &Path) -> Result<()> {
+    if let Err(err) = archive.persist(target) {
+        fs::copy(err.file.path(), target).context("复制更新包至临时目录失败")?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
-fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
+fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool> {
     let current_exe = std::env::current_exe().context("无法定位当前可执行文件路径")?;
     let staging = tempfile::Builder::new()
         .prefix("mio-update-")
@@ -895,7 +1248,7 @@ fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
     let zip_path = staging.join("update.zip");
     let extract_dir = staging.join("extracted");
     fs::create_dir_all(&extract_dir)?;
-    fs::write(&zip_path, bytes)?;
+    stage_archive_file(archive, &zip_path)?;
 
     let status = std::process::Command::new("/usr/bin/ditto")
         .args(["-x", "-k"])
@@ -960,7 +1313,7 @@ fi
 }
 
 #[cfg(target_os = "linux")]
-fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
+fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let current_exe = std::env::current_exe().context("无法定位当前可执行文件路径")?;
@@ -968,14 +1321,12 @@ fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
         .prefix("mio-update-")
         .tempdir()
         .context("无法创建更新临时目录")?;
-    let archive_path = staging.path().join("update.tar.gz");
     let extract_dir = staging.path().join("extracted");
     fs::create_dir_all(&extract_dir)?;
-    fs::write(&archive_path, bytes)?;
 
     let status = std::process::Command::new("tar")
         .arg("-xzf")
-        .arg(&archive_path)
+        .arg(archive.path())
         .arg("-C")
         .arg(&extract_dir)
         .status()
@@ -1021,7 +1372,7 @@ fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
 }
 
 #[cfg(target_os = "windows")]
-fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
+fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool> {
     let current_exe = std::env::current_exe().context("无法定位当前可执行文件路径")?;
     let staging = tempfile::Builder::new()
         .prefix("mio-update-")
@@ -1031,7 +1382,7 @@ fn install_archive_and_relaunch(bytes: &[u8]) -> Result<bool> {
     let zip_path = staging.join("update.zip");
     let extract_dir = staging.join("extracted");
     fs::create_dir_all(&extract_dir)?;
-    fs::write(&zip_path, bytes)?;
+    stage_archive_file(archive, &zip_path)?;
 
     let status = std::process::Command::new("powershell")
         .args([
@@ -1098,7 +1449,7 @@ try {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn install_archive_and_relaunch(_bytes: &[u8]) -> Result<bool> {
+fn install_archive_and_relaunch_from_file(_archive: NamedTempFile) -> Result<bool> {
     bail!("当前操作系统暂不支持自动安装更新")
 }
 
@@ -1166,6 +1517,7 @@ mod tests {
         .to_string();
         let sums_body = format!("{good_hash}  {asset_name}\n");
 
+        let server_good_payload = good_payload.clone();
         let server = tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
@@ -1173,7 +1525,7 @@ mod tests {
                 };
                 let release_json = release_json.clone();
                 let sums_body = sums_body.clone();
-                let good_payload = good_payload.clone();
+                let good_payload = server_good_payload.clone();
                 let base = base.clone();
                 tokio::spawn(async move {
                     let mut buf = [0u8; 4096];
@@ -1215,36 +1567,66 @@ mod tests {
         assert_eq!(info.asset_name, asset_name);
         assert_eq!(info.asset_sha256.as_deref(), Some(good_hash.as_str()));
 
-        let downloaded = http_get_bytes(
+        let mut route_ctx = UpdateRouteContext::new(UpstreamRoute::Direct);
+        let mut progress_updates = Vec::new();
+        let downloaded = http_download_to_temp_file(
             &info.asset_url,
             "*/*",
             Duration::from_secs(10),
             ASSET_MAX_BYTES,
-            &UpstreamRoute::Direct,
+            Some(info.asset_size),
+            &mut route_ctx,
+            |received, total| progress_updates.push((received, total)),
             &cancel,
         )
         .await
         .unwrap();
-        verify_archive_checksum(&info, &downloaded, &cancel)
+        assert_eq!(downloaded.received_bytes, good_payload.len() as u64);
+        assert_eq!(downloaded.sha256_hex, good_hash);
+        assert_eq!(fs::read(downloaded.file.path()).unwrap(), good_payload);
+        assert!(!progress_updates.is_empty());
+        verify_digest_with_route(&info, &downloaded.sha256_hex, &mut route_ctx, &cancel)
             .await
-            .expect("redirected download must pass SHA-256 verification");
+            .expect("redirected streaming download must pass SHA-256 verification");
 
         let mut tampered_info = info.clone();
         tampered_info.asset_url = format!("http://{addr}/tampered-asset");
-        let tampered_bytes = http_get_bytes(
+        let tampered_downloaded = http_download_to_temp_file(
             &tampered_info.asset_url,
             "*/*",
             Duration::from_secs(10),
             ASSET_MAX_BYTES,
-            &UpstreamRoute::Direct,
+            None,
+            &mut route_ctx,
+            |_, _| {},
             &cancel,
         )
         .await
         .unwrap();
-        let err = verify_archive_checksum(&tampered_info, &tampered_bytes, &cancel)
-            .await
-            .unwrap_err();
+        let err = verify_digest_with_route(
+            &tampered_info,
+            &tampered_downloaded.sha256_hex,
+            &mut route_ctx,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("SHA-256 校验失败"));
+
+        let oversized_err = http_download_to_temp_file(
+            &info.asset_url,
+            "*/*",
+            Duration::from_secs(10),
+            4,
+            None,
+            &mut route_ctx,
+            |_, _| {},
+            &cancel,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(oversized_err.to_string().contains("字节上限"));
 
         server.abort();
     }
@@ -1311,30 +1693,31 @@ mod tests {
         let UpdateStatus::Available(info) = status else {
             panic!("expected live update Available over {current}, got {status:?}");
         };
-        let bytes = http_get_bytes(
+        let mut route_ctx = UpdateRouteContext::new(UpstreamRoute::Direct);
+        let downloaded = http_download_to_temp_file(
             &info.asset_url,
             "application/octet-stream, */*",
             Duration::from_secs(120),
             ASSET_MAX_BYTES,
-            &UpstreamRoute::Direct,
+            None,
+            &mut route_ctx,
+            |_, _| {},
             &cancel,
         )
         .await
         .expect("downloading live release asset must succeed");
-        let actual_sha = verify_archive_checksum(&info, &bytes, &cancel)
+        let actual_sha = verify_digest_with_route(&info, &downloaded.sha256_hex, &mut route_ctx, &cancel)
             .await
             .expect("live release asset must match SHA256SUMS.txt");
 
         #[cfg(target_os = "macos")]
         {
             let tmp = tempfile::tempdir().unwrap();
-            let zip_path = tmp.path().join(&info.asset_name);
             let out_dir = tmp.path().join("extracted");
             fs::create_dir_all(&out_dir).unwrap();
-            fs::write(&zip_path, &bytes).unwrap();
             let status = std::process::Command::new("/usr/bin/ditto")
                 .args(["-x", "-k"])
-                .arg(&zip_path)
+                .arg(downloaded.file.path())
                 .arg(&out_dir)
                 .status()
                 .unwrap();
@@ -1354,7 +1737,7 @@ mod tests {
             "LIVE_UPDATE_OK current={current} latest={} asset={} size={} sha256={actual_sha}",
             info.latest_version,
             info.asset_name,
-            bytes.len()
+            downloaded.received_bytes
         );
     }
 }

@@ -18,10 +18,11 @@ impl IntruderSessions {
         for dataset in self.runs.values() {
             ensure!(!cancel.is_cancelled(), "Intruder 资源池查询已取消");
             validate_ticket(source, dataset.owner.id, dataset)?;
-            let mut stored = read_run(&dataset.connection, dataset.run.id)?;
-            stored.retention = IntruderRetention::Session;
-            ensure!(stored == dataset.run, "Intruder RAM 摘要已改变");
-            if let Some(id) = stored.resource_pool {
+            ensure!(
+                dataset.data.run == dataset.run,
+                "Intruder RAM 摘要已改变"
+            );
+            if let Some(id) = dataset.data.run.resource_pool {
                 let count = usage
                     .task_counts
                     .get_mut(&id)
@@ -95,51 +96,28 @@ fn reassign_session(
     commit: bool,
     fail_commit: bool,
 ) -> Result<()> {
-    let mut stored = read_run(&dataset.connection, dataset.run.id)?;
-    stored.retention = IntruderRetention::Session;
     ensure!(
-        stored == dataset.run,
+        dataset.data.run == dataset.run,
         "Intruder RAM 摘要已改变；未删除资源池"
     );
+    #[cfg(test)]
     ensure!(
-        dataset
-            .connection
-            .pragma_query_value::<bool, _>(None, "query_only", |r| r.get(0))?,
-        "Intruder RAM 只读保护已改变"
+        !dataset
+            .reject_writes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "Intruder RAM 只读保护已启用"
     );
-    dataset
-        .connection
-        .pragma_update(None, "query_only", false)?;
-    let result = (|| -> Result<IntruderRunSummary> {
-        let transaction = dataset.connection.unchecked_transaction()?;
-        let before = session::mutable_bytes(&transaction, stored.id, None)?;
-        let run = bind_resource_pool(
-            &transaction,
-            stored.id,
-            stored.resource_pool_revision,
-            to,
-            cancel,
-        )?;
-        ensure!(
-            session::mutable_bytes(&transaction, stored.id, None)? == before,
-            "Intruder Session 改绑改变逻辑字节数；未提交"
-        );
-        transaction.pragma_update(None, "query_only", true)?;
-        if commit {
-            ensure!(!fail_commit, "injected Session pool delete commit failure");
-            ensure!(!cancel.is_cancelled(), "Intruder 资源池删除已取消");
-            transaction.commit()?;
-        } else {
-            transaction.rollback()?;
-        }
-        Ok(run)
-    })();
-    if result.is_err() {
-        dataset.connection.pragma_update(None, "query_only", true)?;
-    }
-    let mut run = result?;
+    let before = dataset.data.mutable_bytes(None)?;
+    let mut staged = dataset.data.clone();
+    let run = staged.bind_resource_pool(staged.run.resource_pool_revision, to, cancel)?;
+    ensure!(
+        staged.mutable_bytes(None)? == before,
+        "Intruder Session 改绑改变逻辑字节数；未提交"
+    );
     if commit {
-        run.retention = IntruderRetention::Session;
+        ensure!(!fail_commit, "injected Session pool delete commit failure");
+        ensure!(!cancel.is_cancelled(), "Intruder 资源池删除已取消");
+        dataset.data = staged;
         dataset.run = run;
     }
     Ok(())

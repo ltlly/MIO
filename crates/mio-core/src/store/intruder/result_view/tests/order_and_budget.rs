@@ -32,14 +32,15 @@ fn payload_page_budget_returns_complete_rows_and_remainder_without_gaps_for_both
             resource_pool: None,
         };
         let (store, run) = fixture_spec(spec.clone());
-        let connection = store.intruder_connection(run.id).unwrap().0;
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "messages",
-                ..
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        if !session {
+            store.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "messages",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }));
+        }
         let ordinals = (0..run.total).rev().collect::<Vec<_>>();
         let mut collected = Vec::new();
         let mut pages = 0;
@@ -97,7 +98,18 @@ fn payload_page_budget_returns_complete_rows_and_remainder_without_gaps_for_both
         }
         assert_eq!(collected, ordinals);
         assert!(pages > 1);
-        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        if session {
+            assert_eq!(
+                store.intruder_sessions.runs[&run.id]
+                    .body_reads
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        } else {
+            store
+                .connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        }
         assert_eq!(store.read_intruder_spec(run.id).unwrap(), spec);
         assert_eq!(
             store.read_intruder_run(run.id).unwrap().retention,
@@ -120,7 +132,7 @@ fn connection_payload_query_allows_one_off_page_selection_without_relaxing_publi
             .intruder_payload_summaries(run.id, &ordinals, &CancellationToken::new())
             .is_err()
     );
-    let connection = store.intruder_connection(run.id).unwrap().0;
+    let connection = store.test_intruder_connection(run.id).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     let rows = payload_summaries(&transaction, &run, &ordinals, &|| Ok(())).unwrap();
     assert_eq!(rows.len(), 501);
@@ -213,7 +225,7 @@ fn payload_order_compares_full_blobs_beyond_preview_and_handles_all_attack_types
         MAX_POSITIONS,
         true,
     );
-    let connection = store.intruder_connection(run.id).unwrap().0;
+    let connection = store.test_intruder_connection(run.id).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     let order = payload_order(&transaction, &run, &|| Ok(())).unwrap();
     let mut asc = (0..run.total).collect::<Vec<_>>();
@@ -246,7 +258,7 @@ fn payload_order_compares_full_blobs_beyond_preview_and_handles_all_attack_types
         baseline_request: true,
         resource_pool: None,
     });
-    let connection = cluster_store.intruder_connection(cluster_run.id).unwrap().0;
+    let connection = cluster_store.test_intruder_connection(cluster_run.id).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     let order = payload_order(&transaction, &cluster_run, &|| Ok(())).unwrap();
     let mut asc = (0..cluster_run.total).collect::<Vec<_>>();
@@ -278,9 +290,8 @@ fn payload_order_compares_full_blobs_beyond_preview_and_handles_all_attack_types
         resource_pool: None,
     });
     let connection = pitchfork_store
-        .intruder_connection(pitchfork_run.id)
-        .unwrap()
-        .0;
+        .test_intruder_connection(pitchfork_run.id)
+        .unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     let order = payload_order(&transaction, &pitchfork_run, &|| Ok(())).unwrap();
     let mut asc = (0..pitchfork_run.total).collect::<Vec<_>>();

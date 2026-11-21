@@ -8,11 +8,27 @@ fn result_query_cancellation_and_deadline_restore_connection_handlers_and_busy_t
         store
             .put_intruder_result(run.id, 0, Err("not sent"))
             .unwrap();
-        let connection = store.intruder_connection(run.id).unwrap().0;
-        let read_only = connection
-            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-            .unwrap();
-        assert_eq!(read_only, session);
+        if session {
+            let query = query(&store, &run);
+            let cancel = CancellationToken::new();
+            let shutdown = CancellationToken::new();
+            cancel.cancel();
+            assert!(
+                store
+                    .query_intruder_result_view(&query, None, &[], &cancel, &shutdown)
+                    .is_err()
+            );
+            let cancel = CancellationToken::new();
+            shutdown.cancel();
+            assert!(
+                store
+                    .query_intruder_result_view(&query, None, &[], &cancel, &shutdown)
+                    .is_err()
+            );
+            store.close().unwrap();
+            continue;
+        }
+        let connection = store.test_intruder_connection(run.id).unwrap();
         connection
             .busy_timeout(Duration::from_millis(4321))
             .unwrap();
@@ -57,7 +73,7 @@ fn result_query_cancellation_and_deadline_restore_connection_handlers_and_busy_t
                 Instant::now() - Duration::from_millis(1),
                 &CancellationToken::new(),
                 &shutdown,
-                (!session).then(|| shutdown.clone()),
+                Some(shutdown.clone()),
             )
             .unwrap();
             assert!(
@@ -72,24 +88,14 @@ fn result_query_cancellation_and_deadline_restore_connection_handlers_and_busy_t
                 .is_ok()
         );
         assert!(connection.is_autocommit());
-        assert_eq!(
-            connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-                .unwrap(),
-            read_only
-        );
+        assert!(!connection
+            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
+            .unwrap());
         let write = connection.execute(
             "UPDATE intruder_runs SET title=title WHERE id=?1",
             [run.id.to_string()],
         );
-        if read_only {
-            assert_eq!(
-                write.unwrap_err().sqlite_error_code(),
-                Some(rusqlite::ErrorCode::ReadOnly)
-            );
-        } else {
-            assert_eq!(write.unwrap(), 1);
-        }
+        assert_eq!(write.unwrap(), 1);
         shutdown.cancel();
         assert!(
             store
@@ -97,13 +103,6 @@ fn result_query_cancellation_and_deadline_restore_connection_handlers_and_busy_t
                 .query_row(WORK, [], |row| row.get::<_, u64>(0))
                 .is_err()
         );
-        if session {
-            assert!(
-                connection
-                    .query_row(WORK, [], |row| row.get::<_, u64>(0))
-                    .is_ok()
-            );
-        }
         store.cancel_queries_with(CancellationToken::new());
         store.close().unwrap();
     }
@@ -319,22 +318,23 @@ fn result_query_sorts_payloads_globally_with_full_blob_ties_and_offpage_selectio
         store
             .set_intruder_state(run.id, IntruderRunState::Completed)
             .unwrap();
-        let connection = store.intruder_connection(run.id).unwrap().0;
         let bodies = Arc::new(AtomicUsize::new(0));
-        connection.authorizer(Some({
-            let bodies = bodies.clone();
-            move |context: AuthContext<'_>| match context.action {
-                AuthAction::Read {
-                    table_name: "messages",
-                    column_name: "body",
-                    ..
-                } => {
-                    bodies.fetch_add(1, Ordering::SeqCst);
-                    Authorization::Deny
+        if !session {
+            store.connection.authorizer(Some({
+                let bodies = bodies.clone();
+                move |context: AuthContext<'_>| match context.action {
+                    AuthAction::Read {
+                        table_name: "messages",
+                        column_name: "body",
+                        ..
+                    } => {
+                        bodies.fetch_add(1, Ordering::SeqCst);
+                        Authorization::Deny
+                    }
+                    _ => Authorization::Allow,
                 }
-                _ => Authorization::Allow,
-            }
-        }));
+            }));
+        }
         let mut q = query(&store, &run);
         q.limit = 3;
         q.sort = IntruderResultSort {
@@ -367,7 +367,18 @@ fn result_query_sorts_payloads_globally_with_full_blob_ties_and_offpage_selectio
         assert_eq!(desc_first.selected_rank, Some(8));
         assert_eq!(desc_first.selected_row.as_ref().unwrap().ordinal, 0);
         assert_eq!(bodies.load(Ordering::SeqCst), 0);
-        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        if session {
+            assert_eq!(
+                store.intruder_sessions.runs[&run.id]
+                    .body_reads
+                    .load(Ordering::SeqCst),
+                0
+            );
+        } else {
+            store
+                .connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        }
         store.close().unwrap();
     }
 }

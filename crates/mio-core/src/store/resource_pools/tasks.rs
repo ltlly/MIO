@@ -109,12 +109,6 @@ fn apply_delete(
         None => 0,
     };
     if reassigned_tabs != 0 {
-        super::super::schema_guard::validate_update_dependencies(
-            transaction,
-            "metadata",
-            &["value"],
-            cancel,
-        )?;
         super::super::write_workspace(transaction, &workspace)?;
     }
     let pools = catalog

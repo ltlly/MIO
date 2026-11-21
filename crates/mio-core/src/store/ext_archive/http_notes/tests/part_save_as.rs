@@ -345,7 +345,7 @@ fn readonly_save_as_preserves_independent_capacities_for_33_http_and_32_websocke
 }
 
 #[test]
-fn schema_21_upgrade_keeps_unmapped_source_notes_unknown_without_rewriting_source_metadata() {
+fn schema_one_save_keeps_unmapped_source_notes_unknown_without_rewriting_source_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("old-source.mio");
     let (mut store, source, mut items) = fixture("unused old note");
@@ -362,13 +362,6 @@ fn schema_21_upgrade_keeps_unmapped_source_notes_unknown_without_rewriting_sourc
     let report = store.ext_report(source).unwrap();
     store.save(Some(&path)).unwrap();
     store.close().unwrap();
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(
-            "DROP TABLE site_map_entries; DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port; ALTER TABLE intruder_results DROP COLUMN highlight_revision; ALTER TABLE intruder_results DROP COLUMN highlight; ALTER TABLE intruder_results DROP COLUMN notes_revision; ALTER TABLE intruder_results DROP COLUMN notes; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; PRAGMA user_version=21;",
-        )
-        .unwrap();
-    connection.close().unwrap();
     let mut reopened = ProjectStore::open(&path).unwrap();
     assert_eq!(
         reopened

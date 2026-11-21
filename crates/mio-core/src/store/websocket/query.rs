@@ -77,7 +77,7 @@ impl ProjectStore {
             app_id == APPLICATION_ID && schema == SCHEMA,
             "WebSocket 查询源项目版本已变化；未返回其它项目数据"
         );
-        schema_guard::validate(&transaction, schema)?;
+        schema_guard::validate(&transaction)?;
         ensure!(
             metadata::project_id(&transaction)? == query.project.id,
             "WebSocket 查询源项目 ID 已变化；未返回其它项目数据"

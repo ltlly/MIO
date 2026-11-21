@@ -30,9 +30,6 @@ fn retention_summary_pages_merge_stable_cursors_without_reading_bodies() {
     let first = change(&mut store, &runs[0], IntruderRetention::Session).unwrap();
     let third = change(&mut store, &runs[2], IntruderRetention::Session).unwrap();
     store.connection.authorizer(Some(deny_data_reads));
-    for dataset in store.intruder_sessions.runs.values() {
-        dataset.connection.authorizer(Some(deny_data_reads));
-    }
     let page = store.intruder_runs(None, 1).unwrap();
     assert_eq!(page.rows[0].id, runs[0].id);
     assert_eq!(page.next_after, Some(runs[0].id));
@@ -48,9 +45,10 @@ fn retention_summary_pages_merge_stable_cursors_without_reading_bodies() {
         1
     );
     for dataset in store.intruder_sessions.runs.values() {
-        dataset
-            .connection
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        assert_eq!(
+            dataset.body_reads.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
     store
         .connection

@@ -34,7 +34,7 @@ pub(in crate::store) fn default_pool(id: Uuid) -> IntruderResourcePool {
 pub(super) fn read(connection: &Connection) -> Result<IntruderResourcePools> {
     let mut query = connection.prepare(
         "SELECT key,CASE WHEN typeof(value)='blob' AND length(value)<=?2 THEN value END
-         FROM main.metadata WHERE key=?1 COLLATE NOCASE",
+         FROM main.metadata WHERE key=?1",
     )?;
     let mut rows = query.query(params![KEY, MAX_INTRUDER_RESOURCE_POOLS_BYTES])?;
     let Some(row) = rows.next()? else {
@@ -94,12 +94,6 @@ pub(super) fn write(
         |row| row.get(0),
     )?;
     let changed = if present {
-        super::schema_guard::validate_update_dependencies(
-            transaction,
-            "metadata",
-            &["value"],
-            cancel,
-        )?;
         transaction.execute(
             "UPDATE main.metadata SET value=?1 WHERE key=?2",
             params![encoded, KEY],

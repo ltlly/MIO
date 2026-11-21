@@ -106,7 +106,7 @@ impl ProjectStore {
         let transaction = self.connection.unchecked_transaction()?;
         let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == super::SCHEMA, "WebSocket 备注项目版本已改变");
-        super::schema_guard::validate(&transaction, schema)?;
+        super::schema_guard::validate(&transaction)?;
         ensure!(
             super::metadata::project_id(&transaction)? == project.id,
             "WebSocket 备注项目 ID 已改变"
@@ -146,7 +146,7 @@ impl ProjectStore {
                 schema == super::SCHEMA,
                 "WebSocket 备注项目版本已改变；备注未修改"
             );
-            super::schema_guard::validate(&transaction, schema)?;
+            super::schema_guard::validate(&transaction)?;
             ensure!(
                 super::metadata::project_id(&transaction)? == project.id,
                 "WebSocket 备注项目 ID 已改变；备注未修改"
@@ -219,12 +219,6 @@ pub(super) fn write(
             params![canonical, revision, text],
         )?;
     } else {
-        super::schema_guard::validate_update_dependencies(
-            transaction,
-            "websocket_notes",
-            &["revision", "text"],
-            cancel,
-        )?;
         let changed = transaction.execute(
             "UPDATE websocket_notes SET revision=?1,text=?2 WHERE message=?3 AND revision=?4",
             params![revision, text, canonical, expected],

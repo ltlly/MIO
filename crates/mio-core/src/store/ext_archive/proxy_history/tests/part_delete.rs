@@ -330,11 +330,7 @@ fn delete_and_clear_live_proxy_history_reject_session_owned_identity_collisions(
         .set_intruder_state(run.id, crate::IntruderRunState::Completed)
         .unwrap();
     let session_results = store.intruder_results(run.id, None, 10).unwrap();
-    let session_runs = store.test_intruder_connection(run.id).unwrap().query_row(
-        "SELECT quote(id)||quote(tab)||quote(revision)||quote(state)||quote(completed)||quote(error) FROM intruder_runs WHERE id=?1",
-        [run.id.to_string()],
-        |row| row.get::<_, String>(0),
-    ).unwrap();
+    let session_runs = store.read_intruder_run(run.id).unwrap();
     assert!(store.is_session_intruder_run(run.id));
     assert_eq!(store.read(session_flow.summary.id).unwrap(), session_flow);
 
@@ -368,20 +364,11 @@ fn delete_and_clear_live_proxy_history_reject_session_owned_identity_collisions(
             crate::store::read_record(&store.connection, collision.summary.id).unwrap(),
             Some(collision.clone())
         );
+        assert_eq!(store.read_intruder_run(run.id).unwrap(), session_runs);
         assert_eq!(
-            store.test_intruder_connection(run.id).unwrap().query_row(
-                "SELECT quote(id)||quote(tab)||quote(revision)||quote(state)||quote(completed)||quote(error) FROM intruder_runs WHERE id=?1",
-                [run.id.to_string()],
-                |row| row.get::<_, String>(0),
-            ).unwrap(),
-            session_runs
-        );
-        assert_eq!(
-            crate::store::read_record(
-                store.test_intruder_connection(run.id).unwrap(),
-                session_flow.summary.id,
-            )
-            .unwrap(),
+            store
+                .test_read_session_flow_raw(run.id, session_flow.summary.id)
+                .unwrap(),
             Some(session_flow.clone())
         );
     }

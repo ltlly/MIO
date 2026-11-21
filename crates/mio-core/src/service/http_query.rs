@@ -1,4 +1,5 @@
 use std::future::pending;
+use std::ops::{Deref, DerefMut};
 
 use tokio::task::{JoinError, JoinHandle};
 
@@ -6,22 +7,246 @@ use super::*;
 
 type Output = Result<HttpHistoryResult>;
 
-struct Active {
-    query: HttpHistoryQuery,
-    cancel: CancellationToken,
-    worker: JoinHandle<Output>,
+pub(super) trait AsyncHistoryQuery: Clone + Send + 'static {
+    type Output: Send + 'static;
+
+    const CANCELLED_MESSAGE: &'static str;
+    const PANIC_PREFIX: &'static str;
+    const SHUTDOWN_TIMEOUT_MESSAGE: &'static str;
+
+    fn project(&self) -> ProjectKey;
+    fn into_event(self, result: Result<Self::Output>) -> Event;
+    fn event_project(event: &Event) -> Option<ProjectKey>;
+    fn is_ok_event_preserved_when_idle(_event: &Event) -> bool {
+        false
+    }
+    fn convert_pending_event_on_cancel(event: Event) -> Event {
+        event
+    }
+    fn is_cancelled(&self, active_cancel: &CancellationToken) -> bool {
+        active_cancel.is_cancelled()
+    }
+}
+
+pub(super) struct ActiveQuery<Q, O> {
+    pub(super) query: Q,
+    pub(super) cancel: CancellationToken,
+    pub(super) worker: JoinHandle<Result<O>>,
+}
+
+type Active = ActiveQuery<HttpHistoryQuery, HttpHistoryResult>;
+
+pub(super) enum QuerySignal<O> {
+    Finished(std::result::Result<Result<O>, JoinError>),
+    Ready(mpsc::OwnedPermit<Event>),
+}
+
+pub(super) struct AsyncQueryState<Q: AsyncHistoryQuery> {
+    pub(super) active: Option<ActiveQuery<Q, Q::Output>>,
+    pub(super) latest: Option<Q>,
+    pub(super) result: Option<Event>,
+}
+
+impl<Q: AsyncHistoryQuery> Default for AsyncQueryState<Q> {
+    fn default() -> Self {
+        Self {
+            active: None,
+            latest: None,
+            result: None,
+        }
+    }
+}
+
+impl<Q: AsyncHistoryQuery> AsyncQueryState<Q> {
+    pub(super) fn has_worker(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub(super) fn cancel(&mut self) {
+        if let Some(active) = &self.active {
+            active.cancel.cancel();
+        }
+        if let Some(query) = self.latest.take() {
+            self.result = Some(query.into_event(Err(anyhow::anyhow!(Q::CANCELLED_MESSAGE))));
+            return;
+        }
+        if self.active.is_none()
+            && self
+                .result
+                .as_ref()
+                .is_some_and(Q::is_ok_event_preserved_when_idle)
+        {
+            return;
+        }
+        let owner = self.active.as_ref().map(|active| active.query.project());
+        let result = self.result.take().filter(|result| {
+            Q::event_project(result).is_some_and(|project| owner.is_none_or(|o| o == project))
+        });
+        if let Some(result) = result {
+            self.result = Some(Q::convert_pending_event_on_cancel(result));
+        } else if let Some(active) = &self.active {
+            self.result = Some(
+                active
+                    .query
+                    .clone()
+                    .into_event(Err(anyhow::anyhow!(Q::CANCELLED_MESSAGE))),
+            );
+        }
+    }
+
+    pub(super) async fn completion(&mut self) -> std::result::Result<Result<Q::Output>, JoinError> {
+        match &mut self.active {
+            Some(active) => (&mut active.worker).await,
+            None => pending().await,
+        }
+    }
+
+    pub(super) async fn next_signal(
+        &mut self,
+        events: &mpsc::Sender<Event>,
+        reclaim_only: bool,
+    ) -> QuerySignal<Q::Output> {
+        // A cancellation reply is terminal only after this reader has actually exited.
+        let deliver = self.result.is_some() && !self.has_worker() && !reclaim_only;
+        tokio::select! {
+            biased;
+            result = self.completion() => QuerySignal::Finished(result),
+            permit = async {
+                if deliver {
+                    match events.clone().reserve_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => pending().await,
+                    }
+                } else {
+                    pending().await
+                }
+            } => QuerySignal::Ready(permit),
+        }
+    }
+
+    pub(super) fn reject_or_record_error(
+        &mut self,
+        query: Q,
+        current_project: ProjectKey,
+        error: anyhow::Error,
+    ) {
+        let project = query.project();
+        if project == current_project {
+            if let Some(active) = &self.active {
+                active.cancel.cancel();
+            }
+            self.latest = None;
+        }
+        if self.result.is_none() || project == current_project {
+            self.result = Some(query.into_event(Err(error)));
+        }
+    }
+
+    pub(super) fn enqueue_or_take_start(&mut self, query: Q) -> Option<Q> {
+        self.result = None;
+        if let Some(active) = &self.active {
+            active.cancel.cancel();
+            self.latest = Some(query);
+            None
+        } else {
+            Some(query)
+        }
+    }
+
+    pub(super) fn deliver_ready(&mut self, permit: mpsc::OwnedPermit<Event>) {
+        permit.send(self.result.take().expect("query result owns this permit"));
+    }
+
+    pub(super) fn finish_and_take_next(
+        &mut self,
+        result: std::result::Result<Result<Q::Output>, JoinError>,
+        current_project: ProjectKey,
+    ) -> Option<Q> {
+        let active = self.active.take().expect("joined query retains its owner");
+        if let Some(latest) = self.latest.take() {
+            return Some(latest);
+        }
+        if active.query.project() == current_project
+            && !self
+                .result
+                .as_ref()
+                .is_some_and(|event| Q::event_project(event) == Some(active.query.project()))
+        {
+            let result = if active.query.is_cancelled(&active.cancel) {
+                Err(anyhow::anyhow!(Q::CANCELLED_MESSAGE))
+            } else {
+                result
+                    .map_err(|error| anyhow::anyhow!("{}：{error}", Q::PANIC_PREFIX))
+                    .and_then(|result| result)
+            };
+            self.result = Some(active.query.into_event(result));
+        }
+        None
+    }
+
+    pub(super) async fn stop_until(
+        &mut self,
+        deadline: tokio::time::Instant,
+        current_project: ProjectKey,
+    ) -> Result<()> {
+        self.cancel();
+        if self.has_worker() {
+            let result = tokio::time::timeout_at(deadline, self.completion())
+                .await
+                .context(Q::SHUTDOWN_TIMEOUT_MESSAGE)?;
+            let next = self.finish_and_take_next(result, current_project);
+            debug_assert!(next.is_none(), "cancelled shutdown never restarts latest");
+        }
+        Ok(())
+    }
+
+    pub(super) async fn finish_shutdown(&mut self, current_project: ProjectKey) -> Result<()> {
+        self.cancel();
+        if self.has_worker() {
+            // A blocking matcher cannot be aborted; retain this owner until its actual exit.
+            let result = self.completion().await;
+            let failure = result.as_ref().err().map(ToString::to_string);
+            let next = self.finish_and_take_next(result, current_project);
+            debug_assert!(next.is_none(), "cancelled shutdown never restarts latest");
+            if let Some(error) = failure {
+                anyhow::bail!("{}：{error}", Q::PANIC_PREFIX);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct GlobalSearchEntry {
+    query: GlobalSearchQuery,
+    operation: CancellationToken,
 }
 
 #[derive(Default)]
 pub(super) struct QueryState {
-    active: Option<Active>,
-    latest: Option<HttpHistoryQuery>,
-    result: Option<Event>,
+    pub(super) history: AsyncQueryState<HttpHistoryQuery>,
+    global_search: AsyncQueryState<GlobalSearchEntry>,
+}
+
+impl Deref for QueryState {
+    type Target = AsyncQueryState<HttpHistoryQuery>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.history
+    }
+}
+
+impl DerefMut for QueryState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.history
+    }
 }
 
 pub(super) enum Signal {
     Finished(std::result::Result<Output, JoinError>),
     Ready(mpsc::OwnedPermit<Event>),
+    GlobalSearchFinished(std::result::Result<Result<GlobalSearchResult>, JoinError>),
+    GlobalSearchReady(mpsc::OwnedPermit<Event>),
 }
 
 impl HttpHistoryQuery {
@@ -33,49 +258,96 @@ impl HttpHistoryQuery {
     }
 }
 
+impl AsyncHistoryQuery for HttpHistoryQuery {
+    type Output = HttpHistoryResult;
+
+    const CANCELLED_MESSAGE: &'static str = "HTTP 历史查询已取消";
+    const PANIC_PREFIX: &'static str = "HTTP 历史查询任务异常退出";
+    const SHUTDOWN_TIMEOUT_MESSAGE: &'static str =
+        "HTTP 历史查询仍在回收；保留任务句柄，未保存或切换项目，请稍后重试";
+
+    fn project(&self) -> ProjectKey {
+        self.project
+    }
+
+    fn into_event(self, result: Result<Self::Output>) -> Event {
+        self.result(result)
+    }
+
+    fn event_project(event: &Event) -> Option<ProjectKey> {
+        match event {
+            Event::HttpHistoryPage { query, .. } => Some(query.project),
+            _ => None,
+        }
+    }
+
+    fn is_ok_event_preserved_when_idle(event: &Event) -> bool {
+        matches!(event, Event::HttpHistoryPage { result: Ok(_), .. })
+    }
+
+    fn convert_pending_event_on_cancel(event: Event) -> Event {
+        match event {
+            Event::HttpHistoryPage { query, .. } => {
+                query.result(Err(anyhow::anyhow!(Self::CANCELLED_MESSAGE)))
+            }
+            other => other,
+        }
+    }
+}
+
+impl AsyncHistoryQuery for GlobalSearchEntry {
+    type Output = GlobalSearchResult;
+
+    const CANCELLED_MESSAGE: &'static str = "全局搜索已取消";
+    const PANIC_PREFIX: &'static str = "全局搜索任务异常退出";
+    const SHUTDOWN_TIMEOUT_MESSAGE: &'static str =
+        "全局搜索仍在回收；保留任务句柄，未保存或切换项目，请稍后重试";
+
+    fn project(&self) -> ProjectKey {
+        self.query.project
+    }
+
+    fn into_event(self, result: Result<Self::Output>) -> Event {
+        Event::GlobalSearchPage {
+            query: self.query,
+            result: result.map_err(|error| error.to_string()),
+        }
+    }
+
+    fn event_project(event: &Event) -> Option<ProjectKey> {
+        match event {
+            Event::GlobalSearchPage { query, .. } => Some(query.project),
+            _ => None,
+        }
+    }
+
+    fn is_ok_event_preserved_when_idle(event: &Event) -> bool {
+        matches!(event, Event::GlobalSearchPage { result: Ok(_), .. })
+    }
+
+    fn convert_pending_event_on_cancel(event: Event) -> Event {
+        match event {
+            Event::GlobalSearchPage { query, .. } => Event::GlobalSearchPage {
+                query,
+                result: Err(Self::CANCELLED_MESSAGE.to_string()),
+            },
+            other => other,
+        }
+    }
+
+    fn is_cancelled(&self, active_cancel: &CancellationToken) -> bool {
+        active_cancel.is_cancelled() || self.operation.is_cancelled()
+    }
+}
+
 impl QueryState {
     pub(super) fn has_worker(&self) -> bool {
-        self.active.is_some()
+        self.history.has_worker() || self.global_search.has_worker()
     }
 
     pub(super) fn cancel(&mut self) {
-        if let Some(active) = &self.active {
-            active.cancel.cancel();
-        }
-        if let Some(query) = self.latest.take() {
-            self.result = Some(query.result(Err(anyhow::anyhow!("HTTP 历史查询已取消"))));
-            return;
-        }
-        if self.active.is_none()
-            && matches!(
-                &self.result,
-                Some(Event::HttpHistoryPage { result: Ok(_), .. })
-            )
-        {
-            return;
-        }
-        let owner = self.active.as_ref().map(|active| active.query.project);
-        let result = self.result.take().filter(|result| {
-            matches!(result, Event::HttpHistoryPage { query, .. }
-                if owner.is_none_or(|owner| owner == query.project))
-        });
-        if let Some(Event::HttpHistoryPage { query, .. }) = result {
-            self.result = Some(query.result(Err(anyhow::anyhow!("HTTP 历史查询已取消"))));
-        } else if let Some(active) = &self.active {
-            self.result = Some(
-                active
-                    .query
-                    .clone()
-                    .result(Err(anyhow::anyhow!("HTTP 历史查询已取消"))),
-            );
-        }
-    }
-
-    async fn completion(&mut self) -> std::result::Result<Output, JoinError> {
-        match &mut self.active {
-            Some(active) => (&mut active.worker).await,
-            None => pending().await,
-        }
+        self.history.cancel();
+        self.global_search.cancel();
     }
 
     pub(super) async fn next_signal(
@@ -83,19 +355,16 @@ impl QueryState {
         events: &mpsc::Sender<Event>,
         reclaim_only: bool,
     ) -> Signal {
-        // A cancellation reply is terminal only after this reader has actually exited.
-        let deliver = self.result.is_some() && !self.has_worker() && !reclaim_only;
         tokio::select! {
             biased;
-            result = self.completion() => Signal::Finished(result),
-            permit = async {
-                if deliver {
-                    match events.clone().reserve_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => pending().await,
-                    }
-                } else { pending().await }
-            } => Signal::Ready(permit),
+            signal = self.history.next_signal(events, reclaim_only) => match signal {
+                QuerySignal::Finished(result) => Signal::Finished(result),
+                QuerySignal::Ready(permit) => Signal::Ready(permit),
+            },
+            signal = self.global_search.next_signal(events, reclaim_only) => match signal {
+                QuerySignal::Finished(result) => Signal::GlobalSearchFinished(result),
+                QuerySignal::Ready(permit) => Signal::GlobalSearchReady(permit),
+            },
         }
     }
 }
@@ -106,43 +375,72 @@ impl State {
         query: GlobalSearchQuery,
         cancel: CancellationToken,
     ) {
-        let snapshot = self.check_project(query.project).and_then(|()| {
+        let entry = GlobalSearchEntry {
+            query: query.clone(),
+            operation: cancel,
+        };
+        let valid = self.check_project(query.project).and_then(|()| {
             ensure!(!self.quiesced, "项目正在切换，全局搜索未开始");
+            ensure!(!self.cancel.is_cancelled(), "全局搜索已取消");
+            ensure!(!entry.operation.is_cancelled(), "全局搜索已取消");
+            Ok(())
+        });
+        if let Err(error) = valid {
+            self.http_query
+                .global_search
+                .reject_or_record_error(entry, self.project, error);
+            return;
+        }
+        if let Some(entry) = self.http_query.global_search.enqueue_or_take_start(entry) {
+            self.start_global_search(entry);
+        }
+    }
+
+    fn start_global_search(&mut self, entry: GlobalSearchEntry) {
+        debug_assert!(self.http_query.global_search.active.is_none());
+        let snapshot = self.check_project(entry.query.project).and_then(|()| {
             let mut ids = HashSet::new();
             let mut pending = Vec::new();
             for capture in self.recovery.iter().rev() {
                 if ids.insert(capture.record.summary.id) {
-                    pending.push((capture.record.clone(), self.original_flow(capture.record.summary.id)?));
+                    pending.push((
+                        capture.record.clone(),
+                        self.original_flow(capture.record.summary.id)?,
+                    ));
                 }
             }
-            Ok((self.store.websocket_query_path(), pending, self.websocket_recovery_snapshot()?))
+            Ok((
+                self.store.websocket_query_path(),
+                pending,
+                self.websocket_recovery_snapshot()?,
+            ))
         });
-        let result = match snapshot {
-            Ok((path, pending, websocket)) => {
-                let shutdown = self.cancel.clone();
-                let operation = cancel.clone();
-                let combined = CancellationToken::new();
-                if shutdown.is_cancelled() || operation.is_cancelled() { combined.cancel(); }
-                let forward = combined.clone();
-                let guard = tokio::spawn(async move {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => forward.cancel(),
-                        _ = operation.cancelled() => forward.cancel(),
-                    }
-                });
-                let worker_query = query.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    ProjectStore::global_search_snapshot(&path, &worker_query, &pending, &websocket, &combined)
-                }).await.expect("global search worker must finish normally");
-                guard.abort();
-                result
+        let (path, pending, websocket) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.http_query.global_search.result = Some(entry.into_event(Err(error)));
+                return;
             }
-            Err(error) => Err(error),
         };
-        self.emit(Event::GlobalSearchPage {
-            query,
-            result: result.map_err(|error| error.to_string()),
-        }).await;
+        let shutdown = self.cancel.child_token();
+        let worker_shutdown = shutdown.clone();
+        let operation = entry.operation.clone();
+        let worker_query = entry.query.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            ProjectStore::global_search_snapshot(
+                &path,
+                &worker_query,
+                &pending,
+                &websocket,
+                &worker_shutdown,
+                &operation,
+            )
+        });
+        self.http_query.global_search.active = Some(ActiveQuery {
+            query: entry,
+            cancel: shutdown,
+            worker,
+        });
     }
 
     pub(super) fn http_recovery_snapshot(&self) -> Result<Vec<HttpHistoryPending>> {
@@ -232,36 +530,26 @@ impl State {
             query.validate()
         });
         if let Err(error) = valid {
-            if query.project == self.project {
-                if let Some(active) = &self.http_query.active {
-                    active.cancel.cancel();
-                }
-                self.http_query.latest = None;
-            }
-            if self.http_query.result.is_none() || query.project == self.project {
-                self.http_query.result = Some(query.result(Err(error)));
-            }
+            self.http_query
+                .history
+                .reject_or_record_error(query, self.project, error);
             return;
         }
         self.history_dirty = false;
-        self.http_query.result = None;
-        if let Some(active) = &self.http_query.active {
-            active.cancel.cancel();
-            self.http_query.latest = Some(query);
-        } else {
+        if let Some(query) = self.http_query.history.enqueue_or_take_start(query) {
             self.start_http_query(query);
         }
     }
 
     fn start_http_query(&mut self, query: HttpHistoryQuery) {
-        debug_assert!(self.http_query.active.is_none());
+        debug_assert!(self.http_query.history.active.is_none());
         let snapshot = self
             .check_project(query.project)
             .and_then(|()| self.http_recovery_snapshot());
         let pending = match snapshot {
             Ok(pending) => pending,
             Err(error) => {
-                self.http_query.result = Some(query.result(Err(error)));
+                self.http_query.history.result = Some(query.result(Err(error)));
                 return;
             }
         };
@@ -272,7 +560,7 @@ impl State {
         let worker = tokio::task::spawn_blocking(move || {
             ProjectStore::http_history_snapshot(&path, &worker_query, &pending, &worker_cancel)
         });
-        self.http_query.active = Some(Active {
+        self.http_query.history.active = Some(Active {
             query,
             cancel,
             worker,
@@ -281,35 +569,24 @@ impl State {
 
     pub(super) fn http_query_signal(&mut self, signal: Signal) {
         match signal {
-            Signal::Ready(permit) => {
-                permit.send(
-                    self.http_query
-                        .result
-                        .take()
-                        .expect("query result owns this permit"),
-                );
-            }
+            Signal::Ready(permit) => self.http_query.history.deliver_ready(permit),
             Signal::Finished(result) => {
-                let active = self
+                if let Some(latest) = self
                     .http_query
-                    .active
-                    .take()
-                    .expect("joined query retains its owner");
-                if let Some(latest) = self.http_query.latest.take() {
-                    self.start_http_query(latest);
-                } else if active.query.project == self.project
-                    && !matches!(&self.http_query.result,
-                        Some(Event::HttpHistoryPage { query, .. })
-                        if query.project == active.query.project)
+                    .history
+                    .finish_and_take_next(result, self.project)
                 {
-                    let result = if active.cancel.is_cancelled() {
-                        Err(anyhow::anyhow!("HTTP 历史查询已取消"))
-                    } else {
-                        result
-                            .map_err(|error| anyhow::anyhow!("HTTP 历史查询任务异常退出：{error}"))
-                            .and_then(|result| result)
-                    };
-                    self.http_query.result = Some(active.query.result(result));
+                    self.start_http_query(latest);
+                }
+            }
+            Signal::GlobalSearchReady(permit) => self.http_query.global_search.deliver_ready(permit),
+            Signal::GlobalSearchFinished(result) => {
+                if let Some(latest) = self
+                    .http_query
+                    .global_search
+                    .finish_and_take_next(result, self.project)
+                {
+                    self.start_global_search(latest);
                 }
             }
         }
@@ -320,25 +597,27 @@ impl State {
         deadline: tokio::time::Instant,
     ) -> Result<()> {
         self.http_query.cancel();
-        if self.http_query.has_worker() {
-            let result = tokio::time::timeout_at(deadline, self.http_query.completion())
-                .await
-                .context("HTTP 历史查询仍在回收；保留任务句柄，未保存或切换项目，请稍后重试")?;
-            self.http_query_signal(Signal::Finished(result));
-        }
+        self.http_query
+            .history
+            .stop_until(deadline, self.project)
+            .await?;
+        self.http_query
+            .global_search
+            .stop_until(deadline, self.project)
+            .await?;
         Ok(())
     }
 
     pub(super) async fn finish_http_query_shutdown(&mut self) -> Result<()> {
         self.http_query.cancel();
-        if self.http_query.has_worker() {
-            let result = self.http_query.completion().await;
-            let failure = result.as_ref().err().map(ToString::to_string);
-            self.http_query_signal(Signal::Finished(result));
-            if let Some(error) = failure {
-                anyhow::bail!("HTTP 历史查询任务异常退出：{error}");
-            }
-        }
+        let history = self.http_query.history.finish_shutdown(self.project).await;
+        let global_search = self
+            .http_query
+            .global_search
+            .finish_shutdown(self.project)
+            .await;
+        history?;
+        global_search?;
         Ok(())
     }
 }

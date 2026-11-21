@@ -9,16 +9,18 @@ mod filters;
 mod page;
 mod validation;
 
+pub(in crate::store::intruder) use filters::{search_matcher, page_from_ordinals};
 use filters::matching_ordinals;
-use page::{view_row, view_row_bytes};
-use validation::{
-    QueryScope, check_query, validate_recovery, validate_recovery_responses, validate_results,
-    validate_run_overlay,
+pub(in crate::store::intruder) use page::{sort_by_length, sort_filtered_rows, view_row_bytes};
+use page::view_row;
+pub(in crate::store::intruder) use validation::{
+    check_query, validate_recovery_responses, validate_run_overlay,
 };
+use validation::{QueryScope, validate_recovery, validate_results};
 
-const QUERY_TIME: Duration = Duration::from_secs(1);
+pub(in crate::store::intruder) const QUERY_TIME: Duration = Duration::from_secs(1);
 const MAX_SEARCH_TERM_BYTES: usize = 4096;
-const MAX_SEARCH_HEAD_BYTES: usize = 128 * 1024;
+pub(in crate::store::intruder) const MAX_SEARCH_HEAD_BYTES: usize = 128 * 1024;
 const HEAD_MESSAGE_QUERY: &str = "SELECT typeof(head),length(head),
     CASE WHEN typeof(head)='blob' AND length(head)<=?2 THEN head END
  FROM messages WHERE flow=?1 AND side=1";
@@ -29,17 +31,17 @@ const FULL_MESSAGE_QUERY: &str = "SELECT typeof(head),length(head),
  FROM messages WHERE flow=?1 AND side=1";
 type ValidateSession<'a> = Option<&'a dyn Fn(&IntruderResultSummary) -> Result<()>>;
 
-struct MatchedResult {
-    ordinal: u64,
-    status: Option<u16>,
-    number: u64,
-    payload_index: Option<usize>,
-    flow: Option<String>,
-    response_bytes: u64,
-    response_received: Option<u64>,
-    grep_matches: Vec<String>,
-    grep_extracts: Vec<(String, String)>,
-    grep_payload_hits: Vec<bool>,
+pub(in crate::store::intruder) struct MatchedResult {
+    pub ordinal: u64,
+    pub status: Option<u16>,
+    pub number: u64,
+    pub payload_index: Option<usize>,
+    pub flow: Option<String>,
+    pub response_bytes: u64,
+    pub response_received: Option<u64>,
+    pub grep_matches: Vec<String>,
+    pub grep_extracts: Vec<(String, String)>,
+    pub grep_payload_hits: Vec<bool>,
 }
 
 impl ProjectStore {
@@ -85,6 +87,21 @@ impl ProjectStore {
             "Intruder 结果查询身份或分页无效"
         );
         self.check_intruder_session_owner(query.project, query.run_id)?;
+        if let Some(dataset) = self.session_dataset(query.run_id)? {
+            return self.with_session_intruder_query(query.run_id, |validate| {
+                dataset.data.query_result_view(
+                    query,
+                    latest,
+                    recovery,
+                    recovery_responses,
+                    validate,
+                    cancel,
+                    shutdown,
+                    #[cfg(test)]
+                    &dataset.body_reads,
+                )
+            });
+        }
         let _main_scope = QueryScope::new(
             &self.connection,
             deadline,
@@ -92,21 +109,14 @@ impl ProjectStore {
             shutdown,
             Some(shutdown.clone()),
         )?;
-        let (connection, retention) = self.intruder_connection(query.run_id)?;
-        let _session_scope = (retention == IntruderRetention::Session)
-            .then(|| QueryScope::new(connection, deadline, cancel, shutdown, None))
-            .transpose()?;
         let read = |validate_session: ValidateSession<'_>| {
             check()?;
-            let transaction = connection.unchecked_transaction()?;
-            if retention == IntruderRetention::Project {
-                ensure!(
-                    crate::store::metadata::project_id(&transaction)? == query.project.id,
-                    "Intruder 项目归属已改变"
-                );
-            }
-            let mut stored = read_run(&transaction, query.run_id)?;
-            stored.retention = retention;
+            let transaction = self.connection.unchecked_transaction()?;
+            ensure!(
+                crate::store::metadata::project_id(&transaction)? == query.project.id,
+                "Intruder 项目归属已改变"
+            );
+            let stored = read_run(&transaction, query.run_id)?;
             let run = latest.unwrap_or(&stored);
             validate_run_overlay(&stored, run)?;
             ensure!(
@@ -237,16 +247,10 @@ impl ProjectStore {
                 next_offset: (next < total).then_some(next),
                 selected_rank,
                 selected_row,
-                persisted: retention == IntruderRetention::Project
-                    && recovery.is_empty()
-                    && run == &stored,
+                persisted: recovery.is_empty() && run == &stored,
             })
         };
-        if retention == IntruderRetention::Session {
-            self.with_session_intruder_query(query.run_id, |validate| read(Some(validate)))
-        } else {
-            read(None)
-        }
+        read(None)
     }
 }
 

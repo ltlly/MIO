@@ -179,19 +179,7 @@ fn assert_legacy_pool_settings_migration(
         legacy_specs.push((run.id, legacy));
     }
     let original_schema = schema_objects(&store.connection);
-    store
-        .connection
-        .execute_batch("DROP TABLE site_map_entries; DROP INDEX flows_source_started; DROP INDEX flows_source_status; DROP INDEX flows_source_capture; ALTER TABLE flows DROP COLUMN response_length; ALTER TABLE flows DROP COLUMN capture_number; ALTER TABLE flows DROP COLUMN elapsed_ms; ALTER TABLE flows DROP COLUMN response_bytes; ALTER TABLE flows DROP COLUMN status; ALTER TABLE flows DROP COLUMN source; ALTER TABLE flows DROP COLUMN listener_port; ALTER TABLE intruder_results DROP COLUMN highlight_revision; ALTER TABLE intruder_results DROP COLUMN highlight; ALTER TABLE intruder_results DROP COLUMN notes_revision; ALTER TABLE intruder_results DROP COLUMN notes; DROP TABLE ext_http_highlights; DROP TABLE websocket_originals; DROP TABLE ext_http_notes; DROP TABLE repeater_history; DROP TABLE websocket_notes; DROP TABLE websocket_connections;")
-        .unwrap();
-    store
-        .connection
-        .pragma_update(None, "user_version", version)
-        .unwrap();
-    store.checkpoint().unwrap();
-    store
-        .connection
-        .execute_batch("PRAGMA journal_mode=DELETE;")
-        .unwrap();
+    store.save(None).unwrap();
     store.close().unwrap();
 
     let mut reopened = ProjectStore::open(&path).unwrap();

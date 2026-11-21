@@ -5,12 +5,12 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AuditStateSnapshot, FlowId, MAX_AUDIT_FINDINGS, MAX_AUDIT_STATE_BYTES, MAX_AUDIT_TASKS,
     ProjectKey,
-    store::{ProjectStore, SCHEMA, audit, metadata, schema_guard},
+    store::{ProjectStore, SCHEMA, audit, ensure_schema_validated_in_tx, metadata},
 };
 
 use super::{
-    MAX_ENTRIES, MAX_NAMESPACES, MAX_PLUGIN_STORAGE_BYTES, PREFIX, decode_map, namespace,
-    namespace_count, read_map, validate_key, validate_plugin_id, validate_value,
+    MAX_ENTRIES, MAX_NAMESPACES, MAX_PLUGIN_STORAGE_BYTES, namespace, namespace_count, read_map,
+    validate_key, validate_plugin_id, validate_value,
 };
 
 pub(in crate::store) fn read_audit_state(
@@ -19,7 +19,7 @@ pub(in crate::store) fn read_audit_state(
     let mut query = transaction.prepare(
         "SELECT key, typeof(value),
                 CASE WHEN typeof(value)='blob' AND length(value)<=?2 THEN value END
-         FROM main.metadata WHERE key=?1 COLLATE NOCASE",
+         FROM main.metadata WHERE key=?1",
     )?;
     let mut rows = query.query(params![audit::KEY, i64::try_from(MAX_AUDIT_STATE_BYTES)?])?;
     let Some(row) = rows.next()? else {
@@ -58,40 +58,6 @@ pub(in crate::store) fn audit_pinned_flows(transaction: &Transaction<'_>) -> Res
         .into_iter()
         .filter_map(|finding| finding.flow_id)
         .collect())
-}
-
-pub(in crate::store) fn validate_all(transaction: &Transaction<'_>) -> Result<()> {
-    let count = namespace_count(transaction)?;
-    ensure!(
-        count <= MAX_NAMESPACES,
-        "插件存储命名空间数量超过 {MAX_NAMESPACES} 个上限"
-    );
-    if count == 0 {
-        return Ok(());
-    }
-    let mut statement = transaction.prepare(
-        "SELECT key,typeof(value),
-                CASE WHEN typeof(value)='blob' AND length(value)<=?1 THEN value END
-         FROM main.metadata WHERE key GLOB 'plugin_storage:*' ORDER BY key LIMIT ?2",
-    )?;
-    let mut rows = statement.query(params![
-        i64::try_from(MAX_PLUGIN_STORAGE_BYTES)?,
-        i64::try_from(MAX_NAMESPACES)?
-    ])?;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let suffix = key.strip_prefix(PREFIX).context("插件存储键前缀无效")?;
-        ensure!(
-            row.get::<_, String>(1)? == "blob",
-            "插件存储必须为二进制 JSON"
-        );
-        let bytes = row
-            .get_ref(2)?
-            .as_blob()
-            .context("插件存储类型或长度无效")?;
-        decode_map(suffix, bytes)?;
-    }
-    Ok(())
 }
 
 impl ProjectStore {
@@ -138,8 +104,7 @@ impl ProjectStore {
             metadata::project_id(&transaction)? == project.id && self.id == project.id,
             "插件存储项目归属已改变"
         );
-        schema_guard::validate(&transaction, SCHEMA)?;
-        schema_guard::validate_update_dependencies(&transaction, "metadata", &["value"], cancel)?;
+        ensure_schema_validated_in_tx(&self.cache, &transaction)?;
         ensure!(!cancel.is_cancelled(), "插件存储写入已取消");
         let mut map = read_map(&transaction, plugin_id)?.unwrap_or_default();
         if !map.entries.contains_key(key) {

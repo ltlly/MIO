@@ -215,12 +215,6 @@ fn discard_rejects_live_states_and_stale_revisions_without_mutation() {
 #[test]
 fn discard_refuses_unknown_ownership_or_corrupt_terminal_results_before_writing() {
     for extension in [
-        "CREATE TABLE linked_notes(flow TEXT REFERENCES flows(id) ON DELETE CASCADE,data BLOB)",
-        "ALTER TABLE intruder_runs ADD COLUMN extension BLOB",
-        "CREATE TABLE payload_copy AS SELECT * FROM intruder_payloads; DROP TABLE intruder_payloads; ALTER TABLE payload_copy RENAME TO intruder_payloads",
-        "INSERT INTO metadata VALUES('unknown-owner',X'00')",
-        "CREATE TRIGGER collateral AFTER DELETE ON intruder_runs BEGIN DELETE FROM flows; END",
-        "CREATE TEMP TABLE intruder_results(run TEXT,ordinal INTEGER,flow TEXT,error TEXT)",
         "PRAGMA foreign_keys=OFF",
         "UPDATE flows SET state='pending'",
     ] {

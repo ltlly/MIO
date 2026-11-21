@@ -52,12 +52,12 @@ impl ProjectStore {
         )?;
         let id = Uuid::new_v4();
         let mut store = Self {
+            cache: Mutex::new(StoreCache::default()),
             connection,
             id,
             path: None,
             temporary,
             intruder_sessions: intruder::IntruderSessions::default(),
-            cached_workspace: std::sync::Mutex::new(None),
         };
         store.configure()?;
         store.connection.execute_batch(&format!("
@@ -102,151 +102,38 @@ impl ProjectStore {
         if crate::is_external_archive_file(path) {
             bail!("外部归档项目须通过只读导入转换，不能直接作为 MIO 项目打开；源文件未修改");
         }
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let read = Connection::open_with_flags(path, flags).context("不能只读检查项目文件")?;
-        read.busy_timeout(Duration::from_millis(1500))?;
-        read.pragma_update(None, "trusted_schema", false)?;
-        let transaction = read.unchecked_transaction()?;
-        let app_id: i32 =
-            transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(
-            app_id == APPLICATION_ID && (1..=SCHEMA).contains(&schema),
-            "不是受支持的 MIO 项目；未修改文件"
-        );
-        schema_guard::validate(&transaction, schema)?;
-        let id = metadata::project_id(&transaction)?;
-        let preflight_workspace = metadata::workspace(&transaction)?;
-        let preflight_schema_version: i64 =
-            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        transaction.commit()?;
-        drop(read);
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let mut store = Self {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags).context("不能打开项目文件")?;
+        connection.busy_timeout(Duration::from_millis(1500))?;
+        connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+        let (id, workspace) = {
+            let transaction = connection.unchecked_transaction()?;
+            let app_id: i32 =
+                transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
+            let schema: i32 =
+                transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            ensure!(
+                app_id == APPLICATION_ID && schema == SCHEMA,
+                "不是受支持的 MIO 项目；未修改文件"
+            );
+            schema_guard::validate(&transaction)?;
+            let id = metadata::project_id(&transaction)?;
+            let workspace = metadata::workspace(&transaction)?;
+            transaction.commit()?;
+            (id, workspace)
+        };
+        connection.pragma_update(None, "query_only", false)?;
+        let store = Self {
+            cache: Mutex::new(StoreCache::default()),
             connection,
             id,
             path: Some(path.to_owned()),
             temporary: None,
             intruder_sessions: intruder::IntruderSessions::default(),
-            cached_workspace: std::sync::Mutex::new(None),
         };
-        let validated_workspace = store.migrate_with_preflight(Some((
-            schema,
-            preflight_schema_version,
-            preflight_workspace,
-        )))?;
         store.configure()?;
-        store.record_opened_cache(Some(validated_workspace))?;
+        store.record_opened_cache(Some(workspace))?;
         Ok(store)
-    }
-
-    #[cfg(test)]
-    pub(super) fn migrate(&mut self) -> Result<()> {
-        let validated_workspace = self.migrate_with_preflight(None)?;
-        self.record_opened_cache(Some(validated_workspace))?;
-        Ok(())
-    }
-
-    fn migrate_with_preflight(
-        &mut self,
-        preflight: Option<(i32, i64, Workspace)>,
-    ) -> Result<Workspace> {
-        self.connection.busy_timeout(Duration::from_millis(1500))?;
-        self.connection.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL;",
-        )?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        // Validate this reopened connection before migration writes. This is not a path/inode
-        // identity guarantee across the read-only/read-write reopen.
-        let app_id: i32 =
-            transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(
-            app_id == APPLICATION_ID && (1..=SCHEMA).contains(&schema),
-            "不是受支持的 MIO 项目；未修改文件"
-        );
-        let current_sv: i64 =
-            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        let validated_workspace = match preflight {
-            Some((pre_schema, pre_sv, pre_ws)) if schema == pre_schema && current_sv == pre_sv => {
-                ensure!(
-                    metadata::project_id(&transaction)? == self.id,
-                    "项目 ID 在重新打开后已变化；未迁移或保存"
-                );
-                pre_ws
-            }
-            _ => {
-                schema_guard::validate(&transaction, schema)?;
-                ensure!(
-                    metadata::project_id(&transaction)? == self.id,
-                    "项目 ID 在重新打开后已变化；未迁移或保存"
-                );
-                metadata::workspace(&transaction)?
-            }
-        };
-        if schema == 1 {
-            websocket::create_schema(&transaction)?;
-        }
-        if schema < 3 {
-            ext_archive::create_schema(&transaction)?;
-        }
-        if schema < 4 {
-            intruder::create_schema(&transaction)?;
-        } else if schema < 7 {
-            intruder::add_pause_column(&transaction)?;
-        }
-        if (4..10).contains(&schema) {
-            intruder::add_title_columns(&transaction)?;
-        }
-        if (4..12).contains(&schema) {
-            intruder::add_baseline_column(&transaction)?;
-        }
-        if (4..13).contains(&schema) {
-            intruder::add_resource_pool_columns(&transaction)?;
-        }
-        if schema < 19 {
-            websocket::create_connections(&transaction)?;
-        }
-        if schema < 24 {
-            websocket::create_originals(&transaction)?;
-        }
-        if schema < 20 {
-            websocket_notes::create_schema(&transaction)?;
-        }
-        if schema < 21 {
-            repeater_history::create_schema(&transaction)?;
-        }
-        if schema < 22 {
-            ext_archive::http_notes::create_schema(&transaction)?;
-        }
-        if schema < 23 {
-            ext_archive::http_highlights::create_schema(&transaction)?;
-        }
-        if schema < 25 {
-            transaction.execute_batch(&format!(
-                "ALTER TABLE flows ADD COLUMN {FLOW_LISTENER_PORT_COLUMN};"
-            ))?;
-        }
-        if (4..25).contains(&schema) {
-            intruder::add_result_annotation_columns(&transaction)?;
-        }
-        if schema < 26 {
-            target_site_map::create_schema(&transaction)?;
-        }
-        if schema < 27 {
-            add_flow_denorm_columns(&transaction)?;
-            backfill_flow_denorm_columns(&transaction)?;
-        }
-        if schema < SCHEMA {
-            transaction.pragma_update(None, "user_version", SCHEMA)?;
-        }
-        transaction.commit()?;
-        Ok(validated_workspace)
     }
 
     pub(super) fn configure(&self) -> Result<()> {
@@ -265,9 +152,8 @@ impl ProjectStore {
             .connection
             .pragma_query_value(None, "data_version", |row| row.get(0))?;
         let tc = query_total_changes(&self.connection)?;
-        let state = conn_cache_for(&self.cached_workspace, &self.connection);
-        if let Ok(mut guard) = state.lock() {
-            guard.validated_schema = Some((SCHEMA, sv, dv));
+        if let Ok(mut guard) = self.cache.lock() {
+            guard.validated_schema = Some((sv, dv));
             if let Some(ws) = workspace {
                 guard.workspace = Some(WorkspaceCacheEntry {
                     data_version: dv,
@@ -281,8 +167,8 @@ impl ProjectStore {
     }
 
     pub(super) fn clear_connection_cache(&self) {
-        if let Ok(mut guard) = self.cached_workspace.lock() {
-            *guard = None;
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = StoreCache::default();
         }
     }
 

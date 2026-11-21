@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn sort_by_length(
+pub(in crate::store::intruder) fn sort_by_length(
     rows: &mut [(u64, u64, Option<u64>)],
     ascending: bool,
     check: &dyn Fn() -> Result<()>,
@@ -107,7 +107,7 @@ pub(super) fn response_length(
     )))
 }
 
-pub(super) fn sort_filtered_rows(
+pub(in crate::store::intruder) fn sort_filtered_rows(
     rows: &mut [MatchedResult],
     sort: crate::IntruderResultSort,
     grep_config: &crate::IntruderGrepConfig,
@@ -434,7 +434,7 @@ pub(super) fn view_row(
     }))
 }
 
-pub(super) fn view_row_bytes(row: &IntruderResultViewRow) -> Result<usize> {
+pub(in crate::store::intruder) fn view_row_bytes(row: &IntruderResultViewRow) -> Result<usize> {
     let result = match row.result.as_ref().map(|result| &result.outcome) {
         Some(IntruderResultOutcome::Flow(summary)) => serde_json::to_vec(summary)?.len(),
         Some(IntruderResultOutcome::Rejected(error)) => error.len(),

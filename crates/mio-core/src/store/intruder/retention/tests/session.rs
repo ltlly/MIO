@@ -56,7 +56,7 @@ fn retention_promotion_failure_keeps_ram_until_the_entire_commit_succeeds() {
         let mut store = ProjectStore::create(None).unwrap();
         let (run, flow) = finished(&mut store, Uuid::new_v4(), 1);
         let session = change(&mut store, &run, IntruderRetention::Session).unwrap();
-        let before = raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id);
+        let before = store.intruder_sessions.runs[&run.id].data.clone();
         let workspace = workspace_bytes(&store);
         store
             .connection
@@ -81,10 +81,7 @@ fn retention_promotion_failure_keeps_ram_until_the_entire_commit_succeeds() {
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
         store.connection.commit_hook(None::<fn() -> bool>);
         assert!(result.is_err());
-        assert_eq!(
-            raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-            before
-        );
+        assert_eq!(store.intruder_sessions.runs[&run.id].data, before);
         assert_eq!(workspace_bytes(&store), workspace);
         assert!(find_run(&store.connection, run.id).unwrap().is_none());
         assert!(!has_flow(&store.connection, flow.summary.id).unwrap());
@@ -180,34 +177,21 @@ fn retention_refuses_foreign_owner_generation_and_exhausted_release_revision() {
 
 #[test]
 fn retention_collision_and_retirement_tampering_never_replace_ram() {
-    for mutation in 0..6 {
+    for mutation in 0..5 {
         let mut store = ProjectStore::create(None).unwrap();
         let (run, flow) = finished(&mut store, Uuid::new_v4(), 1);
         let session = change(&mut store, &run, IntruderRetention::Session).unwrap();
-        let memory = &store.intruder_sessions.runs[&run.id].connection;
-        let before = raw_dataset(memory, run.id);
+        let before = store.intruder_sessions.runs[&run.id].data.clone();
         match mutation {
             0 => {
-                copy_rows(
-                    memory,
-                    &store.connection,
-                    "flows",
-                    DATA[2].1,
-                    "id=?1",
-                    flow.summary.id,
-                    &CancellationToken::new(),
-                )
-                .unwrap();
-                copy_rows(
-                    memory,
-                    &store.connection,
-                    "messages",
-                    DATA[3].1,
-                    "flow=?1 ORDER BY side",
-                    flow.summary.id,
-                    &CancellationToken::new(),
-                )
-                .unwrap();
+                let record = store.intruder_sessions.runs[&run.id]
+                    .data
+                    .read_flow_record(flow.summary.id)
+                    .unwrap()
+                    .unwrap();
+                let tx = store.connection.transaction().unwrap();
+                store::messages::write_record(&tx, &record).unwrap();
+                tx.commit().unwrap();
             }
             1 => {
                 let mut wrong = session.run.clone();
@@ -230,35 +214,27 @@ fn retention_collision_and_retirement_tampering_never_replace_ram() {
                     .unwrap();
             }
             3 => {
-                copy_rows(
-                    memory,
-                    &store.connection,
-                    DATA[0].0,
-                    DATA[0].1,
-                    DATA[0].2,
-                    run.id,
+                let data = &store.intruder_sessions.runs[&run.id].data;
+                let tx = store.connection.transaction().unwrap();
+                data.write_to_project(
+                    &tx,
+                    &BTreeSet::new(),
+                    data.run.revision,
                     &CancellationToken::new(),
+                    |_| Ok(()),
                 )
                 .unwrap();
+                tx.commit().unwrap();
             }
             4 => {
                 store.connection.execute_batch("UPDATE metadata SET value=CAST(json_set(CAST(value AS TEXT),'$.future_scalar',7) AS BLOB) WHERE key='workspace'").unwrap();
-            }
-            5 => {
-                store
-                    .connection
-                    .execute_batch("ALTER TABLE flows ADD COLUMN future BLOB")
-                    .unwrap();
             }
             _ => unreachable!(),
         }
         let disk = raw_dataset(&store.connection, run.id);
         let workspace = workspace_bytes(&store);
         assert!(change(&mut store, &session.run, IntruderRetention::Project).is_err());
-        assert_eq!(
-            raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-            before
-        );
+        assert_eq!(store.intruder_sessions.runs[&run.id].data, before);
         assert_eq!(raw_dataset(&store.connection, run.id), disk);
         assert_eq!(workspace_bytes(&store), workspace);
     }
@@ -267,9 +243,6 @@ fn retention_collision_and_retirement_tampering_never_replace_ram() {
 #[test]
 fn retention_unknown_and_malformed_source_is_refused_without_rewriting_it() {
     for mutation in [
-        "ALTER TABLE intruder_runs ADD COLUMN future BLOB",
-        "CREATE TABLE future_owner(flow TEXT REFERENCES flows(id))",
-        "INSERT INTO metadata VALUES('future-owner',X'00')",
         "UPDATE intruder_runs SET spec_meta=CAST(json_set(CAST(spec_meta AS TEXT),'$.future_scalar',7) AS BLOB)",
         "UPDATE flows SET summary=CAST(json_set(CAST(summary AS TEXT),'$.future_scalar',7) AS BLOB)",
         "UPDATE messages SET head=CAST(json_set(CAST(head AS TEXT),'$.future_scalar',7) AS BLOB) WHERE side=0",

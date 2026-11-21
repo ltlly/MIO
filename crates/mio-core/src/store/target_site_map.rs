@@ -119,9 +119,9 @@ impl crate::store::ProjectStore {
         ensure!(!owner.is_empty() && owner.len() <= 4096, "站点地图来源身份无效");
         validate_detail(&detail)?;
         let transaction = self.connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        crate::store::ensure_schema_validated_in_tx(&self.cached_workspace, &transaction, crate::store::SCHEMA)?;
+        crate::store::ensure_schema_validated_in_tx(&self.cache, &transaction)?;
         ensure!(crate::store::metadata::project_id(&transaction)? == self.id
-            && crate::store::save::workspace_arc_in_tx(&self.cached_workspace, &transaction)?.revision == workspace_revision,
+            && crate::store::save::workspace_arc_in_tx(&self.cache, &transaction)?.revision == workspace_revision,
             "站点地图项目或工作区 revision 已变化");
         let before_tc = crate::store::query_total_changes(&transaction)?;
         let previous: Option<(String, u64, Vec<u8>)> = transaction.query_row(
@@ -152,7 +152,6 @@ impl crate::store::ProjectStore {
             )?;
             ensure!(count < MAX_SITE_MAP_NODES && bytes.checked_add(encoded.len()).is_some_and(|bytes| bytes <= MAX_TOTAL_ENTRY_BYTES),
                 "站点地图显式条目超过 4096 项或 512 MiB");
-            crate::store::validate_site_map_update_deps(&self.cached_workspace, &transaction, cancel)?;
             transaction.execute("INSERT INTO main.site_map_entries(id,owner,revision,row,detail) VALUES(?1,?2,?3,?4,?5)
                 ON CONFLICT(owner) DO UPDATE SET revision=excluded.revision,row=excluded.row,detail=excluded.detail",
                 params![entry_id.to_string(), owner, revision, row_encoded, encoded])?;
@@ -160,7 +159,7 @@ impl crate::store::ProjectStore {
         ensure!(!cancel.is_cancelled(), "站点地图添加已取消");
         transaction.commit()?;
         if !unchanged {
-            crate::store::advance_workspace_cache_changes(&self.connection, before_tc)?;
+            self.advance_workspace_cache_changes(before_tc)?;
         }
         let node_key = tree::parse_site_map_url(&detail.record.request.url).context("站点地图 URL 无效")?.full_key;
         Ok(SiteMapEntryReceipt { entry_id, revision, node_key, row })

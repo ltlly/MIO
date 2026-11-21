@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn pending_cancelled_session_write_failure_recovers_its_reserved_result_without_sending() {
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -25,19 +24,20 @@ async fn pending_cancelled_session_write_failure_recovers_its_reserved_result_wi
         let terminal_rejected = Arc::new(AtomicBool::new(false));
         let observed_pending = Arc::clone(&pending_committed);
         let observed_rejected = Arc::clone(&terminal_rejected);
-        state.store.test_intruder_connection(id).unwrap().authorizer(Some(move |context: AuthContext<'_>| {
-            if matches!(context.action, AuthAction::Update { table_name: "intruder_runs", column_name: "dispatched", .. }) {
+        state.store.set_session_intruder_write_hook(id, Some(Arc::new(move |action: &str| {
+            if action == "dispatched" {
                 observed_pending.store(true, Ordering::SeqCst);
                 cancel.cancel();
+                return true;
             }
-            if observed_pending.load(Ordering::SeqCst)
-                && matches!(context.action, AuthAction::Insert { table_name: "flows", .. }) {
+            if observed_pending.load(Ordering::SeqCst) && action == "insert_flow" {
                 observed_rejected.store(true, Ordering::SeqCst);
-                return Authorization::Deny;
+                return false;
             }
-            Authorization::Allow
-        }));
+            true
+        })));
         assert!(state.advance_intruder(id).await.is_err());
+        state.store.set_session_intruder_write_hook(id, None);
         assert!(pending_committed.load(Ordering::SeqCst) && terminal_rejected.load(Ordering::SeqCst));
         assert!(state.stop_intruder().await.is_err());
         assert!(!state.intruder.has_resources());

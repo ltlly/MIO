@@ -1,28 +1,11 @@
-use std::future::pending;
-
-use tokio::task::{JoinError, JoinHandle};
-
+use super::http_query::{ActiveQuery, AsyncHistoryQuery, AsyncQueryState, QuerySignal};
 use super::*;
 
 type Output = Result<WebSocketHistoryResult>;
+type Active = ActiveQuery<WebSocketHistoryQuery, WebSocketHistoryResult>;
 
-struct Active {
-    query: WebSocketHistoryQuery,
-    cancel: CancellationToken,
-    worker: JoinHandle<Output>,
-}
-
-#[derive(Default)]
-pub(super) struct QueryState {
-    active: Option<Active>,
-    latest: Option<WebSocketHistoryQuery>,
-    result: Option<Event>,
-}
-
-pub(super) enum Signal {
-    Finished(std::result::Result<Output, JoinError>),
-    Ready(mpsc::OwnedPermit<Event>),
-}
+pub(super) type QueryState = AsyncQueryState<WebSocketHistoryQuery>;
+pub(super) type Signal = QuerySignal<WebSocketHistoryResult>;
 
 impl WebSocketHistoryQuery {
     fn result(self, result: Output) -> Event {
@@ -46,74 +29,42 @@ impl WebSocketHistoryQuery {
     }
 }
 
-impl QueryState {
-    pub(super) fn has_worker(&self) -> bool {
-        self.active.is_some()
+impl AsyncHistoryQuery for WebSocketHistoryQuery {
+    type Output = WebSocketHistoryResult;
+
+    const CANCELLED_MESSAGE: &'static str = "WebSocket 查询已取消";
+    const PANIC_PREFIX: &'static str = "WebSocket 查询任务异常退出";
+    const SHUTDOWN_TIMEOUT_MESSAGE: &'static str =
+        "WebSocket 查询仍在回收；保留任务句柄，未保存或切换项目，请稍后重试";
+
+    fn project(&self) -> ProjectKey {
+        self.project
     }
 
-    pub(super) fn cancel(&mut self) {
-        if let Some(active) = &self.active {
-            active.cancel.cancel();
-        }
-        if let Some(query) = self.latest.take() {
-            self.result = Some(query.result(Err(anyhow::anyhow!("WebSocket 查询已取消"))));
-            return;
-        }
-        let owner = self.active.as_ref().map(|active| active.query.project);
-        let result = self.result.take().filter(|result| match result {
+    fn into_event(self, result: Result<Self::Output>) -> Event {
+        self.result(result)
+    }
+
+    fn event_project(event: &Event) -> Option<ProjectKey> {
+        match event {
             Event::WebSocketHistoryPage { project, .. }
-            | Event::WebSocketHistoryError { project, .. } => {
-                owner.is_none_or(|owner| owner == *project)
-            }
-            _ => false,
-        });
-        if let Some(result) = result {
-            self.result = Some(match result {
-                Event::WebSocketHistoryPage {
-                    project,
-                    query_revision,
-                    ..
-                } => Event::WebSocketHistoryError {
-                    project,
-                    query_revision,
-                    message: "WebSocket 查询已取消".into(),
-                },
-                result => result,
-            });
-        } else if let Some(active) = &self.active {
-            self.result = Some(
-                active
-                    .query
-                    .clone()
-                    .result(Err(anyhow::anyhow!("WebSocket 查询已取消"))),
-            );
+            | Event::WebSocketHistoryError { project, .. } => Some(*project),
+            _ => None,
         }
     }
 
-    async fn completion(&mut self) -> std::result::Result<Output, JoinError> {
-        match &mut self.active {
-            Some(active) => (&mut active.worker).await,
-            None => pending().await,
-        }
-    }
-
-    pub(super) async fn next_signal(
-        &mut self,
-        events: &mpsc::Sender<Event>,
-        reclaim_only: bool,
-    ) -> Signal {
-        let deliver = self.result.is_some() && !reclaim_only;
-        tokio::select! {
-            biased;
-            result = self.completion() => Signal::Finished(result),
-            permit = async {
-                if deliver {
-                    match events.clone().reserve_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => pending().await,
-                    }
-                } else { pending().await }
-            } => Signal::Ready(permit),
+    fn convert_pending_event_on_cancel(event: Event) -> Event {
+        match event {
+            Event::WebSocketHistoryPage {
+                project,
+                query_revision,
+                ..
+            } => Event::WebSocketHistoryError {
+                project,
+                query_revision,
+                message: Self::CANCELLED_MESSAGE.into(),
+            },
+            other => other,
         }
     }
 }
@@ -124,23 +75,12 @@ impl State {
             .check_project(query.project)
             .and_then(|()| query.validate());
         if let Err(error) = valid {
-            if query.project == self.project {
-                if let Some(active) = &self.websocket_query.active {
-                    active.cancel.cancel();
-                }
-                self.websocket_query.latest = None;
-            }
-            if self.websocket_query.result.is_none() || query.project == self.project {
-                self.websocket_query.result = Some(query.result(Err(error)));
-            }
+            self.websocket_query
+                .reject_or_record_error(query, self.project, error);
             return;
         }
         self.websocket_history_dirty = false;
-        self.websocket_query.result = None;
-        if let Some(active) = &self.websocket_query.active {
-            active.cancel.cancel();
-            self.websocket_query.latest = Some(query);
-        } else {
+        if let Some(query) = self.websocket_query.enqueue_or_take_start(query) {
             self.start_websocket_query(query);
         }
     }
@@ -173,36 +113,13 @@ impl State {
 
     pub(super) fn websocket_query_signal(&mut self, signal: Signal) {
         match signal {
-            Signal::Ready(permit) => {
-                permit.send(
-                    self.websocket_query
-                        .result
-                        .take()
-                        .expect("query result owns this permit"),
-                );
-            }
+            Signal::Ready(permit) => self.websocket_query.deliver_ready(permit),
             Signal::Finished(result) => {
-                let active = self
+                if let Some(latest) = self
                     .websocket_query
-                    .active
-                    .take()
-                    .expect("joined query retains its owner");
-                if let Some(latest) = self.websocket_query.latest.take() {
-                    self.start_websocket_query(latest);
-                } else if active.query.project == self.project
-                    && !matches!(&self.websocket_query.result,
-                        Some(Event::WebSocketHistoryPage { project, .. }
-                            | Event::WebSocketHistoryError { project, .. })
-                        if *project == active.query.project)
+                    .finish_and_take_next(result, self.project)
                 {
-                    let result = if active.cancel.is_cancelled() {
-                        Err(anyhow::anyhow!("WebSocket 查询已取消"))
-                    } else {
-                        result
-                            .map_err(|error| anyhow::anyhow!("WebSocket 查询任务异常退出：{error}"))
-                            .and_then(|result| result)
-                    };
-                    self.websocket_query.result = Some(active.query.result(result));
+                    self.start_websocket_query(latest);
                 }
             }
         }
@@ -212,28 +129,11 @@ impl State {
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        self.websocket_query.cancel();
-        if self.websocket_query.has_worker() {
-            let result = tokio::time::timeout_at(deadline, self.websocket_query.completion())
-                .await
-                .context("WebSocket 查询仍在回收；保留任务句柄，未保存或切换项目，请稍后重试")?;
-            self.websocket_query_signal(Signal::Finished(result));
-        }
-        Ok(())
+        self.websocket_query.stop_until(deadline, self.project).await
     }
 
     pub(super) async fn finish_websocket_query_shutdown(&mut self) -> Result<()> {
-        self.websocket_query.cancel();
-        if self.websocket_query.has_worker() {
-            // A blocking matcher cannot be aborted; retain this owner until its actual exit.
-            let result = self.websocket_query.completion().await;
-            let failure = result.as_ref().err().map(ToString::to_string);
-            self.websocket_query_signal(Signal::Finished(result));
-            if let Some(error) = failure {
-                anyhow::bail!("WebSocket 查询任务异常退出：{error}");
-            }
-        }
-        Ok(())
+        self.websocket_query.finish_shutdown(self.project).await
     }
 }
 

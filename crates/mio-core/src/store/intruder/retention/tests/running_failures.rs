@@ -8,7 +8,7 @@ fn running_session_promotion_copy_failure_rolls_back_ram_reservations_and_projec
     };
     let mut store = ProjectStore::create(None).unwrap();
     let (run, [first, second]) = running_promotion_fixture(&mut store, false);
-    let before = raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id);
+    let before = store.intruder_sessions.runs[&run.id].data.clone();
     let disk_before = raw_dataset(&store.connection, run.id);
     let workspace = workspace_bytes(&store);
     let quota = (
@@ -38,10 +38,7 @@ fn running_session_promotion_copy_failure_rolls_back_ram_reservations_and_projec
         "a valid running snapshot must reach the copy transaction before its injected write fault"
     );
     assert_eq!(raw_dataset(&store.connection, run.id), disk_before);
-    assert_eq!(
-        raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-        before
-    );
+    assert_eq!(store.intruder_sessions.runs[&run.id].data, before);
     assert_eq!(workspace_bytes(&store), workspace);
     assert_eq!(
         (
@@ -53,12 +50,6 @@ fn running_session_promotion_copy_failure_rolls_back_ram_reservations_and_projec
     assert_eq!(store.read_intruder_run(run.id).unwrap(), run);
     assert_eq!(store.read(first.summary.id).unwrap(), first);
     assert_eq!(store.read(second.summary.id).unwrap(), second);
-    assert!(
-        store.intruder_sessions.runs[&run.id]
-            .connection
-            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-            .unwrap()
-    );
     assert!(
         store
             .set_intruder_retention(
@@ -110,41 +101,25 @@ fn running_session_promotion_rejects_stopping_and_inconsistent_pending_snapshots
                 .unwrap();
         } else {
             let dataset = store.intruder_sessions.runs.get_mut(&run.id).unwrap();
-            dataset
-                .connection
-                .pragma_update(None, "query_only", false)
-                .unwrap();
             if fault == 1 {
-                dataset
-                    .connection
-                    .execute(
-                        "UPDATE intruder_runs SET completed=0 WHERE id=?1",
-                        [run.id.to_string()],
-                    )
-                    .unwrap();
+                dataset.data.run.completed = 0;
                 dataset.run.completed = 0;
                 run.completed = 0;
             } else {
-                dataset.connection.execute(
-                    "INSERT INTO messages(flow,side,head,body) SELECT ?1,?3,head,body FROM messages WHERE flow=?2 AND side=1",
-                    params![pending.summary.id.to_string(), first.summary.id.to_string(), if fault == 2 { 1 } else { 3 }],
-                ).unwrap();
-                let revised = dataset_logical_bytes(
-                    &dataset.connection,
-                    run.id,
-                    u64::MAX,
-                    &CancellationToken::new(),
-                )
-                .unwrap();
+                let resp_msg = dataset.data.flows[&first.summary.id].messages[&1].clone();
+                dataset
+                    .data
+                    .flows
+                    .get_mut(&pending.summary.id)
+                    .unwrap()
+                    .messages
+                    .insert(if fault == 2 { 1 } else { 3 }, resp_msg);
+                let revised = dataset.data.logical_bytes().unwrap();
                 store.intruder_sessions.logical_bytes += revised - dataset.logical_bytes;
                 dataset.logical_bytes = revised;
             }
-            dataset
-                .connection
-                .pragma_update(None, "query_only", true)
-                .unwrap();
         }
-        let bytes = raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id);
+        let bytes = store.intruder_sessions.runs[&run.id].data.clone();
         let before_workspace = workspace_bytes(&store);
         let before_project = raw_dataset(&store.connection, run.id);
         let before_quota = (
@@ -159,10 +134,7 @@ fn running_session_promotion_rejects_stopping_and_inconsistent_pending_snapshots
             1 => assert!(error.contains("已完成结果数量"), "{error}"),
             _ => assert!(error.contains("在途结果不能包含响应"), "{error}"),
         }
-        assert_eq!(
-            raw_dataset(&store.intruder_sessions.runs[&run.id].connection, run.id),
-            bytes
-        );
+        assert_eq!(store.intruder_sessions.runs[&run.id].data, bytes);
         assert_eq!(workspace_bytes(&store), before_workspace);
         assert_eq!(raw_dataset(&store.connection, run.id), before_project);
         assert_eq!(
@@ -171,12 +143,6 @@ fn running_session_promotion_rejects_stopping_and_inconsistent_pending_snapshots
                 store.intruder_sessions.reserved_bytes
             ),
             before_quota
-        );
-        assert!(
-            store.intruder_sessions.runs[&run.id]
-                .connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-                .unwrap()
         );
     }
 }
@@ -217,12 +183,6 @@ fn task_title_session_rename_preserves_ticket_readonly_quota_and_explicit_promot
     assert_eq!(
         store.intruder_sessions.logical_bytes,
         bytes - 6 + "内存名称🙂".len() as u64
-    );
-    assert!(
-        store.intruder_sessions.runs[&kept.id]
-            .connection
-            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-            .unwrap()
     );
     assert_eq!(store.read_intruder_run(kept.id).unwrap(), renamed);
     assert_eq!(
@@ -266,13 +226,12 @@ fn task_title_session_rename_preserves_ticket_readonly_quota_and_explicit_promot
 
 #[test]
 fn task_title_session_failure_never_changes_name_ticket_quota_or_query_only() {
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let mut store = ProjectStore::create(None).unwrap();
     let (original, _) = finished(&mut store, Uuid::new_v4(), 1);
     let kept = change(&mut store, &original, IntruderRetention::Session)
         .unwrap()
         .run;
-    let before = raw_dataset(&store.intruder_sessions.runs[&kept.id].connection, kept.id);
+    let before = store.intruder_sessions.runs[&kept.id].data.clone();
     let ticket = retired_run(&store.connection, kept.id).unwrap();
     let bytes = store.intruder_sessions.logical_bytes;
     store.intruder_sessions.quota = bytes;
@@ -288,15 +247,10 @@ fn task_title_session_failure_never_changes_name_ticket_quota_or_query_only() {
             .is_err()
     );
     store.intruder_sessions.quota = SESSION_LOGICAL_QUOTA;
-    store.intruder_sessions.runs[&kept.id]
-        .connection
-        .authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Update {
-                table_name: "intruder_runs",
-                column_name: "title" | "title_revision",
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+    store.set_session_intruder_write_hook(
+        kept.id,
+        Some(std::sync::Arc::new(|action| action != "rename")),
+    );
     assert!(
         store
             .rename_intruder_run(
@@ -308,9 +262,7 @@ fn task_title_session_failure_never_changes_name_ticket_quota_or_query_only() {
             )
             .is_err()
     );
-    store.intruder_sessions.runs[&kept.id]
-        .connection
-        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    store.set_session_intruder_write_hook(kept.id, None);
     assert!(
         store
             .rename_intruder_run(
@@ -337,19 +289,10 @@ fn task_title_session_failure_never_changes_name_ticket_quota_or_query_only() {
             )
             .is_err()
     );
-    assert_eq!(
-        raw_dataset(&store.intruder_sessions.runs[&kept.id].connection, kept.id),
-        before
-    );
+    assert_eq!(store.intruder_sessions.runs[&kept.id].data, before);
     assert_eq!(store.intruder_sessions.logical_bytes, bytes);
     assert_eq!(retired_run(&store.connection, kept.id).unwrap(), ticket);
     assert_eq!(store.read_intruder_run(kept.id).unwrap(), kept);
-    assert!(
-        store.intruder_sessions.runs[&kept.id]
-            .connection
-            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-            .unwrap()
-    );
     store
         .discard_intruder_run(
             kept.id,

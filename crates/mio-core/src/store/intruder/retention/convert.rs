@@ -1,7 +1,34 @@
-use rusqlite::params_from_iter;
 use serde::de::DeserializeOwned;
 
 use super::*;
+
+pub(super) const DATA_SELECTORS: &[(&str, &str, &str)] = &[
+    (
+        "intruder_runs",
+        "id,tab,revision,spec_revision,total,dispatched,completed,state,paused,error,started,spec_meta,template,title,title_revision,baseline_ordinal,pool_id,pool_revision",
+        "id=?1",
+    ),
+    (
+        "intruder_payloads",
+        "run,set_index,ordinal,value",
+        "run=?1 ORDER BY set_index,ordinal",
+    ),
+    (
+        "flows",
+        "id,revision,started,url,method,state,summary",
+        "id IN (SELECT flow FROM main.intruder_results WHERE run=?1) ORDER BY id",
+    ),
+    (
+        "messages",
+        "flow,side,head,body",
+        "flow IN (SELECT flow FROM main.intruder_results WHERE run=?1) ORDER BY flow,side",
+    ),
+    (
+        "intruder_results",
+        "run,ordinal,flow,error,notes,notes_revision,highlight,highlight_revision",
+        "run=?1 ORDER BY ordinal",
+    ),
+];
 
 pub(super) fn validate_workspace_links(
     connection: &Connection,
@@ -27,7 +54,7 @@ pub(super) fn validate_workspace_links(
         .filter_map(|tab| tab.last_flow)
     {
         for dataset in sessions.runs.values() {
-            if has_flow(&dataset.connection, flow)? {
+            if dataset.data.has_flow(flow) {
                 ensure!(
                     has_flow(connection, flow)?,
                     "Intruder Session-only 流量不能成为已保存的 Repeater 引用；请先显式保存攻击"
@@ -36,21 +63,6 @@ pub(super) fn validate_workspace_links(
         }
     }
     Ok(())
-}
-
-pub(super) fn session_connection() -> Result<Connection> {
-    let connection = Connection::open_in_memory()?;
-    connection.execute_batch(
-        "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;
-         PRAGMA temp_store=MEMORY; PRAGMA journal_mode=MEMORY;
-         CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL) WITHOUT ROWID;
-         CREATE TABLE flows(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,started INTEGER NOT NULL,
-             url TEXT NOT NULL,method TEXT NOT NULL,state TEXT NOT NULL,summary BLOB NOT NULL);
-         CREATE TABLE messages(flow TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
-             side INTEGER NOT NULL,head BLOB NOT NULL,body BLOB NOT NULL,PRIMARY KEY(flow,side)) WITHOUT ROWID;"
-    )?;
-    create_schema(&connection)?;
-    Ok(connection)
 }
 
 pub(super) fn retirement_bytes(run: &IntruderRunSummary) -> [u8; 16] {
@@ -107,7 +119,7 @@ pub(super) fn dataset_logical_bytes(
         total <= limit,
         "Intruder Session 逻辑 RAM 数据配额不足；未复制或驱逐"
     );
-    for &(table, columns, selector) in DATA {
+    for &(table, columns, selector) in DATA_SELECTORS {
         // Lengths are computed in SQLite before any template, payload or message reaches Rust.
         let sizes = columns.split(',').map(|column| format!(
             "CASE typeof({column}) WHEN 'null' THEN 0 WHEN 'integer' THEN 8 WHEN 'real' THEN 8 ELSE length(CAST({column} AS BLOB)) END"
@@ -128,41 +140,6 @@ pub(super) fn dataset_logical_bytes(
         }
     }
     Ok(total)
-}
-
-pub(super) fn copy_rows(
-    source: &Connection,
-    target: &Connection,
-    table: &str,
-    columns: &str,
-    selector: &str,
-    id: Uuid,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    let mut query = source.prepare(&select(table, columns, selector))?;
-    let count = query.column_count();
-    let parameters = (1..=count)
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut insert = target.prepare(&format!(
-        "INSERT INTO main.{table}({columns}) VALUES({parameters})"
-    ))?;
-    let mut rows = query.query([id.to_string()])?;
-    while let Some(row) = rows.next()? {
-        ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；数据保留");
-        let values = (0..count)
-            .map(|index| {
-                row.get_ref(index)
-                    .map(rusqlite::types::ToSqlOutput::Borrowed)
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(
-            insert.execute(params_from_iter(values))? == 1,
-            "Intruder RAM/项目复制数量不一致"
-        );
-    }
-    Ok(())
 }
 
 pub(super) fn same_rows(
@@ -205,36 +182,18 @@ pub(super) fn same_flow(
     id: FlowId,
     messages: bool,
 ) -> Result<bool> {
-    if !same_rows(left, right, &select("flows", DATA[2].1, "id=?1"), id)? {
+    if !same_rows(left, right, &select("flows", DATA_SELECTORS[2].1, "id=?1"), id)? {
         return Ok(false);
     }
     if messages {
         return same_rows(
             left,
             right,
-            &select("messages", DATA[3].1, "flow=?1 ORDER BY side"),
+            &select("messages", DATA_SELECTORS[3].1, "flow=?1 ORDER BY side"),
             id,
         );
     }
     Ok(true)
-}
-
-pub(super) fn visit_flows(
-    connection: &Connection,
-    id: Uuid,
-    mut visit: impl FnMut(FlowId) -> Result<()>,
-) -> Result<()> {
-    let mut query = connection.prepare(
-        "SELECT flow FROM main.intruder_results WHERE run=?1 AND flow IS NOT NULL ORDER BY ordinal",
-    )?;
-    let mut rows = query.query([id.to_string()])?;
-    while let Some(row) = rows.next()? {
-        let raw: String = row.get(0)?;
-        let flow = Uuid::parse_str(&raw)?;
-        ensure!(raw == flow.to_string(), "Intruder flow ID 编码无效");
-        visit(flow)?;
-    }
-    Ok(())
 }
 
 pub(in crate::store::intruder) fn strict_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {

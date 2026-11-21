@@ -146,7 +146,6 @@ fn result_query_globally_filters_sorts_and_keeps_offpage_selection_without_bodie
             .set_intruder_state(run.id, IntruderRunState::Completed)
             .unwrap();
         let original = store.intruder_results(run.id, None, 10).unwrap();
-        let connection = store.intruder_connection(run.id).unwrap().0;
         let bodies = Arc::new(AtomicUsize::new(0));
         let authorizer = || {
             let bodies = bodies.clone();
@@ -165,10 +164,7 @@ fn result_query_globally_filters_sorts_and_keeps_offpage_selection_without_bodie
                 _ => Authorization::Allow,
             }
         };
-        connection.authorizer(Some(authorizer()));
-        if session {
-            store.connection.authorizer(Some(authorizer()));
-        }
+        store.connection.authorizer(Some(authorizer()));
         let mut query = query(&store, &run);
         query.filter.status_classes = [true, false, false, true];
         query.sort.column = IntruderResultSortColumn::Status;
@@ -194,12 +190,17 @@ fn result_query_globally_filters_sorts_and_keeps_offpage_selection_without_bodie
         query.offset = 50;
         assert_eq!(fetch(&store, &query).total, 4);
         assert_eq!(bodies.load(Ordering::SeqCst), 0);
-        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
         if session {
-            store
-                .connection
-                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            assert_eq!(
+                store.intruder_sessions.runs[&run.id]
+                    .body_reads
+                    .load(Ordering::SeqCst),
+                0
+            );
         }
+        store
+            .connection
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
         assert_eq!(store.intruder_results(run.id, None, 10).unwrap(), original);
         store.close().unwrap();
     }
@@ -324,7 +325,7 @@ fn result_query_sorts_response_received_and_length_globally_and_fills_lengths() 
     ];
     assert_eq!(expected, [23, 34, 38]);
 
-    let connection = store.intruder_connection(run.id).unwrap().0;
+    let connection = store.test_intruder_connection(run.id).unwrap();
     let bodies = Arc::new(AtomicUsize::new(0));
     connection.authorizer(Some({
         let bodies = bodies.clone();

@@ -45,43 +45,6 @@ fn validate_http_history_metadata(stored: &StoredHttpHistoryMetadata, flow_id: F
     Ok(())
 }
 
-pub(in crate::store) fn validate_all_http_history_metadata(connection: &Connection) -> Result<()> {
-    let mut statement = connection.prepare(
-        "SELECT m.key,
-                CASE WHEN typeof(m.value)='blob' AND length(m.value)<=?1 THEN m.value END,
-                f.revision
-         FROM main.metadata m
-         LEFT JOIN main.flows f ON f.id = substr(m.key, 19)
-         WHERE m.key GLOB 'http_history_meta:*'",
-    )?;
-    let mut rows = statement.query([MAX_HTTP_HISTORY_META_BYTES as i64])?;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let suffix = key
-            .strip_prefix(HTTP_HISTORY_META_PREFIX)
-            .context("HTTP 历史元数据键无效")?;
-        let id = Uuid::parse_str(suffix)?;
-        ensure!(
-            !id.is_nil() && key == format!("{HTTP_HISTORY_META_PREFIX}{id}"),
-            "HTTP 历史元数据键必须使用规范非空 UUID"
-        );
-        let bytes: Vec<u8> = row
-            .get::<_, Option<Vec<u8>>>(1)?
-            .context("HTTP 历史元数据类型无效或超过 256 KiB")?;
-        let stored: StoredHttpHistoryMetadata = serde_json::from_slice(&bytes)?;
-        validate_http_history_metadata(&stored, id)?;
-        let revision: u64 = row
-            .get::<_, Option<u64>>(2)?
-            .context("HTTP 历史元数据对应流量缺失")?;
-        ensure!(
-            stored.revision == revision,
-            "HTTP 历史元数据 revision 与流量不一致"
-        );
-    }
-    let _ = read_next_proxy_capture_number(connection)?;
-    Ok(())
-}
-
 pub(in crate::store) fn read_next_proxy_capture_number(connection: &Connection) -> Result<Option<u64>> {
     let bytes: Option<Option<Vec<u8>>> = connection
         .query_row(
@@ -112,7 +75,6 @@ pub(in crate::store) fn write_next_proxy_capture_number(
         "HTTP 历史捕获序号计数器无效或溢出"
     );
     let bytes = serde_json::to_vec(&next)?;
-    validate_metadata_value_update_deps(tx, &CancellationToken::new())?;
     tx.execute(
         "INSERT INTO main.metadata(key,value) VALUES(?1,?2)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -196,7 +158,6 @@ pub(in crate::store) fn write_http_history_metadata(
     validate_http_history_metadata(&stored, flow_id)?;
     let bytes = serde_json::to_vec(&stored)?;
     ensure!(bytes.len() <= MAX_HTTP_HISTORY_META_BYTES, "HTTP 历史元数据超过 256 KiB");
-    validate_metadata_value_update_deps(tx, &CancellationToken::new())?;
     tx.execute(
         "INSERT INTO main.metadata(key,value) VALUES(?1,?2)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -482,24 +443,14 @@ fn write_capture_inner(
         listener_port != Some(0),
         "HTTP 流量监听端口不能为 0；必须是 1–65535"
     );
-    let before_tc = query_total_changes(tx)?;
     let id = record.summary.id.to_string();
-    let schema: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let previous: Option<(u64, Option<u16>)> = if schema >= 25 {
-        tx.query_row(
+    let previous: Option<(u64, Option<u16>)> = tx
+        .query_row(
             "SELECT revision, listener_port FROM flows WHERE id=?1",
             [&id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-    } else {
-        tx.query_row(
-            "SELECT revision, NULL FROM flows WHERE id=?1",
-            [&id],
-            |row| Ok((row.get(0)?, row.get::<_, Option<u16>>(1)?)),
-        )
-        .optional()?
-    };
+        .optional()?;
     let fast_new_import = imported_meta.is_some() && previous.is_none();
     let before = if fast_new_import {
         None
@@ -569,7 +520,12 @@ fn write_capture_inner(
                 });
                 if stored_meta.is_none() || ip_changed || recv_changed {
                     let mut metadata =
-                        ext_archive::http_query::live_row_metadata(tx, &record.summary, listener_port)?;
+                        ext_archive::http_query::live_row_metadata_with_stored(
+                            tx,
+                            &record.summary,
+                            listener_port,
+                            stored_meta.as_ref(),
+                        )?;
                     if let Some(ip) = metrics.remote_ip {
                         metadata.remote_ip = ip.to_string();
                     }
@@ -582,7 +538,6 @@ fn write_capture_inner(
                         record.summary.revision,
                         &metadata,
                     )?;
-                    advance_workspace_cache_changes(tx, before_tc)?;
                 }
             }
             return Ok(());
@@ -620,34 +575,24 @@ fn write_capture_inner(
             _ => bail!("流式捕获元数据缺失或改变了既有响应的语义"),
         }
     }
-    if schema >= 27 {
-        tx.execute(
-            "INSERT INTO flows(id, revision, started, url, method, state, summary, listener_port, source, status, response_bytes, elapsed_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, url=excluded.url, method=excluded.method, state=excluded.state, summary=excluded.summary, listener_port=COALESCE(excluded.listener_port, flows.listener_port), source=excluded.source, status=excluded.status, response_bytes=excluded.response_bytes, elapsed_ms=excluded.elapsed_ms",
-            params![
-                id,
-                record.summary.revision,
-                record.summary.started_unix_ms,
-                record.summary.url,
-                record.summary.method,
-                state_code(&record.summary.state),
-                serde_json::to_vec(&record.summary)?,
-                listener_port,
-                source_code(&record.summary.source),
-                record.summary.status.map(i64::from),
-                i64::try_from(record.summary.response_bytes)?,
-                i64::try_from(record.summary.elapsed_ms)?,
-            ],
-        )?;
-    } else if schema >= 25 {
-        tx.execute("INSERT INTO flows(id, revision, started, url, method, state, summary, listener_port) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-            ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, url=excluded.url, method=excluded.method, state=excluded.state, summary=excluded.summary, listener_port=COALESCE(excluded.listener_port, flows.listener_port)",
-            params![id, record.summary.revision, record.summary.started_unix_ms, record.summary.url, record.summary.method, state_code(&record.summary.state), serde_json::to_vec(&record.summary)?, listener_port])?;
-    } else {
-        tx.execute("INSERT INTO flows(id, revision, started, url, method, state, summary) VALUES (?1,?2,?3,?4,?5,?6,?7)
-            ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, url=excluded.url, method=excluded.method, state=excluded.state, summary=excluded.summary",
-            params![id, record.summary.revision, record.summary.started_unix_ms, record.summary.url, record.summary.method, state_code(&record.summary.state), serde_json::to_vec(&record.summary)?])?;
-    }
+    tx.execute(
+        "INSERT INTO flows(id, revision, started, url, method, state, summary, listener_port, source, status, response_bytes, elapsed_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, url=excluded.url, method=excluded.method, state=excluded.state, summary=excluded.summary, listener_port=COALESCE(excluded.listener_port, flows.listener_port), source=excluded.source, status=excluded.status, response_bytes=excluded.response_bytes, elapsed_ms=excluded.elapsed_ms",
+        params![
+            id,
+            record.summary.revision,
+            record.summary.started_unix_ms,
+            record.summary.url,
+            record.summary.method,
+            state_code(&record.summary.state),
+            serde_json::to_vec(&record.summary)?,
+            listener_port,
+            source_code(&record.summary.source),
+            record.summary.status.map(i64::from),
+            i64::try_from(record.summary.response_bytes)?,
+            i64::try_from(record.summary.elapsed_ms)?,
+        ],
+    )?;
     // Body bytes never enter the summary query or its JSON representation.
     let is_proxy = record.summary.source == crate::TrafficSource::Proxy;
     let proxy_capture_number = if is_proxy {
@@ -808,7 +753,12 @@ fn write_capture_inner(
         tx.execute("DELETE FROM messages WHERE flow=?1 AND side=1", [&id])?;
     }
     if is_proxy {
-        let mut metadata = ext_archive::http_query::live_row_metadata(tx, &record.summary, listener_port)?;
+        let mut metadata = ext_archive::http_query::live_row_metadata_with_stored(
+            tx,
+            &record.summary,
+            listener_port,
+            stored_meta.as_ref(),
+        )?;
         if metadata.capture_number.is_none() {
             metadata.capture_number = proxy_capture_number;
         }
@@ -831,18 +781,15 @@ fn write_capture_inner(
             }
         }
         write_http_history_metadata(tx, record.summary.id, record.summary.revision, &metadata)?;
-        if schema >= 27 {
-            tx.execute(
-                "UPDATE flows SET capture_number=COALESCE(?1, capture_number), response_length=?2 WHERE id=?3",
-                params![
-                    metadata.capture_number.and_then(|v| i64::try_from(v).ok()),
-                    metadata.response_length.and_then(|v| i64::try_from(v).ok()),
-                    id,
-                ],
-            )?;
-        }
+        tx.execute(
+            "UPDATE flows SET capture_number=COALESCE(?1, capture_number), response_length=?2 WHERE id=?3",
+            params![
+                metadata.capture_number.and_then(|v| i64::try_from(v).ok()),
+                metadata.response_length.and_then(|v| i64::try_from(v).ok()),
+                id,
+            ],
+        )?;
     }
-    advance_workspace_cache_changes(tx, before_tc)?;
     Ok(())
 }
 

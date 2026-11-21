@@ -40,7 +40,7 @@ fn project_guard(transaction: &Transaction<'_>, project: ProjectKey, expected: U
         schema == crate::store::SCHEMA,
         "外部归档 HTTP 备注项目版本已改变"
     );
-    crate::store::schema_guard::validate(transaction, schema)?;
+    crate::store::schema_guard::validate(transaction)?;
     ensure!(
         crate::store::metadata::project_id(transaction)? == project.id,
         "外部归档 HTTP 备注项目 ID 已改变"
@@ -416,12 +416,6 @@ fn write(
             params![owner.id.to_string(), revision, text],
         )?;
     } else {
-        crate::store::schema_guard::validate_update_dependencies(
-            transaction,
-            "ext_http_notes",
-            &["revision", "text"],
-            cancel,
-        )?;
         let changed = transaction.execute(
             "UPDATE main.ext_http_notes SET revision=?1,text=?2 WHERE item=?3 AND revision=?4",
             params![revision, text, owner.id.to_string(), stored.revision],

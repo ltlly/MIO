@@ -8,17 +8,20 @@ mod pool_delete;
 mod project;
 #[path = "session.rs"]
 mod session;
+mod session_data;
 mod session_views;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use convert::{DATA_SELECTORS as DATA, select};
 pub(in crate::store::intruder) use convert::strict_json;
 use convert::{
-    copy_rows, dataset_logical_bytes, ensure_no_run_rows, has_flow, retirement_bytes, same_flow,
-    same_rows, select, session_connection, ticket_bytes, validate_dataset,
-    validate_dataset_snapshot, validate_ticket, validate_workspace_links, visit_flows,
+    dataset_logical_bytes, ensure_no_run_rows, has_flow, retirement_bytes, same_flow, ticket_bytes,
+    validate_dataset, validate_dataset_snapshot, validate_ticket, validate_workspace_links,
 };
+use session_data::SessionData;
 
 // MIO logical SQL-data limits, not External defaults or a process RSS guarantee.
 const SESSION_LOGICAL_QUOTA: u64 = 64 * 1024 * 1024;
@@ -26,39 +29,10 @@ const MAX_SESSION_DATASETS: usize = 64;
 const OWNERSHIP_BYTES: u64 = 256;
 const ROW_ACCOUNTING_BYTES: u64 = 64;
 
-// The selectors include all message versions, not only the current request and response.
-const DATA: &[(&str, &str, &str)] = &[
-    (
-        "intruder_runs",
-        "id,tab,revision,spec_revision,total,dispatched,completed,state,paused,error,started,spec_meta,template,title,title_revision,baseline_ordinal,pool_id,pool_revision",
-        "id=?1",
-    ),
-    (
-        "intruder_payloads",
-        "run,set_index,ordinal,value",
-        "run=?1 ORDER BY set_index,ordinal",
-    ),
-    (
-        "flows",
-        "id,revision,started,url,method,state,summary",
-        "id IN (SELECT flow FROM main.intruder_results WHERE run=?1) ORDER BY id",
-    ),
-    (
-        "messages",
-        "flow,side,head,body",
-        "flow IN (SELECT flow FROM main.intruder_results WHERE run=?1) ORDER BY flow,side",
-    ),
-    (
-        "intruder_results",
-        "run,ordinal,flow,error,notes,notes_revision,highlight,highlight_revision",
-        "run=?1 ORDER BY ordinal",
-    ),
-];
-
-struct SessionDataset {
-    connection: Connection,
+pub(in crate::store::intruder) struct SessionDataset {
+    pub(super) data: SessionData,
     owner: ProjectKey,
-    run: IntruderRunSummary,
+    pub(in crate::store::intruder) run: IntruderRunSummary,
     logical_bytes: u64,
     // Only these exact pre-existing disk identities may be reused during promotion.
     disk_flows: BTreeSet<FlowId>,
@@ -67,10 +41,16 @@ struct SessionDataset {
     state_reserve: u64,
     // A ticketed snapshot can only be reactivated by its explicit one-time baseline admission.
     reactivated_baseline: Option<u64>,
+    #[cfg(test)]
+    pub(in crate::store::intruder) reject_writes: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(in crate::store::intruder) write_hook: std::sync::Mutex<Option<session_data::SessionWriteHook>>,
+    #[cfg(test)]
+    pub(in crate::store::intruder) body_reads: std::sync::atomic::AtomicUsize,
 }
 
 pub(in crate::store) struct IntruderSessions {
-    runs: BTreeMap<Uuid, SessionDataset>,
+    pub(in crate::store::intruder) runs: BTreeMap<Uuid, SessionDataset>,
     logical_bytes: u64,
     quota: u64,
     reserved_bytes: u64,
@@ -132,7 +112,7 @@ pub(in crate::store) fn ensure_resource_pools_unreferenced(
     ensure_no_pool_references(connection, None, removed, cancel)?;
     for dataset in sessions.runs.values() {
         validate_ticket(connection, dataset.owner.id, dataset)?;
-        ensure_no_pool_references(&dataset.connection, Some(dataset.run.id), removed, cancel)?;
+        dataset.data.ensure_no_pool_references(removed, cancel)?;
     }
     Ok(())
 }
@@ -167,9 +147,10 @@ impl ProjectStore {
         let ticket = self.connection.unchecked_transaction()?;
         validate_ticket(&ticket, self.id, dataset)?;
         ticket.commit()?;
-        let mut stored = read_run(&dataset.connection, id)?;
-        stored.retention = IntruderRetention::Session;
-        ensure!(stored == dataset.run, "Intruder RAM 摘要已改变；名称未改变");
+        ensure!(
+            dataset.data.run == dataset.run,
+            "Intruder RAM 摘要已改变；名称未改变"
+        );
         let previous_bytes = u64::try_from(dataset.run.title.len())?;
         let new_bytes = u64::try_from(title.len())?;
         let logical_bytes = dataset
@@ -189,29 +170,26 @@ impl ProjectStore {
                 .is_some_and(|bytes| bytes <= self.intruder_sessions.quota),
             "Intruder Session 逻辑 RAM 数据配额不足；名称未改变"
         );
-        let query_only: bool =
-            dataset
-                .connection
-                .pragma_query_value(None, "query_only", |row| row.get(0))?;
-        ensure!(query_only, "Intruder Session 只读保护已改变；名称未改变");
-        dataset
-            .connection
-            .pragma_update(None, "query_only", false)?;
-        let renamed = (|| -> Result<IntruderRunSummary> {
-            let transaction = dataset.connection.unchecked_transaction()?;
-            let run = rename_run(&transaction, id, expected_title_revision, title, cancel)?;
-            // Restore read-only protection before publishing; COMMIT is allowed in query-only mode.
-            transaction.pragma_update(None, "query_only", true)?;
-            transaction.commit()?;
-            Ok(run)
-        })();
-        if renamed.is_err() {
-            dataset
-                .connection
-                .pragma_update(None, "query_only", true)
-                .context("Intruder 重命名失败，且 Session 只读保护未恢复")?;
-        }
-        let mut run = renamed?;
+        #[cfg(test)]
+        ensure!(
+            !dataset
+                .reject_writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "Intruder Session 只读保护已启用；名称未改变"
+        );
+        #[cfg(test)]
+        let hook = dataset
+            .write_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut run = dataset.data.rename(
+            expected_title_revision,
+            title,
+            cancel,
+            #[cfg(test)]
+            hook.as_ref(),
+        )?;
         run.retention = IntruderRetention::Session;
         dataset.run = run.clone();
         dataset.logical_bytes = logical_bytes;
@@ -233,13 +211,12 @@ impl ProjectStore {
             validate_pool_binding(&source, &dataset.run)?;
             validate_ticket(&source, self.id, dataset)?;
             validate_ticket(&destination, self.id, dataset)?;
-            visit_flows(&dataset.connection, dataset.run.id, |flow| {
+            for flow in dataset.data.flow_ids_in_order() {
                 ensure!(
                     same_flow(&source, &destination, flow, true)?,
                     "另存为的 Intruder 共享流量或 ID 归属已改变；原项目与 Session 数据保留"
                 );
-                Ok(())
-            })?;
+            }
         }
         destination.commit()?;
         source.commit()?;

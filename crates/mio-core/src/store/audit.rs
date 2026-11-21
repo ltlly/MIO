@@ -46,7 +46,7 @@ fn read(connection: &Connection) -> Result<AuditStateSnapshot> {
     let mut query = connection.prepare(
         "SELECT key, typeof(value),
                 CASE WHEN typeof(value)='blob' AND length(value)<=?2 THEN value END
-         FROM main.metadata WHERE key=?1 COLLATE NOCASE",
+         FROM main.metadata WHERE key=?1",
     )?;
     let mut rows = query.query(params![KEY, i64::try_from(MAX_AUDIT_STATE_BYTES)?])?;
     let Some(row) = rows.next()? else {
@@ -109,12 +109,11 @@ impl ProjectStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let schema: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(schema == super::SCHEMA, "项目版本已改变；未写入审计状态");
-        super::ensure_schema_validated_in_tx(&self.cached_workspace, &tx, super::SCHEMA)?;
+        super::ensure_schema_validated_in_tx(&self.cache, &tx)?;
         ensure!(
             metadata::project_id(&tx)? == self.id,
             "审计状态项目归属已改变"
         );
-        super::validate_metadata_value_update_deps(&tx, cancel)?;
         let before_tc = super::query_total_changes(&tx)?;
         ensure!(!cancel.is_cancelled(), "审计状态更新已取消");
         tx.execute(
@@ -123,7 +122,7 @@ impl ProjectStore {
         )?;
         ensure!(!cancel.is_cancelled(), "审计状态更新已取消");
         tx.commit()?;
-        super::advance_workspace_cache_changes(&self.connection, before_tc)?;
+        self.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 

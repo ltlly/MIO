@@ -195,7 +195,7 @@ impl ProjectStore {
             path: None,
             temporary: None,
             intruder_sessions: super::super::intruder::IntruderSessions::default(),
-            cached_workspace: std::sync::Mutex::new(None),
+            cache: std::sync::Mutex::new(super::super::StoreCache::default()),
         }
     }
 }

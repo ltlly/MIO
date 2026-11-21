@@ -39,16 +39,12 @@ pub(super) use mutations::{write_result, write_result_with_reason_phrase, write_
 pub(super) use recovery_ops::write_recovery;
 pub(in crate::store::intruder) use recovery_ops::{
     bind_resource_pool, ensure_no_pool_references, request_baseline, validate_pool_binding,
-    write_recovery_for_retention,
 };
 pub(in crate::store::intruder) use result_rows::*;
 pub(super) use retention::{IntruderSessions, ensure_resource_pools_unreferenced};
 pub(in crate::store::intruder) use run_codec::*;
 pub(in crate::store) use run_codec::{decode_run, run_select};
-pub(super) use schema::{
-    add_baseline_column, add_pause_column, add_resource_pool_columns,
-    add_result_annotation_columns, add_title_columns, create_schema,
-};
+pub(super) use schema::create_schema;
 pub(in crate::store::intruder) use schema::insert_intruder_run_with_settings;
 
 pub(in crate::store) fn reassign_project_pool(
@@ -70,12 +66,6 @@ pub(in crate::store) fn reassign_project_pool(
     drop(rows);
     drop(query);
     if count != 0 {
-        super::schema_guard::validate_update_dependencies(
-            transaction,
-            "intruder_runs",
-            &["pool_id", "pool_revision"],
-            cancel,
-        )?;
         let changed = transaction.execute(
             "UPDATE intruder_runs SET pool_id=?1,pool_revision=pool_revision+1 WHERE pool_id=?2",
             params![to.to_string(), from.to_string()],

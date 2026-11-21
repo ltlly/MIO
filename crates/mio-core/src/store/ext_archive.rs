@@ -201,12 +201,6 @@ impl ProjectStore {
         final_report.gaps.extend(restored.gaps);
         final_report.gaps.push(format!("已恢复 {} 个 Repeater 标签的已保存选择；{} 个源槽位未恢复。已索引历史和原始归档保留，历史导航使用已映射原稿。", restored.restored_tabs, restored.skipped_tabs));
         let encoded = encode_report(&final_report)?;
-        super::schema_guard::validate_update_dependencies(
-            &transaction,
-            "ext_sources",
-            &["report"],
-            cancel,
-        )?;
         transaction.execute(
             "UPDATE main.ext_sources SET report=?2 WHERE id=?1",
             params![source_id.to_string(), encoded],

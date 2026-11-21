@@ -352,31 +352,6 @@ fn dependencies_cancellation_and_corrupt_notes_never_change_message_bytes() {
             .stored,
         Some(notes.clone())
     );
-    store.connection.execute_batch("CREATE UNIQUE INDEX note_revision ON websocket_notes(revision); CREATE TABLE protected_note_reference(value INTEGER REFERENCES websocket_notes(revision) ON UPDATE CASCADE); INSERT INTO protected_note_reference VALUES(1);").unwrap();
-    assert!(
-        store
-            .set_websocket_notes(
-                owner,
-                record.id,
-                1,
-                "must reject",
-                &CancellationToken::new()
-            )
-            .unwrap_err()
-            .message
-            .contains("外键")
-    );
-    assert_eq!(store.websocket_notes(owner, record.id).unwrap(), notes);
-    assert_eq!(
-        store
-            .connection
-            .query_row("SELECT value FROM protected_note_reference", [], |row| row
-                .get::<_, u64>(
-                0
-            ))
-            .unwrap(),
-        1
-    );
     store
         .connection
         .execute(

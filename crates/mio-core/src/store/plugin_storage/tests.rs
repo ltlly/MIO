@@ -6,7 +6,7 @@ use crate::{
     HttpResponse, HttpVersion, IntruderRetention, IntruderRunState, IntruderSpec, IntruderTab,
     IssueConfidence, ProjectKey, TrafficSource, Uuid,
     intruder::{AttackType, Position},
-    store::{ProjectStore, schema_guard},
+    store::ProjectStore,
 };
 
 fn project(store: &ProjectStore) -> ProjectKey {
@@ -336,23 +336,18 @@ fn plugin_storage_and_audit_state_coexist_with_intruder_discard_and_pin_flows() 
             .is_none()
     );
 
-    store
-        .connection
-        .execute(
-            "INSERT INTO main.metadata VALUES('plugin_storage:bad/id', X'7b7d')",
-            [],
-        )
-        .unwrap();
-    let tx = store.connection.unchecked_transaction().unwrap();
-    assert!(schema_guard::validate_intruder_discard(&tx).is_err());
-    tx.rollback().unwrap();
-    store
-        .connection
-        .execute(
-            "DELETE FROM main.metadata WHERE key='plugin_storage:bad/id'",
-            [],
-        )
-        .unwrap();
+    assert!(
+        store
+            .plugin_storage_get(
+                ProjectKey {
+                    id: store.id,
+                    generation: 1
+                },
+                "bad/id",
+                "k"
+            )
+            .is_err()
+    );
     store
         .connection
         .execute(
@@ -361,6 +356,6 @@ fn plugin_storage_and_audit_state_coexist_with_intruder_discard_and_pin_flows() 
         )
         .unwrap();
     let tx = store.connection.unchecked_transaction().unwrap();
-    assert!(schema_guard::validate_intruder_discard(&tx).is_err());
+    assert!(ops::audit_pinned_flows(&tx).is_err());
     tx.rollback().unwrap();
 }

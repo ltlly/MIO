@@ -44,43 +44,6 @@ pub(in crate::store) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(in crate::store) fn add_result_annotation_columns(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!(
-        "ALTER TABLE intruder_results ADD COLUMN {RESULT_NOTES_COLUMN};
-         ALTER TABLE intruder_results ADD COLUMN {RESULT_NOTES_REVISION_COLUMN};
-         ALTER TABLE intruder_results ADD COLUMN {RESULT_HIGHLIGHT_COLUMN};
-         ALTER TABLE intruder_results ADD COLUMN {RESULT_HIGHLIGHT_REVISION_COLUMN};"
-    ))?;
-    Ok(())
-}
-
-pub(in crate::store) fn add_pause_column(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!(
-        "ALTER TABLE intruder_runs ADD COLUMN {PAUSED_COLUMN};"
-    ))?;
-    Ok(())
-}
-
-pub(in crate::store) fn add_title_columns(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!(
-        "ALTER TABLE intruder_runs ADD COLUMN {TITLE_COLUMN};
-         ALTER TABLE intruder_runs ADD COLUMN {TITLE_REVISION_COLUMN};"
-    ))?;
-    Ok(())
-}
-
-pub(in crate::store) fn add_baseline_column(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!(
-        "ALTER TABLE intruder_runs ADD COLUMN {BASELINE_COLUMN};"
-    ))?;
-    Ok(())
-}
-
-pub(in crate::store) fn add_resource_pool_columns(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!("ALTER TABLE intruder_runs ADD COLUMN {POOL_COLUMN}; ALTER TABLE intruder_runs ADD COLUMN {POOL_REVISION_COLUMN};"))?;
-    Ok(())
-}
-
 #[allow(dead_code)]
 pub(in crate::store::intruder) fn insert_intruder_run(
     transaction: &Transaction<'_>,

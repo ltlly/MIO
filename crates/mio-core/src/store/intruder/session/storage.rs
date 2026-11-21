@@ -39,7 +39,7 @@ impl ProjectStore {
         );
         for other in self.intruder_sessions.runs.values() {
             ensure!(
-                !has_flow(&other.connection, record.summary.id)?,
+                !other.data.has_flow(record.summary.id),
                 "Intruder Session flow ID 已存在"
             );
         }
@@ -99,17 +99,27 @@ impl ProjectStore {
             .as_ref()
             .map_or(true, |record| is_flow_terminal(&record.summary.state));
         let flow = result.as_ref().ok().map(|record| record.summary.id);
-        let (_, run) =
-            self.mutate_session_intruder(id, Some((ordinal, terminal, flow)), |transaction| {
-                let run = write_result_with_reason_phrase(
-                    transaction,
-                    id,
+        #[cfg(test)]
+        let hook = self.intruder_sessions.runs.get(&id).and_then(|d| {
+            d.write_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
+        let (_, run) = self.mutate_session_intruder(
+            id,
+            Some((ordinal, terminal, flow)),
+            |data| {
+                let run = data.write_result_with_reason_phrase(
                     ordinal,
                     result,
                     reason_phrase,
+                    #[cfg(test)]
+                    hook.as_ref(),
                 )?;
                 Ok(((), run))
-            })?;
+            },
+        )?;
         Ok(run)
     }
 
@@ -118,8 +128,8 @@ impl ProjectStore {
         id: Uuid,
         state: IntruderRunState,
     ) -> Result<IntruderRunSummary> {
-        let (_, run) = self.mutate_session_intruder(id, None, |transaction| {
-            let run = write_state(transaction, id, state)?;
+        let (_, run) = self.mutate_session_intruder(id, None, |data| {
+            let run = data.write_state(state)?;
             Ok(((), run))
         })?;
         Ok(run)
@@ -141,16 +151,9 @@ impl ProjectStore {
             notes.len() <= MAX_ERROR_BYTES,
             "Intruder 结果备注超过 64 KiB 字节限额"
         );
-        let (saved, _run) = self.mutate_session_intruder(id, None, |transaction| {
-            let saved = write_result_notes(
-                transaction,
-                id,
-                ordinal,
-                expected_notes_revision,
-                notes,
-                cancel,
-            )?;
-            let run = read_run(transaction, id)?;
+        let (saved, _run) = self.mutate_session_intruder(id, None, |data| {
+            let saved = data.write_result_notes(ordinal, expected_notes_revision, notes, cancel)?;
+            let run = data.run.clone();
             Ok((saved, run))
         })?;
         Ok(saved)
@@ -167,9 +170,9 @@ impl ProjectStore {
             !cancel.is_cancelled(),
             "Intruder 结果高亮修改已取消；数据保留"
         );
-        let (saved, _run) = self.mutate_session_intruder(id, None, |transaction| {
-            let saved = write_result_highlights(transaction, id, entries, highlight, cancel)?;
-            let run = read_run(transaction, id)?;
+        let (saved, _run) = self.mutate_session_intruder(id, None, |data| {
+            let saved = data.write_result_highlights(entries, highlight, cancel)?;
+            let run = data.run.clone();
             Ok((saved, run))
         })?;
         Ok(saved)
@@ -179,7 +182,7 @@ impl ProjectStore {
         &mut self,
         id: Uuid,
         result: Option<(u64, bool, Option<FlowId>)>,
-        change: impl FnOnce(&Transaction<'_>) -> Result<(T, IntruderRunSummary)>,
+        change: impl FnOnce(&mut super::super::session_data::SessionData) -> Result<(T, IntruderRunSummary)>,
     ) -> Result<(T, IntruderRunSummary)> {
         let dataset = self
             .intruder_sessions
@@ -194,53 +197,119 @@ impl ProjectStore {
         } else {
             None
         };
+        #[cfg(test)]
+        ensure!(
+            !dataset
+                .reject_writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "Intruder RAM 只读保护已启用"
+        );
         let credit = result
             .and_then(|(ordinal, _, _)| dataset.reservations.get(&ordinal))
             .map_or(0, |reservation| reservation.bytes);
         if let Some((ordinal, _, Some(flow))) = result {
-            let existing = read_result(&dataset.connection, id, ordinal)?;
-            ensure!(dataset.reservations.get(&ordinal).is_some_and(|reservation| reservation.flow == flow)
-                || existing.as_ref().is_some_and(|row| matches!(&row.outcome, IntruderResultOutcome::Flow(summary) if summary.id == flow && is_flow_terminal(&summary.state))), "Intruder Session 请求缺少完整结果预留");
-        }
-        let before = mutable_bytes(&dataset.connection, id, result.map(|value| value.0))?;
-        ensure!(
-            dataset
-                .connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))?,
-            "Intruder RAM 只读保护已改变"
-        );
-        dataset
-            .connection
-            .pragma_update(None, "query_only", false)?;
-        let operation = (|| -> Result<(T, IntruderRunSummary)> {
-            let transaction = dataset.connection.unchecked_transaction()?;
-            let (saved, run) = change(&transaction)?;
-            let after = mutable_bytes(&transaction, id, result.map(|value| value.0))?;
-            let growth = after.saturating_sub(before);
-            let available = self.intruder_sessions.quota.saturating_sub(
-                self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
-            ) + credit
-                + if result.is_none() {
-                    dataset.state_reserve
-                } else {
-                    0
-                };
+            let existing = dataset.data.result_summary(ordinal)?;
             ensure!(
-                growth <= available,
-                "Intruder Session 配额不足；原记录保留，未写入磁盘"
+                dataset
+                    .reservations
+                    .get(&ordinal)
+                    .is_some_and(|reservation| reservation.flow == flow)
+                    || existing.as_ref().is_some_and(|row| {
+                        matches!(
+                            &row.outcome,
+                            IntruderResultOutcome::Flow(summary)
+                                if summary.id == flow && is_flow_terminal(&summary.state)
+                        )
+                    }),
+                "Intruder Session 请求缺少完整结果预留"
             );
-            if run.state.is_terminal() {
-                ensure!(dataset.reservations.is_empty(), "Intruder 终态仍有结果预留");
-            }
-            transaction.pragma_update(None, "query_only", true)?;
-            transaction.commit()?;
-            Ok((saved, run))
-        })();
-        if operation.is_err() {
-            dataset.connection.pragma_update(None, "query_only", true)?;
         }
-        let (saved, mut run) = operation?;
-        let after = mutable_bytes(&dataset.connection, id, result.map(|value| value.0))?;
+        let before = dataset.data.mutable_bytes(result.map(|value| value.0))?;
+        let available = self.intruder_sessions.quota.saturating_sub(
+            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        ) + credit
+            + if result.is_none() {
+                dataset.state_reserve
+            } else {
+                0
+            };
+        // Backup only the touched flow/result on single-result updates so normal writes stay O(1).
+        let backup_run = dataset.data.run.clone();
+        let backup_ordinal = result.map(|(ord, _, _)| ord);
+        let backup_result = backup_ordinal.and_then(|ord| dataset.data.results.get(&ord).cloned());
+        let backup_flow_id = result.and_then(|(_, _, f)| f);
+        let backup_flow = backup_flow_id.and_then(|fid| dataset.data.flows.get(&fid).cloned());
+        let full_backup = backup_ordinal.is_none().then(|| dataset.data.clone());
+        let outcome = change(&mut dataset.data);
+        let (saved, mut run, after) = match outcome {
+            Ok((saved, run)) => {
+                let after = dataset.data.mutable_bytes(result.map(|value| value.0))?;
+                let growth = after.saturating_sub(before);
+                let ok = growth <= available
+                    && (!run.state.is_terminal() || dataset.reservations.is_empty());
+                if ok {
+                    (saved, run, after)
+                } else {
+                    if let Some(full) = full_backup {
+                        dataset.data = full;
+                    } else {
+                        dataset.data.run = backup_run;
+                        if let Some(ord) = backup_ordinal {
+                            match backup_result {
+                                Some(r) => {
+                                    dataset.data.results.insert(ord, r);
+                                }
+                                None => {
+                                    dataset.data.results.remove(&ord);
+                                }
+                            }
+                        }
+                        if let Some(fid) = backup_flow_id {
+                            match backup_flow {
+                                Some(f) => {
+                                    dataset.data.flows.insert(fid, f);
+                                }
+                                None => {
+                                    dataset.data.flows.remove(&fid);
+                                }
+                            }
+                        }
+                    }
+                    if growth > available {
+                        bail!("Intruder Session 配额不足；原记录保留，未写入磁盘");
+                    }
+                    bail!("Intruder 终态仍有结果预留");
+                }
+            }
+            Err(err) => {
+                if let Some(full) = full_backup {
+                    dataset.data = full;
+                } else {
+                    dataset.data.run = backup_run;
+                    if let Some(ord) = backup_ordinal {
+                        match backup_result {
+                            Some(r) => {
+                                dataset.data.results.insert(ord, r);
+                            }
+                            None => {
+                                dataset.data.results.remove(&ord);
+                            }
+                        }
+                    }
+                    if let Some(fid) = backup_flow_id {
+                        match backup_flow {
+                            Some(f) => {
+                                dataset.data.flows.insert(fid, f);
+                            }
+                            None => {
+                                dataset.data.flows.remove(&fid);
+                            }
+                        }
+                    }
+                }
+                return Err(err);
+            }
+        };
         let growth = after.saturating_sub(before);
         let consumed_credit = credit.min(growth);
         if let Some((ordinal, terminal, _)) = result {
@@ -273,7 +342,7 @@ impl ProjectStore {
         Ok((saved, run))
     }
 
-    /// Each batch belongs to one Session dataset and is committed only to its RAM connection.
+    /// Each batch belongs to one Session dataset and is committed only to its RAM state.
     pub(crate) fn retry_session_intruder_mutations(
         &mut self,
         mutations: &[IntruderMutation],
@@ -299,6 +368,13 @@ impl ProjectStore {
         } else {
             None
         };
+        #[cfg(test)]
+        ensure!(
+            !dataset
+                .reject_writes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "Intruder RAM 只读保护已启用"
+        );
         let mut ordinals = BTreeMap::new();
         for mutation in mutations {
             let run = match mutation {
@@ -315,9 +391,22 @@ impl ProjectStore {
                             .map_or(true, |record| is_flow_terminal(&record.summary.state)),
                     );
                     if let Ok(record) = result {
-                        let existing = read_result(&dataset.connection, id, *ordinal)?;
-                        ensure!(dataset.reservations.get(ordinal).is_some_and(|reservation| reservation.flow == record.summary.id)
-                            || existing.as_ref().is_some_and(|row| matches!(&row.outcome, IntruderResultOutcome::Flow(summary) if summary.id == record.summary.id && is_flow_terminal(&summary.state))), "RAM 恢复预留身份不匹配");
+                        let existing = dataset.data.result_summary(*ordinal)?;
+                        ensure!(
+                            dataset
+                                .reservations
+                                .get(ordinal)
+                                .is_some_and(|reservation| reservation.flow == record.summary.id)
+                                || existing.as_ref().is_some_and(|row| {
+                                    matches!(
+                                        &row.outcome,
+                                        IntruderResultOutcome::Flow(summary)
+                                            if summary.id == record.summary.id
+                                                && is_flow_terminal(&summary.state)
+                                    )
+                                }),
+                            "RAM 恢复预留身份不匹配"
+                        );
                     }
                     run
                 }
@@ -328,58 +417,51 @@ impl ProjectStore {
                 "RAM 恢复批次必须仅属于一个Session攻击"
             );
         }
-        let bytes = |connection: &Connection| -> Result<u64> {
-            let run_bytes = mutable_bytes(connection, id, None)?;
+        let bytes = |data: &super::super::session_data::SessionData| -> Result<u64> {
+            let run_bytes = data.mutable_bytes(None)?;
             ordinals.keys().try_fold(run_bytes, |bytes, ordinal| {
-                Ok(bytes + mutable_bytes(connection, id, Some(*ordinal))? - run_bytes)
+                Ok(bytes + data.mutable_bytes(Some(*ordinal))? - run_bytes)
             })
         };
-        let before = bytes(&dataset.connection)?;
+        let before = bytes(&dataset.data)?;
         let credit = ordinals
             .keys()
             .filter_map(|ordinal| dataset.reservations.get(ordinal))
             .map(|reservation| reservation.bytes)
             .sum::<u64>();
+        let mut staged = dataset.data.clone();
+        ensure!(!cancel.is_cancelled(), "Intruder RAM 恢复已取消");
+        #[cfg(test)]
+        let hook = dataset
+            .write_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        staged.write_recovery(
+            mutations,
+            #[cfg(test)]
+            hook.as_ref(),
+        )?;
+        let after = bytes(&staged)?;
+        let available = self.intruder_sessions.quota.saturating_sub(
+            self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
+        ) + credit
+            + dataset.state_reserve;
         ensure!(
-            dataset
-                .connection
-                .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))?,
-            "Intruder RAM 只读保护已改变"
+            after.saturating_sub(before) <= available,
+            "Intruder RAM 恢复容量不足；数据仍保留，未写盘"
         );
-        dataset
-            .connection
-            .pragma_update(None, "query_only", false)?;
-        let applied = (|| -> Result<u64> {
-            let transaction = dataset.connection.unchecked_transaction()?;
-            ensure!(!cancel.is_cancelled(), "Intruder RAM 恢复已取消");
-            write_recovery_for_retention(&transaction, mutations, IntruderRetention::Session)?;
-            let after = bytes(&transaction)?;
-            let available = self.intruder_sessions.quota.saturating_sub(
-                self.intruder_sessions.logical_bytes + self.intruder_sessions.reserved_bytes,
-            ) + credit
-                + dataset.state_reserve;
+        if expected.state.is_terminal() {
             ensure!(
-                after.saturating_sub(before) <= available,
-                "Intruder RAM 恢复容量不足；数据仍保留，未写盘"
+                dataset
+                    .reservations
+                    .keys()
+                    .all(|ordinal| ordinals.get(ordinal) == Some(&true)),
+                "Intruder 终态恢复仍有未确认请求"
             );
-            if expected.state.is_terminal() {
-                ensure!(
-                    dataset
-                        .reservations
-                        .keys()
-                        .all(|ordinal| ordinals.get(ordinal) == Some(&true)),
-                    "Intruder 终态恢复仍有未确认请求"
-                );
-            }
-            ensure!(!cancel.is_cancelled(), "Intruder RAM 恢复已取消");
-            transaction.pragma_update(None, "query_only", true)?;
-            transaction.commit()?;
-            Ok(after)
-        })();
-        if applied.is_err() {
-            dataset.connection.pragma_update(None, "query_only", true)?;
         }
-        let after = applied?;
+        ensure!(!cancel.is_cancelled(), "Intruder RAM 恢复已取消");
+        dataset.data = staged;
         let mut growth = after.saturating_sub(before);
         for (ordinal, terminal) in ordinals {
             if terminal {

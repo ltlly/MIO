@@ -1,5 +1,4 @@
 use super::*;
-use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
 #[path = "tests/baseline.rs"]
 mod baseline;
@@ -92,18 +91,8 @@ fn complete(before: &FlowRecord) -> FlowRecord {
 
 fn assert_accounting(store: &ProjectStore, id: Uuid) {
     let dataset = &store.intruder_sessions.runs[&id];
-    assert_eq!(
-        dataset_logical_bytes(&dataset.connection, id, u64::MAX, &CancellationToken::new())
-            .unwrap(),
-        dataset.logical_bytes
-    );
+    assert_eq!(dataset.data.logical_bytes().unwrap(), dataset.logical_bytes);
     assert_eq!(store.intruder_sessions.logical_bytes, dataset.logical_bytes);
-    assert!(
-        dataset
-            .connection
-            .pragma_query_value::<bool, _>(None, "query_only", |row| row.get(0))
-            .unwrap()
-    );
     assert!(
         store.intruder_sessions.logical_bytes + store.intruder_sessions.reserved_bytes
             <= store.intruder_sessions.quota
@@ -240,18 +229,12 @@ fn live_session_ram_recovery_is_atomic_and_never_writes_project_data() {
             .unwrap()
     );
     let original_reserve = store.intruder_sessions.reserved_bytes;
-    store.intruder_sessions.runs[&run.id]
-        .connection
-        .authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Insert {
-                table_name: "flows",
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+    store.set_session_intruder_write_hook(
+        run.id,
+        Some(std::sync::Arc::new(|action| action != "insert_flow")),
+    );
     assert!(store.put_intruder_result(run.id, 0, Ok(&request)).is_err());
-    store.intruder_sessions.runs[&run.id]
-        .connection
-        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    store.set_session_intruder_write_hook(run.id, None);
     assert_eq!(store.intruder_sessions.reserved_bytes, original_reserve);
     assert_eq!(store.read_intruder_run(run.id).unwrap(), run);
     let mut rejected = request.clone();

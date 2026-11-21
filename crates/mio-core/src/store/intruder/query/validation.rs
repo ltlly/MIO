@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn check_query(
+pub(in crate::store::intruder) fn check_query(
     deadline: Instant,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
@@ -64,7 +64,7 @@ impl Drop for QueryScope<'_> {
     }
 }
 
-pub(super) fn validate_run_overlay(
+pub(in crate::store::intruder) fn validate_run_overlay(
     stored: &IntruderRunSummary,
     run: &IntruderRunSummary,
 ) -> Result<()> {
@@ -160,7 +160,7 @@ pub(super) fn validate_recovery<'a>(
     Ok(by_ordinal)
 }
 
-pub(super) fn validate_recovery_responses(
+pub(in crate::store::intruder) fn validate_recovery_responses(
     recovery: &BTreeMap<u64, &IntruderResultSummary>,
     recovery_responses: &BTreeMap<u64, &crate::HttpResponse>,
     check: &dyn Fn() -> Result<()>,

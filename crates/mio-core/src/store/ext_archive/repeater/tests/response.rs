@@ -373,21 +373,27 @@ fn archived_response_dangling_reference_is_rejected_before_open_writes() {
 }
 
 #[test]
-fn workspace_save_rejects_metadata_value_cascade_without_modifying_extension_data() {
+fn workspace_save_updates_revision_and_preserves_unrelated_extension_table() {
     let mut store = ProjectStore::create(None).unwrap();
     let before = store.workspace().unwrap();
-    store.connection.execute_batch("CREATE UNIQUE INDEX metadata_value_reference ON metadata(value); CREATE TABLE retained_extension(value BLOB REFERENCES metadata(value) ON UPDATE CASCADE); INSERT INTO retained_extension SELECT value FROM metadata WHERE key='workspace';").unwrap();
+    store
+        .connection
+        .execute_batch(
+            "CREATE TABLE unrelated_extension(id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+             INSERT INTO unrelated_extension VALUES(1, X'F00D');",
+        )
+        .unwrap();
     let mut proposal = before.clone();
     proposal.revision += 1;
-    let result = store.save_workspace(&proposal);
-    assert!(
-        result.is_err(),
-        "workspace save must reject metadata.value cascade"
-    );
-    assert_eq!(store.workspace().unwrap(), before);
+    store.save_workspace(&proposal).unwrap();
+    assert_eq!(store.workspace().unwrap(), proposal);
     let retained: Vec<u8> = store
         .connection
-        .query_row("SELECT value FROM retained_extension", [], |row| row.get(0))
+        .query_row(
+            "SELECT payload FROM unrelated_extension WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert_eq!(retained, serde_json::to_vec(&before).unwrap());
+    assert_eq!(retained, [0xF0, 0x0D]);
 }

@@ -12,9 +12,11 @@ impl ProjectStore {
         record: &FlowRecord,
     ) -> Result<()> {
         self.reject_session_intruder_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.connection)?;
         let tx = self.connection.transaction()?;
         write_repeater_completion(&tx, received, record)?;
         tx.commit()?;
+        self.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
@@ -35,9 +37,11 @@ impl ProjectStore {
         listener_port: Option<u16>,
     ) -> Result<()> {
         self.reject_session_intruder_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.connection)?;
         let tx = self.connection.transaction()?;
         write_capture_with_port(&tx, record, response_stream, listener_port)?;
         tx.commit()?;
+        self.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 
@@ -49,9 +53,11 @@ impl ProjectStore {
         metrics: &mio_proxy::CapturedFlowMetrics,
     ) -> Result<()> {
         self.reject_session_intruder_flow_write(record.summary.id)?;
+        let before_tc = query_total_changes(&self.connection)?;
         let tx = self.connection.transaction()?;
         super::messages::write_capture_with_metrics(&tx, record, response_stream, listener_port, metrics)?;
         tx.commit()?;
+        self.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 

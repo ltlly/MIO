@@ -148,7 +148,7 @@ pub(in crate::store) fn validate_workspace(
             continue;
         };
         let schema: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(schema >= 21, "旧版本项目包含未确认的 Repeater 导航状态");
+        ensure!(schema == crate::store::SCHEMA, "旧版本项目包含未确认的 Repeater 导航状态");
         let archive = archive_for_tab(connection, tab)?;
         let Some(cursor) = &history.cursor else {
             continue;

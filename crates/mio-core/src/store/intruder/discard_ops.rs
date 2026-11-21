@@ -1,5 +1,41 @@
 use super::*;
 
+fn ensure_flows_binary_pk(transaction: &Transaction<'_>) -> Result<()> {
+    let schema: i32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let foreign_keys: bool =
+        transaction.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    ensure!(
+        schema == super::super::SCHEMA && foreign_keys,
+        "不能确认 Intruder 丢弃的项目版本或外键保护"
+    );
+    let mut indexes = transaction.prepare("PRAGMA main.index_list('flows')")?;
+    let mut indexes = indexes.query([])?;
+    let mut primary_indexes = 0;
+    while let Some(index) = indexes.next()? {
+        if index.get::<_, String>(3)? != "pk" {
+            continue;
+        }
+        primary_indexes += 1;
+        let name = index.get::<_, String>(1)?.replace('"', "\"\"");
+        let mut columns =
+            transaction.prepare(&format!("PRAGMA main.index_xinfo(\"{name}\")"))?;
+        let mut columns = columns.query([])?;
+        while let Some(column) = columns.next()? {
+            if column.get::<_, bool>(5)? {
+                ensure!(
+                    column.get::<_, Option<String>>(4)?.as_deref() == Some("BINARY"),
+                    "项目主键比较规则未知；不能安全丢弃 Intruder"
+                );
+            }
+        }
+    }
+    ensure!(
+        primary_indexes == 1,
+        "项目主键索引未知；不能安全丢弃 Intruder"
+    );
+    Ok(())
+}
+
 pub(in crate::store) fn discard_project_run(
     transaction: &Transaction<'_>,
     project_id: Uuid,
@@ -9,7 +45,7 @@ pub(in crate::store) fn discard_project_run(
     cancel: &CancellationToken,
 ) -> Result<IntruderDiscardReceipt> {
     ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
-    super::super::schema_guard::validate_intruder_discard(transaction)?;
+    ensure_flows_binary_pk(transaction)?;
     ensure!(
         super::super::metadata::project_id(transaction)? == project_id,
         "项目 ID 已改变；Intruder 未丢弃"
@@ -136,6 +172,15 @@ pub(in crate::store) fn discard_project_run(
             break;
         }
     }
+    let remaining_payloads: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.intruder_payloads WHERE run=?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !remaining_payloads,
+        "Intruder payload 删除键含 NULL 或未完整清理；未丢弃"
+    );
     let deleted = transaction.execute(
         "DELETE FROM main.intruder_runs WHERE id=?1 AND revision=?2",
         params![id.to_string(), expected_revision],
@@ -163,13 +208,20 @@ pub(in crate::store::intruder) fn retirement_key(id: Uuid) -> String {
 }
 
 pub(in crate::store) fn validate_retirements(connection: &Connection) -> Result<()> {
+    let has_non_text_key: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.metadata WHERE key < '')
+         OR EXISTS(SELECT 1 FROM main.metadata WHERE key >= X'')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(!has_non_text_key, "Intruder 丢弃键长度或类型无效");
     let prefix = "intruder_discarded:";
     let mut statement = connection.prepare(
         "SELECT CASE WHEN typeof(key)='text' AND length(CAST(key AS BLOB))=?1 THEN key END,
                 CASE WHEN typeof(value)='blob' AND length(value)=16 THEN value END
-         FROM main.metadata WHERE typeof(key)!='text' OR substr(key,1,?2) COLLATE NOCASE=?3",
+         FROM main.metadata WHERE key GLOB 'intruder_discarded:*'",
     )?;
-    let mut rows = statement.query(params![prefix.len() + 36, prefix.len(), prefix])?;
+    let mut rows = statement.query([prefix.len() + 36])?;
     while let Some(row) = rows.next()? {
         let key: String = row.get(0).context("Intruder 丢弃键长度或类型无效")?;
         let suffix = key

@@ -1,25 +1,37 @@
-mod foreign_keys;
 #[cfg(test)]
 mod tests;
 
 mod tables;
 
-pub(super) use foreign_keys::{validate_intruder_discard, validate_update_dependencies};
 pub(super) use tables::validate;
 
-const TABLES: &[(i32, &str, &[&str])] = &[
-    (26, "site_map_entries", &["id", "owner", "revision", "row", "detail"]),
-    (1, "metadata", &["key", "value"]),
+const TABLES: &[(&str, &[&str])] = &[
     (
-        1,
+        "site_map_entries",
+        &["id", "owner", "revision", "row", "detail"],
+    ),
+    ("metadata", &["key", "value"]),
+    (
         "flows",
         &[
-            "id", "revision", "started", "url", "method", "state", "summary",
+            "id",
+            "revision",
+            "started",
+            "url",
+            "method",
+            "state",
+            "summary",
+            "listener_port",
+            "source",
+            "status",
+            "response_bytes",
+            "elapsed_ms",
+            "capture_number",
+            "response_length",
         ],
     ),
-    (1, "messages", &["flow", "side", "head", "body"]),
+    ("messages", &["flow", "side", "head", "body"]),
     (
-        2,
         "websocket_messages",
         &[
             "ordinal",
@@ -33,18 +45,13 @@ const TABLES: &[(i32, &str, &[&str])] = &[
             "observed",
         ],
     ),
-    (2, "websocket_payloads", &["message", "body"]),
+    ("websocket_payloads", &["message", "body"]),
+    ("websocket_connections", &["id", "flow", "listener_port"]),
+    ("websocket_notes", &["message", "revision", "text"]),
+    ("ext_http_notes", &["item", "revision", "text"]),
+    ("ext_http_highlights", &["item", "revision", "color"]),
+    ("websocket_originals", &["message", "body"]),
     (
-        19,
-        "websocket_connections",
-        &["id", "flow", "listener_port"],
-    ),
-    (20, "websocket_notes", &["message", "revision", "text"]),
-    (22, "ext_http_notes", &["item", "revision", "text"]),
-    (23, "ext_http_highlights", &["item", "revision", "color"]),
-    (24, "websocket_originals", &["message", "body"]),
-    (
-        21,
         "repeater_history",
         &[
             "tab",
@@ -56,7 +63,6 @@ const TABLES: &[(i32, &str, &[&str])] = &[
         ],
     ),
     (
-        3,
         "ext_sources",
         &[
             "id",
@@ -68,12 +74,10 @@ const TABLES: &[(i32, &str, &[&str])] = &[
         ],
     ),
     (
-        3,
         "ext_source_chunks",
         &["source", "ordinal", "raw_bytes", "codec", "data"],
     ),
     (
-        3,
         "ext_items",
         &[
             "id",
@@ -85,9 +89,8 @@ const TABLES: &[(i32, &str, &[&str])] = &[
             "metadata",
         ],
     ),
-    (3, "ext_messages", &["id", "item", "field_id", "summary"]),
+    ("ext_messages", &["id", "item", "field_id", "summary"]),
     (
-        4,
         "intruder_runs",
         &[
             "id",
@@ -98,16 +101,30 @@ const TABLES: &[(i32, &str, &[&str])] = &[
             "dispatched",
             "completed",
             "state",
+            "paused",
             "error",
             "started",
+            "title",
+            "title_revision",
+            "baseline_ordinal",
+            "pool_id",
+            "pool_revision",
             "spec_meta",
             "template",
         ],
     ),
+    ("intruder_payloads", &["run", "set_index", "ordinal", "value"]),
     (
-        4,
-        "intruder_payloads",
-        &["run", "set_index", "ordinal", "value"],
+        "intruder_results",
+        &[
+            "run",
+            "ordinal",
+            "flow",
+            "error",
+            "notes",
+            "notes_revision",
+            "highlight",
+            "highlight_revision",
+        ],
     ),
-    (4, "intruder_results", &["run", "ordinal", "flow", "error"]),
 ];
