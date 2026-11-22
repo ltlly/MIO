@@ -1092,7 +1092,7 @@ impl Running {
                 envelope::Body::Resync((*snapshot).clone()),
                 0,
             )?;
-            if let Err(err) = preview.validate() {
+            if let Err(err) = preview.validate_for_minor(self.protocol_minor) {
                 self.abandon_panel_resync(
                     panel_id,
                     if is_main {
@@ -1337,7 +1337,7 @@ impl Running {
             };
             let preview =
                 self.preview_envelope_for(panel_id, envelope::Body::UiEvent(event), 0)?;
-            if let Err(err) = preview.validate() {
+            if let Err(err) = preview.validate_for_minor(self.protocol_minor) {
                 self.remove_pending_pointer_cancel_seq(panel_id, cancel.seq);
                 self.fail_deferred_panel_commands(
                     panel_id,

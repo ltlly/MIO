@@ -78,7 +78,7 @@ impl Running {
         self.frame_count += 1;
         ensure!(self.frame_count <= 512, "插件消息频率超过每秒 512 帧限额");
         envelope
-            .check_channel_header(self.identity, self.incoming_sequence)
+            .check_channel_header_for_minor(self.identity, self.incoming_sequence, self.protocol_minor)
             .map_err(anyhow::Error::msg)?;
         self.incoming_sequence = envelope.request_id;
         let now = Instant::now();

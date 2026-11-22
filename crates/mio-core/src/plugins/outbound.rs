@@ -26,6 +26,7 @@ impl Running {
         Self {
             identity,
             plugin_id,
+            protocol_minor: protocol::PROTOCOL_MINOR,
             supports_panel_multiplexing,
             panels: HashMap::from([(PANEL_ID, PanelSlot::with_state(panel_state))]),
             broker,
@@ -346,6 +347,7 @@ impl Running {
             body,
             MAX_OPERATION,
         )
+        .with_minor(self.protocol_minor)
         .with_panel_id(panel_id);
         envelope.in_reply_to = in_reply_to;
         Ok(envelope)
@@ -441,7 +443,9 @@ impl Running {
         in_reply_to: u64,
     ) -> Result<u64> {
         let envelope = self.envelope_for(panel_id, body, in_reply_to)?;
-        envelope.validate().map_err(anyhow::Error::msg)?;
+        envelope
+            .validate_for_minor(self.protocol_minor)
+            .map_err(anyhow::Error::msg)?;
         let id = envelope.request_id;
         self.push_outbound(outgoing, envelope)?;
         Ok(id)
@@ -471,7 +475,9 @@ impl Running {
             QUEUE_CAPACITY
         };
         ensure!(self.requests.len() < limit, "插件待完成操作超过限额");
-        envelope.validate().map_err(anyhow::Error::msg)?;
+        envelope
+            .validate_for_minor(self.protocol_minor)
+            .map_err(anyhow::Error::msg)?;
         let id = envelope.request_id;
         if let Some(claims) = self.outbound_claims.as_ref() {
             claims.register(panel_id, id);

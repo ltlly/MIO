@@ -150,6 +150,7 @@ fn panel_snapshot(rev: u64, title: &str) -> Vec<u8> {
 }
 
 fn encode_env(
+    minor: u64,
     req_id: u64,
     instance_id: &[u8],
     project_id: &[u8],
@@ -161,7 +162,7 @@ fn encode_env(
 ) -> Vec<u8> {
     let mut out = Vec::new();
     tag_varint(1, 1, &mut out);
-    tag_varint(2, 6, &mut out);
+    tag_varint(2, minor, &mut out);
     tag_varint(3, req_id, &mut out);
     tag_bytes(4, instance_id, &mut out);
     tag_bytes(5, project_id, &mut out);
@@ -178,6 +179,7 @@ fn encode_env(
 
 #[derive(Default)]
 struct EnvMeta {
+    minor: u64,
     req_id: u64,
     in_reply_to: u64,
     instance_id: Vec<u8>,
@@ -196,6 +198,7 @@ fn parse_env(buf: &[u8]) -> EnvMeta {
         let field = (key >> 3) as u32;
         let wire = key & 7;
         match (field, wire) {
+            (2, 0) => meta.minor = read_varint(buf, &mut pos),
             (3, 0) => meta.req_id = read_varint(buf, &mut pos),
             (4, 2) => {
                 let len = read_varint(buf, &mut pos) as usize;
@@ -233,6 +236,14 @@ fn main() -> io::Result<()> {
     let manifest_json = fs::read_to_string("manifest.json").unwrap_or_default();
     let plugin_id = json_field(&manifest_json, "id");
     let plugin_version = json_field(&manifest_json, "version");
+    if plugin_version == "0.0.0-exit" {
+        std::process::exit(42);
+    }
+    let expected_minor: u64 = if plugin_version.starts_with("0.0.0-v15") {
+        5
+    } else {
+        6
+    };
 
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
@@ -241,6 +252,9 @@ fn main() -> io::Result<()> {
         return Ok(());
     };
     let hello = parse_env(&hello_buf);
+    if hello.minor != expected_minor {
+        return Ok(());
+    }
 
     let mut reg = Vec::new();
     tag_bytes(1, plugin_id.as_bytes(), &mut reg);
@@ -249,6 +263,7 @@ fn main() -> io::Result<()> {
     let mut next_req = 1u64;
     let mut rev = 1u64;
     let reg_env = encode_env(
+        expected_minor,
         next_req,
         &hello.instance_id,
         &hello.project_id,
@@ -275,6 +290,7 @@ fn main() -> io::Result<()> {
             tag_bytes(10, &pref_entry, &mut host_call);
             tag_varint(20, env.req_id, &mut host_call);
             let call_env = encode_env(
+                expected_minor,
                 call_id,
                 &hello.instance_id,
                 &hello.project_id,
@@ -299,6 +315,7 @@ fn main() -> io::Result<()> {
             rev += 1;
             next_req += 1;
             let snap_env = encode_env(
+                expected_minor,
                 next_req,
                 &hello.instance_id,
                 &hello.project_id,
@@ -1131,4 +1148,115 @@ fn persistent_plugins_survive_runtime_restart_toggle_disable_extensions_and_unin
     assert!(!plugins_dir.join("packages/lab.persist").exists());
     let store = crate::plugins::PluginRegistryStore::new(Some(plugins_dir));
     assert!(store.list().unwrap().is_empty());
+}
+
+#[test]
+fn supervisor_recovers_from_handshake_zombie_eperm_and_falls_back_to_v15_when_safe() {
+    use crate::plugins::{
+        NativeTrust, PluginEvent, PluginSupervisor, ServiceResult, VerifiedPackage,
+    };
+    use mio_plugin_api::{ProjectKey, protocol::Permission};
+    use tokio::sync::mpsc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = ProjectKey {
+        id: Uuid::new_v4(),
+        generation: 1,
+    };
+
+    // 1. Immediate worker exit during handshake must return the handshake EOF error,
+    // never macOS zombie-leader EPERM ("无法终止插件进程组").
+    let exit_dir = temp.path().join("exit-worker");
+    fs::create_dir_all(&exit_dir).unwrap();
+    write_native_package(
+        &exit_dir,
+        "lab.exit_early",
+        "0.0.0-exit",
+        &["traffic.read"],
+        &["suite_panel"],
+    );
+    let exit_pkg = VerifiedPackage::read(&exit_dir).unwrap();
+    let exit_trust = NativeTrust::confirmed(&exit_pkg, [Permission::TrafficRead]).unwrap();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async move {
+        let (srv_tx, _srv_rx) = mpsc::channel(8);
+        let err = PluginSupervisor::start(exit_pkg, project, exit_trust, srv_tx)
+            .await
+            .err()
+            .expect("exiting worker must fail handshake");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("无法终止插件进程组"),
+            "unexpected process group termination error: {msg}"
+        );
+
+        // 2. Worker supporting only v1.5 (without passive_check / active_check / audit.write)
+        // must automatically fall back to minor=5 and complete handshake + UiEvent.
+        let v15_dir = temp.path().join("v15-compat-worker");
+        fs::create_dir_all(&v15_dir).unwrap();
+        write_native_package(
+            &v15_dir,
+            "lab.v15_compat",
+            "0.0.0-v15",
+            &["storage.kv", "traffic.read"],
+            &["suite_panel", "http_hook"],
+        );
+        let v15_pkg = VerifiedPackage::read(&v15_dir).unwrap();
+        let v15_trust =
+            NativeTrust::confirmed(&v15_pkg, [Permission::Storage, Permission::TrafficRead])
+                .unwrap();
+        let (srv_tx2, mut srv_rx2) = mpsc::channel(8);
+        let mut sup = PluginSupervisor::start(v15_pkg, project, v15_trust, srv_tx2)
+            .await
+            .expect("compatible v1.5 plugin should fall back to protocol v1.5");
+        let handle = sup.handle();
+        handle
+            .try_event(UiEvent {
+                node_id: 10,
+                event: Some(ui_event::Event::Click(Empty {})),
+                editors: vec![],
+            })
+            .unwrap();
+        let req = srv_rx2.recv().await.expect("expected HostCall on v1.5 fallback");
+        let _ = req.reply.send(Ok(ServiceResult::Done));
+        let updated_rev = loop {
+            match sup.events.recv().await.expect("expected plugin event") {
+                PluginEvent::Panel { snapshot, .. } if snapshot.revision >= 2 => {
+                    break snapshot.revision;
+                }
+                _ => {}
+            }
+        };
+        assert!(updated_rev >= 2);
+        sup.stop().await.unwrap();
+
+        // 3. v1.5 worker declaring passive_check must NOT fall back to v1.5 because
+        // PassiveCheckCall wire format changed in v1.6.
+        let incompatible_dir = temp.path().join("v15-passive-worker");
+        fs::create_dir_all(&incompatible_dir).unwrap();
+        write_native_package(
+            &incompatible_dir,
+            "lab.v15_passive",
+            "0.0.0-v15-passive",
+            &["traffic.read"],
+            &["passive_check"],
+        );
+        let inc_pkg = VerifiedPackage::read(&incompatible_dir).unwrap();
+        let inc_trust = NativeTrust::confirmed(&inc_pkg, [Permission::TrafficRead]).unwrap();
+        let (srv_tx3, _srv_rx3) = mpsc::channel(8);
+        let inc_err = PluginSupervisor::start(inc_pkg, project, inc_trust, srv_tx3)
+            .await
+            .err()
+            .expect("v1.5 worker declaring passive_check must be rejected");
+        let inc_msg = format!("{inc_err:#}");
+        assert!(
+            !inc_msg.contains("无法终止插件进程组"),
+            "unexpected process group termination error: {inc_msg}"
+        );
+        })
+        .await
+        .expect("supervisor v1.5 fallback test timed out");
+    });
 }

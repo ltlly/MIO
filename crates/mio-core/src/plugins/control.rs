@@ -1428,7 +1428,10 @@ impl Running {
                     return Err(err);
                 }
             };
-            if let Err(err) = env.validate().map_err(anyhow::Error::msg) {
+            if let Err(err) = env
+                .validate_for_minor(self.protocol_minor)
+                .map_err(anyhow::Error::msg)
+            {
                 remaining.push_back(revoke);
                 remaining.append(&mut self.pending_revokes);
                 self.pending_revokes = remaining;
@@ -1845,7 +1848,7 @@ impl Running {
         }
         let preview =
             self.preview_envelope_for(panel_id, envelope::Body::UiEvent(event.clone()), 0)?;
-        if let Err(error) = preview.validate() {
+        if let Err(error) = preview.validate_for_minor(self.protocol_minor) {
             return self
                 .reject_ui_event(
                     panel_id,
@@ -1967,7 +1970,7 @@ impl Running {
             _ => 0,
         };
         let env = self.envelope_for(PANEL_ID, body, 0)?;
-        if let Err(err) = env.validate() {
+        if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }

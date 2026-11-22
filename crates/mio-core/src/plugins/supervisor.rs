@@ -259,12 +259,128 @@ pub(crate) fn test_supervisor(
         events,
     )
 }
-pub(super) async fn handshake_native<W, R>(
+pub(super) fn supports_v15_compat_fallback(manifest: &PluginManifest, grants: &BTreeSet<Permission>) -> bool {
+    !grants.contains(&Permission::AuditWrite)
+        && !manifest
+            .contributions
+            .iter()
+            .any(|c| matches!(c.as_str(), "passive_check" | "active_check"))
+}
+
+enum SpawnAttemptError {
+    TimedOut(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+async fn spawn_native_attempt(
+    package: &VerifiedPackage,
+    trust: &NativeTrust,
+    identity: ChannelIdentity,
+    protocol_minor: u32,
+) -> std::result::Result<(WorkerTransport, PanelState, u64, bool), SpawnAttemptError> {
+    let mut command = Command::new(&package.executable);
+    command
+        .current_dir(&package.work_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Native code remains trusted and unsandboxed; do not hand it host secret environment values.
+    command.env_clear();
+    #[cfg(windows)]
+    for key in ["SystemRoot", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .context("无法启动可信 native worker")
+        .map_err(SpawnAttemptError::Failed)?;
+    #[cfg(windows)]
+    let job = WindowsJob::create_and_assign(&child).ok();
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("缺少插件 stdin")
+        .map_err(SpawnAttemptError::Failed)?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("缺少插件 stdout")
+        .map_err(SpawnAttemptError::Failed)?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("缺少插件 stderr")
+        .map_err(SpawnAttemptError::Failed)?;
+    let handshake = handshake_native(
+        &mut stdin,
+        &mut stdout,
+        identity,
+        &package.manifest,
+        &trust.grants,
+        protocol_minor,
+    );
+    match timeout(MAX_OPERATION, handshake).await {
+        Ok(Ok((state, seq, multiplexing))) => Ok((
+            WorkerTransport::Native {
+                child: Box::new(child),
+                #[cfg(windows)]
+                job,
+                stdin,
+                stdout,
+                stderr,
+            },
+            state,
+            seq,
+            multiplexing,
+        )),
+        result => {
+            #[cfg(windows)]
+            if let Some(ref j) = job {
+                let _ = j.terminate();
+            }
+            let (terminated, reaped) = terminate_and_reap_worker(
+                &mut child,
+                "插件握手失败，已发出终止但回收进程超时",
+                "插件握手失败，回收进程失败",
+            )
+            .await;
+            if let Err(err) = reaped {
+                return Err(SpawnAttemptError::Failed(err));
+            }
+            if let Err(err) = terminated {
+                return Err(SpawnAttemptError::Failed(err));
+            }
+            match result {
+                Ok(Err(error)) => Err(SpawnAttemptError::Failed(error)),
+                _ => Err(SpawnAttemptError::TimedOut(anyhow::anyhow!(
+                    "插件握手超时；已终止并回收新实例"
+                ))),
+            }
+        }
+    }
+}
+
+async fn handshake_native<W, R>(
     stdin: &mut W,
     stdout: &mut R,
     identity: ChannelIdentity,
     manifest: &PluginManifest,
     grants: &BTreeSet<Permission>,
+    protocol_minor: u32,
 ) -> Result<(PanelState, u64, bool)>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -278,15 +394,18 @@ where
             max_frame_bytes: protocol::MAX_FRAME_BYTES as u32,
             max_operation_ms: MAX_OPERATION.as_millis() as u32,
             granted_permissions: grants.iter().map(|p| *p as i32).collect(),
-            host_minor: protocol::PROTOCOL_MINOR,
+            host_minor: protocol_minor,
         }),
         MAX_OPERATION,
-    );
-    stdin.write_all(&protocol::encode_frame(&hello)?).await?;
+    )
+    .with_minor(protocol_minor);
+    stdin
+        .write_all(&protocol::encode_frame_for_minor(&hello, protocol_minor)?)
+        .await?;
     stdin.flush().await?;
-    let registration = read_async_frame(stdout).await?;
+    let registration = read_async_frame_for_minor(stdout, protocol_minor).await?;
     registration
-        .check_channel(identity, 0)
+        .check_channel_for_minor(identity, 0, protocol_minor)
         .map_err(anyhow::Error::msg)?;
     ensure!(registration.in_reply_to == 1, "插件注册未关联 Hello");
     let Some(envelope::Body::Register(register)) = &registration.body else {
@@ -334,9 +453,12 @@ where
         state.snapshot().revision,
         envelope::Body::Ready(panel::Empty {}),
         MAX_OPERATION,
-    );
+    )
+    .with_minor(protocol_minor);
     ready.in_reply_to = registration.request_id;
-    stdin.write_all(&protocol::encode_frame(&ready)?).await?;
+    stdin
+        .write_all(&protocol::encode_frame_for_minor(&ready, protocol_minor)?)
+        .await?;
     stdin.flush().await?;
     Ok((
         state,
@@ -355,7 +477,14 @@ pub(crate) async fn spawn_test_duplex_supervisor(
 ) -> Result<(PluginSupervisor, mpsc::Receiver<ServiceRequest>)> {
     let (panel_state, incoming_sequence, supports_panel_multiplexing) = timeout(
         MAX_OPERATION,
-        handshake_native(&mut stdin, &mut stdout, identity, &manifest, &grants),
+        handshake_native(
+            &mut stdin,
+            &mut stdout,
+            identity,
+            &manifest,
+            &grants,
+            protocol::PROTOCOL_MINOR,
+        ),
     )
     .await
     .context("测试插件握手超时")??;
@@ -436,78 +565,34 @@ impl PluginSupervisor {
             instance_id: Uuid::new_v4(),
             project,
         };
-        let (transport, panel_state, incoming_sequence, supports_panel_multiplexing) = {
-            let mut command = Command::new(&package.executable);
-            command
-                .current_dir(&package.work_dir)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            // Native code remains trusted and unsandboxed; do not hand it host secret environment values.
-            command.env_clear();
-            #[cfg(windows)]
-            for key in ["SystemRoot", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP"] {
-                if let Some(value) = std::env::var_os(key) {
-                    command.env(key, value);
-                }
-            }
-            #[cfg(windows)]
+        let ((transport, panel_state, incoming_sequence, supports_panel_multiplexing), negotiated_minor) =
+            match spawn_native_attempt(&package, &trust, identity, protocol::PROTOCOL_MINOR).await
             {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.as_std_mut().process_group(0);
-            }
-            let mut child = command.spawn().context("无法启动可信 native worker")?;
-            #[cfg(windows)]
-            let job = WindowsJob::create_and_assign(&child).ok();
-            let mut stdin = child.stdin.take().context("缺少插件 stdin")?;
-            let mut stdout = child.stdout.take().context("缺少插件 stdout")?;
-            let stderr = child.stderr.take().context("缺少插件 stderr")?;
-            let handshake = handshake_native(
-                &mut stdin,
-                &mut stdout,
-                identity,
-                &package.manifest,
-                &trust.grants,
-            );
-            match timeout(MAX_OPERATION, handshake).await {
-                Ok(Ok((state, seq, multiplexing))) => (
-                    WorkerTransport::Native {
-                        child: Box::new(child),
-                        #[cfg(windows)]
-                        job,
-                        stdin,
-                        stdout,
-                        stderr,
-                    },
-                    state,
-                    seq,
-                    multiplexing,
-                ),
-                result => {
-                    #[cfg(windows)]
-                    if let Some(ref j) = job {
-                        let _ = j.terminate();
-                    }
-                    let terminated = kill_worker_group(&mut child);
-                    timeout(REAP_DEADLINE, child.wait())
-                        .await
-                        .context("插件握手失败，已发出终止但回收进程超时")?
-                        .context("插件握手失败，回收进程失败")?;
-                    terminated?;
-                    match result {
-                        Ok(Err(error)) => return Err(error),
-                        _ => bail!("插件握手超时；已终止并回收新实例"),
+                Ok(ok) => (ok, protocol::PROTOCOL_MINOR),
+                Err(SpawnAttemptError::Failed(err))
+                    if supports_v15_compat_fallback(&package.manifest, &trust.grants) =>
+                {
+                    match spawn_native_attempt(
+                        &package,
+                        &trust,
+                        identity,
+                        protocol::LEGACY_COMPAT_MINOR,
+                    )
+                    .await
+                    {
+                        Ok(ok) => (ok, protocol::LEGACY_COMPAT_MINOR),
+                        Err(
+                            SpawnAttemptError::Failed(fallback_err)
+                            | SpawnAttemptError::TimedOut(fallback_err),
+                        ) => {
+                            return Err(fallback_err.context(format!("{err:#}；尝试协议 v1.5 兼容握手失败")));
+                        }
                     }
                 }
-            }
-        };
+                Err(SpawnAttemptError::Failed(err) | SpawnAttemptError::TimedOut(err)) => {
+                    return Err(err);
+                }
+            };
         let initial_panel = Arc::new(panel_state.snapshot().clone());
         let (control, commands) = mpsc::channel(QUEUE_CAPACITY);
         let (urgent_control, urgent_commands) = mpsc::unbounded_channel();
@@ -521,7 +606,7 @@ impl PluginSupervisor {
             cancel: cancel.clone(),
         };
         let manifest = package.manifest;
-        let runtime = Running::new(
+        let mut runtime = Running::new(
             identity,
             manifest.id.clone(),
             supports_panel_multiplexing,
@@ -533,6 +618,7 @@ impl PluginSupervisor {
             2,
             incoming_sequence,
         );
+        runtime.protocol_minor = negotiated_minor;
         let task = tokio::spawn(runtime.run(transport, commands, urgent_commands));
         Ok(Self {
             identity,

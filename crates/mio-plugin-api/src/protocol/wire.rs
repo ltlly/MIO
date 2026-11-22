@@ -63,7 +63,14 @@ impl Envelope {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.major != PROTOCOL_MAJOR || self.minor != PROTOCOL_MINOR {
+        self.validate_for_minor(PROTOCOL_MINOR)
+    }
+
+    pub fn validate_for_minor(&self, expected_minor: u32) -> Result<(), String> {
+        if self.major != PROTOCOL_MAJOR
+            || !matches!(expected_minor, LEGACY_COMPAT_MINOR | PROTOCOL_MINOR)
+            || self.minor != expected_minor
+        {
             return Err("插件协议版本不兼容".into());
         }
         self.identity()?;
@@ -77,7 +84,23 @@ impl Envelope {
         if self.encoded_len() > MAX_FRAME_BYTES {
             return Err("插件消息超过 1 MiB 帧限额".into());
         }
-        match self.body.as_ref().unwrap() {
+        let body = self.body.as_ref().unwrap();
+        if expected_minor < PROTOCOL_MINOR
+            && (matches!(
+                body,
+                envelope::Body::PassiveCheckCall(_)
+                    | envelope::Body::PassiveCheckResult(_)
+                    | envelope::Body::ActiveCheckCall(_)
+                    | envelope::Body::ActiveCheckResult(_)
+            ) || matches!(
+                body,
+                envelope::Body::HostCall(call)
+                    if matches!(call.operation, Some(host_call::Operation::SubmitAuditIssue(_)))
+            ))
+        {
+            return Err("当前兼容协议版本不支持该检查/审计消息，请升级插件至协议 v1.6".into());
+        }
+        match body {
             envelope::Body::OpenRequest(open) => {
                 uuid(&open.resource_id)?;
                 if open.message_revision == 0 {
@@ -249,7 +272,16 @@ impl Envelope {
         identity: ChannelIdentity,
         previous_sequence: u64,
     ) -> Result<(), String> {
-        self.validate()?;
+        self.check_channel_header_for_minor(identity, previous_sequence, PROTOCOL_MINOR)
+    }
+
+    pub fn check_channel_header_for_minor(
+        &self,
+        identity: ChannelIdentity,
+        previous_sequence: u64,
+        expected_minor: u32,
+    ) -> Result<(), String> {
+        self.validate_for_minor(expected_minor)?;
         if self.identity()? != identity {
             return Err("实例或项目代际不匹配".into());
         }
@@ -264,7 +296,16 @@ impl Envelope {
         identity: ChannelIdentity,
         previous_sequence: u64,
     ) -> Result<(), String> {
-        self.check_channel_header(identity, previous_sequence)?;
+        self.check_channel_for_minor(identity, previous_sequence, PROTOCOL_MINOR)
+    }
+
+    pub fn check_channel_for_minor(
+        &self,
+        identity: ChannelIdentity,
+        previous_sequence: u64,
+        expected_minor: u32,
+    ) -> Result<(), String> {
+        self.check_channel_header_for_minor(identity, previous_sequence, expected_minor)?;
         if self.is_expired() {
             return Err("插件消息 deadline 已过期".into());
         }
@@ -308,16 +349,24 @@ pub fn frame_length(prefix: [u8; 4]) -> io::Result<usize> {
 }
 
 pub fn decode_frame(payload: &[u8]) -> io::Result<Envelope> {
+    decode_frame_for_minor(payload, PROTOCOL_MINOR)
+}
+
+pub fn decode_frame_for_minor(payload: &[u8], expected_minor: u32) -> io::Result<Envelope> {
     if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
         return Err(invalid("插件帧长度无效"));
     }
     let envelope = Envelope::decode(payload).map_err(|_| invalid("无法解析插件 Protobuf 帧"))?;
-    envelope.validate().map_err(invalid)?;
+    envelope.validate_for_minor(expected_minor).map_err(invalid)?;
     Ok(envelope)
 }
 
 pub fn encode_frame(envelope: &Envelope) -> io::Result<Vec<u8>> {
-    envelope.validate().map_err(invalid)?;
+    encode_frame_for_minor(envelope, PROTOCOL_MINOR)
+}
+
+pub fn encode_frame_for_minor(envelope: &Envelope, expected_minor: u32) -> io::Result<Vec<u8>> {
+    envelope.validate_for_minor(expected_minor).map_err(invalid)?;
     let length = envelope.encoded_len();
     let mut frame = Vec::with_capacity(length + 4);
     frame.extend_from_slice(&(length as u32).to_be_bytes());

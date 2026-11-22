@@ -660,3 +660,101 @@ fn handshake_strictly_requires_current_protocol_minor() {
         .is_err()
     );
 }
+
+#[test]
+fn legacy_v15_compat_minor_allows_core_frames_and_rejects_v16_check_and_audit_frames() {
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let dur = Duration::from_secs(5);
+    let hello = Envelope::new(
+        identity,
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![Permission::TrafficRead as i32],
+            host_minor: LEGACY_COMPAT_MINOR,
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_COMPAT_MINOR);
+    let wire = encode_frame_for_minor(&hello, LEGACY_COMPAT_MINOR).unwrap();
+    let decoded = decode_frame_for_minor(&wire[4..], LEGACY_COMPAT_MINOR).unwrap();
+    assert_eq!(decoded.minor, LEGACY_COMPAT_MINOR);
+
+    let hook = Envelope::new(
+        identity,
+        2,
+        1,
+        envelope::Body::HttpHookCall(HttpHookCall {
+            plugin_id: "lab.compat".into(),
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
+            source: SourceDto::Proxy as i32,
+            response_stage: false,
+            response_head_only: false,
+            request: Some(HttpRequestDto {
+                method: "GET".into(),
+                url: "https://example.invalid/".into(),
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+            response: None,
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_COMPAT_MINOR);
+    hook.check_channel_header_for_minor(identity, 0, LEGACY_COMPAT_MINOR)
+        .unwrap();
+
+    let passive = Envelope::new(
+        identity,
+        3,
+        1,
+        envelope::Body::PassiveCheckCall(PassiveCheckCall {
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
+            url: "https://example.invalid/".into(),
+            request: Some(HttpRequestDto {
+                method: "GET".into(),
+                url: "https://example.invalid/".into(),
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+            response: Some(HttpResponseDto {
+                status: 200,
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_COMPAT_MINOR);
+    assert!(passive.validate_for_minor(LEGACY_COMPAT_MINOR).is_err());
+
+    let submit_audit = Envelope::new(
+        identity,
+        4,
+        1,
+        envelope::Body::HostCall(HostCall {
+            parent_request_id: 0,
+            operation: Some(host_call::Operation::SubmitAuditIssue(SubmitAuditIssueDto {
+                flow_id: Uuid::new_v4().as_bytes().to_vec(),
+                url: "https://example.invalid/".into(),
+                finding: Some(PluginFindingDto {
+                    title: "T".into(),
+                    severity: FindingSeverity::Low as i32,
+                    confidence: FindingConfidence::Firm as i32,
+                    ..Default::default()
+                }),
+            })),
+        }),
+        dur,
+    )
+    .with_minor(LEGACY_COMPAT_MINOR);
+    assert!(submit_audit.validate_for_minor(LEGACY_COMPAT_MINOR).is_err());
+}

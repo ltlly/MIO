@@ -213,7 +213,7 @@ impl Running {
             envelope::Body::HostResult(result),
             completed.request_id,
         )?;
-        if let Err(error) = envelope.validate() {
+        if let Err(error) = envelope.validate_for_minor(self.protocol_minor) {
             envelope.body = Some(envelope::Body::HostResult(HostResult {
                 outcome: Some(host_result::Outcome::Error(Failure::new(
                     ErrorCode::Invalid,
@@ -221,7 +221,9 @@ impl Running {
                 ))),
             }));
         }
-        envelope.validate().map_err(anyhow::Error::msg)?;
+        envelope
+            .validate_for_minor(self.protocol_minor)
+            .map_err(anyhow::Error::msg)?;
         self.push_outbound(outgoing, envelope)?;
         Ok(())
     }
@@ -374,7 +376,35 @@ impl Running {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn spawn_stream_io<W, R>(
+        stdin: W,
+        stdout: R,
+        writes: mpsc::Receiver<Envelope>,
+        wire: &mpsc::Sender<Wire>,
+        outbound_claims: Arc<OutboundWriteClaims>,
+        write_progress: tokio::sync::watch::Sender<u64>,
+        io_cancel: &CancellationToken,
+        io_tasks: &mut JoinSet<()>,
+    ) where
+        W: AsyncWrite + Unpin + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        Self::spawn_stream_io_for_minor(
+            stdin,
+            stdout,
+            writes,
+            wire,
+            outbound_claims,
+            write_progress,
+            io_cancel,
+            io_tasks,
+            protocol::PROTOCOL_MINOR,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_stream_io_for_minor<W, R>(
         mut stdin: W,
         mut stdout: R,
         mut writes: mpsc::Receiver<Envelope>,
@@ -383,6 +413,7 @@ impl Running {
         write_progress: tokio::sync::watch::Sender<u64>,
         io_cancel: &CancellationToken,
         io_tasks: &mut JoinSet<()>,
+        protocol_minor: u32,
     ) where
         W: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
@@ -394,7 +425,7 @@ impl Running {
                 let result = tokio::select! {
                     biased;
                     _ = reader_cancel.cancelled() => break,
-                    result = read_async_frame(&mut stdout) => result,
+                    result = read_async_frame_for_minor(&mut stdout, protocol_minor) => result,
                 };
                 let message = match result {
                     Ok(frame) => Wire::Frame(Box::new(frame)),
@@ -427,7 +458,9 @@ impl Running {
                     continue;
                 }
                 let result = async {
-                    stdin.write_all(&protocol::encode_frame(&envelope)?).await?;
+                    stdin
+                        .write_all(&protocol::encode_frame_for_minor(&envelope, protocol_minor)?)
+                        .await?;
                     stdin.flush().await?;
                     Ok::<_, anyhow::Error>(())
                 };
@@ -478,7 +511,7 @@ impl Running {
                 stdout,
                 mut stderr,
             } => {
-                Self::spawn_stream_io(
+                Self::spawn_stream_io_for_minor(
                     stdin,
                     stdout,
                     writes,
@@ -487,6 +520,7 @@ impl Running {
                     write_progress_tx.clone(),
                     &io_cancel,
                     &mut io_tasks,
+                    self.protocol_minor,
                 );
                 let stderr_cancel = io_cancel.clone();
                 io_tasks.spawn(async move {
@@ -512,7 +546,7 @@ impl Running {
             }
             #[cfg(test)]
             WorkerTransport::Duplex { stdin, stdout } => {
-                Self::spawn_stream_io(
+                Self::spawn_stream_io_for_minor(
                     stdin,
                     stdout,
                     writes,
@@ -521,6 +555,7 @@ impl Running {
                     write_progress_tx.clone(),
                     &io_cancel,
                     &mut io_tasks,
+                    self.protocol_minor,
                 );
                 None
             }
@@ -691,28 +726,12 @@ impl Running {
             if let Some(ref j) = job {
                 let _ = j.terminate();
             }
-            #[cfg(unix)]
-            let group = child.id();
-            let mut terminated = kill_worker_group(&mut child);
-            let reaped = timeout(REAP_DEADLINE, child.wait())
-                .await
-                .context("插件已发出终止但回收进程超时")
-                .and_then(|result| result.context("插件回收进程失败"))
-                .map(|_| ());
-            // macOS can return EPERM for a group containing only its zombie leader; verify absence, never signal it again.
-            #[cfg(unix)]
-            if reaped.is_ok()
-        && terminated.as_ref().err().is_some_and(|error| {
-            error.downcast_ref::<std::io::Error>().is_some_and(|error| error.raw_os_error() == Some(libc::EPERM))
-        })
-        && group.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), 0) } == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
-    {
-        terminated = Ok(());
-    }
-            #[cfg(not(unix))]
-            let _ = &mut terminated;
-            (terminated, reaped)
+            terminate_and_reap_worker(
+                &mut child,
+                "插件已发出终止但回收进程超时",
+                "插件回收进程失败",
+            )
+            .await
         } else {
             (Ok(()), Ok(()))
         };

@@ -151,7 +151,7 @@ impl Running {
             return Ok(());
         }
         let envelope = self.envelope_for(panel_id, body, 0)?;
-        if let Err(error) = envelope.validate() {
+        if let Err(error) = envelope.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(error)));
             return Ok(());
         }
@@ -264,7 +264,7 @@ impl Running {
         }
         let message_revision = request.message_revision;
         let env = self.envelope_for(panel_id, envelope::Body::CommitEditor(request), 0)?;
-        if let Err(err) = env.validate() {
+        if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }
@@ -334,7 +334,7 @@ impl Running {
         }
         let message_revision = request.message_revision;
         let env = self.envelope_for(panel_id, envelope::Body::CommitResponseEditor(request), 0)?;
-        if let Err(err) = env.validate() {
+        if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }

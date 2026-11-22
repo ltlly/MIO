@@ -473,6 +473,7 @@ pub(super) enum Wire {
 struct Running {
     identity: ChannelIdentity,
     plugin_id: String,
+    protocol_minor: u32,
     supports_panel_multiplexing: bool,
     panels: HashMap<u64, PanelSlot>,
     broker: PermissionBroker,
@@ -724,12 +725,53 @@ impl OutboundWriteClaims {
     }
 }
 
+#[cfg(test)]
 async fn read_async_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Envelope> {
+    read_async_frame_for_minor(reader, protocol::PROTOCOL_MINOR).await
+}
+
+async fn read_async_frame_for_minor(
+    reader: &mut (impl AsyncRead + Unpin),
+    expected_minor: u32,
+) -> Result<Envelope> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).await?;
     let mut payload = vec![0; protocol::frame_length(prefix)?];
     reader.read_exact(&mut payload).await?;
-    Ok(protocol::decode_frame(&payload)?)
+    Ok(protocol::decode_frame_for_minor(&payload, expected_minor)?)
+}
+
+async fn terminate_and_reap_worker(
+    child: &mut Child,
+    timeout_msg: &'static str,
+    wait_msg: &'static str,
+) -> (Result<()>, Result<()>) {
+    #[cfg(unix)]
+    let group = child.id();
+    let mut terminated = kill_worker_group(child);
+    let reaped = timeout(REAP_DEADLINE, child.wait())
+        .await
+        .context(timeout_msg)
+        .and_then(|result| result.context(wait_msg))
+        .map(|_| ());
+    // macOS can return EPERM for a group containing only its zombie leader; verify absence, never signal it again.
+    #[cfg(unix)]
+    if reaped.is_ok()
+        && terminated.as_ref().err().is_some_and(|error| {
+            error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.raw_os_error() == Some(libc::EPERM))
+        })
+        && group.is_some_and(|pid| {
+            let rc = unsafe { libc::kill(-(pid as i32), 0) };
+            rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        })
+    {
+        terminated = Ok(());
+    }
+    #[cfg(not(unix))]
+    let _ = &mut terminated;
+    (terminated, reaped)
 }
 
 fn kill_worker_group(child: &mut Child) -> Result<()> {
