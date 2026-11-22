@@ -8,7 +8,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AppContext, Entity, EntityInputHandler, Focusable, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt, Window, div, prelude::FluentBuilder as _, px, rgb,
+    TestSupportExt, WeakEntity, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -282,7 +282,7 @@ pub(super) struct MessageEditorShared {
     pub auto_scroll_to_match: bool,
     pub header_preview: Option<Entity<EditorState>>,
     pub non_printable: Option<Entity<EditorState>>,
-    pub hex_grid: Option<Entity<HexGridView>>,
+    pub hex_grid: Option<WeakEntity<HexGridView>>,
     pub search_error: Option<String>,
     pub wire_bytes: Vec<u8>,
     pub hex_synced_revision: Option<u64>,
@@ -322,7 +322,9 @@ pub(crate) struct MessageEditor {
     pub(crate) header_preview_error: Option<String>,
     pub(super) pretty_baseline_text: Option<String>,
     pretty_baseline_revision: Option<u64>,
+    raw_baseline_text: Option<String>,
     raw_baseline_revision: Option<u64>,
+    pub(super) hex_grid: Option<Entity<HexGridView>>,
     raw_display_charset: MessageDisplayCharset,
     raw_charset_pref: (u8, String),
     pub soft_wrap: bool,

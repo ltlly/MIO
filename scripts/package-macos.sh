@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
-export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export CARGO_INCREMENTAL=0
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "package-macos.sh must be run on macOS (use package-linux.sh or package-windows.ps1/sh for Linux/Windows)." >&2
   exit 1

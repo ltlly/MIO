@@ -478,8 +478,16 @@ impl Workbench {
             self.error = None;
             return Ok(());
         }
-        self.workspace.sessions = next;
-        self.save_workspace(cx);
+        let previous = std::mem::replace(&mut self.workspace.sessions, next);
+        if !self.save_workspace(cx) {
+            self.workspace.sessions = previous;
+            let msg = self
+                .error
+                .clone()
+                .unwrap_or_else(|| "保存会话设置失败，已恢复原配置。".into());
+            cx.notify();
+            return Err(msg);
+        }
         self.error = None;
         cx.notify();
         Ok(())

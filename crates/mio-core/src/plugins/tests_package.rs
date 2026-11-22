@@ -337,4 +337,46 @@ fn single_file_archive_rejects_tampered_sha256_traversal_symlinks_and_non_gzip()
     fs::write(&non_gz_path, b"MZ\x90\x00not-gzip").unwrap();
     let err = VerifiedPackage::read(&non_gz_path).unwrap_err().to_string();
     assert!(err.contains("gzip"), "unexpected: {err}");
+
+    let escape_target = tmp.path().join("outside-secret");
+    fs::write(&escape_target, b"secret-outside").unwrap();
+    let trav_sha_manifest = br#"{"id":"lab.bad","version":"1","api_version":1,"engine":"native","entry":"../outside-secret","permissions":[],"contributions":["suite_panel"]}"#;
+    let trav_sha = serde_json::json!({
+        "id": "lab.bad",
+        "version": "1",
+        "engine": "native",
+        "entry": "../outside-secret",
+        "manifest_sha256": test_sha256_hex(trav_sha_manifest),
+        "entry_sha256": test_sha256_hex(b"secret-outside"),
+        "entry_bytes": 14,
+    })
+    .to_string();
+    let trav_sha_path = tmp.path().join("sha-traversal.tar.gz");
+    fs::write(
+        &trav_sha_path,
+        build_test_tar_gz(&[
+            ("manifest.json", b'0', 0o644, trav_sha_manifest),
+            ("sha256-manifest.json", b'0', 0o644, trav_sha.as_bytes()),
+        ]),
+    )
+    .unwrap();
+    let err = VerifiedPackage::read(&trav_sha_path).unwrap_err().to_string();
+    assert!(
+        err.contains("相对路径") || err.contains("穿越") || err.contains("包外"),
+        "unexpected: {err}"
+    );
+
+    let dir_pkg = tmp.path().join("dir-with-sha");
+    fs::create_dir_all(&dir_pkg).unwrap();
+    fs::write(dir_pkg.join("manifest.json"), manifest_bytes).unwrap();
+    let dir_worker = dir_pkg.join("worker");
+    fs::write(&dir_worker, entry_bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir_worker, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(dir_pkg.join("sha256-manifest.json"), bad_sha.as_bytes()).unwrap();
+    let err = VerifiedPackage::read(&dir_pkg).unwrap_err().to_string();
+    assert!(err.contains("sha256-manifest.json"), "unexpected: {err}");
 }

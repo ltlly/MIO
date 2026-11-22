@@ -161,7 +161,7 @@ fn encode_env(
 ) -> Vec<u8> {
     let mut out = Vec::new();
     tag_varint(1, 1, &mut out);
-    tag_varint(2, 5, &mut out);
+    tag_varint(2, 6, &mut out);
     tag_varint(3, req_id, &mut out);
     tag_bytes(4, instance_id, &mut out);
     tag_bytes(5, project_id, &mut out);

@@ -36,7 +36,10 @@ jobs:
 
       - name: Validate shell scripts
         shell: bash
-        run: bash -n scripts/test.sh scripts/package-macos.sh scripts/package-linux.sh scripts/package-windows.sh
+        run: |
+          for script in scripts/test.sh scripts/package-macos.sh scripts/package-linux.sh scripts/package-windows.sh; do
+            bash -n "$script"
+          done
 
       - name: Read Rust toolchain channel
         id: rust-toolchain

@@ -217,29 +217,77 @@ pub(crate) fn unpack_plugin_archive(
     ))
 }
 
-fn verify_optional_sha256_manifest(work_dir: &Path) -> Result<()> {
-    let sha_path = work_dir.join("sha256-manifest.json");
-    if !sha_path.exists() {
-        return Ok(());
+fn read_bounded_plain_file(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let meta = fs::symlink_metadata(path).with_context(|| format!("读取{label}失败"))?;
+        ensure!(
+            meta.is_file() && !meta.file_type().is_symlink(),
+            "{label}必须是普通文件"
+        );
     }
-    let sha_meta = fs::symlink_metadata(&sha_path)?;
-    ensure!(
-        sha_meta.is_file() && !sha_meta.file_type().is_symlink(),
-        "sha256-manifest.json 必须是普通文件"
-    );
-    let expected: ArchiveShaManifest =
-        serde_json::from_slice(&fs::read(&sha_path)?).context("解析 sha256-manifest.json 失败")?;
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).with_context(|| format!("打开{label}失败"))?;
+    let meta = file.metadata()?;
+    ensure!(meta.is_file(), "{label}必须是普通文件");
+    ensure!(meta.len() <= max_bytes, "{label}超过允许大小上限");
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= max_bytes, "{label}在读取时超过大小上限");
+    Ok(bytes)
+}
 
-    let manifest_bytes = fs::read(work_dir.join("manifest.json")).context("归档缺少 manifest.json")?;
+pub(super) fn verify_optional_sha256_manifest(work_dir: &Path) -> Result<()> {
+    let sha_path = work_dir.join("sha256-manifest.json");
+    match fs::symlink_metadata(&sha_path) {
+        Ok(meta) => {
+            ensure!(
+                meta.is_file() && !meta.file_type().is_symlink(),
+                "sha256-manifest.json 必须是普通文件"
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("检查 sha256-manifest.json 失败"),
+    }
+    let sha_bytes = read_bounded_plain_file(
+        &sha_path,
+        super::MAX_MANIFEST_BYTES as u64,
+        "sha256-manifest.json",
+    )?;
+    let expected: ArchiveShaManifest =
+        serde_json::from_slice(&sha_bytes).context("解析 sha256-manifest.json 失败")?;
+
+    let manifest_path = work_dir.join("manifest.json");
+    let manifest_bytes =
+        super::package::read_manifest(&manifest_path).context("归档缺少 manifest.json")?;
     let partial: PartialManifestMeta =
         serde_json::from_slice(&manifest_bytes).context("解析归档内 manifest.json 失败")?;
-    let entry_path = super::package::resolve_entry_path(work_dir, &partial.entry, &partial.engine);
-    let entry_meta = fs::symlink_metadata(&entry_path).context("归档缺少插件入口文件")?;
+    let entry_raw = partial.entry.to_string_lossy();
     ensure!(
-        entry_meta.is_file() && !entry_meta.file_type().is_symlink(),
-        "归档内插件入口必须是普通文件"
+        !partial.entry.as_os_str().is_empty()
+            && !entry_raw.contains('\0')
+            && !entry_raw.contains('\\')
+            && partial
+                .entry
+                .components()
+                .all(|c| matches!(c, Component::Normal(_))),
+        "单文件插件入口必须是包内相对路径，禁止路径穿越"
     );
-    let entry_bytes = fs::read(&entry_path)?;
+    let canon_work_dir = work_dir.canonicalize().context("无法解析插件工作目录")?;
+    let entry_path = super::package::resolve_entry_path(work_dir, &partial.entry, &partial.engine);
+    let canon_entry = entry_path.canonicalize().context("归档缺少插件入口文件")?;
+    ensure!(
+        canon_entry.starts_with(&canon_work_dir),
+        "插件入口不能指向包外"
+    );
+    let entry_bytes =
+        read_bounded_plain_file(&entry_path, MAX_UNPACKED_BYTES, "插件入口文件")?;
 
     ensure!(
         expected.id == partial.id

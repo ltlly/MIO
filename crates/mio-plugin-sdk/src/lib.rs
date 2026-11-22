@@ -27,6 +27,7 @@ pub mod ui;
 pub use context::{HostClient, HostContext, MAX_DEFERRED_ENVELOPES};
 use context::{
     DeferredQueue, PanelRevisionState, emit_panel_update, is_prunable_expired, send_deadline_error,
+    send_panel_error,
 };
 pub use ui::FindingBuilder;
 
@@ -551,6 +552,18 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
                     }
                 })?;
                 if destroy {
+                    let pruned = runner.deferred.prune_panel(panel_id);
+                    for stale in pruned {
+                        if stale.request_id != 0 {
+                            send_panel_error(
+                                &mut runner.session,
+                                &stale,
+                                &runner.panel_revisions,
+                                ErrorCode::Stale,
+                                "子面板已销毁",
+                            )?;
+                        }
+                    }
                     runner.panel_revisions.remove(&panel_id);
                 }
             }

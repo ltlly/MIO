@@ -119,7 +119,12 @@ pub fn export_project_settings_json(ws: &Workspace) -> Result<String, String> {
     let subset = ProjectSettingsSubset::from_workspace(ws);
     subset.validate()?;
     let doc = ProjectSettingsExportDoc::from(&subset);
-    serde_json::to_string_pretty(&doc).map_err(|err| format!("序列化项目设置 JSON 失败：{err}"))
+    let encoded = serde_json::to_string_pretty(&doc)
+        .map_err(|err| format!("序列化项目设置 JSON 失败：{err}"))?;
+    if encoded.len() > MAX_PROJECT_SETTINGS_JSON_BYTES {
+        return Err("项目设置 JSON 超过 512 KiB 上限，无法导出。".into());
+    }
+    Ok(encoded)
 }
 
 pub fn parse_project_settings_json(raw: &str) -> Result<ProjectSettingsSubset, String> {
@@ -249,9 +254,9 @@ struct ProjectSettingsImportDoc {
     #[serde(default, deserialize_with = "deserialize_some")]
     network_http: Option<NetworkHttpSettings>,
     #[serde(default, deserialize_with = "deserialize_some")]
-    upstream_proxy: Option<UpstreamProxySettings>,
+    upstream_proxy: Option<UpstreamProxyImportJson>,
     #[serde(default, deserialize_with = "deserialize_some")]
-    upstream_tls: Option<UpstreamTlsJson>,
+    upstream_tls: Option<UpstreamTlsImportJson>,
     #[serde(default, deserialize_with = "deserialize_some")]
     proxy_listeners: Option<Vec<ProxyListenerConfig>>,
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -301,7 +306,7 @@ impl ProjectSettingsImportDoc {
     fn into_subset(self) -> Result<ProjectSettingsSubset, String> {
         let upstream_tls = self
             .upstream_tls
-            .map(UpstreamTlsJson::into_core)
+            .map(UpstreamTlsImportJson::into_core)
             .transpose()?
             .unwrap_or_default();
         let client_certificates = self
@@ -319,7 +324,10 @@ impl ProjectSettingsImportDoc {
         Ok(ProjectSettingsSubset {
             repeater_settings: self.repeater_settings.unwrap_or_default(),
             network_http: self.network_http.unwrap_or_default(),
-            upstream_proxy: self.upstream_proxy.unwrap_or_default(),
+            upstream_proxy: self
+                .upstream_proxy
+                .map(UpstreamProxyImportJson::into_core)
+                .unwrap_or_default(),
             upstream_tls,
             proxy_listeners: self.proxy_listeners.unwrap_or_default(),
             client_certificates,
@@ -381,22 +389,130 @@ impl From<&UpstreamTlsSettings> for UpstreamTlsJson {
 }
 
 impl UpstreamTlsJson {
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn into_core(self) -> Result<UpstreamTlsSettings, String> {
+        UpstreamTlsImportJson {
+            custom_ca_ders_b64: self.custom_ca_ders_b64,
+            include_system_roots: self.include_system_roots,
+            insecure_skip_verify: self.insecure_skip_verify,
+            protocol_mode: self.protocol_mode,
+            custom_protocols: Some(self.custom_protocols),
+            custom_cipher_suites: self.custom_cipher_suites,
+            disable_session_resume: self.disable_session_resume,
+            client_certs_override_project_only: self.client_certs_override_project_only,
+            allow_unsafe_renegotiation: None,
+        }
+        .into_core()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct UpstreamTlsImportJson {
+    custom_ca_ders_b64: Vec<String>,
+    include_system_roots: bool,
+    insecure_skip_verify: bool,
+    protocol_mode: TlsProtocolMode,
+    custom_protocols: Option<Vec<String>>,
+    custom_cipher_suites: Vec<String>,
+    disable_session_resume: bool,
+    client_certs_override_project_only: bool,
+    allow_unsafe_renegotiation: Option<bool>,
+}
+
+impl Default for UpstreamTlsImportJson {
+    fn default() -> Self {
+        let base = UpstreamTlsJson::default();
+        Self {
+            custom_ca_ders_b64: base.custom_ca_ders_b64,
+            include_system_roots: base.include_system_roots,
+            insecure_skip_verify: base.insecure_skip_verify,
+            protocol_mode: base.protocol_mode,
+            custom_protocols: None,
+            custom_cipher_suites: base.custom_cipher_suites,
+            disable_session_resume: base.disable_session_resume,
+            client_certs_override_project_only: base.client_certs_override_project_only,
+            allow_unsafe_renegotiation: None,
+        }
+    }
+}
+
+impl UpstreamTlsImportJson {
+    fn into_core(self) -> Result<UpstreamTlsSettings, String> {
+        let _ = self.allow_unsafe_renegotiation;
         let custom_ca_ders = self
             .custom_ca_ders_b64
             .iter()
             .map(|s| b64_decode(s, "上游 TLS 自定义根证书 Base64 解码失败。"))
             .collect::<Result<Vec<_>, _>>()?;
+        let custom_protocols = match self.custom_protocols {
+            Some(list) => list,
+            None if self.protocol_mode == TlsProtocolMode::Custom => {
+                vec!["TLSv1.3".into(), "TLSv1.2".into()]
+            }
+            None => Vec::new(),
+        };
         Ok(UpstreamTlsSettings {
             custom_ca_ders,
             include_system_roots: self.include_system_roots,
             insecure_skip_verify: self.insecure_skip_verify,
             protocol_mode: self.protocol_mode,
-            custom_protocols: self.custom_protocols,
+            custom_protocols,
             custom_cipher_suites: self.custom_cipher_suites,
             disable_session_resume: self.disable_session_resume,
             client_certs_override_project_only: self.client_certs_override_project_only,
         })
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct UpstreamProxyImportJson {
+    protocol: Option<UpstreamProxyProtocol>,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    rules: Vec<UpstreamProxyRule>,
+    socks: SocksProxySettings,
+    open_ended_response_timeout_secs: u64,
+    hostname_resolutions: Vec<HostnameResolutionRule>,
+    platform_auth: PlatformAuthSettings,
+    override_project_only: bool,
+}
+
+impl UpstreamProxyImportJson {
+    fn into_core(self) -> UpstreamProxySettings {
+        let mut rules = self.rules;
+        if rules.is_empty()
+            && let Some(protocol) = self.protocol
+            && protocol != UpstreamProxyProtocol::Direct
+            && (!self.host.trim().is_empty() || self.port != 0)
+        {
+            let auth_type = if self.username.is_empty() && self.password.is_empty() {
+                UpstreamAuthType::None
+            } else {
+                UpstreamAuthType::Basic
+            };
+            rules.push(UpstreamProxyRule {
+                protocol,
+                host: self.host,
+                port: self.port,
+                auth_type,
+                username: self.username,
+                password: self.password,
+                ..UpstreamProxyRule::default()
+            });
+        }
+        UpstreamProxySettings {
+            rules,
+            socks: self.socks,
+            open_ended_response_timeout_secs: self.open_ended_response_timeout_secs,
+            hostname_resolutions: self.hostname_resolutions,
+            platform_auth: self.platform_auth,
+            override_project_only: self.override_project_only,
+        }
     }
 }
 
@@ -1660,6 +1776,56 @@ mod tests {
         assert!(oversized.len() > MAX_PROJECT_SETTINGS_JSON_BYTES);
         let err = parse_project_settings_json(&oversized).expect_err("oversized JSON must fail");
         assert!(err.contains("512 KiB"));
+
+        let mut oversized_export = Workspace::default();
+        oversized_export.scope.include.push(ScopeRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            prefix: format!("https://example.invalid/{padding}"),
+            include_subdomains: false,
+        });
+        assert!(export_project_settings_json(&oversized_export).is_err());
+
+        let legacy_v022 = r#"{
+            "format": "mio.project_settings.v1",
+            "upstream_proxy": {
+                "protocol": "http",
+                "host": "127.0.0.1",
+                "port": 8888,
+                "username": "",
+                "password": "",
+                "rules": [],
+                "socks": { "use_proxy": false, "host": "", "port": 1080, "username": "", "password": "", "dns_over_socks": false, "bypass_hosts": [], "override_project_only": false },
+                "open_ended_response_timeout_secs": 0,
+                "hostname_resolutions": [],
+                "override_project_only": false
+            },
+            "upstream_tls": {
+                "custom_ca_ders_b64": [],
+                "include_system_roots": true,
+                "insecure_skip_verify": false,
+                "protocol_mode": "custom",
+                "allow_unsafe_renegotiation": false,
+                "disable_session_resume": false,
+                "client_certs_override_project_only": false
+            }
+        }"#;
+        let legacy_parsed = parse_project_settings_json(legacy_v022).unwrap();
+        assert_eq!(legacy_parsed.upstream_tls.protocol_mode, TlsProtocolMode::Custom);
+        assert_eq!(
+            legacy_parsed.upstream_tls.custom_protocols,
+            vec!["TLSv1.3", "TLSv1.2"]
+        );
+        assert_eq!(legacy_parsed.upstream_proxy.rules.len(), 1);
+        assert_eq!(legacy_parsed.upstream_proxy.rules[0].host, "127.0.0.1");
+        assert_eq!(legacy_parsed.upstream_proxy.rules[0].port, 8888);
+
+        assert!(
+            parse_project_settings_json(
+                r#"{"upstream_tls": {"protocol_mode": "custom", "custom_protocols": []}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

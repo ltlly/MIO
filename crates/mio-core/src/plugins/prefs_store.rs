@@ -5,7 +5,6 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::Mutex,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -46,17 +45,27 @@ mod base64_plugin_map {
         encoded.serialize(serializer)
     }
 
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EncodedPrefValue {
+        Base64(String),
+        LegacyBytes(Vec<u8>),
+    }
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<PluginPrefsMap, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let raw = BTreeMap::<String, BTreeMap<String, String>>::deserialize(deserializer)?;
+        let raw = BTreeMap::<String, BTreeMap<String, EncodedPrefValue>>::deserialize(deserializer)?;
         let mut out = BTreeMap::new();
         for (plugin_id, entries) in raw {
             let mut decoded_entries = BTreeMap::new();
             for (k, v) in entries {
-                let bytes = crate::codec_util::base64_decode(v.as_bytes())
-                    .map_err(serde::de::Error::custom)?;
+                let bytes = match v {
+                    EncodedPrefValue::Base64(s) => crate::codec_util::base64_decode(s.as_bytes())
+                        .map_err(serde::de::Error::custom)?,
+                    EncodedPrefValue::LegacyBytes(b) => b,
+                };
                 decoded_entries.insert(k, bytes);
             }
             out.insert(plugin_id, decoded_entries);
@@ -96,7 +105,6 @@ pub fn default_plugin_preferences_path() -> Result<PathBuf> {
 pub struct PluginPreferencesStore {
     path: Option<PathBuf>,
     memory: PluginPrefsMap,
-    cache: Mutex<Option<PluginPrefsMap>>,
 }
 
 impl Default for PluginPreferencesStore {
@@ -110,7 +118,6 @@ impl PluginPreferencesStore {
         Self {
             path,
             memory: BTreeMap::new(),
-            cache: Mutex::new(None),
         }
     }
 
@@ -128,33 +135,18 @@ impl PluginPreferencesStore {
         Self::new(user_preferences_path.map(|p| p.with_file_name("plugin-preferences.json")))
     }
 
-    fn invalidate_cache(&mut self) {
-        *self
-            .cache
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    }
-
     #[cfg(test)]
     pub fn set_path(&mut self, path: Option<PathBuf>) {
         self.path = path;
-        self.invalidate_cache();
     }
 
     pub fn get(&self, plugin_id: &str, key: &str) -> Result<Option<Vec<u8>>> {
         validate_plugin_and_key(plugin_id, key)?;
         if let Some(path) = &self.path {
-            let mut guard = self
-                .cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if guard.is_none() {
-                let data = read_file(path)?;
-                *guard = Some(data.plugins);
-            }
-            return Ok(guard
-                .as_ref()
-                .and_then(|plugins| plugins.get(plugin_id))
+            let data = read_file(path)?;
+            return Ok(data
+                .plugins
+                .get(plugin_id)
                 .and_then(|ns| ns.get(key))
                 .cloned());
         }
@@ -179,7 +171,6 @@ impl PluginPreferencesStore {
             "插件偏好单值超过 64 KiB 限额"
         );
         if let Some(path) = self.path.clone() {
-            self.invalidate_cache();
             write_file_with(&path, cancel, |current| {
                 let mut next = current.clone();
                 apply_mutation(&mut next.plugins, plugin_id, key, value)?;

@@ -583,6 +583,7 @@ impl State {
         send_config.network.upstream_route = upstream_route;
         send_config.network.hostname_overrides = hostname_overrides;
         send_config.tls.trust = upstream_tls;
+        send_config.tls.options = workspace.upstream_tls.to_proxy_tls_options();
         send_config.tls.client_certificates = self.tls.compiled_client_certs.clone();
         send_config.limits.timeout =
             Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600));

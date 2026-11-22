@@ -483,6 +483,20 @@ fn bind_tcp_endpoint(
             "IPC 路径 {} 已存在且不是普通端点文件，拒绝覆盖",
             path.display()
         );
+        ensure!(
+            existing_meta.len() <= 4096,
+            "IPC 路径 {} 已存在且不是 MIO 端点描述文件，拒绝删除",
+            path.display()
+        );
+        let bytes = fs::read(path)
+            .with_context(|| format!("无法读取已存在的 IPC 路径 {}", path.display()))?;
+        let parsed: WindowsIpcEndpoint = serde_json::from_slice(&bytes)
+            .with_context(|| format!("IPC 路径 {} 不是有效的 MIO 端点描述文件，拒绝删除", path.display()))?;
+        ensure!(
+            !parsed.addr.trim().is_empty() && !parsed.token.trim().is_empty(),
+            "IPC 路径 {} 缺少有效端点字段，拒绝删除",
+            path.display()
+        );
         if call_ai_ipc(path, &AiIpcRequest::Status, Duration::from_millis(250)).is_ok() {
             bail!(
                 "IPC 端点 {} 已被另一个运行中的 MIO 实例占用",

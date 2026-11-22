@@ -74,6 +74,12 @@ impl ScriptPresetLibraryUi {
         if let Some(path) = &self.library_path {
             return Ok(path.clone());
         }
+        #[cfg(test)]
+        let path = std::env::temp_dir().join(format!(
+            "mio-ui-test-scripts-{}.json",
+            mio_core::Uuid::new_v4()
+        ));
+        #[cfg(not(test))]
         let path =
             mio_core::default_user_preferences_path()?.with_file_name("http-filter-scripts.json");
         self.library_path = Some(path.clone());

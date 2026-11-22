@@ -191,7 +191,14 @@ impl Relay<'_> {
             return Err(ProxyError::Cancelled);
         }
         let message = match preencoded {
-            Some(msg) => msg,
+            Some(msg) => {
+                if payload.len() > self.state.config.limits.max_body_bytes {
+                    return Err(ProxyError::BodyLimit {
+                        limit: self.state.config.limits.max_body_bytes,
+                    });
+                }
+                msg
+            }
             None => client::websocket_outgoing_message(
                 kind,
                 &payload,

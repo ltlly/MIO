@@ -77,16 +77,20 @@ fn extract_multipart_pairs(body: &[u8], boundary: &str) -> Option<Vec<(String, S
     let mut multipart = multer::Multipart::new(body_stream, boundary);
     let analysis = async {
         let mut pairs = Vec::new();
-        while let Ok(Some(field)) = multipart.next_field().await {
-            let name = field.name().unwrap_or("").to_owned();
-            if let Ok(field_bytes) = field.bytes().await {
-                let val = String::from_utf8_lossy(&field_bytes).into_owned();
-                pairs.push((name, val));
+        loop {
+            match multipart.next_field().await {
+                Ok(Some(field)) => {
+                    let name = field.name().unwrap_or("").to_owned();
+                    let field_bytes = field.bytes().await.ok()?;
+                    let val = String::from_utf8_lossy(&field_bytes).into_owned();
+                    pairs.push((name, val));
+                }
+                Ok(None) => return Some(pairs),
+                Err(_) => return None,
             }
         }
-        pairs
     };
-    analysis.now_or_never()
+    analysis.now_or_never()?
 }
 
 fn extract_request_body_pairs(raw: &[u8], parsed: &ParsedRawRequest<'_>) -> Vec<(String, String)> {

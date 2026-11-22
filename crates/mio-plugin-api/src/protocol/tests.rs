@@ -120,7 +120,7 @@ fn envelope_checks_forgery_generation_and_replay() {
 
 #[test]
 fn v13_preferences_response_editor_and_context_menu_frames_validate_limits() {
-    assert_eq!(PROTOCOL_MINOR, 5);
+    assert_eq!(PROTOCOL_MINOR, 6);
     let identity = ChannelIdentity {
         instance_id: Uuid::new_v4(),
         project: ProjectKey {

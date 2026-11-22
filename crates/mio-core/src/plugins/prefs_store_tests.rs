@@ -71,27 +71,38 @@ fn plugin_preferences_persist_across_reopen_isolate_namespaces_and_enforce_limit
         "values must not be persisted as JSON byte arrays"
     );
 
-    // Populate in-memory cache via get(), then verify repeated get() serves from cache
-    // without re-reading disk, and set() invalidates the cache.
+    // Cross-instance updates and legacy v0.2.2 byte-array entries must be visible without stale cache.
     assert_eq!(
         derived.get("mio.gamma", "token").unwrap().as_deref(),
         Some(&b"persisted-across-projects"[..])
     );
-    let saved_json = std::fs::read(&sibling_json).unwrap();
-    std::fs::remove_file(&sibling_json).unwrap();
-    assert_eq!(
-        derived.get("mio.gamma", "token").unwrap().as_deref(),
-        Some(&b"persisted-across-projects"[..]),
-        "cached read should not hit disk"
-    );
-    std::fs::write(&sibling_json, &saved_json).unwrap();
-    derived
-        .set("mio.gamma", "token", b"updated-token", &cancel)
+    let mut second_instance = PluginPreferencesStore::from_env_or_user_preferences(Some(&user_pref));
+    second_instance
+        .set("mio.gamma", "token", b"updated-by-peer", &cancel)
         .unwrap();
     assert_eq!(
         derived.get("mio.gamma", "token").unwrap().as_deref(),
-        Some(&b"updated-token"[..]),
-        "write must invalidate cache"
+        Some(&b"updated-by-peer"[..]),
+        "peer writes must be observed by other instances"
+    );
+
+    std::fs::write(
+        &sibling_json,
+        r#"{"version":1,"plugins":{"mio.legacy":{"k":[104,101,108,108,111]}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        derived.get("mio.legacy", "k").unwrap().as_deref(),
+        Some(&b"hello"[..])
+    );
+    derived
+        .set("mio.gamma", "token", b"updated-token", &cancel)
+        .unwrap();
+    let migrated_json = std::fs::read_to_string(&sibling_json).unwrap();
+    assert!(migrated_json.contains(&crate::codec_util::base64_encode(b"hello")));
+    assert_eq!(
+        derived.get("mio.gamma", "token").unwrap().as_deref(),
+        Some(&b"updated-token"[..])
     );
 }
 

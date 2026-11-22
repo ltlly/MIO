@@ -322,6 +322,26 @@ pub(crate) fn is_prunable_expired(envelope: &Envelope) -> bool {
         )
 }
 
+pub(crate) fn send_panel_error<R: Read, W: Write>(
+    session: &mut WorkerSession<R, W>,
+    envelope: &Envelope,
+    panel_revisions: &HashMap<u64, PanelRevisionState>,
+    code: ErrorCode,
+    msg: &str,
+) -> io::Result<()> {
+    let panel_id = envelope.panel_id.max(PANEL_ID);
+    let rev = panel_revisions
+        .get(&panel_id)
+        .map_or(envelope.revision, |s| s.published);
+    session.send_on_panel(
+        panel_id,
+        envelope::Body::Error(Failure::new(code, msg)),
+        rev,
+        envelope.request_id,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn send_deadline_error<R: Read, W: Write>(
     session: &mut WorkerSession<R, W>,
     envelope: &Envelope,
@@ -333,16 +353,7 @@ pub(crate) fn send_deadline_error<R: Read, W: Write>(
     } else {
         "插件请求已超时"
     };
-    let rev = panel_revisions
-        .get(&panel_id)
-        .map_or(envelope.revision, |s| s.published);
-    session.send_on_panel(
-        panel_id,
-        envelope::Body::Error(Failure::new(ErrorCode::Deadline, msg)),
-        rev,
-        envelope.request_id,
-    )?;
-    Ok(())
+    send_panel_error(session, envelope, panel_revisions, ErrorCode::Deadline, msg)
 }
 
 pub(crate) fn emit_panel_update<R: Read, W: Write>(
@@ -434,6 +445,31 @@ impl DeferredQueue {
         } else {
             false
         }
+    }
+
+    pub(crate) fn prune_panel(&mut self, panel_id: u64) -> Vec<Envelope> {
+        let mut pruned = Vec::new();
+        let mut kept_urgent = VecDeque::with_capacity(self.urgent.len());
+        while let Some(env) = self.urgent.pop_front() {
+            let is_shutdown = matches!(env.body, Some(envelope::Body::Shutdown(_)));
+            if !is_shutdown && env.panel_id.max(PANEL_ID) == panel_id {
+                pruned.push(env);
+            } else {
+                kept_urgent.push_back(env);
+            }
+        }
+        self.urgent = kept_urgent;
+
+        let mut kept_normal = VecDeque::with_capacity(self.normal.len());
+        while let Some(env) = self.normal.pop_front() {
+            if env.panel_id.max(PANEL_ID) == panel_id {
+                pruned.push(env);
+            } else {
+                kept_normal.push_back(env);
+            }
+        }
+        self.normal = kept_normal;
+        pruned
     }
 
     pub(crate) fn prune_expired<R: Read, W: Write>(

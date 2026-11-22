@@ -453,8 +453,10 @@ impl Settings {
                 });
             });
             let _ = settings_weak.update(cx, |this, cx| {
-                this.tls_negotiation_error = validation_error;
-                cx.notify();
+                if this.state.project == project {
+                    this.tls_negotiation_error = validation_error;
+                    cx.notify();
+                }
             });
         });
     }

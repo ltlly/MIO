@@ -67,7 +67,7 @@ impl MessageEditor {
                         !s.case_sensitive,
                         s.regex,
                         s.auto_scroll_to_match,
-                        s.hex_grid.clone(),
+                        s.hex_grid.as_ref().and_then(WeakEntity::upgrade),
                     )
                 };
                 for editor in [
@@ -141,7 +141,10 @@ impl MessageEditor {
                     {
                         let (auto_scroll, hex_grid) = {
                             let s = shared_change.borrow();
-                            (s.auto_scroll_to_match, s.hex_grid.clone())
+                            (
+                                s.auto_scroll_to_match,
+                                s.hex_grid.as_ref().and_then(WeakEntity::upgrade),
+                            )
                         };
                         let revealed = editor.update(cx, |state, cx| {
                             state.sync_search_matcher();
@@ -182,6 +185,7 @@ impl MessageEditor {
         let raw_selection = observe_selection_state(&raw, selection_seq.clone(), cx);
         let hex_selection = observe_selection_state(&hex, selection_seq.clone(), cx);
         let default_soft_wrap = crate::theme::editor_soft_wrap();
+        let raw_baseline_text = Some(raw.read(cx).value().to_string());
         let raw_baseline_revision = raw.update(cx, |state, cx| {
             state.set_soft_wrap(default_soft_wrap, window, cx);
             state.document_revision()
@@ -197,7 +201,9 @@ impl MessageEditor {
             header_preview_error: None,
             pretty_baseline_text: None,
             pretty_baseline_revision: None,
+            raw_baseline_text,
             raw_baseline_revision: Some(raw_baseline_revision),
+            hex_grid: None,
             raw_display_charset: MessageDisplayCharset::Utf8,
             raw_charset_pref: crate::theme::message_editor_charset(),
             soft_wrap: default_soft_wrap,
@@ -258,7 +264,7 @@ impl MessageEditor {
     }
 
     pub(crate) fn hex_grid(&self) -> Option<Entity<HexGridView>> {
-        self.shared.borrow().hex_grid.clone()
+        self.hex_grid.clone()
     }
 
     pub(crate) fn active_hex_grid(&self) -> Option<Entity<HexGridView>> {
@@ -268,7 +274,7 @@ impl MessageEditor {
             && !s.hide_headers
             && !s.pretty_active
             && s.view == MessageView::Hex)
-            .then(|| s.hex_grid.clone())
+            .then(|| self.hex_grid.clone())
             .flatten()
     }
 
@@ -348,13 +354,14 @@ impl MessageEditor {
     }
 
     fn ensure_hex_grid(&mut self, window: &mut Window, cx: &mut App) -> Entity<HexGridView> {
-        if let Some(existing) = self.shared.borrow().hex_grid.clone() {
+        if let Some(existing) = self.hex_grid.clone() {
             return existing;
         }
         let hex_for_grid = self.hex.clone();
         let shared = self.shared.clone();
         let grid = cx.new(|cx| HexGridView::new(hex_for_grid, shared, window, cx));
-        self.shared.borrow_mut().hex_grid = Some(grid.clone());
+        self.hex_grid = Some(grid.clone());
+        self.shared.borrow_mut().hex_grid = Some(grid.downgrade());
         grid
     }
 
@@ -585,14 +592,11 @@ impl MessageEditor {
     }
 
     pub fn has_focus(&self, window: &Window, cx: &App) -> bool {
-        let (header_preview, non_printable, hex_grid) = {
+        let (header_preview, non_printable) = {
             let s = self.shared.borrow();
-            (
-                s.header_preview.clone(),
-                s.non_printable.clone(),
-                s.hex_grid.clone(),
-            )
+            (s.header_preview.clone(), s.non_printable.clone())
         };
+        let hex_grid = self.hex_grid();
         header_preview
             .as_ref()
             .is_some_and(|ed| ed.focus_handle(cx).is_focused(window))
@@ -662,6 +666,7 @@ impl MessageEditor {
         self.shared.borrow_mut().wire_bytes = bytes.to_vec();
         self.pretty_baseline_text = None;
         self.pretty_baseline_revision = None;
+        self.raw_baseline_text = None;
         self.raw_baseline_revision = None;
         let charset_pref = crate::theme::message_editor_charset();
         let (charset, decoded) = decode_message_bytes_with_charset(bytes);
@@ -709,6 +714,7 @@ impl MessageEditor {
                     self.pretty_baseline_revision = Some(rev);
                     self.shared.borrow_mut().pretty_active = true;
                 } else {
+                    self.raw_baseline_text = Some(text.clone());
                     let rev = self.raw.update(cx, |state, cx| {
                         state.set_value(text, window, cx);
                         state.set_line_number_mapping(None, cx);
@@ -927,12 +933,14 @@ impl MessageEditor {
             self.raw_display_charset = charset;
             self.raw_charset_pref = crate::theme::message_editor_charset();
             if let Some(raw_text) = decoded {
+                self.raw_baseline_text = Some(raw_text.clone());
                 if self.raw.read(cx).value().as_ref() != raw_text {
                     self.raw
                         .update(cx, |state, cx| state.set_value(raw_text, window, cx));
                 }
                 self.raw_baseline_revision = Some(self.raw.read(cx).document_revision());
             } else {
+                self.raw_baseline_text = None;
                 self.raw_baseline_revision = None;
             }
         }
@@ -976,10 +984,12 @@ impl MessageEditor {
         match view {
             MessageView::Raw => {
                 let raw_state = self.raw.read(cx);
-                if self.raw_baseline_revision == Some(raw_state.document_revision()) {
+                let text = raw_state.value();
+                if self.raw_baseline_revision == Some(raw_state.document_revision())
+                    || self.raw_baseline_text.as_deref() == Some(text.as_ref())
+                {
                     return self.shared.borrow().wire_bytes.clone();
                 }
-                let text = raw_state.value();
                 let wire = self.shared.borrow().wire_bytes.clone();
                 encode_raw_text_bytes(
                     text.as_ref(),
@@ -1028,7 +1038,9 @@ impl MessageEditor {
         let rev = source.read(cx).document_revision();
         match view {
             MessageView::Raw => {
-                if self.raw_baseline_revision == Some(rev) {
+                if self.raw_baseline_revision == Some(rev)
+                    || self.raw_baseline_text.as_deref() == Some(text.as_ref())
+                {
                     return Ok(self.shared.borrow().wire_bytes.clone());
                 }
                 let wire = self.shared.borrow().wire_bytes.clone();
@@ -1097,6 +1109,7 @@ impl MessageEditor {
                 })?;
                 self.raw_display_charset = charset;
                 self.raw_charset_pref = crate::theme::message_editor_charset();
+                self.raw_baseline_text = Some(raw_text.clone());
                 let rev = self.raw.update(cx, |state, cx| {
                     if state.value().as_ref() != raw_text {
                         state.set_value(raw_text, window, cx);
@@ -1143,6 +1156,7 @@ impl MessageEditor {
                 })?;
                 self.raw_display_charset = charset;
                 self.raw_charset_pref = crate::theme::message_editor_charset();
+                self.raw_baseline_text = Some(value.clone());
                 let rev = self.raw.update(cx, |state, cx| {
                     if state.value().as_ref() != value {
                         state.set_value(value, window, cx);
@@ -1167,6 +1181,7 @@ impl MessageEditor {
                 hex_grid.update(cx, |grid, cx| {
                     grid.reset_view_state(None, cx);
                 });
+                self.raw_baseline_text = None;
                 self.raw_baseline_revision = None;
                 self.pretty_baseline_revision = None;
             }
@@ -1234,6 +1249,7 @@ impl MessageEditor {
             state.document_revision()
         });
         self.pretty_baseline_revision = Some(rev);
+        self.raw_baseline_text = None;
         self.raw_baseline_revision = None;
         {
             let mut s = self.shared.borrow_mut();

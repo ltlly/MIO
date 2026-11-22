@@ -7,9 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
-if ([string]::IsNullOrWhiteSpace($env:CARGO_INCREMENTAL)) {
-    $env:CARGO_INCREMENTAL = "0"
-}
+$env:CARGO_INCREMENTAL = "0"
 
 $SourceCommit = (git rev-parse HEAD).Trim()
 $BranchOut = git symbolic-ref --quiet --short HEAD 2>$null

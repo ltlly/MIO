@@ -106,6 +106,13 @@ impl UpstreamAuthRuleConfig {
     pub fn matches_destination(&self, host: &str) -> bool {
         self.enabled && matches_bypass_host(&self.destination_host, host)
     }
+
+    pub fn matches_proxy(&self, endpoint: &crate::ProxyEndpoint) -> bool {
+        let host_ok = self.proxy_host.trim().is_empty()
+            || matches_bypass_host(&self.proxy_host, &endpoint.host);
+        let port_ok = self.proxy_port == 0 || self.proxy_port == endpoint.port;
+        host_ok && port_ok
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -132,6 +132,9 @@ impl VerifiedPackage {
             !manifest.contributions.is_empty(),
             "插件包必须声明至少一个支持的贡献"
         );
+        if source_archive.is_none() {
+            super::archive::verify_optional_sha256_manifest(&work_dir)?;
+        }
         Ok(Self {
             manifest,
             directory,

@@ -924,6 +924,7 @@ impl Settings {
                 .find(|&p| Self::page_matches(p, self.scope_filter, &query))
         {
             self.page = first;
+            self.tls_negotiation_error = None;
             self.collapsed_groups[Self::page_group_index(first)] = false;
             if first == SettingsPage::ProjectTasks {
                 self.refresh_pool_page(cx);
@@ -939,6 +940,7 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         self.page = page;
+        self.tls_negotiation_error = None;
         self.content_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
         self.user_pages
             .editor_scroll

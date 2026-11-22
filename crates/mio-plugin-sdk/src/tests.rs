@@ -2082,3 +2082,172 @@ fn ui_builders_and_finding_builder_produce_valid_protocol_dtos() {
     assert_eq!(dto.severity, protocol::FindingSeverity::Medium as i32);
     assert_eq!(dto.confidence, protocol::FindingConfidence::Firm as i32);
 }
+
+#[test]
+fn destroying_child_panel_prunes_stale_queued_open_requests() {
+    struct NoPostDestroyOpenPlugin {
+        open_calls: usize,
+        destroyed: bool,
+    }
+
+    impl MioPlugin for NoPostDestroyOpenPlugin {
+        fn id(&self) -> &str {
+            "lab.sdk-destroy-prune"
+        }
+
+        fn supports_panel_multiplexing(&self) -> bool {
+            true
+        }
+
+        fn on_ui_event(
+            &mut self,
+            ctx: &mut dyn HostClient,
+            _panel_id: u64,
+            _event: panel::UiEvent,
+        ) -> Result<PanelUpdate, String> {
+            let _ = ctx.is_in_scope("https://example.invalid/");
+            Ok(PanelUpdate::None)
+        }
+
+        fn on_open_request(
+            &mut self,
+            _ctx: &mut dyn HostClient,
+            panel_id: u64,
+            _open: OpenRequest,
+        ) -> Result<PanelUpdate, String> {
+            assert_ne!(panel_id, 2, "pruned child panel OpenRequest must never run");
+            self.open_calls += 1;
+            Ok(PanelUpdate::None)
+        }
+
+        fn on_panel_destroy(
+            &mut self,
+            _ctx: &mut dyn HostClient,
+            panel_id: u64,
+            _close: CloseRequest,
+        ) -> Result<PanelUpdate, String> {
+            assert_eq!(panel_id, 2);
+            self.destroyed = true;
+            Ok(PanelUpdate::None)
+        }
+    }
+
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let mut incoming_bytes = Vec::new();
+    let timeout = Duration::from_secs(5);
+    let push_host = |buf: &mut Vec<u8>, panel_id: u64, req_id: u64, rev: u64, in_reply_to: u64, body| {
+        let mut env = Envelope::new(identity, req_id, rev, body, timeout).with_panel_id(panel_id);
+        env.in_reply_to = in_reply_to;
+        buf.extend_from_slice(&encode_frame(&env).unwrap());
+    };
+
+    push_host(
+        &mut incoming_bytes,
+        PANEL_ID,
+        1,
+        0,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![Permission::TrafficRead as i32],
+            host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
+        }),
+    );
+    push_host(
+        &mut incoming_bytes,
+        PANEL_ID,
+        2,
+        1,
+        1,
+        envelope::Body::Ready(Empty {}),
+    );
+    push_host(
+        &mut incoming_bytes,
+        PANEL_ID,
+        3,
+        1,
+        0,
+        envelope::Body::UiEvent(panel::UiEvent {
+            node_id: 1,
+            event: None,
+            editors: vec![],
+        }),
+    );
+    // While UiEvent waits on HostCall(req 2 from worker), host enqueues OpenRequest(req 5) + CloseRequest(destroy=true, req 6) for panel 2,
+    // followed by HostResult replying to worker req 2, then Shutdown(req 7).
+    push_host(
+        &mut incoming_bytes,
+        2,
+        5,
+        0,
+        0,
+        envelope::Body::OpenRequest(OpenRequest {
+            resource_id: Uuid::new_v4().as_bytes().to_vec(),
+            message_revision: 1,
+            read_only: false,
+            request: Some(HttpRequestDto {
+                method: "GET".into(),
+                url: "https://example.invalid/".into(),
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+        }),
+    );
+    push_host(
+        &mut incoming_bytes,
+        2,
+        6,
+        1,
+        0,
+        envelope::Body::CloseRequest(CloseRequest {
+            resource_id: Uuid::new_v4().as_bytes().to_vec(),
+            destroy_panel: true,
+        }),
+    );
+    push_host(
+        &mut incoming_bytes,
+        PANEL_ID,
+        4,
+        1,
+        2,
+        envelope::Body::HostResult(mio_plugin_api::protocol::HostResult {
+            outcome: Some(host_result::Outcome::ScopeStatus(ScopeStatusDto {
+                in_scope: true,
+            })),
+        }),
+    );
+    push_host(&mut incoming_bytes, PANEL_ID, 7, 1, 0, envelope::Body::Shutdown(Empty {}));
+
+    let mut outgoing_bytes = Vec::new();
+    let mut plugin = NoPostDestroyOpenPlugin {
+        open_calls: 0,
+        destroyed: false,
+    };
+    run_with_io(incoming_bytes.as_slice(), &mut outgoing_bytes, &mut plugin).unwrap();
+    assert!(plugin.destroyed);
+    assert_eq!(plugin.open_calls, 0);
+
+    let mut cursor = outgoing_bytes.as_slice();
+    let mut replies = Vec::new();
+    while !cursor.is_empty() {
+        replies.push(read_frame(&mut cursor).unwrap());
+    }
+    assert!(
+        replies.iter().any(|r| {
+            r.in_reply_to == 5
+                && r.panel_id == 2
+                && matches!(
+                    r.body,
+                    Some(envelope::Body::Error(ref err)) if err.code == ErrorCode::Stale as i32
+                )
+        }),
+        "pruned OpenRequest must receive Stale error reply, got: {replies:?}"
+    );
+}

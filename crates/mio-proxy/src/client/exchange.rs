@@ -462,6 +462,31 @@ impl Drop for PoolLifecycle {
     }
 }
 
+struct PoolLifecycleBody {
+    body: Body,
+    _lifecycle: Arc<PoolLifecycle>,
+}
+
+impl rama::http::body::StreamingBody for PoolLifecycleBody {
+    type Data = <Body as rama::http::body::StreamingBody>::Data;
+    type Error = <Body as rama::http::body::StreamingBody>::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<rama::http::body::Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> rama::http::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
 #[derive(Clone)]
 struct PooledClientEntry {
     key: PooledClientKey,
@@ -1213,7 +1238,7 @@ pub(crate) async fn exchange_with_metrics(
             hostname_overrides: config.network.hostname_overrides.to_vec(),
             connection_pool_group_id: config.group.connection_pool_group_id,
         };
-        let (client, _lifecycle) = get_or_build_pooled_client(
+        let (client, lifecycle) = get_or_build_pooled_client(
             pool_key,
             prepared.tls,
             proxy_tls,
@@ -1226,11 +1251,17 @@ pub(crate) async fn exchange_with_metrics(
         if let Some(barrier) = &config.group.single_packet_barrier {
             barrier.wait_or_cancel(&cancel).await?;
         }
-        tokio::select! {
+        let mut resp = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
             result = Box::pin(client.serve(request)) => result.map_err(map_client_error)?,
-        }
+        };
+        let inner = std::mem::replace(resp.body_mut(), Body::empty());
+        *resp.body_mut() = Body::new(PoolLifecycleBody {
+            body: inner,
+            _lifecycle: lifecycle,
+        });
+        resp
     } else {
         let client = build_direct_client_service(
             prepared,

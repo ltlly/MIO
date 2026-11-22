@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
-export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export CARGO_INCREMENTAL=0
 
 build_profile="release"
 build_flags=(--release)

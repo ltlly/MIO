@@ -530,6 +530,15 @@ impl State {
             return;
         }
         for entry in entries.into_iter().filter(|e| e.enabled) {
+            if entry.engine != "native" {
+                self.emit(Event::PluginAutoLoadFailed {
+                    project: self.project,
+                    plugin_id: entry.id,
+                    message: "WASM 插件引擎已移除，无法自动加载；请在扩展列表中卸载旧记录".into(),
+                })
+                .await;
+                continue;
+            }
             if let Err(err) = self.plugin_capacity() {
                 self.emit(Event::PluginAutoLoadFailed {
                     project: self.project,

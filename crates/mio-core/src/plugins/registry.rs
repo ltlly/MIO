@@ -490,7 +490,7 @@ fn validate_entry(entry: &InstalledPluginEntry) -> Result<()> {
         "持久化插件版本无效"
     );
     ensure!(
-        entry.engine == "native",
+        entry.engine == "native" || entry.engine == "wasm",
         "持久化插件引擎不受支持"
     );
     validate_segment(&entry.package_dir, "持久化插件包目录")?;

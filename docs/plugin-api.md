@@ -1,4 +1,4 @@
-# MIO Native Plugin API Specification (Protocol `v1.5` & `mio-plugin-sdk`)
+# MIO Native Plugin API Specification (Protocol `v1.6` & `mio-plugin-sdk`)
 
 Authoritative specification generated from `crates/mio-plugin-api/src/`, `crates/mio-plugin-sdk/src/`, and `crates/mio-core/src/plugins/`.
 
@@ -39,8 +39,9 @@ Validation rules (`PluginManifest`, `#[serde(deny_unknown_fields)]` in `crates/m
   - `"session.hook"` (`SessionHook`)
   - `"payload.process"` (`PayloadProcess`)
   - `"storage.kv"` (`Storage`)
+  - `"audit.write"` (`AuditWrite`)
 - `contributions` (non-empty list from supported identifiers):
-  `"suite_panel"`, `"message_editor"`, `"message_response_editor"`, `"context_menu"`, `"http_hook"`, `"ws_hook"`, `"session_action"`, `"payload_generator"`, `"payload_processor"`, `"passive_check"`, `"active_check"` (legacy alias `"proxy_hook"` also accepted by validator).
+  `"suite_panel"`, `"message_editor"`, `"message_response_editor"`, `"context_menu"`, `"http_hook"`, `"ws_hook"`, `"session_action"`, `"payload_generator"`, `"payload_processor"`, `"passive_check"`, `"active_check"`.
 
 CLI tool (`crates/mio-core/examples/mio_plugin_cli.rs`):
 ```sh
@@ -52,11 +53,11 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 
 ---
 
-## 3. Wire Framing, Limits & Lifecycle (`v1.5`)
+## 3. Wire Framing, Limits & Lifecycle (`v1.6`)
 
 - **Framing**: `[u32 big-endian length][Protobuf Envelope bytes]`.
 - **Hard Limits**:
-  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 5`
+  - `PROTOCOL_MAJOR = 1`, `PROTOCOL_MINOR = 6`
   - `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`)
   - `MAX_INLINE_BODY = 512 KiB` (`512 * 1024`) — requests/responses/WS payloads exceeding this error rather than truncate
   - `MAX_EDITOR_BYTES = 256 KiB`
@@ -66,9 +67,9 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
   - Max `64` live resource handles on the main panel (`PANEL_ID = 1`) and `128` shared live resource handles across multiplexed child panels per worker; up to `MAX_CHILD_EDITORS = 64` concurrent child editors project-wide (`panel_id >= 2`); host service concurrency `16`; `5s` operation timeout
 - **Envelope Header**: `major`, `minor`, `request_id` (strictly increasing per sender, non-zero), `instance_id` (16B UUID), `project_id` (16B UUID), `project_generation` (`!= 0`), `panel_id` (`PANEL_ID = 1` for main panel, `>= 2` for multiplexed child panels), `revision`, `deadline_unix_ms`, `in_reply_to`, `body`.
 - **Handshake (`WorkerSession::accept`, handled automatically by `mio_plugin_sdk::run_stdio`)**:
-  1. Host -> Worker (wire `minor = 5`): `Hello(max_frame_bytes, max_operation_ms, granted_permissions, host_minor = 5)`
-  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`, `minor = 5`): `Register(plugin_id, plugin_version, required_components, panel, supports_panel_multiplexing)`
-  3. Host -> Worker (`minor = 5`): `Ready` (`in_reply_to = 1`)
+  1. Host -> Worker (wire `minor = 6`): `Hello(max_frame_bytes, max_operation_ms, granted_permissions, host_minor = 6)`
+  2. Worker -> Host (`request_id = 1`, `in_reply_to = hello.request_id`, `minor = 6`): `Register(plugin_id, plugin_version, required_components, panel, supports_panel_multiplexing)`
+  3. Host -> Worker (`minor = 6`): `Ready` (`in_reply_to = 1`)
   4. Runtime loop: dispatch incoming envelopes routed by `panel_id` until `Shutdown`.
 
 ---
@@ -88,13 +89,13 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 | `payload_generator` | `PayloadCall(Op=Generate)`(43) | `PayloadResult`(44) | `config`, `max_items` -> `outputs: Vec<Vec<u8>>` (`<= 10_000` items, `<= 512 KiB` total) |
 | `payload_processor` | `PayloadCall(Op=Process)`(43) | `PayloadResult`(44) | `config`, `inputs` -> `outputs` |
 | `passive_check` | `PassiveCheckCall`(50) | `PassiveCheckResult`(51) | Returns `findings: Vec<PluginFindingDto>` (`<= 64`) + `log_line` |
-| `active_check` | `ActiveCheckCall`(52) | `ActiveCheckResult`(53) | Correlated by `call_id`; receives `base_request`, `base_response`, `parameter_name`, `parameter_value` |
+| `active_check` | `ActiveCheckCall`(52) | `ActiveCheckResult`(53) | Receives `flow_id`, `base_request`, `base_response`, `parameter_name`, `parameter_value` |
 
 ### Core DTOs (`crates/mio-plugin-api/src/protocol/dto.rs` & `hooks.rs`)
 
 - **`RequestDto` (`HttpRequestDto`)**: `{ method, url, version: HttpVersionDto (0=Http10,1=Http11,2=Http2), headers: [HeaderDto { name, value: bytes }], body: bytes, trailers: [HeaderDto] }`
 - **`ResponseDto` (`HttpResponseDto`)**: `{ status: 100..=599, version, headers, body, trailers }`
-- **`PluginFindingDto`**: `{ title (<=512), detail (<=8192), remediation (<=4096), severity (<=64), confidence (<=64), parameter (<=512), evidence (<=4096) }` (`severity`: `Information`/`Low`/`Medium`/`High`; `confidence`: `Tentative`/`Firm`/`Certain`)
+- **`PluginFindingDto`**: `{ title (<=512), detail (<=8192), remediation (<=4096), severity: FindingSeverity (0=Information,1=Low,2=Medium,3=High), confidence: FindingConfidence (0=Firm,1=Tentative,2=Certain), parameter (<=512), evidence (<=4096) }`
 
 ---
 
@@ -110,7 +111,7 @@ cargo run --release --locked -p mio-core --example mio_plugin_cli -- pack /tmp/m
 
 ---
 
-## 6. All 19 `HostCall` Operations (`v1.5`, Worker -> Host)
+## 6. All 19 `HostCall` Operations (`v1.6`, Worker -> Host)
 
 Worker sends `Envelope(Body::HostCall(call))`; host replies `Envelope(Body::HostResult(res))` with `in_reply_to`. `HostCall.parent_request_id` (tag 20, populated automatically by `mio-plugin-sdk`): non-zero values must match an active, uncancelled request on the same `panel_id`, inherit the parent deadline as an upper bound, and cascade-cancel on parent timeout, revoke, or `CancelPanelOp`. When invoked from `MioPlugin::on_cancel` on a **live** panel (closing panels reject `HostCall`s as `Stale`), `parent_request_id` correlates to the host `Cancel` notification's bounded cleanup window (`MAX_OPERATION`), which closes on `Ack`/`Error` (or legacy `Snapshot`/`Patch`): only `QueryHistory`, `ReadFlow`, `ScopeCheck`, `QuerySiteMap`, `ReadAnnotations`, `StorageGet`, `StorageSet`, `PreferencesGet`, and `PreferencesSet` are allowed (bypassing transient revision drift, while scheduling `Resync` only if the active `Cancel` is for a non-`Resync` request and the callback's envelope revision exceeds the host revision), whereas all other operations (including `UpdateDraft`, `OpenRepeater`, `OpenIntruder`, `NetworkSend`, `ScopeUpdate`, `OpenOrganiser`, `UpdateAnnotations`, `SubmitAuditIssue`, and `Collaborator*`) are rejected with `ErrorCode::Cancelled`:
 
@@ -130,7 +131,7 @@ Worker sends `Envelope(Body::HostCall(call))`; host replies `Envelope(Body::Host
 | `ReadAnnotations(16B UUID)` (14) | `read_annotations(flow_id)` | `traffic.read` | `Annotations(AnnotationsDto)` (10) | Notes + 0..=9 highlight color + revisions |
 | `UpdateAnnotations(UpdateAnnotationsDto)` (15) | `update_annotations(flow_id, notes, color)` | `draft.write` | `Annotations(AnnotationsDto)` (10) | Persists notes (`<=64KiB`) / color (`0..=9`) |
 | `OpenOrganiser(OpenOrganiserDto)` (16) | `open_organiser(req, resp, notes, color)` | `repeater.open` | `Resource(ResourceRevision)` (4) | Appends item to Organiser & returns ID + number |
-| `SubmitAuditIssue(SubmitAuditIssueDto)` (17) | `submit_audit_issue(flow_id, url, finding)` | `traffic.read` | `Done` (5) | Merges standalone finding (`0x00900102`) into Dashboard/Target |
+| `SubmitAuditIssue(SubmitAuditIssueDto)` (17) | `submit_audit_issue(flow_id, url, finding)` | `audit.write` | `Done` (5) | Merges standalone finding (`0x00900102`) into Dashboard/Target |
 | `CollaboratorGenerate(CollaboratorGenerateDto)` (18) | `collaborator_generate(label)` | `network.send` | `CollaboratorPayload(CollaboratorPayloadDto)` (11) | Starts local OAST if idle & issues HTTP/DNS payload |
 | `CollaboratorPoll(CollaboratorPollDto)` (19) | `collaborator_poll(token_filter, limit)` | `network.send` | `CollaboratorInteractions(CollaboratorInteractionsDto)` (12) | Drains & returns observed OAST interactions (`<=128`) |
 
@@ -172,10 +173,16 @@ impl MioPlugin for MyPlugin {
         if ctx.is_in_scope(&call.url).unwrap_or(false)
             && call.response.as_ref().is_some_and(|r| r.body.windows(6).any(|w| w == b"SECRET"))
         {
-            findings.push(ui::finding(
-                "Exposed Secret", "High", "Certain", "Response leaked SECRET",
-                "Remove debug secret", "body", "SECRET",
-            ));
+            findings.push(
+                ui::finding("Exposed Secret")
+                    .severity(FindingSeverity::High)
+                    .confidence(FindingConfidence::Certain)
+                    .detail("Response leaked SECRET")
+                    .remediation("Remove debug secret")
+                    .parameter("body")
+                    .evidence("SECRET")
+                    .into(),
+            );
         }
         Ok(PassiveCheckResult { findings, log_line: format!("checked {}", call.url) })
     }

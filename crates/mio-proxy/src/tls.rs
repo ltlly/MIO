@@ -378,11 +378,18 @@ impl UpstreamTlsOptions {
         }
         if self.protocol_mode == UpstreamTlsProtocolMode::Custom {
             let active = enabled_versions.unwrap_or(&[TlsVersion::Tls13, TlsVersion::Tls12]);
-            if !suite_protocols.iter().any(|p| active.contains(p)) {
+            let mut compatible = Vec::with_capacity(suites.len());
+            for (suite, proto) in suites.into_iter().zip(suite_protocols) {
+                if active.contains(&proto) {
+                    compatible.push(suite);
+                }
+            }
+            if compatible.is_empty() {
                 return Err(ProxyError::Tls(
                     "自定义密码套件与启用的 TLS 协议版本不兼容".into(),
                 ));
             }
+            return Ok(compatible);
         }
         Ok(suites)
     }
@@ -1451,6 +1458,26 @@ mod tests {
                 .config_with_options(None, &unknown_suite)
                 .is_err()
         );
+
+        let mixed_custom = UpstreamTlsOptions {
+            disable_session_resume: false,
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            tls_min_version: None,
+            tls_max_version: None,
+            custom_protocols: vec![TlsVersion::Tls13],
+            custom_cipher_suites: vec![
+                "TLS13_CHACHA20_POLY1305_SHA256".into(),
+                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".into(),
+            ],
+        };
+        assert_eq!(
+            mixed_custom
+                .resolved_cipher_suites(mixed_custom.resolved_tls_versions().unwrap().as_deref())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(UpstreamTls::System.config_with_options(None, &mixed_custom).is_ok());
 
         let ca_der = MitmAuthority::generate().unwrap().certificate_der();
         for (trust, alpn_ver, store_chain) in [

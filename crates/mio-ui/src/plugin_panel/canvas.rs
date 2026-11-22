@@ -459,26 +459,41 @@ impl NativePanel {
                                             return;
                                         }
                                         let color = tone(*tone_val);
-                                        let run = TextRun {
-                                            len: text.len(),
-                                            font: window.text_style().font(),
-                                            color,
-                                            background_color: None,
-                                            underline: None,
-                                            strikethrough: None,
-                                        };
+                                        let font = window.text_style().font();
                                         let size = px(*font_size);
-                                        let line = window
-                                            .text_system()
-                                            .shape_line(text.clone(), size, &[run], None);
-                                        let _ = line.paint(
-                                            offset_point(*text_origin, origin),
-                                            size,
-                                            TextAlign::Left,
-                                            None,
-                                            window,
-                                            cx,
-                                        );
+                                        let line_height = size * 1.25;
+                                        let base = offset_point(*text_origin, origin);
+                                        for (line_idx, segment) in text.split('\n').enumerate() {
+                                            if segment.is_empty() {
+                                                continue;
+                                            }
+                                            let run = TextRun {
+                                                len: segment.len(),
+                                                font: font.clone(),
+                                                color,
+                                                background_color: None,
+                                                underline: None,
+                                                strikethrough: None,
+                                            };
+                                            let line = window.text_system().shape_line(
+                                                SharedString::from(segment.to_owned()),
+                                                size,
+                                                &[run],
+                                                None,
+                                            );
+                                            let line_origin = point(
+                                                base.x,
+                                                base.y + line_height * (line_idx as f32),
+                                            );
+                                            let _ = line.paint(
+                                                line_origin,
+                                                size,
+                                                TextAlign::Left,
+                                                None,
+                                                window,
+                                                cx,
+                                            );
+                                        }
                                     }
                                     PreparedCommand::Image {
                                         bounds,
@@ -770,6 +785,36 @@ mod tests {
             );
 
             theme::init(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn native_canvas_paints_multiline_draw_text_without_panicking(cx: &mut TestAppContext) {
+        let snapshot = PanelSnapshot {
+            revision: 1,
+            title: "Multiline Text Canvas".into(),
+            root: Some(Node::new(
+                43,
+                "Canvas",
+                node::Kind::Canvas(Canvas {
+                    width: 160.,
+                    height: 120.,
+                    hit_regions: vec![],
+                    commands: vec![DrawCommand {
+                        op: Some(draw_command::Op::Text(DrawText {
+                            origin: Some(Point { x: 4., y: 6. }),
+                            text: "line one\n\nline three".into(),
+                            tone: Tone::Foreground as i32,
+                            size: 12.,
+                        })),
+                    }],
+                }),
+            )),
+        };
+        let fixture = crate::plugin_panel::tests::fixture(cx, snapshot);
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.render_frame(cx);
         })
         .unwrap();
     }

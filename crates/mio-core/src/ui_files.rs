@@ -99,14 +99,21 @@ pub fn read_utf8_rule_lines(
     max_bytes: u64,
     max_line_bytes: usize,
 ) -> std::result::Result<Vec<String>, String> {
-    let meta = fs::metadata(path).map_err(|err| format!("读取文件元数据失败：{err}"))?;
-    if !meta.is_file() {
-        return Err("所选路径不是普通文件。".into());
-    }
-    if meta.len() > max_bytes {
-        return Err("规则文件超过 256 KiB 上限，未导入。".into());
-    }
-    let text = fs::read_to_string(path).map_err(|err| format!("读取 UTF-8 规则文件失败：{err}"))?;
+    let bytes = read_regular_file_bounded_with_hook(path, max_bytes, false, || {}).map_err(|err| {
+        match err {
+            RegularFileReadError::Open(e) => format!("读取规则文件失败：{e}"),
+            RegularFileReadError::Metadata(e) => format!("读取文件元数据失败：{e}"),
+            RegularFileReadError::InvalidOrTooLarge => {
+                "所选路径不是普通文件或超过 256 KiB 上限，未导入。".into()
+            }
+            RegularFileReadError::TooLargeAfterRead => {
+                "规则文件超过 256 KiB 上限，未导入。".into()
+            }
+            RegularFileReadError::Read(e) => format!("读取 UTF-8 规则文件失败：{e}"),
+        }
+    })?;
+    let text =
+        String::from_utf8(bytes).map_err(|err| format!("读取 UTF-8 规则文件失败：{err}"))?;
     let entries: Vec<String> = text
         .lines()
         .map(str::trim)
@@ -161,17 +168,19 @@ pub fn read_bounded_optional_file(
     max_bytes: u64,
     label: &str,
 ) -> Result<Option<Vec<u8>>> {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            ensure!(meta.is_file(), "{label}路径不是普通文件");
-            ensure!(meta.len() <= max_bytes, "{label}文件超过大小上限");
+    match read_regular_file_bounded_with_hook(path, max_bytes, true, || {}) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(RegularFileReadError::Open(err)) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(RegularFileReadError::Open(err)) | Err(RegularFileReadError::Metadata(err)) => {
+            Err(err).with_context(|| format!("读取{label}失败：{}", path.display()))
         }
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
+        Err(RegularFileReadError::InvalidOrTooLarge | RegularFileReadError::TooLargeAfterRead) => {
+            anyhow::bail!("{label}必须是不超过 {max_bytes} 字节的普通文件")
+        }
+        Err(RegularFileReadError::Read(err)) => {
+            Err(err).with_context(|| format!("读取{label}失败：{}", path.display()))
+        }
     }
-    let bytes = fs::read(path).with_context(|| format!("读取{label}失败：{}", path.display()))?;
-    ensure!(bytes.len() as u64 <= max_bytes, "{label}文件超过大小上限");
-    Ok(Some(bytes))
 }
 
 pub fn atomic_write_bounded_file(

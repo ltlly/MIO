@@ -102,11 +102,29 @@ impl ProjectStore {
         if crate::is_external_archive_file(path) {
             bail!("外部归档项目须通过只读导入转换，不能直接作为 MIO 项目打开；源文件未修改");
         }
+        {
+            let ro_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let ro_conn =
+                Connection::open_with_flags(path, ro_flags).context("不能打开项目文件")?;
+            ro_conn.busy_timeout(Duration::from_millis(1500))?;
+            ro_conn.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+            let ro_tx = ro_conn.unchecked_transaction()?;
+            let app_id: i32 =
+                ro_tx.pragma_query_value(None, "application_id", |row| row.get(0))?;
+            let schema: i32 =
+                ro_tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            ensure!(
+                app_id == APPLICATION_ID && schema == SCHEMA,
+                "不是受支持的 MIO 项目；未修改文件"
+            );
+            schema_guard::validate(&ro_tx)?;
+            ro_tx.commit()?;
+        }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = Connection::open_with_flags(path, flags).context("不能打开项目文件")?;
         connection.busy_timeout(Duration::from_millis(1500))?;
         connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
-        let (id, workspace) = {
+        let id = {
             let transaction = connection.unchecked_transaction()?;
             let app_id: i32 =
                 transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -118,9 +136,9 @@ impl ProjectStore {
             );
             schema_guard::validate(&transaction)?;
             let id = metadata::project_id(&transaction)?;
-            let workspace = metadata::workspace(&transaction)?;
+            let _workspace = metadata::workspace(&transaction)?;
             transaction.commit()?;
-            (id, workspace)
+            id
         };
         connection.pragma_update(None, "query_only", false)?;
         let store = Self {
@@ -132,7 +150,7 @@ impl ProjectStore {
             intruder_sessions: intruder::IntruderSessions::default(),
         };
         store.configure()?;
-        store.record_opened_cache(Some(workspace))?;
+        store.record_opened_cache(None)?;
         Ok(store)
     }
 
@@ -145,6 +163,9 @@ impl ProjectStore {
     }
 
     pub(super) fn record_opened_cache(&self, workspace: Option<Workspace>) -> Result<()> {
+        let Some(ws) = workspace else {
+            return Ok(());
+        };
         let sv: i64 = self
             .connection
             .pragma_query_value(None, "schema_version", |row| row.get(0))?;
@@ -154,14 +175,12 @@ impl ProjectStore {
         let tc = query_total_changes(&self.connection)?;
         if let Ok(mut guard) = self.cache.lock() {
             guard.validated_schema = Some((sv, dv));
-            if let Some(ws) = workspace {
-                guard.workspace = Some(WorkspaceCacheEntry {
-                    data_version: dv,
-                    schema_version: sv,
-                    total_changes: tc,
-                    workspace: Arc::new(ws),
-                });
-            }
+            guard.workspace = Some(WorkspaceCacheEntry {
+                data_version: dv,
+                schema_version: sv,
+                total_changes: tc,
+                workspace: Arc::new(ws),
+            });
         }
         Ok(())
     }

@@ -839,7 +839,7 @@ async fn execute_ipc_repeater_send(
     let mut record = pending_repeater_flow_record(run_id, request, started_unix_ms);
     let started = std::time::Instant::now();
     let deadline = started + runtime_cfg.request_timeout;
-    let send_config = runtime_cfg.build_send_config(
+    let initial_send_config = runtime_cfg.build_send_config(
         Some(&record.request.url),
         runtime_cfg.request_timeout,
         Some(record.request.version),
@@ -854,7 +854,7 @@ async fn execute_ipc_repeater_send(
         &settings,
         None,
         true,
-        &send_config,
+        &initial_send_config,
         &cancel,
         deadline,
         started,
@@ -869,6 +869,14 @@ async fn execute_ipc_repeater_send(
         };
         bail!(msg);
     }
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(std::time::Duration::from_millis(1));
+    let send_config = runtime_cfg.build_send_config(
+        Some(&record.request.url),
+        remaining,
+        Some(record.request.version),
+    );
     let response =
         match mio_proxy::send(record.request.clone(), send_config.clone(), cancel.clone())
             .await

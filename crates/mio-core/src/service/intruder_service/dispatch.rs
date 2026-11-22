@@ -101,6 +101,7 @@ impl State {
                 .route_for_url_with_tls(&run.target, upstream_tls.clone())?;
             send_cfg.network.hostname_overrides = hostname_overrides;
             send_cfg.tls.trust = upstream_tls;
+            send_cfg.tls.options = workspace.upstream_tls.to_proxy_tls_options();
             send_cfg.tls.client_certificates = self.tls.compiled_client_certs.clone();
             send_cfg.limits.timeout = run.timeout;
             send_cfg.limits.streaming_timeout = streaming_timeout;

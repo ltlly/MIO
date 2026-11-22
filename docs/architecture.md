@@ -50,7 +50,7 @@ Vendored workspace patches in `vendor/` (detailed in [vendor/README.md](../vendo
 
 Defined in `crates/mio-core/src/service/ai_ipc.rs` and `crates/mio-cli/src/main.rs` (`render.rs`):
 
-- **Transport & Default Path** (overridable by `--socket <path>`, `MIO_IPC_SOCKET`, or `MIO_SOCKET`):
+- **Transport & Default Path** (overridable by `--socket <path>` or `MIO_IPC_SOCKET`):
   - macOS: `~/Library/Application Support/MIO/run/mio.sock` (Unix domain socket `0600`, UID check; falls back to `/tmp/mio-<euid>/mio.sock` if `> 96` bytes).
   - Linux: `${XDG_RUNTIME_DIR}/mio/mio.sock` or `/tmp/mio-<euid>/mio.sock`.
   - Windows: Loopback TCP `127.0.0.1` descriptor file (`%LOCALAPPDATA%\MIO\run\mio.sock` or `%TEMP%\mio-run\mio.sock`) + 256-bit auth token.
@@ -72,12 +72,12 @@ Global options: `--socket <path>`, `--json`, `help` / `-h` / `--help`.
 | `flows get` | `<flow-id> [--original]` | `FlowsGet` |
 | `ws list` | `[--limit <n>]` | `WebSocketList` (default `limit=50`) |
 | `repeater open` | `(--flow <flow-id> [--original] \| --target <origin> --raw <raw-request>) [--title <title>]` | `RepeaterOpen` |
-| `repeater send` | `(--flow <flow-id> [--original] \| --target <origin> --raw <raw-request>) [--set-header\|--add-header <K:V>] [--remove-header <K>] [--body <str>] [--insecure]` | `RepeaterSend` |
+| `repeater send` | `(--flow <flow-id> [--original] \| --target <origin> --raw <raw-request>) [--add-header <K:V>] [--remove-header <K>] [--body <str>] [--insecure]` | `RepeaterSend` |
 | `proxy start` | `[--listen <addr>]` | `ProxyStart` |
 | `proxy stop` | — | `ProxyStop` |
 | `proxy intercept` | `[--requests on\|off] [--responses on\|off]` | `ProxyIntercept` |
 | `proxy pending` | — | `ProxyPending` |
-| `proxy decide` | `<flow-id> --revision <rev> (--forward [--set-header\|--add-header <K:V>] [--remove-header <K>] [--body <str>] [--status <code>] \| --drop)` | `ProxyDecide` |
+| `proxy decide` | `<flow-id> --revision <rev> (--forward [--add-header <K:V>] [--remove-header <K>] [--body <str>] [--status <code>] \| --drop)` | `ProxyDecide` |
 | `workspace get` | — | `WorkspaceGet` |
 | `workspace set` | `<json-file>` | `WorkspacePatch` |
 | `ca export` | `<dest-path> [--pem\|--der]` | `ExportCa` |

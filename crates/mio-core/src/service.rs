@@ -395,6 +395,7 @@ struct State {
     awaiting_event_slot: bool,
     cancel: CancellationToken,
     quiesced: bool,
+    automated_tasks_paused: bool,
     extensions_disabled: bool,
     proxy: ProxyRuntimeState,
     repeater: RepeaterState,

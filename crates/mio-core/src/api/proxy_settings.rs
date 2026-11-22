@@ -525,7 +525,7 @@ impl From<mio_proxy::ObservedCertInfo> for ObservedServerCert {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpstreamTlsSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_ca_ders: Vec<Vec<u8>>,
@@ -543,6 +543,52 @@ pub struct UpstreamTlsSettings {
     pub disable_session_resume: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub client_certs_override_project_only: bool,
+}
+
+impl<'de> Deserialize<'de> for UpstreamTlsSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawUpstreamTlsSettings {
+            #[serde(default)]
+            custom_ca_ders: Vec<Vec<u8>>,
+            #[serde(default = "default_true_bool")]
+            include_system_roots: bool,
+            #[serde(default)]
+            insecure_skip_verify: bool,
+            #[serde(default)]
+            protocol_mode: TlsProtocolMode,
+            #[serde(default)]
+            custom_protocols: Option<Vec<String>>,
+            #[serde(default)]
+            custom_cipher_suites: Vec<String>,
+            #[serde(default)]
+            disable_session_resume: bool,
+            #[serde(default)]
+            client_certs_override_project_only: bool,
+        }
+
+        let raw = RawUpstreamTlsSettings::deserialize(deserializer)?;
+        let custom_protocols = match raw.custom_protocols {
+            Some(list) => list,
+            None if raw.protocol_mode == TlsProtocolMode::Custom => {
+                vec!["TLSv1.3".into(), "TLSv1.2".into()]
+            }
+            None => Vec::new(),
+        };
+        Ok(Self {
+            custom_ca_ders: raw.custom_ca_ders,
+            include_system_roots: raw.include_system_roots,
+            insecure_skip_verify: raw.insecure_skip_verify,
+            protocol_mode: raw.protocol_mode,
+            custom_protocols,
+            custom_cipher_suites: raw.custom_cipher_suites,
+            disable_session_resume: raw.disable_session_resume,
+            client_certs_override_project_only: raw.client_certs_override_project_only,
+        })
+    }
 }
 
 impl Default for UpstreamTlsSettings {

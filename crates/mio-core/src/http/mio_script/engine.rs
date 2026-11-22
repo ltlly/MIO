@@ -38,6 +38,7 @@ fn build_engine() -> Engine {
     ENGINE_BUILD_COUNT.with(|count| count.set(count.get() + 1));
 
     let mut engine = Engine::new();
+    engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
     engine.set_max_operations(50_000);
     engine.set_max_string_size(MAX_BODY);
     engine.set_max_array_size(4096);

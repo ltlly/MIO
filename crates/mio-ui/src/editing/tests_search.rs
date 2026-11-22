@@ -938,3 +938,56 @@ fn message_editor_materializes_lazy_sub_editors_only_on_demand(cx: &mut TestAppC
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn raw_undo_preserves_exact_non_utf8_bytes_with_ascii_header(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let original: Vec<u8> =
+        b"POST /raw HTTP/1.1\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\n\xff\xfeabc"
+            .to_vec();
+    let (window, harness) = cx.update(|cx| {
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(800.), px(600.)),
+                })),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                cx.new(|cx| SearchHarness {
+                    editor: MessageEditor::new(window, cx),
+                    readonly: false,
+                })
+            },
+        )
+        .unwrap()
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        let initial_rev = harness.update(cx, |h, cx| {
+            h.editor.load(&original, window, cx);
+            assert_eq!(h.editor.view(), MessageView::Raw);
+            assert_eq!(h.editor.bytes(window, cx).unwrap(), original);
+            assert_eq!(h.editor.bytes_lossless(cx), original);
+            let rev = h.editor.raw.read(cx).document_revision();
+
+            h.editor.raw.update(cx, |state, cx| {
+                let end = state.value().len();
+                state.replace_text_in_range(Some(end..end), "d", window, cx);
+                state.focus(window, cx);
+            });
+            assert_ne!(h.editor.bytes(window, cx).unwrap(), original);
+            rev
+        });
+        window.render_frame(cx);
+        window.press(crate::kbd!("z"), cx);
+        harness.update(cx, |h, cx| {
+            assert_ne!(h.editor.raw.read(cx).document_revision(), initial_rev);
+            assert_eq!(h.editor.bytes(window, cx).unwrap(), original);
+            assert_eq!(h.editor.bytes_lossless(cx), original);
+        });
+    })
+    .unwrap();
+}

@@ -481,8 +481,9 @@ async fn execute_cli(cli: Cli) -> Result<()> {
         CliCommand::Workspace { command } => match command {
             WorkspaceCommand::Get => (AiIpcRequest::WorkspaceGet, false),
             WorkspaceCommand::Set { json_path } => {
-                let workspace_json = std::fs::read_to_string(&json_path)
+                let raw = std::fs::read_to_string(&json_path)
                     .with_context(|| format!("读取工作区 JSON 失败：{}", json_path.display()))?;
+                let workspace_json = extract_workspace_patch_json(&raw)?;
                 (AiIpcRequest::WorkspacePatch { workspace_json }, false)
             }
         },
@@ -516,6 +517,20 @@ fn format_headless_ready_json(socket_path: &Path, active_proxy: Option<&str>) ->
         "proxy_address": active_proxy,
     })
     .to_string()
+}
+
+fn extract_workspace_patch_json(raw: &str) -> Result<String> {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(payload) = map.get("payload").and_then(|v| v.as_object())
+            && let Some(ws) = payload.get("workspace").filter(|v| v.is_object())
+        {
+            return serde_json::to_string(ws).context("序列化内层工作区 JSON 失败");
+        }
+        if let Some(ws) = map.get("workspace").filter(|v| v.is_object()) {
+            return serde_json::to_string(ws).context("序列化工作区字段 JSON 失败");
+        }
+    }
+    Ok(raw.to_owned())
 }
 
 async fn await_headless_event<T>(
@@ -568,12 +583,20 @@ async fn run_headless_server(
         }
         None => None,
     };
-    let listen_addr: Option<SocketAddr> = match listen.as_deref().map(str::trim) {
-        Some(addr) if !addr.is_empty() => Some(
-            addr.parse()
-                .context("无效的监听 SocketAddr（例如 127.0.0.1:8080）")?,
-        ),
-        _ => None,
+    let listen_addr: Option<SocketAddr> = match listen {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            ensure!(
+                !trimmed.is_empty(),
+                "--listen 不能为空，请提供有效的 SocketAddr（例如 127.0.0.1:8080）"
+            );
+            Some(
+                trimmed
+                    .parse()
+                    .context("无效的监听 SocketAddr（例如 127.0.0.1:8080）")?,
+            )
+        }
+        None => None,
     };
 
     let socket_for_start = socket_path.clone();
@@ -1236,9 +1259,31 @@ mod tests {
     async fn headless_server_rejects_invalid_listen_address_cleanly() {
         let dir = TempDirGuard::new("mio-bad");
         let sock = dir.path.join("bad.sock");
-        let err = run_headless_server(sock, Some("not-a-socket-addr".into()), None, true)
+        let err = run_headless_server(sock.clone(), Some("not-a-socket-addr".into()), None, true)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("SocketAddr"));
+
+        let blank_err = run_headless_server(sock, Some("   ".into()), None, true)
+            .await
+            .unwrap_err();
+        assert!(blank_err.to_string().contains("--listen"));
+    }
+
+    #[test]
+    fn extract_workspace_patch_json_unwraps_workspace_get_response() {
+        let raw_ws = r#"{"revision":3,"project_name":"demo"}"#;
+        assert_eq!(extract_workspace_patch_json(raw_ws).unwrap(), raw_ws);
+
+        let wrapped = r#"{"ok":true,"workspace":{"revision":3,"project_name":"demo"}}"#;
+        let extracted: serde_json::Value =
+            serde_json::from_str(&extract_workspace_patch_json(wrapped).unwrap()).unwrap();
+        assert_eq!(extracted["revision"], 3);
+        assert_eq!(extracted["project_name"], "demo");
+
+        let nested = r#"{"ok":true,"payload":{"workspace":{"revision":4,"project_name":"n"}}}"#;
+        let extracted2: serde_json::Value =
+            serde_json::from_str(&extract_workspace_patch_json(nested).unwrap()).unwrap();
+        assert_eq!(extracted2["revision"], 4);
     }
 }

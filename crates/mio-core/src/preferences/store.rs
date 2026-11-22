@@ -36,6 +36,10 @@ impl Default for UserPreferences {
 }
 
 impl PreferencesStore {
+    pub(crate) fn is_isolated(&self) -> bool {
+        self.path.is_none()
+    }
+
     pub(crate) fn new(path: Option<PathBuf>) -> Self {
         let mut store = Self {
             path,

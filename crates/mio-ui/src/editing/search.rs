@@ -105,7 +105,7 @@ impl MessageEditor {
         cx: &mut App,
     ) -> Result<(), String> {
         let query = input_snapshot(&self.search, window, cx).map_err(str::to_owned)?;
-        let (header_preview, non_printable, case_sensitive, regex, auto_scroll_to_match, hex_grid) = {
+        let (header_preview, non_printable, case_sensitive, regex, auto_scroll_to_match) = {
             let s = self.shared.borrow();
             (
                 s.header_preview.clone(),
@@ -113,9 +113,9 @@ impl MessageEditor {
                 s.case_sensitive,
                 s.regex,
                 s.auto_scroll_to_match,
-                s.hex_grid.clone(),
             )
         };
+        let hex_grid = self.hex_grid();
         let active = self.state();
         for candidate in [
             header_preview.as_ref(),

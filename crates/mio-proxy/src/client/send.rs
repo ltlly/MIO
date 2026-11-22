@@ -34,6 +34,27 @@ pub(crate) fn find_matching_platform_auth<'a>(
         .find(|rule| rule.matches_host(&host))
 }
 
+fn upstream_http_proxy_endpoint(url: &str, config: &SendConfig) -> Option<crate::ProxyEndpoint> {
+    let uri: rama::net::uri::Uri = url.parse().ok()?;
+    if !uri
+        .scheme_str()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
+    {
+        return None;
+    }
+    let host = uri.host_str()?;
+    match config.network.upstream_route.resolve_for_host(&host) {
+        crate::UpstreamRoute::Http(ep) | crate::UpstreamRoute::Https { endpoint: ep, .. } => {
+            Some(ep)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn should_send_proxy_auth_on_request(url: &str, config: &SendConfig) -> bool {
+    upstream_http_proxy_endpoint(url, config).is_some()
+}
+
 pub(crate) fn find_matching_upstream_auth<'a>(
     url: &str,
     config: &'a SendConfig,
@@ -43,11 +64,12 @@ pub(crate) fn find_matching_upstream_auth<'a>(
     }
     let uri: rama::net::uri::Uri = url.parse().ok()?;
     let host = uri.host_str()?;
+    let proxy_ep = upstream_http_proxy_endpoint(url, config)?;
     config
         .auth
         .upstream_rules
         .iter()
-        .find(|rule| rule.matches_destination(&host))
+        .find(|rule| rule.matches_destination(&host) && rule.matches_proxy(&proxy_ep))
 }
 
 pub(crate) fn apply_preemptive_auth_to_model(
@@ -72,6 +94,9 @@ pub(crate) fn apply_preemptive_auth_to_model(
 }
 
 fn resolve_preemptive_proxy_auth(request: &HttpRequest, config: &SendConfig) -> Option<String> {
+    if !should_send_proxy_auth_on_request(&request.url, config) {
+        return None;
+    }
     let rule = find_matching_upstream_auth(&request.url, config)?;
     if rule.credentials.scheme != crate::HttpAuthScheme::Basic
         || request
@@ -277,6 +302,9 @@ pub(crate) async fn exchange_model_with_auth(
     for _step in 0..2 {
         let status = response.status().as_u16();
         let (is_proxy, creds) = if status == 407 {
+            if !should_send_proxy_auth_on_request(&model.url, &config) {
+                break;
+            }
             let Some(rule) = find_matching_upstream_auth(&model.url, &config) else {
                 break;
             };
@@ -350,7 +378,16 @@ pub(crate) async fn exchange_model_with_auth(
                 };
                 drain_auth_challenge_body(response.into_body(), deadline, &cancel, false).await?;
                 let (cnonce, _, _) = crate::auth::next_cnonce_and_challenge();
-                let uri_path = crate::auth::request_uri_path_and_query(&model.url);
+                let uri_path = if is_proxy && model.url.to_ascii_lowercase().starts_with("http://") {
+                    model
+                        .url
+                        .split('#')
+                        .next()
+                        .unwrap_or(&model.url)
+                        .to_owned()
+                } else {
+                    crate::auth::request_uri_path_and_query(&model.url)
+                };
                 let val = digest_chal.build_authorization_value(&crate::auth::DigestRequest {
                     username: &creds.username,
                     password: &creds.password,

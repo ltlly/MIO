@@ -871,15 +871,13 @@ impl Workbench {
             self.fail(err, cx);
             return;
         }
+        if self.collaborator_insert_sub.is_some() {
+            self.status = "上一个 Collaborator 载荷仍在生成中，请稍候。".into();
+            cx.notify();
+            return;
+        }
         let seq = NEXT_COLLAB_INSERT_SEQ.fetch_add(1, Ordering::Relaxed);
         let label = format!("编辑器右键插入 #{seq}");
-        let before_count = self.collaborator_pane.status.issued_tokens.len();
-        let before_last_token = self
-            .collaborator_pane
-            .status
-            .issued_tokens
-            .last()
-            .map(|t| t.token.clone());
         let before_error = self.collaborator_pane.error.clone();
         if !self.enqueue(
             Command::Collaborator(mio_core::CollaboratorCommand::GeneratePayloads {
@@ -916,13 +914,6 @@ impl Workbench {
                 .iter()
                 .rev()
                 .find(|item| item.label == label)
-                .or_else(|| {
-                    let tokens = &view.collaborator_pane.status.issued_tokens;
-                    (tokens.len() > before_count)
-                        .then(|| tokens.last())
-                        .flatten()
-                        .filter(|item| Some(item.token.as_str()) != before_last_token.as_deref())
-                })
                 .map(|item| item.http_callback_url.clone());
             if let Some(payload) = fresh {
                 if view

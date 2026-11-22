@@ -188,6 +188,19 @@ fn upstream_tls_model_preserves_defaults_and_explicit_system_setting() {
         .validate()
         .is_err()
     );
+
+    let legacy_custom_upgraded: crate::UpstreamTlsSettings =
+        serde_json::from_str(r#"{"protocol_mode":"custom"}"#).unwrap();
+    assert_eq!(legacy_custom_upgraded.protocol_mode, crate::TlsProtocolMode::Custom);
+    assert_eq!(
+        legacy_custom_upgraded.custom_protocols,
+        vec!["TLSv1.3", "TLSv1.2"]
+    );
+    legacy_custom_upgraded.validate().unwrap();
+
+    let explicit_empty_custom: crate::UpstreamTlsSettings =
+        serde_json::from_str(r#"{"protocol_mode":"custom","custom_protocols":[]}"#).unwrap();
+    assert!(explicit_empty_custom.validate().is_err());
 }
 
 #[test]

@@ -766,3 +766,115 @@ async fn prepared_send_applies_platform_and_upstream_auth_consistently() {
     .await
     .expect("PreparedSend auth flows complete promptly");
 }
+
+#[tokio::test]
+async fn proxy_auth_never_leaks_on_https_direct_or_socks_bypass_and_digest_uses_absolute_uri() {
+    use crate::client::send::{find_matching_upstream_auth, should_send_proxy_auth_on_request};
+
+    let mut cfg = SendConfig::default();
+    cfg.auth.upstream_rules = std::sync::Arc::from([crate::UpstreamAuthRuleConfig {
+        enabled: true,
+        destination_host: "*".into(),
+        proxy_host: "127.0.0.1".into(),
+        proxy_port: 8888,
+        credentials: crate::AuthCredentials {
+            scheme: crate::HttpAuthScheme::Basic,
+            username: "proxy-u".into(),
+            password: "proxy-p".into(),
+            ..Default::default()
+        },
+    }]);
+
+    // Direct route: never send Proxy-Authorization.
+    assert!(!should_send_proxy_auth_on_request("http://app.lab.invalid/", &cfg));
+    assert!(find_matching_upstream_auth("http://app.lab.invalid/", &cfg).is_none());
+
+    // SOCKS5 with bypass: bypassed and non-bypassed hosts both must not receive HTTP Proxy-Authorization.
+    cfg.network.upstream_route = crate::UpstreamRoute::Socks5WithBypass {
+        endpoint: crate::ProxyEndpoint {
+            host: "127.0.0.1".into(),
+            port: 1080,
+            credentials: None,
+        },
+        local_dns: false,
+        bypass_hosts: vec!["bypass.lab.invalid".into()],
+    };
+    assert!(!should_send_proxy_auth_on_request("http://bypass.lab.invalid/", &cfg));
+    assert!(find_matching_upstream_auth("http://app.lab.invalid/", &cfg).is_none());
+
+    // HTTP proxy: HTTPS inner request never sends Proxy-Authorization; plain HTTP matches exact proxy port.
+    cfg.network.upstream_route = crate::UpstreamRoute::Http(crate::ProxyEndpoint {
+        host: "127.0.0.1".into(),
+        port: 8888,
+        credentials: None,
+    });
+    assert!(!should_send_proxy_auth_on_request("https://app.lab.invalid/", &cfg));
+    assert!(find_matching_upstream_auth("https://app.lab.invalid/", &cfg).is_none());
+    assert!(should_send_proxy_auth_on_request("http://app.lab.invalid/", &cfg));
+    assert!(find_matching_upstream_auth("http://app.lab.invalid/", &cfg).is_some());
+
+    // Mismatched proxy port does not match rule.
+    cfg.network.upstream_route = crate::UpstreamRoute::Http(crate::ProxyEndpoint {
+        host: "127.0.0.1".into(),
+        port: 9999,
+        credentials: None,
+    });
+    assert!(find_matching_upstream_auth("http://app.lab.invalid/", &cfg).is_none());
+
+    // Proxy Digest auth uses absolute-form URI in digest calculation.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let head1 = read_h1_request_head(&mut s1).await.unwrap();
+            assert!(!head1.to_ascii_lowercase().contains("proxy-authorization:"));
+            s1.write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Digest realm=\"p\", nonce=\"abc\", qop=\"auth\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let (mut s2, _) = listener.accept().await.unwrap();
+            let head2 = read_h1_request_head(&mut s2).await.unwrap();
+            assert!(
+                head2.contains("uri=\"http://upstream.lab.invalid/proxied?k=1\""),
+                "proxy Digest must use absolute-form request URI, got: {head2}"
+            );
+            s2.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let mut config = SendConfig::default();
+        config.network.upstream_route = crate::UpstreamRoute::Http(crate::ProxyEndpoint {
+            host: "127.0.0.1".into(),
+            port: proxy_addr.port(),
+            credentials: None,
+        });
+        config.auth.upstream_rules = std::sync::Arc::from([crate::UpstreamAuthRuleConfig {
+            enabled: true,
+            destination_host: "*".into(),
+            proxy_host: "*".into(),
+            proxy_port: 0,
+            credentials: crate::AuthCredentials {
+                scheme: crate::HttpAuthScheme::Digest,
+                username: "proxy-u".into(),
+                password: "proxy-p".into(),
+                ..Default::default()
+            },
+        }]);
+        let req = HttpRequest {
+            method: "GET".into(),
+            url: "http://upstream.lab.invalid/proxied?k=1".into(),
+            version: HttpVersion::Http11,
+            headers: Vec::new(),
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        let resp = send(req, config, CancellationToken::new()).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"ok");
+        proxy_task.await.unwrap();
+    })
+    .await
+    .expect("proxy Digest absolute-URI test completes promptly");
+}

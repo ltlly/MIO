@@ -69,12 +69,12 @@ mod custom_action_mutation_tests {
     fn sample_request() -> HttpRequest {
         HttpRequest {
             method: "GET".into(),
-            url: "https://api.example.com/v1/profile?tab=info&debug=1".into(),
+            url: "https://api.example.invalid/v1/profile?tab=info&debug=1".into(),
             version: HttpVersion::Http11,
             headers: vec![
                 Header {
                     name: "Host".into(),
-                    value: b"api.example.com".to_vec(),
+                    value: b"api.example.invalid".to_vec(),
                 },
                 Header {
                     name: "Cookie".into(),
@@ -157,7 +157,7 @@ mod custom_action_mutation_tests {
         );
         assert_eq!(
             updated.url,
-            "https://api.example.com/v1/profile?tab=info&_cb=42"
+            "https://api.example.invalid/v1/profile?tab=info&_cb=42"
         );
     }
 
@@ -172,9 +172,22 @@ mod custom_action_mutation_tests {
         .unwrap();
         assert_eq!(
             outcome.output,
-            "GET https://api.example.com/v1/profile?tab=info&debug=1"
+            "GET https://api.example.invalid/v1/profile?tab=info&debug=1"
         );
         assert_eq!(outcome.updated_request, None);
+    }
+
+    #[test]
+    fn script_module_imports_are_disabled() {
+        let req = sample_request();
+        let err = eval_custom_action_with_mutation(
+            r#"import "foo" as f; print("unreachable");"#,
+            &req,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.is_empty());
     }
 }
 
@@ -186,12 +199,12 @@ mod expanded_security_helpers_tests {
         let body = br#"{"user":{"role":"guest","tags":["read"]},"active":true}"#.to_vec();
         HttpRequest {
             method: "POST".into(),
-            url: "https://api.example.com/v1/users".into(),
+            url: "https://api.example.invalid/v1/users".into(),
             version: HttpVersion::Http11,
             headers: vec![
                 Header {
                     name: "Host".into(),
-                    value: b"api.example.com".to_vec(),
+                    value: b"api.example.invalid".to_vec(),
                 },
                 Header {
                     name: "Content-Type".into(),

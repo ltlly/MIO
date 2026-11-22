@@ -437,11 +437,18 @@ async fn ai_ipc_repeater_send_obeys_monitor_mio_ai_and_session_rule_scope() {
     let server = tokio::spawn(async move {
         for _ in 0..3 {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
-                .await
-                .unwrap();
-            let req_text = String::from_utf8_lossy(&buf[..n]);
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
+                let n = tokio::io::AsyncReadExt::read(&mut sock, &mut chunk)
+                    .await
+                    .unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&chunk[..n]);
+            }
+            let req_text = String::from_utf8_lossy(&head);
             let cookie_line = req_text
                 .lines()
                 .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))

@@ -605,14 +605,14 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
     let api_json = super::super::render_suite::build_mio_plugin_api_json().unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&api_json).unwrap();
     assert_eq!(parsed["name"], "mio-plugin-api");
-    assert_eq!(parsed["protocol"]["minor"], 5);
+    assert_eq!(parsed["protocol"]["minor"], 6);
     assert_eq!(
         parsed["panel_multiplexing"]["register_field"],
         "supports_panel_multiplexing"
     );
     assert!(parsed["manifest_schema"]["properties"]["engine"].is_object());
     let api_md = super::super::render_suite::build_mio_plugin_api_markdown();
-    assert!(api_md.contains("MIO Extensions API (v1.5)"));
+    assert!(api_md.contains("MIO Extensions API (v1.6)"));
     assert!(api_md.contains("Panel Multiplexing (v1.5)"));
     assert!(api_md.contains("traffic.read"));
 }

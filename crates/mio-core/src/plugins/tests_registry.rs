@@ -253,3 +253,56 @@ fn registry_mutations_and_staging_rollback_work() {
     assert!(store.get("lab.two").unwrap().is_none());
     assert!(!pkg2_dir.exists());
 }
+
+#[test]
+fn registry_allows_listing_and_uninstalling_legacy_wasm_entries_alongside_native() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-plugins");
+    let store = PluginRegistryStore::new(Some(root.clone()));
+
+    let src = temp.path().join("native-src");
+    write_native_dir(&src, "lab.keep", "1.0.0");
+    let pkg = VerifiedPackage::read(&src).unwrap();
+    let (_, staging) = store.stage_install_package(&pkg).unwrap().unwrap();
+    store
+        .upsert(InstalledPluginEntry {
+            id: "lab.keep".into(),
+            version: "1.0.0".into(),
+            engine: "native".into(),
+            package_dir: staging.package_dir.clone(),
+            original_source: None,
+            grants: vec![Permission::TrafficRead],
+            enabled: true,
+            auto_reload: false,
+        })
+        .unwrap();
+    staging.commit();
+
+    let legacy_pkg_dir = root.join("packages").join("lab.legacy_wasm");
+    fs::create_dir_all(&legacy_pkg_dir).unwrap();
+    let installed_path = root.join("installed.json");
+    let mut file_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&installed_path).unwrap()).unwrap();
+    file_json["plugins"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "lab.legacy_wasm",
+            "version": "0.1.0",
+            "engine": "wasm",
+            "package_dir": "lab.legacy_wasm",
+            "original_source": null,
+            "grants": [],
+            "enabled": true,
+            "auto_reload": false
+        }));
+    fs::write(&installed_path, serde_json::to_vec(&file_json).unwrap()).unwrap();
+
+    let entries = store.list().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(store.remove("lab.legacy_wasm").unwrap());
+    assert!(!legacy_pkg_dir.exists());
+    let remaining = store.list().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, "lab.keep");
+}

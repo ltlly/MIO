@@ -238,6 +238,7 @@ impl State {
             awaiting_event_slot: false,
             cancel,
             quiesced: false,
+            automated_tasks_paused: false,
             extensions_disabled: false,
             proxy: ProxyRuntimeState::new(),
             repeater: RepeaterState::new(),

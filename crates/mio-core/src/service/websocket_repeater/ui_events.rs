@@ -177,6 +177,7 @@ impl State {
             },
             tls: mio_proxy::UpstreamTlsConfig {
                 trust: upstream_tls,
+                options: workspace.upstream_tls.to_proxy_tls_options(),
                 client_certificates,
                 ..Default::default()
             },

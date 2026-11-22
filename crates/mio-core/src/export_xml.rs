@@ -15,8 +15,18 @@ pub struct XmlHttpExportItem<'a> {
     pub comment: &'a str,
 }
 
+fn is_valid_xml_1_0_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
+}
+
 fn push_xml_text(out: &mut String, text: &str) {
     for ch in text.chars() {
+        if !is_valid_xml_1_0_char(ch) {
+            continue;
+        }
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -28,6 +38,9 @@ fn push_xml_text(out: &mut String, text: &str) {
 
 fn push_xml_attr(out: &mut String, value: &str) {
     for ch in value.chars() {
+        if !is_valid_xml_1_0_char(ch) {
+            continue;
+        }
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -97,6 +110,11 @@ fn append_http_item_xml(
 }
 
 pub fn build_http_item_xml(item: &XmlHttpExportItem<'_>) -> Result<String, String> {
+    for field in [item.time_str, item.url, item.method, item.comment] {
+        if !field.chars().all(is_valid_xml_1_0_char) {
+            return Err("XML 导出包含 XML 1.0 不允许的控制字符。".into());
+        }
+    }
     let parsed = url::Url::parse(item.url).map_err(|error| format!("导出 URL 无效：{error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("XML 导出 URL 必须使用 HTTP 协议。".into());
@@ -295,6 +313,26 @@ mod tests {
         assert_eq!(
             ws_doc.root_element().attribute("mioVersion"),
             Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        let control_item = XmlHttpExportItem {
+            url: "https://example.invalid/",
+            method: "GET",
+            status: Some(200),
+            time_str: "12:00:00",
+            request_bytes: b"GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n",
+            response_bytes: b"HTTP/1.1 200 OK\r\n\r\nok",
+            comment: "bad\x00\x0bcomment",
+        };
+        assert!(build_http_item_xml(&control_item).is_err());
+        let cleaned_multi = build_http_items_xml("now\x00", &[control_item]);
+        let cleaned_doc = roxmltree::Document::parse(&cleaned_multi).unwrap();
+        assert_eq!(
+            cleaned_doc
+                .descendants()
+                .find(|n| n.has_tag_name("comment"))
+                .and_then(|n| n.text()),
+            Some("badcomment")
         );
     }
 }

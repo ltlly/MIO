@@ -236,7 +236,12 @@ impl State {
 
     pub(super) async fn authority(&mut self) -> Result<MitmAuthority> {
         if self.proxy.ca.is_none() {
-            self.proxy.ca = Some(tokio::task::spawn_blocking(authority::load_or_create).await??);
+            let ca = if self.preferences.is_isolated() {
+                tokio::task::spawn_blocking(MitmAuthority::generate).await??
+            } else {
+                tokio::task::spawn_blocking(authority::load_or_create).await??
+            };
+            self.proxy.ca = Some(ca);
         }
         Ok(self.proxy.ca.as_ref().unwrap().clone())
     }
@@ -281,6 +286,7 @@ impl State {
         self.storage.reset_for_project(restored_annotated);
         self.intruder = intruder;
         self.quiesced = false;
+        self.automated_tasks_paused = effective_pause;
         self.ai_ipc.repeater_revisions.clear();
         self.tls.observed_cert_keys.clear();
         self.last_scheduled_fire.clear();
@@ -435,13 +441,13 @@ impl State {
     }
 
     pub(super) async fn run_scheduled_tasks_tick(&mut self) {
-        if self.quiesced || self.unsaved_count() != 0 {
+        if self.quiesced || self.automated_tasks_paused || self.unsaved_count() != 0 {
             return;
         }
         let Ok(workspace) = self.store.metadata().workspace_arc() else {
             return;
         };
-        if workspace.scheduled_tasks.is_empty() {
+        if !workspace.tasks_auto_start || workspace.scheduled_tasks.is_empty() {
             return;
         }
         let now_secs = crate::codec_util::now_unix_ms() / 1000;

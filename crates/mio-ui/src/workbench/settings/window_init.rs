@@ -214,6 +214,7 @@ impl Settings {
                 this.pools.selected = None;
                 this.interception_selected = [None, None];
                 this.project_json_feedback = None;
+                this.tls_negotiation_error = None;
                 this.http_streaming_scope_selected = None;
                 this.http_streaming_scope_editing = None;
                 this.http_streaming_scope_editor_open = false;
@@ -227,6 +228,9 @@ impl Settings {
                 this.scope_oos_custom_subdomains = false;
                 this.listeners_tls.client_cert_selected = None;
                 this.scope_ui.reset_editing(cx);
+            }
+            if legacy_changed && !project_changed {
+                this.tls_negotiation_error = None;
             }
             if user_prefs_changed {
                 this.sync_user_pages_inputs(window, cx);
