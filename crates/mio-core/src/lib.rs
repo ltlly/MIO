@@ -48,6 +48,7 @@ pub use http::{
     toggle_http_request_method_bytes, validate_ssl_and_ws_rules, validate_target_origin,
 };
 pub use mio_plugin_api::*;
+pub use mio_proxy::{SUPPORTED_TLS_CIPHER_SUITES, TlsCipherSuiteSpec, TlsVersion};
 pub use organiser::{next_organiser_number, validate_organiser_items};
 pub use plugins::default_plugins_dir;
 pub use preferences::{

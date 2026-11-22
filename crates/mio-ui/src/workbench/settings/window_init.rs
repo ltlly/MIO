@@ -621,6 +621,7 @@ impl Settings {
             tls_table,
             tls_import: None,
             tls_error: None,
+            tls_negotiation_error: None,
             scope_ui,
             scope_include_input,
             scope_exclude_input,

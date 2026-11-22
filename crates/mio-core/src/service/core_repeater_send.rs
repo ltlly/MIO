@@ -76,7 +76,7 @@ impl RepeaterSendRuntimeConfig {
         config.network.upstream_route = route;
         config.network.hostname_overrides = self.hostname_overrides.clone();
         config.tls.trust = self.upstream_tls.clone();
-        config.tls.options = self.upstream_tls_options;
+        config.tls.options = self.upstream_tls_options.clone();
         config.tls.client_certificates = self.client_certificates.clone();
         config.limits.timeout = timeout;
         config.limits.streaming_timeout = self.streaming_timeout;
@@ -141,6 +141,7 @@ pub(in crate::service) fn pending_repeater_flow_record(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::service) async fn apply_repeater_session_rules(
     sessions: &crate::sessions::SessionRuntime,
+    tool: SessionTool,
     provenance: &ProvenanceTracker,
     run_id: FlowId,
     base_request: &HttpRequest,
@@ -155,7 +156,7 @@ pub(in crate::service) async fn apply_repeater_session_rules(
 ) -> Option<bool> {
     let (changed, steps) = sessions
         .apply_to_flow_record_with_steps(
-            SessionTool::Repeater,
+            tool,
             record,
             macro_send_config,
             cancel,
@@ -467,6 +468,7 @@ impl State {
             );
             let mut request_mutated = match apply_repeater_session_rules(
                 &sessions,
+                SessionTool::Repeater,
                 &provenance,
                 flow_id,
                 &parsed_draft_request,

@@ -40,6 +40,7 @@ fn format_trace_tool(tool: SessionTool) -> &'static str {
         SessionTool::Scanner => "Scanner",
         SessionTool::Sequencer => "Sequencer",
         SessionTool::Extensions => "Extensions",
+        SessionTool::MioAi => "MioAI",
     }
 }
 

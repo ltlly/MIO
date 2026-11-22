@@ -375,6 +375,7 @@ impl Settings {
                 scanner: true,
                 sequencer: false,
                 extensions: false,
+                mio_ai: false,
             };
             self.sessions.rule_url_mode = 0;
             self.sessions.url_scope_select.update(cx, |s, cx| {
@@ -477,6 +478,7 @@ impl Settings {
             scanner: true,
             sequencer: false,
             extensions: false,
+            mio_ai: false,
         };
         self.sessions.rule_url_mode = 0;
         self.sessions.url_scope_select.update(cx, |s, cx| {
@@ -520,6 +522,7 @@ impl Settings {
                 scanner: true,
                 sequencer: false,
                 extensions: false,
+                mio_ai: false,
             },
             condition: SessionRuleCondition {
                 url_scope: SessionUrlScope::AllUrls,
@@ -565,6 +568,7 @@ impl Settings {
                 scanner: true,
                 sequencer: false,
                 extensions: false,
+                mio_ai: false,
             };
             let make_rule = |name: String| SessionRule {
                 id: Uuid::new_v4(),

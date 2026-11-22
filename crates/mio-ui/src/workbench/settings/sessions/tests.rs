@@ -729,7 +729,17 @@ fn sessions_default_cookie_jar_rule_and_interactive_tracer(
     drain(&mut fixture.commands);
     let settings = open_sessions_page(&fixture, cx);
 
-    // 1. Toggle default Cookie Jar rule checkbox -> materializes real persisted UseCookieJar rule.
+    // 1. Toggle MioAI Cookie Jar monitor and default Cookie Jar rule checkbox -> persisted in workspace.
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-cookie-jar-monitor-ai", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let ws_ai = saved(&mut fixture.commands);
+    assert!(ws_ai.sessions.cookie_jar.monitor_mio_ai);
+    acknowledge(&fixture, ws_ai, cx);
+
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
         window.click("settings-sessions-rule-enable-default", cx);

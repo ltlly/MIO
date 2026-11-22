@@ -846,6 +846,7 @@ async fn execute_ipc_repeater_send(
     );
     if apply_repeater_session_rules(
         &sessions,
+        SessionTool::MioAi,
         &provenance,
         run_id,
         &original_request,
@@ -879,7 +880,7 @@ async fn execute_ipc_repeater_send(
                 return Err(err);
             }
         };
-    sessions.observe_response(SessionTool::Repeater, &record.request.url, &response);
+    sessions.observe_response(SessionTool::MioAi, &record.request.url, &response);
     let original_response = response.clone();
     let unpacked = if settings.unpack_compressed_responses {
         spawn_unpack_response(

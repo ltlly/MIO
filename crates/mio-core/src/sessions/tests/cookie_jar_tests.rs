@@ -254,3 +254,45 @@ fn workspace_sessions_persist_across_create_save_reopen_and_enforce_cas() {
     assert_eq!(loaded.sessions, sessions);
     reopened.close().unwrap();
 }
+
+#[test]
+fn mio_ai_cookie_jar_monitoring_follows_monitor_mio_ai_flag() {
+    let mut ws = Workspace::default();
+    let project = ProjectKey {
+        id: Uuid::new_v4(),
+        generation: 1,
+    };
+    ws.sessions.cookie_jar.monitor_mio_ai = false;
+    let runtime = SessionRuntime::from_workspace(project, &ws);
+
+    let set_cookie_resp = HttpResponse {
+        status: 200,
+        version: HttpVersion::Http11,
+        reason_phrase: None,
+        headers: vec![Header {
+            name: "Set-Cookie".into(),
+            value: b"ai_sid=blocked; Path=/".to_vec(),
+        }],
+        body: Vec::new(),
+        trailers: Vec::new(),
+    };
+
+    assert!(!runtime.observe_response(
+        SessionTool::MioAi,
+        "http://127.0.0.1/login",
+        &set_cookie_resp,
+    ));
+    assert!(runtime.cookie_jar_snapshot().is_empty());
+
+    ws.revision += 1;
+    ws.sessions.cookie_jar.monitor_mio_ai = true;
+    assert!(runtime.sync_workspace(project, &ws));
+    assert!(runtime.observe_response(
+        SessionTool::MioAi,
+        "http://127.0.0.1/login",
+        &set_cookie_resp,
+    ));
+    assert_eq!(runtime.cookie_jar_snapshot().len(), 1);
+    assert_eq!(runtime.cookie_jar_snapshot()[0].name, "ai_sid");
+    assert_eq!(runtime.cookie_jar_snapshot()[0].value, "blocked");
+}

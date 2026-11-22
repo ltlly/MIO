@@ -260,3 +260,131 @@ pub(super) fn verify_http_filter_and_user_tls_certificates(
     .unwrap();
     cx.simulate_keystrokes(settings, "escape");
 }
+
+#[gpui_kit::test]
+fn settings_tls_custom_protocols_and_ciphers_persist_and_validate(cx: &mut TestAppContext) {
+    let initial = tab("自定义 TLS 协议与密码套件测试");
+    let mut fixture = fixture(cx, vec![initial], 64);
+    drain(&mut fixture.commands);
+
+    let settings = open_settings(&fixture, cx);
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-network-tls", cx);
+        window.render_frame(cx);
+        window.click("settings-tls-proto-custom", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let custom_ws = saved(&mut fixture.commands);
+    assert_eq!(
+        custom_ws.upstream_tls.protocol_mode,
+        mio_core::TlsProtocolMode::Custom
+    );
+    assert_eq!(
+        custom_ws.upstream_tls.custom_protocols,
+        vec!["TLSv1.3", "TLSv1.2"]
+    );
+    assert!(custom_ws.upstream_tls.custom_cipher_suites.is_empty());
+    acknowledge(&fixture, custom_ws, cx);
+
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("settings-tls-custom-panel").visible());
+        window.click("settings-tls-custom-proto-tls13", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let tls12_ws = saved(&mut fixture.commands);
+    assert_eq!(tls12_ws.upstream_tls.custom_protocols, vec!["TLSv1.2"]);
+    acknowledge(&fixture, tls12_ws, cx);
+
+    // Incompatible TLS 1.3 cipher when only TLS 1.2 is enabled must show inline error and not save.
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-tls-custom-cipher-TLS13_CHACHA20_POLY1305_SHA256", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(drain(&mut fixture.commands).is_empty());
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        let alert = window.find("settings-tls-negotiation-error");
+        assert!(alert.visible());
+        assert!(alert.label().unwrap().contains("不兼容"));
+        for _ in 0..4 {
+            if window
+                .find("settings-tls-custom-cipher-TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256")
+                .visible()
+            {
+                break;
+            }
+            window.scroll(
+                "settings-tls-page",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-200.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        window.click(
+            "settings-tls-custom-cipher-TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            cx,
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let cipher_ws = saved(&mut fixture.commands);
+    assert_eq!(
+        cipher_ws.upstream_tls.custom_cipher_suites,
+        vec!["TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"]
+    );
+    acknowledge(&fixture, cipher_ws, cx);
+
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-tls-negotiation-error").is_none());
+        for _ in 0..4 {
+            if window.find("settings-tls-custom-cipher-reset").visible() {
+                break;
+            }
+            window.scroll(
+                "settings-tls-page",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(200.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        window.click("settings-tls-custom-cipher-reset", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let reset_ws = saved(&mut fixture.commands);
+    assert!(reset_ws.upstream_tls.custom_cipher_suites.is_empty());
+    acknowledge(&fixture, reset_ws, cx);
+
+    // Disabling the last remaining protocol version must be rejected with inline error.
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        for _ in 0..4 {
+            if window.find("settings-tls-custom-proto-tls12").visible() {
+                break;
+            }
+            window.scroll(
+                "settings-tls-page",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(200.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        window.click("settings-tls-custom-proto-tls12", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(drain(&mut fixture.commands).is_empty());
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("settings-tls-negotiation-error").visible());
+    })
+    .unwrap();
+    cx.simulate_keystrokes(settings, "escape");
+}

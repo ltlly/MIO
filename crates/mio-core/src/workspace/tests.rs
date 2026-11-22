@@ -120,6 +120,74 @@ fn upstream_tls_model_preserves_defaults_and_explicit_system_setting() {
         protocol_only.to_proxy_tls(),
         mio_proxy::UpstreamTls::System
     ));
+
+    let valid_custom = crate::UpstreamTlsSettings {
+        protocol_mode: crate::TlsProtocolMode::Custom,
+        custom_protocols: vec!["TLSv1.3".into(), "TLSv1.2".into()],
+        custom_cipher_suites: vec![
+            "TLS13_CHACHA20_POLY1305_SHA256".into(),
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".into(),
+        ],
+        ..crate::UpstreamTlsSettings::default()
+    };
+    assert!(!valid_custom.is_default());
+    valid_custom.validate().unwrap();
+    let proxy_opts = valid_custom.to_proxy_tls_options();
+    assert_eq!(
+        proxy_opts.protocol_mode,
+        mio_proxy::UpstreamTlsProtocolMode::Custom
+    );
+    assert_eq!(
+        proxy_opts.custom_protocols,
+        vec![mio_proxy::TlsVersion::Tls13, mio_proxy::TlsVersion::Tls12]
+    );
+    assert_eq!(
+        proxy_opts.custom_cipher_suites,
+        vec![
+            "TLS13_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        ]
+    );
+
+    assert!(
+        crate::UpstreamTlsSettings {
+            protocol_mode: crate::TlsProtocolMode::Custom,
+            custom_protocols: Vec::new(),
+            custom_cipher_suites: Vec::new(),
+            ..crate::UpstreamTlsSettings::default()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        crate::UpstreamTlsSettings {
+            protocol_mode: crate::TlsProtocolMode::Custom,
+            custom_protocols: vec!["SSLv3".into()],
+            ..crate::UpstreamTlsSettings::default()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        crate::UpstreamTlsSettings {
+            protocol_mode: crate::TlsProtocolMode::Custom,
+            custom_protocols: vec!["TLSv1.3".into()],
+            custom_cipher_suites: vec!["UNKNOWN_SUITE".into()],
+            ..crate::UpstreamTlsSettings::default()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        crate::UpstreamTlsSettings {
+            protocol_mode: crate::TlsProtocolMode::Custom,
+            custom_protocols: vec!["TLSv1.2".into()],
+            custom_cipher_suites: vec!["TLS13_CHACHA20_POLY1305_SHA256".into()],
+            ..crate::UpstreamTlsSettings::default()
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 #[test]

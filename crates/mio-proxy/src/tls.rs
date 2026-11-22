@@ -184,6 +184,94 @@ pub enum TlsVersion {
     Tls13,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TlsCipherSuiteSpec {
+    pub name: &'static str,
+    pub protocol: TlsVersion,
+}
+
+pub const SUPPORTED_TLS_CIPHER_SUITES: &[TlsCipherSuiteSpec] = &[
+    TlsCipherSuiteSpec {
+        name: "TLS13_AES_256_GCM_SHA384",
+        protocol: TlsVersion::Tls13,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS13_AES_128_GCM_SHA256",
+        protocol: TlsVersion::Tls13,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS13_CHACHA20_POLY1305_SHA256",
+        protocol: TlsVersion::Tls13,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        protocol: TlsVersion::Tls12,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        protocol: TlsVersion::Tls12,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+        protocol: TlsVersion::Tls12,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        protocol: TlsVersion::Tls12,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        protocol: TlsVersion::Tls12,
+    },
+    TlsCipherSuiteSpec {
+        name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        protocol: TlsVersion::Tls12,
+    },
+];
+
+fn resolve_ring_cipher_suite(
+    name: &str,
+) -> Option<(TlsVersion, rustls::SupportedCipherSuite)> {
+    use rustls::crypto::ring::cipher_suite;
+    match name {
+        "TLS13_AES_256_GCM_SHA384" => {
+            Some((TlsVersion::Tls13, cipher_suite::TLS13_AES_256_GCM_SHA384))
+        }
+        "TLS13_AES_128_GCM_SHA256" => {
+            Some((TlsVersion::Tls13, cipher_suite::TLS13_AES_128_GCM_SHA256))
+        }
+        "TLS13_CHACHA20_POLY1305_SHA256" => Some((
+            TlsVersion::Tls13,
+            cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+        )),
+        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        )),
+        "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        )),
+        "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        )),
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        )),
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        )),
+        "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" => Some((
+            TlsVersion::Tls12,
+            cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        )),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UpstreamTlsProtocolMode {
     #[default]
@@ -191,46 +279,112 @@ pub enum UpstreamTlsProtocolMode {
     AllSupported,
     Tls12Only,
     Tls13Only,
+    Custom,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct UpstreamTlsOptions {
     pub disable_session_resume: bool,
     pub protocol_mode: UpstreamTlsProtocolMode,
     pub tls_min_version: Option<TlsVersion>,
     pub tls_max_version: Option<TlsVersion>,
+    pub custom_protocols: Vec<TlsVersion>,
+    pub custom_cipher_suites: Vec<String>,
 }
 
 impl UpstreamTlsOptions {
     pub fn validate(&self) -> Result<(), ProxyError> {
-        let _ = self.resolved_protocol_versions()?;
+        let versions = self.resolved_tls_versions()?;
+        let _ = self.resolved_cipher_suites(versions.as_deref())?;
         Ok(())
     }
 
-    pub(crate) fn resolved_protocol_versions(
-        &self,
-    ) -> Result<Option<Vec<ProtocolVersion>>, ProxyError> {
+    fn resolved_tls_versions(&self) -> Result<Option<Vec<TlsVersion>>, ProxyError> {
         if let (Some(min), Some(max)) = (self.tls_min_version, self.tls_max_version)
             && min > max
         {
             return Err(ProxyError::Tls("TLS 最低版本不能高于最高版本".into()));
         }
         match self.protocol_mode {
-            UpstreamTlsProtocolMode::Tls12Only => Ok(Some(vec![ProtocolVersion::TLSv1_2])),
-            UpstreamTlsProtocolMode::Tls13Only => Ok(Some(vec![ProtocolVersion::TLSv1_3])),
+            UpstreamTlsProtocolMode::Tls12Only => Ok(Some(vec![TlsVersion::Tls12])),
+            UpstreamTlsProtocolMode::Tls13Only => Ok(Some(vec![TlsVersion::Tls13])),
+            UpstreamTlsProtocolMode::Custom => {
+                if self.custom_protocols.is_empty() {
+                    return Err(ProxyError::Tls("自定义 TLS 至少需启用一个协议版本".into()));
+                }
+                let mut list = Vec::with_capacity(self.custom_protocols.len());
+                for proto in &self.custom_protocols {
+                    if !list.contains(proto) {
+                        list.push(*proto);
+                    }
+                }
+                if let Some(min) = self.tls_min_version {
+                    list.retain(|v| *v >= min);
+                }
+                if let Some(max) = self.tls_max_version {
+                    list.retain(|v| *v <= max);
+                }
+                if list.is_empty() {
+                    return Err(ProxyError::Tls("自定义 TLS 至少需启用一个协议版本".into()));
+                }
+                Ok(Some(list))
+            }
             UpstreamTlsProtocolMode::Default | UpstreamTlsProtocolMode::AllSupported => {
                 match (self.tls_min_version, self.tls_max_version) {
-                    (Some(TlsVersion::Tls13), _) => Ok(Some(vec![ProtocolVersion::TLSv1_3])),
-                    (_, Some(TlsVersion::Tls12)) => Ok(Some(vec![ProtocolVersion::TLSv1_2])),
+                    (Some(TlsVersion::Tls13), _) => Ok(Some(vec![TlsVersion::Tls13])),
+                    (_, Some(TlsVersion::Tls12)) => Ok(Some(vec![TlsVersion::Tls12])),
                     (Some(TlsVersion::Tls12), Some(TlsVersion::Tls13))
                     | (Some(TlsVersion::Tls12), None)
                     | (None, Some(TlsVersion::Tls13)) => {
-                        Ok(Some(vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]))
+                        Ok(Some(vec![TlsVersion::Tls13, TlsVersion::Tls12]))
                     }
                     (None, None) => Ok(None),
                 }
             }
         }
+    }
+
+    pub(crate) fn resolved_protocol_versions(
+        &self,
+    ) -> Result<Option<Vec<ProtocolVersion>>, ProxyError> {
+        Ok(self.resolved_tls_versions()?.map(|list| {
+            list.into_iter()
+                .map(|v| match v {
+                    TlsVersion::Tls12 => ProtocolVersion::TLSv1_2,
+                    TlsVersion::Tls13 => ProtocolVersion::TLSv1_3,
+                })
+                .collect()
+        }))
+    }
+
+    fn resolved_cipher_suites(
+        &self,
+        enabled_versions: Option<&[TlsVersion]>,
+    ) -> Result<Vec<rustls::SupportedCipherSuite>, ProxyError> {
+        if self.custom_cipher_suites.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut suites = Vec::with_capacity(self.custom_cipher_suites.len());
+        let mut suite_protocols = Vec::with_capacity(self.custom_cipher_suites.len());
+        for raw_name in &self.custom_cipher_suites {
+            let trimmed = raw_name.trim();
+            let Some((proto, suite)) = resolve_ring_cipher_suite(trimmed) else {
+                return Err(ProxyError::Tls(format!("不支持的 TLS 密码套件：{trimmed}")));
+            };
+            if !suites.contains(&suite) {
+                suites.push(suite);
+                suite_protocols.push(proto);
+            }
+        }
+        if self.protocol_mode == UpstreamTlsProtocolMode::Custom {
+            let active = enabled_versions.unwrap_or(&[TlsVersion::Tls13, TlsVersion::Tls12]);
+            if !suite_protocols.iter().any(|p| active.contains(p)) {
+                return Err(ProxyError::Tls(
+                    "自定义密码套件与启用的 TLS 协议版本不兼容".into(),
+                ));
+            }
+        }
+        Ok(suites)
     }
 }
 
@@ -820,6 +974,70 @@ fn hash_client_identity(identity: &crate::ParsedClientIdentity) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+#[derive(Debug)]
+struct InsecureCustomCertVerifier(Vec<rustls::SignatureScheme>);
+
+impl rustls::client::danger::ServerCertVerifier for InsecureCustomCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.clone()
+    }
+}
+
+fn build_custom_root_store(
+    trust: &UpstreamTls,
+) -> Result<rustls::RootCertStore, ProxyError> {
+    let mut roots = rustls::RootCertStore::empty();
+    let include_system = match trust {
+        UpstreamTls::System => true,
+        UpstreamTls::Insecure => false,
+        UpstreamTls::CustomRoots {
+            certificates_der,
+            include_system,
+        } => {
+            for der in certificates_der {
+                roots
+                    .add(CertificateDer::from(der.clone()))
+                    .map_err(ProxyError::tls)?;
+            }
+            *include_system
+        }
+    };
+    if include_system {
+        let anchors = rama::crypto::native_certs::shared_native_trust_anchors();
+        let (_, _) = roots.add_parsable_certificates(anchors.iter().cloned());
+    }
+    Ok(roots)
+}
+
 fn build_tls_client_config(
     trust: &UpstreamTls,
     alpn: ClientAlpnMode,
@@ -828,7 +1046,9 @@ fn build_tls_client_config(
     store_server_cert_chain: bool,
 ) -> Result<TlsClientConfig, ProxyError> {
     trust.validate()?;
+    let tls_versions = options.resolved_tls_versions()?;
     let supported_versions = options.resolved_protocol_versions()?;
+    let custom_suites = options.resolved_cipher_suites(tls_versions.as_deref())?;
     let mut config = match alpn {
         ClientAlpnMode::Http2 => TlsClientConfig::new().with_alpn_http_2(),
         ClientAlpnMode::Http1 => TlsClientConfig::new().with_alpn_http_1(),
@@ -869,7 +1089,51 @@ fn build_tls_client_config(
         config = identity.apply_to_tls_config(config);
     }
 
-    if options.disable_session_resume {
+    if options.protocol_mode == UpstreamTlsProtocolMode::Custom && !custom_suites.is_empty() {
+        let mut provider = rustls::crypto::ring::default_provider();
+        provider.cipher_suites = custom_suites;
+        let provider = Arc::new(provider);
+        let rustls_versions: Vec<&'static rustls::SupportedProtocolVersion> = tls_versions
+            .unwrap_or_else(|| vec![TlsVersion::Tls13, TlsVersion::Tls12])
+            .into_iter()
+            .map(|v| match v {
+                TlsVersion::Tls13 => &rustls::version::TLS13,
+                TlsVersion::Tls12 => &rustls::version::TLS12,
+            })
+            .collect();
+        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match trust {
+            UpstreamTls::Insecure => Arc::new(InsecureCustomCertVerifier(
+                provider.signature_verification_algorithms.supported_schemes(),
+            )),
+            UpstreamTls::System | UpstreamTls::CustomRoots { .. } => {
+                let roots = build_custom_root_store(trust)?;
+                rustls::client::WebPkiServerVerifier::builder_with_provider(
+                    Arc::new(roots),
+                    provider.clone(),
+                )
+                .build()
+                .map_err(ProxyError::tls)?
+            }
+        };
+        let disable_resumption = options.disable_session_resume;
+        config = config.with_modify_rustls_config(move |incoming| {
+            let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&rustls_versions)
+                .map_err(rama::error::BoxError::from)?;
+            let mut next = builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier.clone())
+                .with_client_cert_resolver(incoming.client_auth_cert_resolver);
+            next.alpn_protocols = incoming.alpn_protocols;
+            next.key_log = incoming.key_log;
+            if disable_resumption {
+                next.resumption = rustls::client::Resumption::disabled();
+            } else {
+                next.resumption = incoming.resumption;
+            }
+            Ok(next)
+        });
+    } else if options.disable_session_resume {
         config = config.with_modify_rustls_config(|mut cfg| {
             cfg.resumption = rustls::client::Resumption::disabled();
             Ok(cfg)
@@ -920,7 +1184,7 @@ impl UpstreamTls {
         let key = ClientTlsCacheKey {
             trust: trust_key,
             alpn,
-            options: *options,
+            options: options.clone(),
             client_cert_sha256: client_identity.map(hash_client_identity),
             store_server_cert_chain,
         };
@@ -1052,7 +1316,9 @@ mod tests {
 
         let (leaf_chain, leaf_key) = generate_server_auth(
             GeneratedServerAuthConfig::SelfSignedLeaf(LeafCertRequest::new(
-                CertificateIdentity::try_from_host(&"custom.example".parse::<Host>().unwrap())
+                CertificateIdentity::try_from_host(
+                    &"custom.example.invalid".parse::<Host>().unwrap(),
+                )
                     .unwrap(),
             )),
         )
@@ -1109,6 +1375,7 @@ mod tests {
             protocol_mode: UpstreamTlsProtocolMode::Tls13Only,
             tls_min_version: None,
             tls_max_version: None,
+            ..Default::default()
         };
         let cfg = UpstreamTls::System.config_with_options(None, &opts).unwrap();
         let rustls_cfg = rustls::ClientConfig::try_from(RustlsTlsConnectorConfig::from_extensions(
@@ -1122,6 +1389,7 @@ mod tests {
             protocol_mode: UpstreamTlsProtocolMode::Tls12Only,
             tls_min_version: None,
             tls_max_version: None,
+            ..Default::default()
         };
         let cfg12 = UpstreamTls::System
             .config_with_options(None, &tls12)
@@ -1138,8 +1406,51 @@ mod tests {
             protocol_mode: UpstreamTlsProtocolMode::Default,
             tls_min_version: Some(TlsVersion::Tls13),
             tls_max_version: Some(TlsVersion::Tls12),
+            ..Default::default()
         };
         assert!(UpstreamTls::System.config_with_options(None, &invalid).is_err());
+
+        let empty_custom = UpstreamTlsOptions {
+            disable_session_resume: false,
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            tls_min_version: None,
+            tls_max_version: None,
+            custom_protocols: Vec::new(),
+            custom_cipher_suites: Vec::new(),
+        };
+        assert!(
+            UpstreamTls::System
+                .config_with_options(None, &empty_custom)
+                .is_err()
+        );
+
+        let incompatible_custom = UpstreamTlsOptions {
+            disable_session_resume: false,
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            tls_min_version: None,
+            tls_max_version: None,
+            custom_protocols: vec![TlsVersion::Tls12],
+            custom_cipher_suites: vec!["TLS13_CHACHA20_POLY1305_SHA256".into()],
+        };
+        assert!(
+            UpstreamTls::System
+                .config_with_options(None, &incompatible_custom)
+                .is_err()
+        );
+
+        let unknown_suite = UpstreamTlsOptions {
+            disable_session_resume: false,
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            tls_min_version: None,
+            tls_max_version: None,
+            custom_protocols: vec![TlsVersion::Tls13],
+            custom_cipher_suites: vec!["NO_SUCH_CIPHER".into()],
+        };
+        assert!(
+            UpstreamTls::System
+                .config_with_options(None, &unknown_suite)
+                .is_err()
+        );
 
         let ca_der = MitmAuthority::generate().unwrap().certificate_der();
         for (trust, alpn_ver, store_chain) in [
@@ -1203,5 +1514,167 @@ mod tests {
                 );
             }
         }
+    }
+
+    async fn spawn_test_tls_server(
+        versions: &[&'static rustls::SupportedProtocolVersion],
+        suites: Vec<rustls::SupportedCipherSuite>,
+        leaf_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+        leaf_key: rustls::pki_types::PrivateKeyDer<'static>,
+    ) -> std::net::SocketAddr {
+        let mut provider = rustls::crypto::ring::default_provider();
+        provider.cipher_suites = suites;
+        let server_cfg = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(versions)
+            .expect("valid test server versions")
+            .with_no_client_auth()
+            .with_single_cert(leaf_chain, leaf_key)
+            .expect("valid test server cert");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = listener.accept().await {
+                let _ = acceptor.accept(tcp).await;
+            }
+        });
+        addr
+    }
+
+    async fn connect_with_upstream_options(
+        addr: std::net::SocketAddr,
+        leaf_der: &[u8],
+        opts: &UpstreamTlsOptions,
+    ) -> Result<(Option<rustls::ProtocolVersion>, Option<rustls::CipherSuite>), String> {
+        let native_cfg = UpstreamTls::CustomRoots {
+            certificates_der: vec![leaf_der.to_vec()],
+            include_system: false,
+        }
+        .config_with_options(None, opts)
+        .map_err(|e| e.to_string())?;
+        let rustls_cfg =
+            rustls::ClientConfig::try_from(RustlsTlsConnectorConfig::from_extensions(
+                native_cfg.as_extensions(),
+            ))
+            .map_err(|e| e.to_string())?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(rustls_cfg));
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        let server_name =
+            rustls::pki_types::ServerName::try_from("custom.example.invalid").unwrap();
+        let tls = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (_, conn) = tls.get_ref();
+        Ok((
+            conn.protocol_version(),
+            conn.negotiated_cipher_suite().map(|cs| cs.suite()),
+        ))
+    }
+
+    #[tokio::test]
+    async fn custom_tls_protocols_and_ciphers_enforced_in_loopback_handshakes() {
+        use rustls::crypto::ring::cipher_suite;
+
+        let (leaf_chain, leaf_key) = generate_server_auth(
+            GeneratedServerAuthConfig::SelfSignedLeaf(LeafCertRequest::new(
+                CertificateIdentity::try_from_host(
+                    &"custom.example.invalid".parse::<Host>().unwrap(),
+                )
+                    .unwrap(),
+            )),
+        )
+        .unwrap();
+        let leaf_der = leaf_chain[0].as_ref().to_vec();
+
+        // 1. TLS 1.3 custom cipher suite match (server prefers AES-256 first, client allows only Chacha20)
+        let addr_tls13 = spawn_test_tls_server(
+            &[&rustls::version::TLS13],
+            vec![
+                cipher_suite::TLS13_AES_256_GCM_SHA384,
+                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            ],
+            leaf_chain.clone(),
+            leaf_key.clone_key(),
+        )
+        .await;
+        let tls13_chacha = UpstreamTlsOptions {
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            custom_protocols: vec![TlsVersion::Tls13],
+            custom_cipher_suites: vec!["TLS13_CHACHA20_POLY1305_SHA256".into()],
+            ..Default::default()
+        };
+        let (ver, suite) = connect_with_upstream_options(addr_tls13, &leaf_der, &tls13_chacha)
+            .await
+            .expect("TLS 1.3 matching custom cipher handshake succeeds");
+        assert_eq!(ver, Some(rustls::ProtocolVersion::TLSv1_3));
+        assert_eq!(
+            suite,
+            Some(rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256)
+        );
+
+        // 2. TLS 1.3 custom cipher suite mismatch fails
+        let addr_tls13_aes_only = spawn_test_tls_server(
+            &[&rustls::version::TLS13],
+            vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+            leaf_chain.clone(),
+            leaf_key.clone_key(),
+        )
+        .await;
+        assert!(
+            connect_with_upstream_options(addr_tls13_aes_only, &leaf_der, &tls13_chacha)
+                .await
+                .is_err(),
+            "mismatched custom TLS 1.3 cipher suite must fail handshake"
+        );
+
+        // 3. TLS 1.2 custom cipher suite match succeeds
+        let addr_tls12 = spawn_test_tls_server(
+            &[&rustls::version::TLS12],
+            vec![
+                cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            ],
+            leaf_chain.clone(),
+            leaf_key.clone_key(),
+        )
+        .await;
+        let tls12_chacha = UpstreamTlsOptions {
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            custom_protocols: vec![TlsVersion::Tls12],
+            custom_cipher_suites: vec!["TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".into()],
+            ..Default::default()
+        };
+        let (ver, suite) = connect_with_upstream_options(addr_tls12, &leaf_der, &tls12_chacha)
+            .await
+            .expect("TLS 1.2 matching custom cipher handshake succeeds");
+        assert_eq!(ver, Some(rustls::ProtocolVersion::TLSv1_2));
+        assert_eq!(
+            suite,
+            Some(rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256)
+        );
+
+        // 4. TLS 1.2 custom protocol-only (no cipher restriction) fails against TLS 1.3-only server
+        let addr_tls13_only = spawn_test_tls_server(
+            &[&rustls::version::TLS13],
+            vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+            leaf_chain,
+            leaf_key,
+        )
+        .await;
+        let tls12_any_suite = UpstreamTlsOptions {
+            protocol_mode: UpstreamTlsProtocolMode::Custom,
+            custom_protocols: vec![TlsVersion::Tls12],
+            custom_cipher_suites: Vec::new(),
+            ..Default::default()
+        };
+        assert!(
+            connect_with_upstream_options(addr_tls13_only, &leaf_der, &tls12_any_suite)
+                .await
+                .is_err(),
+            "TLS 1.2 custom protocol filter must reject TLS 1.3-only server"
+        );
     }
 }

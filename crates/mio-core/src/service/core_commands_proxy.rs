@@ -267,7 +267,7 @@ impl State {
             config.network.upstream_route = net.upstream_route.clone();
             config.network.upstream_route_resolver = Some(net.upstream_route_resolver.clone());
             config.tls.upstream.trust = net.upstream_tls.clone();
-            config.tls.upstream.options = net.upstream_tls_options;
+            config.tls.upstream.options = net.upstream_tls_options.clone();
             config.network.hostname_overrides = net.hostname_overrides.clone();
             config.limits.request_timeout = net.request_timeout;
             config.limits.streaming_timeout = net.streaming_timeout;
@@ -363,7 +363,7 @@ impl State {
         session_send_cfg.network.upstream_route = net.upstream_route.clone();
         session_send_cfg.network.hostname_overrides = net.hostname_overrides.clone();
         session_send_cfg.tls.trust = net.upstream_tls.clone();
-        session_send_cfg.tls.options = net.upstream_tls_options;
+        session_send_cfg.tls.options = net.upstream_tls_options.clone();
         session_send_cfg.tls.client_certificates = client_certificates;
         session_send_cfg.limits.timeout = net.request_timeout;
         session_send_cfg.limits.streaming_timeout = net.streaming_timeout;

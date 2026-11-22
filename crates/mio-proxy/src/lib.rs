@@ -42,8 +42,9 @@ pub use server::{
 pub use streaming::StreamingScopeMatcher;
 pub use tls::{
     ListenerCertMode, ListenerTlsProtocols, MitmAuthority, ObservedCertInfo,
-    ServerCertObservedCallback, TlsVersion, UpstreamTls, UpstreamTlsConfig, UpstreamTlsOptions,
-    UpstreamTlsProtocolMode, parse_observed_cert,
+    SUPPORTED_TLS_CIPHER_SUITES, ServerCertObservedCallback, TlsCipherSuiteSpec, TlsVersion,
+    UpstreamTls, UpstreamTlsConfig, UpstreamTlsOptions, UpstreamTlsProtocolMode,
+    parse_observed_cert,
 };
 pub use transport::build_dns_resolver;
 

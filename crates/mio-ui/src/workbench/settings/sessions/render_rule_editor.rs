@@ -445,6 +445,21 @@ impl Settings {
                                 cx.notify();
                             });
                         })
+                    })
+                    .child({
+                        let entity = cx.entity();
+                        inline_checkbox(
+                            "settings-sessions-tool-ai",
+                            "MioAI",
+                            self.sessions.rule_tools.mio_ai,
+                            enabled,
+                        )
+                        .on_change(move |st, _, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.sessions.rule_tools.mio_ai = st == CheckboxState::Checked;
+                                cx.notify();
+                            });
+                        })
                     }),
             )
             .child(

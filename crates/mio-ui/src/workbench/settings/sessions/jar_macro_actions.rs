@@ -20,6 +20,7 @@ impl Settings {
             SessionTool::Scanner => next.cookie_jar.monitor_scanner = checked,
             SessionTool::Sequencer => next.cookie_jar.monitor_sequencer = checked,
             SessionTool::Extensions => next.cookie_jar.monitor_extensions = checked,
+            SessionTool::MioAi => next.cookie_jar.monitor_mio_ai = checked,
         }
         let _ = self.commit_session_settings(next, cx);
     }

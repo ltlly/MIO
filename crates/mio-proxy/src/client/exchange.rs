@@ -894,7 +894,7 @@ fn prepare_exchange(request: &mut Request, config: &SendConfig) -> Result<Prepar
                     _ => crate::tls::TrustModeKey::System,
                 },
                 alpn: crate::tls::ClientAlpnMode::from_http_version(tls_alpn_version),
-                options: config.tls.options,
+                options: config.tls.options.clone(),
                 client_cert_sha256: None,
                 store_server_cert_chain: false,
             },

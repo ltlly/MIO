@@ -486,6 +486,7 @@ pub enum TlsProtocolMode {
     #[default]
     AllSupported,
     Default,
+    Custom,
 }
 
 impl TlsProtocolMode {
@@ -534,6 +535,10 @@ pub struct UpstreamTlsSettings {
     pub insecure_skip_verify: bool,
     #[serde(default, skip_serializing_if = "TlsProtocolMode::is_default")]
     pub protocol_mode: TlsProtocolMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_protocols: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_cipher_suites: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_session_resume: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -547,9 +552,19 @@ impl Default for UpstreamTlsSettings {
             include_system_roots: true,
             insecure_skip_verify: false,
             protocol_mode: TlsProtocolMode::AllSupported,
+            custom_protocols: Vec::new(),
+            custom_cipher_suites: Vec::new(),
             disable_session_resume: false,
             client_certs_override_project_only: false,
         }
+    }
+}
+
+fn parse_custom_tls_protocol(name: &str) -> Option<mio_proxy::TlsVersion> {
+    match name.trim() {
+        "TLSv1.3" | "TLS1.3" | "tls1.3" | "tlsv1.3" => Some(mio_proxy::TlsVersion::Tls13),
+        "TLSv1.2" | "TLS1.2" | "tls1.2" | "tlsv1.2" => Some(mio_proxy::TlsVersion::Tls12),
+        _ => None,
     }
 }
 
@@ -559,6 +574,8 @@ impl UpstreamTlsSettings {
             && self.custom_ca_ders.is_empty()
             && self.include_system_roots
             && self.protocol_mode == TlsProtocolMode::AllSupported
+            && self.custom_protocols.is_empty()
+            && self.custom_cipher_suites.is_empty()
             && !self.disable_session_resume
             && !self.client_certs_override_project_only
     }
@@ -582,6 +599,28 @@ impl UpstreamTlsSettings {
                 || self.include_system_roots,
             "未配置自定义 TLS 根证书时不能关闭系统根证书信任"
         );
+        for proto in &self.custom_protocols {
+            anyhow::ensure!(
+                parse_custom_tls_protocol(proto).is_some(),
+                "不支持的 TLS 协议版本：{proto}（仅支持 TLSv1.3、TLSv1.2）"
+            );
+        }
+        for suite in &self.custom_cipher_suites {
+            let trimmed = suite.trim();
+            anyhow::ensure!(
+                mio_proxy::SUPPORTED_TLS_CIPHER_SUITES
+                    .iter()
+                    .any(|spec| spec.name == trimmed),
+                "不支持的 TLS 密码套件：{trimmed}"
+            );
+        }
+        if self.protocol_mode == TlsProtocolMode::Custom {
+            anyhow::ensure!(
+                !self.custom_protocols.is_empty(),
+                "自定义 TLS 至少需启用一个协议版本"
+            );
+            self.to_proxy_tls_options().validate()?;
+        }
         self.to_proxy_tls().validate()?;
         Ok(())
     }
@@ -600,15 +639,47 @@ impl UpstreamTlsSettings {
     }
 
     pub fn to_proxy_tls_options(&self) -> mio_proxy::UpstreamTlsOptions {
-        let protocol_mode = match self.protocol_mode {
-            TlsProtocolMode::AllSupported => mio_proxy::UpstreamTlsProtocolMode::AllSupported,
-            TlsProtocolMode::Default => mio_proxy::UpstreamTlsProtocolMode::Default,
+        let (protocol_mode, custom_protocols, custom_cipher_suites) = match self.protocol_mode {
+            TlsProtocolMode::AllSupported => (
+                mio_proxy::UpstreamTlsProtocolMode::AllSupported,
+                Vec::new(),
+                Vec::new(),
+            ),
+            TlsProtocolMode::Default => (
+                mio_proxy::UpstreamTlsProtocolMode::Default,
+                Vec::new(),
+                Vec::new(),
+            ),
+            TlsProtocolMode::Custom => {
+                let mut protocols = Vec::with_capacity(self.custom_protocols.len());
+                for proto in &self.custom_protocols {
+                    if let Some(parsed) = parse_custom_tls_protocol(proto)
+                        && !protocols.contains(&parsed)
+                    {
+                        protocols.push(parsed);
+                    }
+                }
+                let mut suites = Vec::with_capacity(self.custom_cipher_suites.len());
+                for suite in &self.custom_cipher_suites {
+                    let trimmed = suite.trim();
+                    if !trimmed.is_empty() && !suites.iter().any(|existing| existing == trimmed) {
+                        suites.push(trimmed.to_owned());
+                    }
+                }
+                (
+                    mio_proxy::UpstreamTlsProtocolMode::Custom,
+                    protocols,
+                    suites,
+                )
+            }
         };
         mio_proxy::UpstreamTlsOptions {
             disable_session_resume: self.disable_session_resume,
             protocol_mode,
             tls_min_version: None,
             tls_max_version: None,
+            custom_protocols,
+            custom_cipher_suites,
         }
     }
 

@@ -561,7 +561,12 @@ fn phase2_workspace_fields_persist_across_reopen_and_default_from_legacy_json() 
         });
     ws.upstream_proxy.socks.bypass_hosts = vec!["localhost".into(), "*.internal".into()];
     ws.upstream_proxy.socks.override_project_only = true;
-    ws.upstream_tls.protocol_mode = crate::TlsProtocolMode::Default;
+    ws.upstream_tls.protocol_mode = crate::TlsProtocolMode::Custom;
+    ws.upstream_tls.custom_protocols = vec!["TLSv1.3".into(), "TLSv1.2".into()];
+    ws.upstream_tls.custom_cipher_suites = vec![
+        "TLS13_CHACHA20_POLY1305_SHA256".into(),
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".into(),
+    ];
     ws.upstream_tls.disable_session_resume = true;
     ws.upstream_tls.client_certs_override_project_only = true;
     ws.proxy_listeners.push(crate::ProxyListenerConfig {

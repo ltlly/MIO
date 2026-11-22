@@ -415,3 +415,152 @@ async fn ipc_repeater_send_does_not_block_concurrent_status_and_workspace_patch_
     drop(client);
     runtime.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn ai_ipc_repeater_send_obeys_monitor_mio_ai_and_session_rule_scope() {
+    #[cfg(unix)]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-ai-jar-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    #[cfg(not(unix))]
+    let dir = tempfile::Builder::new()
+        .prefix("mio-ipc-ai-jar-")
+        .tempdir()
+        .unwrap();
+    let sock_path = dir.path().join("mio.sock");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let observed_cookies = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+    let observed_for_srv = observed_cookies.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                .await
+                .unwrap();
+            let req_text = String::from_utf8_lossy(&buf[..n]);
+            let cookie_line = req_text
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                .map(|l| l.trim().to_owned());
+            observed_for_srv.lock().unwrap().push(cookie_line);
+            let resp = "HTTP/1.1 200 OK\r\nSet-Cookie: ai_sid=42; Path=/\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+
+    let (runtime, mut client) = Runtime::start_with_ipc_socket(sock_path.clone()).unwrap();
+    let _ = recv_until(&mut client.events, |ev| match ev {
+        Event::ProjectOpened { project, .. } => Some(project),
+        _ => None,
+    })
+    .await;
+
+    let patch_sessions = |sock: &std::path::Path, monitor_mio_ai: bool| {
+        let sock = sock.to_path_buf();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let (get_env, _) =
+                    call_ai_ipc(&sock, &AiIpcRequest::WorkspaceGet, Duration::from_secs(3))
+                        .unwrap();
+                let AiIpcPayload::WorkspaceState { workspace: val } =
+                    get_env.payload.unwrap()
+                else {
+                    panic!("expected WorkspaceState");
+                };
+                let mut ws: crate::Workspace = serde_json::from_value(val).unwrap();
+                ws.revision += 1;
+                ws.sessions.cookie_jar.monitor_mio_ai = monitor_mio_ai;
+                if ws.sessions.rules.is_empty() {
+                    ws.sessions.rules.push(crate::SessionRule {
+                        id: Uuid::new_v4(),
+                        name: "AI Cookie Rule".into(),
+                        enabled: true,
+                        tools: crate::SessionToolScope {
+                            proxy: false,
+                            repeater: false,
+                            intruder: false,
+                            scanner: false,
+                            sequencer: false,
+                            extensions: false,
+                            mio_ai: true,
+                        },
+                        condition: crate::SessionRuleCondition::default(),
+                        actions: vec![crate::SessionRuleAction::UseCookieJar {
+                            add_new_cookies: true,
+                            update_existing_cookies: true,
+                        }],
+                    });
+                }
+                let json = serde_json::to_string(&ws).unwrap();
+                let (patch_env, _) = call_ai_ipc(
+                    &sock,
+                    &AiIpcRequest::WorkspacePatch {
+                        workspace_json: json,
+                    },
+                    Duration::from_secs(3),
+                )
+                .unwrap();
+                assert!(patch_env.ok, "patch failed: {:?}", patch_env.error);
+            })
+            .await
+            .unwrap();
+        }
+    };
+
+    let send_once = |sock: &std::path::Path, path: &str| {
+        let sock = sock.to_path_buf();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        let target = format!("http://{addr}");
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let (env, _) = call_ai_ipc(
+                    &sock,
+                    &AiIpcRequest::RepeaterSend {
+                        flow_id: None,
+                        use_original: false,
+                        target: Some(target),
+                        raw_request: Some(req),
+                        add_headers: Vec::new(),
+                        remove_headers: Vec::new(),
+                        override_body: None,
+                        insecure: false,
+                    },
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+                assert!(env.ok, "send failed: {:?}", env.error);
+            })
+            .await
+            .unwrap();
+        }
+    };
+
+    // 1. Default monitor_mio_ai = false: Set-Cookie must NOT populate Cookie Jar for next AI send.
+    patch_sessions(&sock_path, false).await;
+    send_once(&sock_path, "/first").await;
+    // 2. Enable monitor_mio_ai = true, send again -> Cookie Jar is populated with ai_sid=42.
+    patch_sessions(&sock_path, true).await;
+    send_once(&sock_path, "/second").await;
+    // 3. Third AI send must automatically inject Cookie: ai_sid=42 via UseCookieJar (mio_ai=true).
+    send_once(&sock_path, "/third").await;
+
+    let seen = observed_cookies.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0], None);
+    assert_eq!(seen[1], None, "disabled monitor_mio_ai must not ingest ai_sid from /first");
+    assert_eq!(
+        seen[2].as_deref(),
+        Some("Cookie: ai_sid=42"),
+        "enabled monitor_mio_ai + mio_ai rule must ingest and inject ai_sid"
+    );
+
+    server.await.unwrap();
+    drop(client);
+    runtime.shutdown().unwrap();
+}

@@ -353,6 +353,8 @@ struct UpstreamTlsJson {
     include_system_roots: bool,
     insecure_skip_verify: bool,
     protocol_mode: TlsProtocolMode,
+    custom_protocols: Vec<String>,
+    custom_cipher_suites: Vec<String>,
     disable_session_resume: bool,
     client_certs_override_project_only: bool,
 }
@@ -370,6 +372,8 @@ impl From<&UpstreamTlsSettings> for UpstreamTlsJson {
             include_system_roots: tls.include_system_roots,
             insecure_skip_verify: tls.insecure_skip_verify,
             protocol_mode: tls.protocol_mode,
+            custom_protocols: tls.custom_protocols.clone(),
+            custom_cipher_suites: tls.custom_cipher_suites.clone(),
             disable_session_resume: tls.disable_session_resume,
             client_certs_override_project_only: tls.client_certs_override_project_only,
         }
@@ -388,6 +392,8 @@ impl UpstreamTlsJson {
             include_system_roots: self.include_system_roots,
             insecure_skip_verify: self.insecure_skip_verify,
             protocol_mode: self.protocol_mode,
+            custom_protocols: self.custom_protocols,
+            custom_cipher_suites: self.custom_cipher_suites,
             disable_session_resume: self.disable_session_resume,
             client_certs_override_project_only: self.client_certs_override_project_only,
         })
@@ -1317,7 +1323,12 @@ mod tests {
             .certificate_der();
         ws.upstream_tls.custom_ca_ders = vec![ca_der];
         ws.upstream_tls.include_system_roots = false;
-        ws.upstream_tls.protocol_mode = TlsProtocolMode::Default;
+        ws.upstream_tls.protocol_mode = TlsProtocolMode::Custom;
+        ws.upstream_tls.custom_protocols = vec!["TLSv1.3".into(), "TLSv1.2".into()];
+        ws.upstream_tls.custom_cipher_suites = vec![
+            "TLS13_CHACHA20_POLY1305_SHA256".into(),
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".into(),
+        ];
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
@@ -1418,6 +1429,7 @@ mod tests {
 
         let macro_id = Uuid::new_v4();
         ws.sessions.cookie_jar.monitor_repeater = true;
+        ws.sessions.cookie_jar.monitor_mio_ai = true;
         ws.sessions.cookie_jar.entries.push(CookieJarEntry {
             id: Uuid::new_v4(),
             domain: "example.invalid".into(),
@@ -1486,6 +1498,7 @@ mod tests {
                 scanner: true,
                 sequencer: false,
                 extensions: true,
+                mio_ai: true,
             },
             condition: SessionRuleCondition {
                 url_scope: SessionUrlScope::CustomPrefixes(vec![

@@ -251,6 +251,47 @@ impl Workbench {
     }
 }
 
+fn has_custom_tls_protocol(list: &[String], version: mio_core::TlsVersion) -> bool {
+    list.iter().any(|entry| {
+        let trimmed = entry.trim();
+        match version {
+            mio_core::TlsVersion::Tls13 => {
+                trimmed.eq_ignore_ascii_case("TLSv1.3") || trimmed.eq_ignore_ascii_case("TLS1.3")
+            }
+            mio_core::TlsVersion::Tls12 => {
+                trimmed.eq_ignore_ascii_case("TLSv1.2") || trimmed.eq_ignore_ascii_case("TLS1.2")
+            }
+        }
+    })
+}
+
+fn toggle_custom_tls_protocol(list: &mut Vec<String>, version: mio_core::TlsVersion) {
+    let has_13 = has_custom_tls_protocol(list, mio_core::TlsVersion::Tls13)
+        ^ (version == mio_core::TlsVersion::Tls13);
+    let has_12 = has_custom_tls_protocol(list, mio_core::TlsVersion::Tls12)
+        ^ (version == mio_core::TlsVersion::Tls12);
+    list.clear();
+    if has_13 {
+        list.push("TLSv1.3".into());
+    }
+    if has_12 {
+        list.push("TLSv1.2".into());
+    }
+}
+
+fn toggle_custom_tls_cipher_suite(list: &mut Vec<String>, target: &str) {
+    if list.iter().any(|existing| existing.trim() == target) {
+        list.retain(|existing| existing.trim() != target);
+    } else {
+        list.push(target.to_owned());
+    }
+    *list = mio_core::SUPPORTED_TLS_CIPHER_SUITES
+        .iter()
+        .filter(|spec| list.iter().any(|entry| entry.trim() == spec.name))
+        .map(|spec| spec.name.to_owned())
+        .collect();
+}
+
 impl Settings {
     fn add_user_tls_certificate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tls_import.is_some()
@@ -390,20 +431,30 @@ impl Settings {
     }
 
     pub(super) fn update_upstream_tls(
-        &self,
+        &mut self,
         mutate: impl FnOnce(&mut mio_core::UpstreamTlsSettings) + 'static,
         cx: &mut Context<Self>,
     ) {
         let project = self.state.project;
         let owner = self.owner.clone();
         let owner_window = self.owner_window;
+        let settings_weak = cx.entity().downgrade();
         cx.defer(move |cx| {
+            let mut validation_error = None;
             let _ = owner_window.update(cx, |_, window, cx| {
                 let _ = owner.update(cx, |view, cx| {
                     let mut updated = view.workspace.upstream_tls.clone();
                     mutate(&mut updated);
+                    if let Err(error) = updated.validate() {
+                        validation_error = Some(error.to_string());
+                        return false;
+                    }
                     view.set_upstream_tls(project, updated, window, cx)
                 });
+            });
+            let _ = settings_weak.update(cx, |this, cx| {
+                this.tls_negotiation_error = validation_error;
+                cx.notify();
             });
         });
     }
@@ -417,10 +468,287 @@ impl Settings {
         let project_enabled = self.state.enabled && self.tls_import.is_none();
         let verify_upstream = !self.state.upstream_tls.insecure_skip_verify;
         let proto_mode = self.state.upstream_tls.protocol_mode;
+        let custom_protocols = self.state.upstream_tls.custom_protocols.clone();
+        let custom_ciphers = self.state.upstream_tls.custom_cipher_suites.clone();
         let disable_session_resume = self.state.upstream_tls.disable_session_resume;
         let session_resume_owner = cx.entity();
 
+        let mut custom_panel = None;
+        if proto_mode == mio_core::TlsProtocolMode::Custom {
+            let tls13_checked = has_custom_tls_protocol(&custom_protocols, mio_core::TlsVersion::Tls13);
+            let tls12_checked = has_custom_tls_protocol(&custom_protocols, mio_core::TlsVersion::Tls12);
+            let tls13_owner = cx.entity();
+            let tls12_owner = cx.entity();
+            let reset_owner = cx.entity();
+            let mut cipher_list = div().flex().flex_col().gap(px(2.));
+            for spec in mio_core::SUPPORTED_TLS_CIPHER_SUITES {
+                let suite_name = spec.name;
+                let proto_tag = match spec.protocol {
+                    mio_core::TlsVersion::Tls13 => "TLSv1.3",
+                    mio_core::TlsVersion::Tls12 => "TLSv1.2",
+                };
+                let checked = custom_ciphers.iter().any(|c| c.trim() == suite_name);
+                let cipher_owner = cx.entity();
+                cipher_list = cipher_list.child(
+                    listeners_tls::indexed_checkbox(
+                        SharedString::from(format!("settings-tls-custom-cipher-{suite_name}")),
+                        format!("{suite_name} ({proto_tag})"),
+                        checked,
+                        project_enabled,
+                    )
+                    .on_change(move |_, _, _, cx| {
+                        cipher_owner.update(cx, |this, cx| {
+                            this.update_upstream_tls(
+                                move |s| {
+                                    toggle_custom_tls_cipher_suite(
+                                        &mut s.custom_cipher_suites,
+                                        suite_name,
+                                    );
+                                },
+                                cx,
+                            );
+                        });
+                    }),
+                );
+            }
+            custom_panel = Some(
+                div()
+                    .id("settings-tls-custom-panel")
+                    .test_support()
+                    .ml(px(22.))
+                    .mt(px(4.))
+                    .mb(px(4.))
+                    .p(px(8.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(theme::border())
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(16.))
+                            .child(
+                                div()
+                                    .text_color(theme::foreground())
+                                    .text_size(theme::scaled_px(12.))
+                                    .child("启用协议"),
+                            )
+                            .child(
+                                listeners_tls::indexed_checkbox(
+                                    "settings-tls-custom-proto-tls13",
+                                    "TLSv1.3",
+                                    tls13_checked,
+                                    project_enabled,
+                                )
+                                .on_change(move |_, _, _, cx| {
+                                    tls13_owner.update(cx, |this, cx| {
+                                        this.update_upstream_tls(
+                                            |s| {
+                                                toggle_custom_tls_protocol(
+                                                    &mut s.custom_protocols,
+                                                    mio_core::TlsVersion::Tls13,
+                                                );
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            )
+                            .child(
+                                listeners_tls::indexed_checkbox(
+                                    "settings-tls-custom-proto-tls12",
+                                    "TLSv1.2",
+                                    tls12_checked,
+                                    project_enabled,
+                                )
+                                .on_change(move |_, _, _, cx| {
+                                    tls12_owner.update(cx, |this, cx| {
+                                        this.update_upstream_tls(
+                                            |s| {
+                                                toggle_custom_tls_protocol(
+                                                    &mut s.custom_protocols,
+                                                    mio_core::TlsVersion::Tls12,
+                                                );
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_color(theme::muted_foreground())
+                                    .text_size(theme::scaled_px(12.))
+                                    .child("自定义密码套件（留空表示允许所选协议的全部套件）"),
+                            )
+                            .child(
+                                listeners_tls::mio_action_button(
+                                    "settings-tls-custom-cipher-reset",
+                                    "清空自选",
+                                    !project_enabled || custom_ciphers.is_empty(),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    reset_owner.update(cx, |this, cx| {
+                                        this.update_upstream_tls(
+                                            |s| s.custom_cipher_suites.clear(),
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            ),
+                    )
+                    .child(cipher_list),
+            );
+        }
+
         // Section 1: TLS negotiation (TOP — matches MIO Network > TLS)
+        let mut protocol_group = div()
+            .mt(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .child({
+                let proto_owner = cx.entity();
+                settings_radio(
+                    "settings-tls-proto-all",
+                    "使用运行环境支持的全部协议与密码套件",
+                    proto_mode == mio_core::TlsProtocolMode::AllSupported,
+                    project_enabled,
+                    window,
+                    cx,
+                )
+                .on_change(move |_, _, _, cx| {
+                    proto_owner.update(cx, |this, cx| {
+                        this.update_upstream_tls(
+                            |s| s.protocol_mode = mio_core::TlsProtocolMode::AllSupported,
+                            cx,
+                        );
+                    });
+                })
+            })
+            .child({
+                let proto_owner = cx.entity();
+                settings_radio(
+                    "settings-tls-proto-default",
+                    "使用运行环境的默认协议与密码套件",
+                    proto_mode == mio_core::TlsProtocolMode::Default,
+                    project_enabled,
+                    window,
+                    cx,
+                )
+                .on_change(move |_, _, _, cx| {
+                    proto_owner.update(cx, |this, cx| {
+                        this.update_upstream_tls(
+                            |s| s.protocol_mode = mio_core::TlsProtocolMode::Default,
+                            cx,
+                        );
+                    });
+                })
+            })
+            .child({
+                let proto_owner = cx.entity();
+                settings_radio(
+                    "settings-tls-proto-custom",
+                    "使用自定义协议与密码套件",
+                    proto_mode == mio_core::TlsProtocolMode::Custom,
+                    project_enabled,
+                    window,
+                    cx,
+                )
+                .on_change(move |_, _, _, cx| {
+                    proto_owner.update(cx, |this, cx| {
+                        this.update_upstream_tls(
+                            |s| {
+                                s.protocol_mode = mio_core::TlsProtocolMode::Custom;
+                                if s.custom_protocols.is_empty() {
+                                    s.custom_protocols = vec!["TLSv1.3".into(), "TLSv1.2".into()];
+                                }
+                            },
+                            cx,
+                        );
+                    });
+                })
+            });
+        if let Some(panel) = custom_panel {
+            protocol_group = protocol_group.child(panel);
+        }
+
+        let mut negotiation_body = div()
+            .pl(px(30.))
+            .pt(px(4.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_color(theme::foreground())
+                    .child("TLS 信任"),
+            )
+            .child({
+                let verify_owner = cx.entity();
+                listeners_tls::indexed_checkbox(
+                    "settings-tls-verify-upstream",
+                    "验证上游 TLS",
+                    verify_upstream,
+                    project_enabled,
+                )
+                .on_change(move |state, _, _, cx| {
+                    let insecure = state != CheckboxState::Checked;
+                    verify_owner.update(cx, |this, cx| {
+                        this.update_upstream_tls(move |s| s.insecure_skip_verify = insecure, cx);
+                    });
+                })
+            })
+            .child(protocol_group);
+        if let Some(error) = &self.tls_negotiation_error {
+            negotiation_body = negotiation_body.child(
+                div()
+                    .id("settings-tls-negotiation-error")
+                    .test_support()
+                    .role(Role::Alert)
+                    .aria_label(error.clone())
+                    .mt(px(4.))
+                    .p(px(8.))
+                    .rounded(px(4.))
+                    .bg(theme::danger_bg())
+                    .text_color(theme::danger_fg())
+                    .child(error.clone()),
+            );
+        }
+        negotiation_body = negotiation_body
+            .child(
+                div()
+                    .mt(px(8.))
+                    .text_color(theme::foreground())
+                    .child("TLS 协商变通方案"),
+            )
+            .child(
+                listeners_tls::indexed_checkbox(
+                    "settings-tls-disable-session-resume",
+                    "禁用 TLS 会话恢复",
+                    disable_session_resume,
+                    project_enabled,
+                )
+                .on_change(move |state, _, _, cx| {
+                    let checked = state == CheckboxState::Checked;
+                    session_resume_owner.update(cx, |this, cx| {
+                        this.update_upstream_tls(move |s| s.disable_session_resume = checked, cx);
+                    });
+                }),
+            );
+
         let negotiation_section = div()
             .flex()
             .flex_col()
@@ -433,108 +761,7 @@ impl Settings {
             .child(listeners_tls::mio_desc_row(
                 "使用这些设置控制与上游服务器进行 TLS 协商时使用的 TLS 协议和密码套件。请谨慎修改，错误配置可能导致出站 TLS 连接中断。",
             ))
-            .child(
-                div()
-                    .pl(px(30.))
-                    .pt(px(4.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_color(theme::foreground())
-                            .child("TLS 信任"),
-                    )
-                    .child({
-                        let verify_owner = cx.entity();
-                        listeners_tls::indexed_checkbox(
-                            "settings-tls-verify-upstream",
-                            "验证上游 TLS",
-                            verify_upstream,
-                            project_enabled,
-                        )
-                        .on_change(move |state, _, _, cx| {
-                            let insecure = state != CheckboxState::Checked;
-                            verify_owner.update(cx, |this, cx| {
-                                this.update_upstream_tls(
-                                    move |s| s.insecure_skip_verify = insecure,
-                                    cx,
-                                );
-                            });
-                        })
-                    })
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child({
-                                let proto_owner = cx.entity();
-                                settings_radio(
-                                    "settings-tls-proto-all",
-                                    "使用运行环境支持的全部协议与密码套件",
-                                    proto_mode == mio_core::TlsProtocolMode::AllSupported,
-                                    project_enabled,
-                                    window,
-                                    cx,
-                                )
-                                .on_change(move |_, _, _, cx| {
-                                    proto_owner.update(cx, |this, cx| {
-                                        this.update_upstream_tls(
-                                            |s| {
-                                                s.protocol_mode =
-                                                    mio_core::TlsProtocolMode::AllSupported
-                                            },
-                                            cx,
-                                        );
-                                    });
-                                })
-                            })
-                            .child({
-                                let proto_owner = cx.entity();
-                                settings_radio(
-                                    "settings-tls-proto-default",
-                                    "使用运行环境的默认协议与密码套件",
-                                    proto_mode == mio_core::TlsProtocolMode::Default,
-                                    project_enabled,
-                                    window,
-                                    cx,
-                                )
-                                .on_change(move |_, _, _, cx| {
-                                    proto_owner.update(cx, |this, cx| {
-                                        this.update_upstream_tls(
-                                            |s| s.protocol_mode = mio_core::TlsProtocolMode::Default,
-                                            cx,
-                                        );
-                                    });
-                                })
-                            }),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .text_color(theme::foreground())
-                            .child("TLS 协商变通方案"),
-                    )
-                    .child(
-                        listeners_tls::indexed_checkbox(
-                            "settings-tls-disable-session-resume",
-                            "禁用 TLS 会话恢复",
-                            disable_session_resume,
-                            project_enabled,
-                        )
-                        .on_change(move |state, _, _, cx| {
-                            let checked = state == CheckboxState::Checked;
-                            session_resume_owner.update(cx, |this, cx| {
-                                this.update_upstream_tls(
-                                    move |s| s.disable_session_resume = checked,
-                                    cx,
-                                );
-                            });
-                        }),
-                    ),
-            );
+            .child(negotiation_body);
 
         // Section 2: Client TLS certificates
         let client_tls_section = self.render_client_tls_card(window, cx);

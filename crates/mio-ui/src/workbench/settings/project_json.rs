@@ -286,7 +286,9 @@ mod tests {
             override_project_only: true,
         };
 
-        ws.upstream_tls.protocol_mode = TlsProtocolMode::Default;
+        ws.upstream_tls.protocol_mode = TlsProtocolMode::Custom;
+        ws.upstream_tls.custom_protocols = vec!["TLSv1.3".into(), "TLSv1.2".into()];
+        ws.upstream_tls.custom_cipher_suites = vec!["TLS13_CHACHA20_POLY1305_SHA256".into()];
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
@@ -322,6 +324,7 @@ mod tests {
         });
 
         ws.sessions.cookie_jar.monitor_repeater = true;
+        ws.sessions.cookie_jar.monitor_mio_ai = true;
         ws.ssl_pass_through_rules.push(SslPassThroughRule {
             id: Uuid::new_v4(),
             enabled: true,

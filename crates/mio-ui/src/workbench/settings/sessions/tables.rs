@@ -29,6 +29,9 @@ fn format_rule_tools(tools: &SessionToolScope) -> String {
     if tools.extensions {
         parts.push("Extensions");
     }
+    if tools.mio_ai {
+        parts.push("MioAI");
+    }
     parts.join(", ")
 }
 

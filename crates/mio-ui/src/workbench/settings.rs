@@ -307,6 +307,7 @@ struct Settings {
     tls_table: Entity<TableState<CertificateTable>>,
     tls_import: Option<mio_core::Uuid>,
     tls_error: Option<String>,
+    tls_negotiation_error: Option<String>,
     scope_ui: Box<scope::ScopeUi>,
     scope_include_input: Entity<InputState>,
     scope_exclude_input: Entity<InputState>,

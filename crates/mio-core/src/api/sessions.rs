@@ -16,6 +16,7 @@ pub enum SessionTool {
     Scanner,
     Sequencer,
     Extensions,
+    MioAi,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,8 @@ pub struct CookieJarSettings {
     pub monitor_sequencer: bool,
     #[serde(default)]
     pub monitor_extensions: bool,
+    #[serde(default)]
+    pub monitor_mio_ai: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<CookieJarEntry>,
 }
@@ -66,6 +69,7 @@ impl Default for CookieJarSettings {
             monitor_scanner: false,
             monitor_sequencer: false,
             monitor_extensions: false,
+            monitor_mio_ai: false,
             entries: Vec::new(),
         }
     }
@@ -79,6 +83,7 @@ impl CookieJarSettings {
             && !self.monitor_scanner
             && !self.monitor_sequencer
             && !self.monitor_extensions
+            && !self.monitor_mio_ai
             && self.entries.is_empty()
     }
 
@@ -90,6 +95,7 @@ impl CookieJarSettings {
             SessionTool::Scanner => self.monitor_scanner,
             SessionTool::Sequencer => self.monitor_sequencer,
             SessionTool::Extensions => self.monitor_extensions,
+            SessionTool::MioAi => self.monitor_mio_ai,
         }
     }
 }
@@ -108,6 +114,8 @@ pub struct SessionToolScope {
     pub sequencer: bool,
     #[serde(default)]
     pub extensions: bool,
+    #[serde(default)]
+    pub mio_ai: bool,
 }
 
 impl Default for SessionToolScope {
@@ -119,6 +127,7 @@ impl Default for SessionToolScope {
             scanner: false,
             sequencer: false,
             extensions: false,
+            mio_ai: false,
         }
     }
 }
@@ -132,6 +141,7 @@ impl SessionToolScope {
             SessionTool::Scanner => self.scanner,
             SessionTool::Sequencer => self.sequencer,
             SessionTool::Extensions => self.extensions,
+            SessionTool::MioAi => self.mio_ai,
         }
     }
 }
