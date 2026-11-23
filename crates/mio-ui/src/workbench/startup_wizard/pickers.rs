@@ -325,7 +325,10 @@ impl Workbench {
                 if trimmed_file.is_empty() {
                     return Err("请输入或选择新建项目文件（File）。".into());
                 }
-                let raw_path = PathBuf::from(trimmed_file);
+                let mut raw_path = PathBuf::from(trimmed_file);
+                if raw_path.extension().is_none() {
+                    raw_path.set_extension("mio");
+                }
                 if raw_path
                     .extension()
                     .is_some_and(|ext| !ext.eq_ignore_ascii_case("mio"))

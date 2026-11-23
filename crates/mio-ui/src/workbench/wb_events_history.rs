@@ -244,44 +244,58 @@ impl Workbench {
             Event::LoggerHistoryPage {
                 project,
                 query_revision,
+                offset,
                 result,
-                ..
             } if self.project == Some(project)
                 && self.extra_tools.logger_query_revision == query_revision =>
             {
                 self.extra_tools.logger_query_cancel = None;
                 match result {
-                    Ok((_total, mut rows)) => {
+                    Ok((total, mut rows)) => {
+                        let page_len = rows.len();
                         rows.reverse();
-                        let search_term = self
-                            .extra_tools
-                            .logger_search
-                            .read(cx)
-                            .value()
-                            .trim()
-                            .to_lowercase();
-                        for live in std::mem::take(&mut self.extra_tools.logger_entries) {
-                            if let Some(existing) = rows.iter_mut().find(|row| row.id == live.id) {
-                                if live.revision > existing.revision {
-                                    *existing = live;
+                        if offset == 0 {
+                            let plain_filter =
+                                self.extra_tools.logger_query_filter.trim().to_lowercase();
+                            for live in std::mem::take(&mut self.extra_tools.logger_entries) {
+                                if let Some(existing) =
+                                    rows.iter_mut().find(|row| row.id == live.id)
+                                {
+                                    if live.revision > existing.revision {
+                                        *existing = live;
+                                    }
+                                } else if self.extra_tools.logger_source_filter.as_ref().is_none_or(
+                                    |src| match (src, &live.source) {
+                                        (
+                                            mio_core::TrafficSource::Plugin(_),
+                                            mio_core::TrafficSource::Plugin(_),
+                                        ) => true,
+                                        _ => &live.source == src,
+                                    },
+                                ) && (plain_filter.is_empty()
+                                    || live.url.to_lowercase().contains(&plain_filter)
+                                    || live.method.to_lowercase().contains(&plain_filter)
+                                    || live
+                                        .status
+                                        .is_some_and(|code| code.to_string().contains(&plain_filter)))
+                                {
+                                    rows.push(live);
                                 }
-                            } else if self.extra_tools.logger_source_filter.as_ref().is_none_or(
-                                |src| match (src, &live.source) {
-                                    (
-                                        mio_core::TrafficSource::Plugin(_),
-                                        mio_core::TrafficSource::Plugin(_),
-                                    ) => true,
-                                    _ => &live.source == src,
-                                },
-                            ) && (search_term.is_empty()
-                                || live.url.to_lowercase().contains(&search_term)
-                                || live.method.to_lowercase().contains(&search_term)
-                                || live
-                                    .status
-                                    .is_some_and(|code| code.to_string().contains(&search_term)))
-                            {
-                                rows.push(live);
                             }
+                        } else {
+                            let mut merged = std::mem::take(&mut self.extra_tools.logger_entries);
+                            for row in rows {
+                                if let Some(existing) =
+                                    merged.iter_mut().find(|item| item.id == row.id)
+                                {
+                                    if row.revision > existing.revision {
+                                        *existing = row;
+                                    }
+                                } else {
+                                    merged.push(row);
+                                }
+                            }
+                            rows = merged;
                         }
                         rows.sort_by(|a, b| {
                             a.started_unix_ms
@@ -294,6 +308,26 @@ impl Workbench {
                             rows.drain(0..excess);
                         }
                         self.extra_tools.logger_entries = rows;
+                        let target_limit = total.min(max_entries);
+                        let next_offset = offset.saturating_add(page_len);
+                        if page_len > 0 && next_offset < target_limit {
+                            let next_limit = 200.min(target_limit - next_offset);
+                            let cancel = self.shutdown.child_token();
+                            if self.enqueue(
+                                Command::QueryLoggerHistory {
+                                    project,
+                                    query_revision,
+                                    offset: next_offset,
+                                    limit: next_limit,
+                                    filter: self.extra_tools.logger_query_filter.clone(),
+                                    source: self.extra_tools.logger_source_filter.clone(),
+                                    cancel: cancel.clone(),
+                                },
+                                cx,
+                            ) {
+                                self.extra_tools.logger_query_cancel = Some(cancel);
+                            }
+                        }
                         cx.notify();
                     }
                     Err(err) => {

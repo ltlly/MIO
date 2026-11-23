@@ -1209,13 +1209,18 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_filtered(
-            Some(crate::workbench::settings::SettingsPage::ProjectTasks),
-            None,
-            false,
-            window,
-            cx,
-        );
+        let target_url = self
+            .current_transfer_draft("定时扫描", window, cx)
+            .ok()
+            .and_then(|draft| {
+                mio_core::copy_url_for_request(&draft.raw, &draft.target, draft.version).ok()
+            })
+            .filter(|url| !url.trim().is_empty());
+        let prefill_name = match target_url {
+            Some(url) => format!("扫描 {url}"),
+            None => "定时扫描".to_owned(),
+        };
+        self.open_project_tasks_scheduled_prefill(prefill_name, window, cx);
     }
 
     pub(crate) fn engagement_generate_csrf_poc(

@@ -48,19 +48,24 @@ fn match_and_replace_two_sections_collapsible_editors_and_ws_rules_work(
     assert!(ws.proxy_messages.ws_match_replace_in_scope_only);
     acknowledge(&f, ws, cx);
 
-    // Open HTTP editor via Add, submit inline, verify dialog + inline editor close cleanly
+    // Open HTTP popup editor via Add, submit, verify dialog closes cleanly without stale inline state
     cx.update_window(f.window, |_, window, cx| {
         window.render_frame(cx);
         window.click("mr-side-add", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mr_dialog = *cx.windows().iter().find(|&&w| w != f.window).unwrap();
+    cx.update_window(mr_dialog, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.find("mr-target-select").visible());
+        assert!(window.find("mr-type-select").visible());
         window.click("mr-match-input", cx);
         window.input("User-Agent: old", cx);
         window.click("mr-replace-input", cx);
         window.input("User-Agent: mio", cx);
         window.click("mr-comment-input", cx);
         window.input("swap ua", cx);
-        window.click("mr-add-button", cx);
+        window.click("mr-submit", cx);
     })
     .unwrap();
     cx.run_until_parked();

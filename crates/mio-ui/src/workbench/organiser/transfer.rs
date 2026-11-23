@@ -1,8 +1,8 @@
 use super::*;
 
 const SEARCH_PREVIEW_LIMIT: usize = 16 * 1024;
-const MAX_COMPARER_ITEMS: usize = 32;
-const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+const MAX_COMPARER_ITEMS: usize = 64;
+const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
 
 impl Workbench {
     pub(in crate::workbench) fn selected_organiser_item_cloned(&self) -> Option<OrganiserItem> {

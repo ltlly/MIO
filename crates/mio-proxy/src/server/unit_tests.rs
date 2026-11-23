@@ -417,3 +417,78 @@ fn proxy_config_to_send_config_preserves_auth_tls_and_http2_for_http_and_websock
         config.to_send_config("https://app.lab.invalid/api", HttpVersion::Http11, false);
     assert_eq!(h1_fallback.http.version, Some(HttpVersion::Http11));
 }
+
+#[tokio::test]
+async fn invisible_tls_respects_ssl_passthrough_for_matching_sni() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        if let Ok((mut stream, _)) = origin.accept().await {
+            let mut peek = [0u8; 256];
+            let n = stream.read(&mut peek).await.unwrap_or(0);
+            if n > 0 {
+                let _ = stream.write_all(b"RAW-TLS-PASSTHROUGH-OK").await;
+            }
+        }
+    });
+
+    let mut config = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    config.network.listen = "0.0.0.0:0".parse().unwrap();
+    config.network.invisible_proxying = true;
+    config.network.redirect_to_port = Some(origin_addr.port());
+    config.network.hostname_overrides =
+        Arc::from([(String::from("pinned.example.invalid"), origin_addr.ip())]);
+    config.hooks.ssl_pass_through = Some(Arc::new(|host, port| {
+        host.eq_ignore_ascii_case("pinned.example.invalid") && port != 0
+    }));
+
+    let project = ProjectKey {
+        id: Uuid::new_v4(),
+        generation: 1,
+    };
+    let (events_tx, mut events_rx) = mpsc::channel(16);
+    let mut handle = start(config, project, events_tx).await.unwrap();
+    let connect_addr: SocketAddr = (Ipv4Addr::LOCALHOST, handle.address().port()).into();
+
+    // Minimal synthetic TLS ClientHello containing SNI = pinned.example.invalid
+    let sni = b"pinned.example.invalid";
+    let sni_entry_len = (1 + 2 + sni.len()) as u16;
+    let sni_ext_len = (2 + sni_entry_len as usize) as u16;
+    let extensions_total = (4 + sni_ext_len as usize) as u16;
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
+    body.extend_from_slice(&[0u8; 32]); // Random
+    body.push(0); // Session ID len
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // 1 cipher suite
+    body.extend_from_slice(&[0x01, 0x00]); // 1 compression method (null)
+    body.extend_from_slice(&extensions_total.to_be_bytes());
+    body.extend_from_slice(&[0x00, 0x00]); // server_name extension
+    body.extend_from_slice(&sni_ext_len.to_be_bytes());
+    body.extend_from_slice(&sni_entry_len.to_be_bytes());
+    body.push(0x00); // host_name
+    body.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    body.extend_from_slice(sni);
+
+    let hello_len = body.len();
+    let mut record = Vec::new();
+    record.push(0x16);
+    record.extend_from_slice(&[0x03, 0x01]);
+    record.extend_from_slice(&((hello_len + 4) as u16).to_be_bytes());
+    record.push(0x01);
+    record.push(((hello_len >> 16) & 0xff) as u8);
+    record.push(((hello_len >> 8) & 0xff) as u8);
+    record.push((hello_len & 0xff) as u8);
+    record.extend_from_slice(&body);
+
+    let mut client = tokio::net::TcpStream::connect(connect_addr).await.unwrap();
+    client.write_all(&record).await.unwrap();
+    let mut reply = Vec::new();
+    client.read_to_end(&mut reply).await.unwrap();
+    assert_eq!(reply, b"RAW-TLS-PASSTHROUGH-OK");
+    assert!(events_rx.try_recv().is_err(), "pass-through should not capture MITM flows");
+
+    handle.stop().await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), origin_task).await;
+}

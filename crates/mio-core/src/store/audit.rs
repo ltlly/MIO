@@ -232,6 +232,7 @@ mod tests {
             revision: 1,
             live_passive_enabled: true,
             live_passive_crawl_enabled: true,
+            live_passive_suite_scope_only: false,
             tasks: vec![sample_task(AuditTaskState::Completed)],
             findings,
         };
@@ -264,6 +265,7 @@ mod tests {
                         revision: 3,
                         live_passive_enabled: true,
                         live_passive_crawl_enabled: true,
+                        live_passive_suite_scope_only: false,
                         tasks: vec![running, completed],
                         findings: Vec::new(),
                     },

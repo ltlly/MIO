@@ -216,7 +216,7 @@ impl InterceptionEditor {
             });
             cx.notify();
         });
-        let relation_change = cx.subscribe_in(&relationship, window, |this, _, event, _, cx| {
+        let relation_change = cx.subscribe_in(&relationship, window, |this, _, event, _window, cx| {
             let SelectEvent::Confirm(value) = event;
             if let Some(value) = value
                 && let Some(relationship) = intercept_relations(this.rule.match_type, this.response)
@@ -335,6 +335,14 @@ impl Render for InterceptionEditor {
         );
         let condition_enabled = self.rule.relationship.is_regex();
         let busy = self.pending.is_some() || self.checking.is_some();
+        let is_first_rule = if self.new {
+            intercept_set(&self.base, self.response).rules.is_empty()
+        } else {
+            intercept_set(&self.base, self.response)
+                .rules
+                .first()
+                .is_some_and(|first| first.id == self.rule.id)
+        };
         let label_w = if theme::ui_scale() <= 1.0 {
             px(128.)
         } else {
@@ -373,7 +381,7 @@ impl Render for InterceptionEditor {
                             .id("proxy-rule-editor-operator")
                             .small()
                             .w(field_w)
-                            .disabled(busy),
+                            .disabled(busy || is_first_rule),
                     ),
             )
             .child(

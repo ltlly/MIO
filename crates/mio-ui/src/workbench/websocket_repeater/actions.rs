@@ -610,7 +610,7 @@ impl Workbench {
         else {
             return;
         };
-        const MAX_DECODER_BYTES: usize = 512 * 1024;
+        const MAX_DECODER_BYTES: usize = 4 * 1024 * 1024;
         if bytes.len() > MAX_DECODER_BYTES {
             self.fail(
                 format!(
@@ -667,8 +667,8 @@ impl Workbench {
         else {
             return;
         };
-        const MAX_COMPARER_ITEMS: usize = 32;
-        const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+        const MAX_COMPARER_ITEMS: usize = 64;
+        const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
         if bytes.len() > MAX_COMPARER_ITEM_BYTES {
             self.fail(
                 format!(

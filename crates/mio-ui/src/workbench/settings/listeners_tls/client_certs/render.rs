@@ -92,10 +92,9 @@ impl Settings {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let table = &self.listeners_tls.client_cert_table;
-        let enabled = self.state.enabled;
+        let enabled = self.state.enabled && !self.listeners_tls.client_cert_saving;
         let project = self.state.project;
-        let remove_index =
-            active_selected.or_else(|| (!self.state.client_certificates.is_empty()).then_some(0));
+        let remove_index = active_selected;
         let can_move_up = active_selected.is_some_and(|row| row > 0);
         let can_move_down = active_selected.is_some_and(|row| row + 1 < cert_count);
 
@@ -113,12 +112,31 @@ impl Settings {
                 mio_action_button("settings-client-cert-add", "添加", !enabled)
                     .w_full()
                     .tooltip("打开或关闭客户端 TLS 证书添加表单")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.listeners_tls.client_cert_editor_visible =
-                            !this.listeners_tls.client_cert_editor_visible;
-                        this.listeners_tls.client_cert_error = None;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.listeners_tls.client_cert_editor_visible
+                            && this.listeners_tls.client_cert_editing.is_none()
+                        {
+                            this.listeners_tls.client_cert_editor_visible = false;
+                            this.listeners_tls.client_cert_error = None;
+                            cx.notify();
+                        } else {
+                            this.open_client_cert_editor(None, window, cx);
+                        }
                     })),
+            )
+            .child(
+                mio_action_button(
+                    "settings-client-cert-edit",
+                    "编辑",
+                    !enabled || active_selected.is_none(),
+                )
+                .w_full()
+                .tooltip("编辑选中的客户端 TLS 证书规则")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(index) = active_selected {
+                        this.open_client_cert_editor(Some(index), window, cx);
+                    }
+                })),
             )
             .child(
                 mio_action_button(
@@ -216,24 +234,28 @@ impl Settings {
     ) -> gpui_kit::Div {
         let format_select = &self.listeners_tls.client_cert_format_select;
         let is_pem = self.listeners_tls.client_cert_format == ClientCertificateFormat::Pem;
+        let is_editing = self.listeners_tls.client_cert_editing.is_some();
+        let form_enabled = enabled && !self.listeners_tls.client_cert_saving;
         let label_col = |text: &'static str| {
             div()
                 .w(theme::scaled_px(135.).max(px(130.)))
                 .flex_shrink_0()
                 .child(text)
         };
-        let input_box = |input: &Entity<InputState>, id: &'static str, aria: &'static str, off: bool| {
+        let input_box = |input: &Entity<InputState>, id: &'static str, aria: &'static str, off: bool, masked: bool| {
+            let mut field = Input::new(input)
+                .id(id)
+                .aria_label(aria)
+                .small()
+                .disabled(off);
+            if masked {
+                field = field.mask_toggle();
+            }
             div()
                 .flex_1()
                 .max_w(theme::scaled_px(360.).max(px(360.)))
                 .min_w(px(180.))
-                .child(
-                    Input::new(input)
-                        .id(id)
-                        .aria_label(aria)
-                        .small()
-                        .disabled(off),
-                )
+                .child(field)
         };
 
         div()
@@ -257,7 +279,7 @@ impl Settings {
                             .id("settings-client-cert-format-select")
                             .small()
                             .w(theme::scaled_px(220.).max(px(220.)))
-                            .disabled(!enabled),
+                            .disabled(!form_enabled),
                     ),
             )
             .child(
@@ -270,7 +292,8 @@ impl Settings {
                         &self.listeners_tls.client_cert_host,
                         "settings-client-cert-host",
                         "目标主机模式",
-                        !enabled,
+                        !form_enabled,
+                        false,
                     )),
             )
             .child(
@@ -278,15 +301,20 @@ impl Settings {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(label_col("证书文件路径"))
+                    .child(label_col(if is_editing {
+                        "证书文件路径（留空沿用）"
+                    } else {
+                        "证书文件路径"
+                    }))
                     .child(input_box(
                         &self.listeners_tls.client_cert_path,
                         "settings-client-cert-path",
                         "证书文件路径",
-                        !enabled,
+                        !form_enabled,
+                        false,
                     ))
                     .child(
-                        mio_action_button("settings-client-cert-browse", "选择文件...", !enabled)
+                        mio_action_button("settings-client-cert-browse", "选择文件...", !form_enabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.pick_client_cert_file(false, window, cx)
                             })),
@@ -302,13 +330,14 @@ impl Settings {
                         &self.listeners_tls.client_cert_key_path,
                         "settings-client-cert-key-path",
                         "PEM 私钥路径",
-                        !enabled || !is_pem,
+                        !form_enabled || !is_pem,
+                        false,
                     ))
                     .child(
                         mio_action_button(
                             "settings-client-cert-key-browse",
                             "选择文件...",
-                            !enabled || !is_pem,
+                            !form_enabled || !is_pem,
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.pick_client_cert_file(true, window, cx)
@@ -325,7 +354,8 @@ impl Settings {
                         &self.listeners_tls.client_cert_password,
                         "settings-client-cert-password",
                         "PKCS#12 口令",
-                        !enabled || is_pem,
+                        !form_enabled || is_pem,
+                        true,
                     )),
             )
             .child(
@@ -333,16 +363,28 @@ impl Settings {
                     .flex()
                     .gap(px(8.))
                     .child(
-                        mio_action_button("settings-client-cert-submit", "确认添加", !enabled)
-                            .tooltip("读取并添加当前客户端 TLS 证书规则到项目设置")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_add_client_cert(window, cx)
-                            })),
+                        mio_action_button(
+                            "settings-client-cert-submit",
+                            if self.listeners_tls.client_cert_saving {
+                                "校验中…"
+                            } else if is_editing {
+                                "保存修改"
+                            } else {
+                                "确认添加"
+                            },
+                            !form_enabled,
+                        )
+                        .tooltip("读取并添加当前客户端 TLS 证书规则到项目设置")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.submit_add_client_cert(window, cx)
+                        })),
                     )
                     .child(
                         mio_action_button("settings-client-cert-cancel", "取消", false).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.listeners_tls.client_cert_editor_visible = false;
+                                this.listeners_tls.client_cert_editing = None;
+                                this.listeners_tls.client_cert_saving = false;
                                 this.listeners_tls.client_cert_error = None;
                                 cx.notify();
                             }),

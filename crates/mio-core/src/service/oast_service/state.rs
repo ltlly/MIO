@@ -114,6 +114,16 @@ impl State {
                 self.collaborator.clear_interactions();
                 self.emit_collaborator_status(project).await;
             }
+            CollaboratorCommand::DeleteInteraction {
+                project,
+                interaction_id,
+            } => {
+                self.check_project(project)?;
+                self.collaborator.project = Some(project);
+                let _ = self.collaborator.drain_local_rx();
+                let _ = self.collaborator.delete_interaction(interaction_id);
+                self.emit_collaborator_status(project).await;
+            }
         }
         Ok(())
     }
@@ -139,38 +149,15 @@ impl State {
             return Ok(None);
         };
         let workspace = self.store.metadata().workspace_arc()?;
-        let upstream_tls = self
-            .preferences
-            .effective_upstream_tls(&workspace.upstream_tls)?;
-        let upstream_route = workspace
-            .upstream_proxy
-            .route_for_url_with_tls(polling_url.as_str(), upstream_tls.clone())?;
-        let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
+        let mut send_config =
+            self.build_tool_send_config_for_url(&workspace, polling_url.as_str())?;
         let timeout_secs = workspace
             .repeater_settings
             .request_timeout_secs
             .clamp(1, 60);
-        let send_config = SendConfig {
-            network: mio_proxy::SendNetworkConfig {
-                upstream_route,
-                hostname_overrides,
-            },
-            tls: mio_proxy::UpstreamTlsConfig {
-                trust: upstream_tls,
-                client_certificates: self.tls.compiled_client_certs.clone(),
-                ..Default::default()
-            },
-            limits: mio_proxy::SendLimits {
-                max_body_bytes: MAX_POLL_BODY_BYTES,
-                timeout: Duration::from_secs(timeout_secs),
-                ..Default::default()
-            },
-            http: mio_proxy::SendHttpConfig {
-                version: Some(HttpVersion::Http11),
-                ..Default::default()
-            },
-            ..SendConfig::default()
-        };
+        send_config.limits.max_body_bytes = MAX_POLL_BODY_BYTES;
+        send_config.limits.timeout = Duration::from_secs(timeout_secs);
+        send_config.http.version = Some(HttpVersion::Http11);
         let request = build_poll_request(
             &polling_url,
             self.collaborator.config.authorization_header.as_deref(),

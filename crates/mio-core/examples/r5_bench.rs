@@ -120,8 +120,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<BenchConfig> {
             "--intruder-concurrency" => {
                 intruder_concurrency = value.parse().context("invalid --intruder-concurrency")?;
                 ensure!(
-                    (1..=16).contains(&intruder_concurrency),
-                    "--intruder-concurrency must be in 1..=16"
+                    (1..=256).contains(&intruder_concurrency),
+                    "--intruder-concurrency must be in 1..=256"
                 );
             }
             "--hold-total" => {

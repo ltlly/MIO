@@ -255,7 +255,7 @@ fn stale_or_foreign_workspaces_are_rejected() {
 }
 
 #[test]
-fn proxy_listeners_enforce_count_identity_loopback_and_enabled_port_uniqueness() {
+fn proxy_listeners_enforce_count_identity_bind_syntax_and_enabled_port_uniqueness() {
     let listener = |id: u128, enabled: bool, addr: &str| crate::ProxyListenerConfig {
         id: Uuid::from_u128(id),
         enabled,
@@ -269,11 +269,28 @@ fn proxy_listeners_enforce_count_identity_loopback_and_enabled_port_uniqueness()
             listener(3, false, "127.0.0.1:8080"),
             listener(4, true, "127.0.0.1:0"),
             listener(5, true, "127.0.0.1:0"),
+            listener(6, true, "0.0.0.0:8088"),
+            listener(7, true, "[::]:8089"),
+            listener(8, true, "192.0.2.10:8090"),
         ],
         ..Workspace::default()
     };
     workspace.validate_structure().unwrap();
     workspace.validate().unwrap();
+
+    let mut wildcard_specific = listener(9, true, "127.0.0.1:8091");
+    wildcard_specific.certificate_mode = crate::ProxyListenerCertMode::SpecificHostname;
+    wildcard_specific.specific_cert_hostname = "*.example.invalid".into();
+    workspace.proxy_listeners.push(wildcard_specific);
+    workspace.validate_structure().unwrap();
+    workspace.validate().unwrap();
+
+    let mut bad_redirect_port = listener(1, true, "0.0.0.0:8080");
+    bad_redirect_port.redirect_to_port = Some(0);
+
+    let mut bad_specific_url = listener(1, true, "127.0.0.1:8080");
+    bad_specific_url.certificate_mode = crate::ProxyListenerCertMode::SpecificHostname;
+    bad_specific_url.specific_cert_hostname = "https://bad.example.invalid".into();
 
     for invalid in [
         vec![listener(0, true, "127.0.0.1:8080")],
@@ -283,11 +300,11 @@ fn proxy_listeners_enforce_count_identity_loopback_and_enabled_port_uniqueness()
         ],
         vec![listener(1, true, "")],
         vec![listener(1, true, "localhost:8080")],
-        vec![listener(1, false, "0.0.0.0:8080")],
-        vec![listener(1, true, "192.168.1.10:8080")],
+        vec![bad_redirect_port],
+        vec![bad_specific_url],
         vec![
-            listener(1, true, "127.0.0.1:8080"),
-            listener(2, true, "127.0.0.1:8080"),
+            listener(1, true, "0.0.0.0:8080"),
+            listener(2, true, "0.0.0.0:8080"),
         ],
         vec![
             listener(1, true, "[::1]:8443"),
@@ -299,6 +316,12 @@ fn proxy_listeners_enforce_count_identity_loopback_and_enabled_port_uniqueness()
         assert!(workspace.validate_structure().is_err());
         assert!(workspace.validate().is_err());
     }
+
+    let mut bad_custom_pem = listener(1, true, "127.0.0.1:8080");
+    bad_custom_pem.certificate_mode = crate::ProxyListenerCertMode::CustomCertificate;
+    bad_custom_pem.custom_cert_pem = Some("not-valid-pem".into());
+    workspace.proxy_listeners = vec![bad_custom_pem];
+    assert!(workspace.validate().is_err());
 }
 
 #[test]
@@ -628,4 +651,112 @@ fn platform_auth_settings_and_workspace_ssl_ws_fields_validate_directly() {
 
     ws.ws_match_and_replace_rules[0].is_regex = false;
     ws.validate().unwrap();
+}
+
+#[test]
+fn upstream_direct_glob_socks_bypass_and_multiline_replace_rules_work() {
+    let settings = UpstreamProxySettings {
+        socks: SocksProxySettings {
+            use_proxy: true,
+            host: "127.0.0.1".into(),
+            port: 1080,
+            bypass_hosts: vec!["10.0.*".into(), "*.corp.invalid".into(), "direct.corp.invalid".into()],
+            ..SocksProxySettings::default()
+        },
+        rules: vec![
+            UpstreamProxyRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                destination_host: "direct.corp.invalid".into(),
+                protocol: UpstreamProxyProtocol::Direct,
+                host: String::new(),
+                port: 0,
+                ..UpstreamProxyRule::default()
+            },
+            UpstreamProxyRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                destination_host: "10.0.*".into(),
+                protocol: UpstreamProxyProtocol::Http,
+                host: "192.0.2.50".into(),
+                port: 8080,
+                ..UpstreamProxyRule::default()
+            },
+        ],
+        ..UpstreamProxySettings::default()
+    };
+    settings.validate().unwrap();
+    let resolver = settings
+        .build_route_resolver(mio_proxy::UpstreamTls::System)
+        .unwrap();
+    assert!(matches!(resolver("direct.corp.invalid"), mio_proxy::UpstreamRoute::Direct));
+    assert!(matches!(
+        resolver("10.0.5.12"),
+        mio_proxy::UpstreamRoute::Http(ref ep) if ep.host == "192.0.2.50" && ep.port == 8080
+    ));
+    assert!(matches!(
+        resolver("api.corp.invalid"),
+        mio_proxy::UpstreamRoute::Direct
+    ));
+    assert!(matches!(
+        resolver("external.example.invalid"),
+        mio_proxy::UpstreamRoute::Socks5WithBypass { .. }
+    ));
+
+    let mut ws = Workspace::default();
+    ws.match_and_replace_rules.push(crate::MatchAndReplaceRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        item_type: crate::MatchReplaceTarget::ResponseBody,
+        match_pattern: "</body>".into(),
+        replace_with: "<script>\nconsole.log(1);\n</script>\r\n</body>".into(),
+        regex: false,
+        comment: "multiline body".into(),
+        script_name: String::new(),
+        filter_script: String::new(),
+    });
+    ws.ws_match_and_replace_rules.push(crate::WsMatchAndReplaceRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        direction: crate::WsReplaceDirection::Both,
+        match_pattern: "a".into(),
+        replace_with: "line1\nline2".into(),
+        is_regex: false,
+        comment: String::new(),
+    });
+    ws.validate().unwrap();
+
+    ws.match_and_replace_rules[0].item_type = crate::MatchReplaceTarget::RequestHeader;
+    assert!(ws.validate().is_err());
+
+    let no_scheme_exact = ScopeRule {
+        id: Uuid::new_v4(),
+        enabled: true,
+        prefix: "example.invalid".into(),
+        include_subdomains: false,
+    };
+    assert!(no_scheme_exact.matches_url("https://example.invalid/a"));
+    assert!(!no_scheme_exact.matches_url("https://sub.example.invalid/a"));
+
+    let adv_scope = TargetScope {
+        advanced_mode: true,
+        advanced_include: vec![AdvancedScopeRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            protocol: ScopeProtocol::Https,
+            host: "192.0.2.0/24".into(),
+            port: String::new(),
+            file: String::new(),
+        }],
+        ..TargetScope::default()
+    };
+    adv_scope.validate().unwrap();
+    assert!(adv_scope.is_url_in_scope("https://192.0.2.44/api"));
+    assert!(!adv_scope.is_url_in_scope("https://192.0.3.44/api"));
+
+    let ca_a = mio_proxy::MitmAuthority::generate().unwrap().certificate_pem();
+    let ca_b = mio_proxy::MitmAuthority::generate().unwrap().certificate_pem();
+    let bundle = format!("{ca_a}\n{ca_b}\n");
+    let parsed_certs = crate::UpstreamTlsSettings::parse_pem_or_der_certs(bundle.as_bytes()).unwrap();
+    assert_eq!(parsed_certs.len(), 2);
 }

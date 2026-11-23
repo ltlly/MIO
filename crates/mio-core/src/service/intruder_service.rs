@@ -25,7 +25,7 @@ use pool_timing::PoolTiming;
 
 // MIO admission limits, not External defaults. Terminal datasets belong to storage, not ActiveRun.
 const MAX_RUNS: usize = 8;
-const MAX_REQUESTS_IN_FLIGHT: usize = 16;
+const MAX_REQUESTS_IN_FLIGHT: usize = crate::MAX_INTRUDER_CONCURRENT_REQUESTS as usize;
 const RESULT_PAGE_BYTES: usize = 1024 * 1024;
 // Pending notifications suspend admission: one reply, one History change, and at most
 // one error per in-flight completion plus two lifecycle errors per admitted run.

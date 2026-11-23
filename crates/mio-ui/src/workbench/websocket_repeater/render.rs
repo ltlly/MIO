@@ -362,7 +362,7 @@ impl Workbench {
                         .readonly(true)
                         .size_full()
                         .context_menu(
-                            self.request_context_menu(editors.history.state(), true),
+                            self.websocket_payload_context_menu(editors.history.state(), true),
                         )
                         .aria_label("WebSocket 历史消息编辑器"),
                 ),
@@ -770,7 +770,7 @@ impl Workbench {
                             editing::message_editor(&editors.draft)
                                 .readonly(!can_operate || editors.draft.is_readonly_preview())
                                 .size_full()
-                                .context_menu(self.request_context_menu(
+                                .context_menu(self.websocket_payload_context_menu(
                                     editors.draft.state(),
                                     !can_operate || editors.draft.is_readonly_preview(),
                                 ))

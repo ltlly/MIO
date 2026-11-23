@@ -65,9 +65,12 @@ pub(super) async fn serve_socks5(
     let (host, port, authority) = match handshake {
         Ok(Ok(target)) => target,
         Ok(Err(error)) => {
+            let listen_host = crate::route::format_host_for_authority(
+                &state.config.network.listen.ip().to_string(),
+            );
             let failed = HttpRequest {
                 method: "CONNECT".into(),
-                url: format!("socks5://127.0.0.1:{}", state.listener_port),
+                url: format!("socks5://{listen_host}:{}", state.listener_port),
                 version: HttpVersion::Http11,
                 headers: Vec::new(),
                 body: Vec::new(),
@@ -77,9 +80,12 @@ pub(super) async fn serve_socks5(
             return;
         }
         Err(_) => {
+            let listen_host = crate::route::format_host_for_authority(
+                &state.config.network.listen.ip().to_string(),
+            );
             let failed = HttpRequest {
                 method: "CONNECT".into(),
-                url: format!("socks5://127.0.0.1:{}", state.listener_port),
+                url: format!("socks5://{listen_host}:{}", state.listener_port),
                 version: HttpVersion::Http11,
                 headers: Vec::new(),
                 body: Vec::new(),

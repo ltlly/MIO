@@ -26,6 +26,15 @@ impl Workbench {
                             || snapshot.revision >= self.audit_dashboard.snapshot.revision
                         {
                             self.audit_dashboard.snapshot = *snapshot;
+                            self.audit_dashboard.live_task_scope = if self
+                                .audit_dashboard
+                                .snapshot
+                                .live_passive_suite_scope_only
+                            {
+                                LiveTaskTrafficScope::SuiteScopeOnly
+                            } else {
+                                LiveTaskTrafficScope::AllTraffic
+                            };
                         }
                         self.audit_dashboard.loaded = true;
                         self.audit_dashboard.state_error = None;

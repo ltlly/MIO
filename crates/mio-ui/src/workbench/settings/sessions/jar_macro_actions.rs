@@ -105,6 +105,9 @@ impl Settings {
         }
         if self.commit_session_settings(next, cx) {
             self.sessions.editing_cookie_id = None;
+            self.sessions.cookie_subdomains = false;
+            self.sessions.cookie_secure = false;
+            self.sessions.cookie_http_only = true;
             self.sessions
                 .cookie_domain
                 .update(cx, |s, cx| s.set_value("", window, cx));
@@ -122,6 +125,30 @@ impl Settings {
                 .update(cx, |s, cx| s.set_value("", window, cx));
             cx.notify();
         }
+    }
+
+    pub(super) fn cancel_cookie_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sessions.editing_cookie_id = None;
+        self.sessions.cookie_subdomains = false;
+        self.sessions.cookie_secure = false;
+        self.sessions.cookie_http_only = true;
+        self.sessions
+            .cookie_domain
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions
+            .cookie_path
+            .update(cx, |s, cx| s.set_value("/", window, cx));
+        self.sessions
+            .cookie_name
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions
+            .cookie_value
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions
+            .cookie_expires
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions.local_error = None;
+        cx.notify();
     }
 
     pub(super) fn load_selected_cookie_for_edit(
@@ -290,21 +317,10 @@ impl Settings {
                 _ => return self.report_local_input_err("预期状态码须在 100 到 599 之间。", cx),
             }
         };
-        let mut headers = Vec::new();
-        for seg in raw_headers
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let Some((h_name, h_val)) = seg.split_once(':') else {
-                return self
-                    .report_local_input_err("附加请求头格式须为 Name: Value（分号分隔）。", cx);
-            };
-            headers.push(Header {
-                name: h_name.trim().to_owned(),
-                value: h_val.trim().as_bytes().to_vec(),
-            });
-        }
+        let headers = match parse_macro_step_headers(&raw_headers) {
+            Ok(headers) => headers,
+            Err(err) => return self.report_local_input_err(&err, cx),
+        };
         let mut extractions = Vec::new();
         if !ext_name.is_empty() {
             let source = match self.sessions.ext_kind {
@@ -362,14 +378,28 @@ impl Settings {
             expected_status,
             extractions,
         });
-        self.sessions
-            .step_url
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.sessions
-            .ext_name
-            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.reset_macro_step_draft_inputs(window, cx);
         self.sessions.local_error = None;
         cx.notify();
+    }
+
+    fn reset_macro_step_draft_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sessions
+            .step_method
+            .update(cx, |s, cx| s.set_value("GET", window, cx));
+        for input in [
+            &self.sessions.step_url,
+            &self.sessions.step_headers,
+            &self.sessions.step_body,
+            &self.sessions.step_status,
+            &self.sessions.ext_name,
+            &self.sessions.ext_arg1,
+            &self.sessions.ext_arg2,
+            &self.sessions.ext_target_name,
+        ] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.sessions.step_use_jar = true;
     }
 
     pub(super) fn save_session_macro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -445,6 +475,7 @@ impl Settings {
         self.sessions
             .macro_timeout_ms
             .update(cx, |s, cx| s.set_value("10000", window, cx));
+        self.reset_macro_step_draft_inputs(window, cx);
         self.sessions.local_error = None;
         cx.notify();
     }
@@ -517,5 +548,82 @@ impl Settings {
         self.sessions.local_error = Some(msg.to_owned());
         self.settings_error(msg, cx);
         cx.notify();
+    }
+}
+
+fn is_http_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn parse_macro_step_headers(raw: &str) -> Result<Vec<Header>, String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if raw.contains('\n') || raw.contains('\r') {
+        for line in raw.lines().map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((h_name, h_val)) = line.split_once(':') else {
+                return Err("附加请求头格式须为 Name: Value（分号或换行分隔）。".into());
+            };
+            let name = h_name.trim();
+            if !is_http_header_token(name) {
+                return Err("附加请求头名称包含非法字符。".into());
+            }
+            pairs.push((name.to_owned(), h_val.trim().to_owned()));
+        }
+    } else {
+        for seg in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((h_name, h_val)) = seg.split_once(':')
+                && is_http_header_token(h_name.trim())
+            {
+                pairs.push((h_name.trim().to_owned(), h_val.trim().to_owned()));
+            } else if let Some((_, prev_val)) = pairs.last_mut() {
+                if !prev_val.is_empty() {
+                    prev_val.push_str("; ");
+                }
+                prev_val.push_str(seg);
+            } else {
+                return Err("附加请求头格式须为 Name: Value（分号或换行分隔）。".into());
+            }
+        }
+    }
+    Ok(pairs
+        .into_iter()
+        .map(|(name, val)| Header {
+            name,
+            value: val.into_bytes(),
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod macro_header_tests {
+    use super::*;
+
+    #[test]
+    fn parse_macro_step_headers_preserves_semicolons_inside_single_and_multiline_headers() {
+        let single = parse_macro_step_headers("Content-Type: application/json; charset=utf-8")
+            .expect("content-type charset parameter");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].name, "Content-Type");
+        assert_eq!(single[0].value, b"application/json; charset=utf-8");
+
+        let dual = parse_macro_step_headers(
+            "Content-Type: application/json; charset=utf-8; X-Client: mio",
+        )
+        .expect("multiple headers with semicolon parameter");
+        assert_eq!(dual.len(), 2);
+        assert_eq!(dual[0].name, "Content-Type");
+        assert_eq!(dual[0].value, b"application/json; charset=utf-8");
+        assert_eq!(dual[1].name, "X-Client");
+        assert_eq!(dual[1].value, b"mio");
+
+        let multi = parse_macro_step_headers("Accept: text/html;q=0.9\nX-Token: a;b")
+            .expect("newline separated headers");
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0].value, b"text/html;q=0.9");
+        assert_eq!(multi[1].value, b"a;b");
+
+        assert!(parse_macro_step_headers("NoColonHere").is_err());
     }
 }

@@ -51,7 +51,6 @@ pub(in crate::workbench) fn target_item_menu(
             .snapshot
             .findings
             .iter()
-            .take(15)
             .map(|f| {
                 let label = if f.host.is_empty() {
                     f.title.clone()

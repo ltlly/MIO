@@ -7,7 +7,7 @@ use crate::{
 };
 
 pub const DEFAULT_SEQUENCER_CONCURRENCY: usize = 4;
-pub const MAX_SEQUENCER_CONCURRENCY: usize = 16;
+pub const MAX_SEQUENCER_CONCURRENCY: usize = 64;
 pub const DEFAULT_SEQUENCER_TARGET_SAMPLES: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -74,8 +74,12 @@ pub(super) struct SessionsUi {
     pub(super) url_scope_select: Entity<SelectState<Vec<&'static str>>>,
     pub(super) rule_prefixes: Entity<InputState>,
     pub(super) rule_req_param: Entity<InputState>,
+    pub(super) rule_param_absent: bool,
+    pub(super) rule_header_contains: Entity<InputState>,
     pub(super) draft_action_kind: DraftActionKind,
     pub(super) action_kind_select: Entity<SelectState<Vec<&'static str>>>,
+    pub(super) action_jar_add_new: bool,
+    pub(super) action_jar_update_existing: bool,
     pub(super) action_header_name: Entity<InputState>,
     pub(super) action_header_val: Entity<InputState>,
     pub(super) action_cookie_name: Entity<InputState>,
@@ -84,10 +88,14 @@ pub(super) struct SessionsUi {
     pub(super) action_param_name: Entity<InputState>,
     pub(super) action_param_val: Entity<InputState>,
     pub(super) action_param_remove: bool,
+    pub(super) action_param_only_present: bool,
     pub(super) action_replace_match: Entity<InputState>,
     pub(super) action_replace_with: Entity<InputState>,
     pub(super) action_replace_regex: bool,
     pub(super) action_macro_idx: usize,
+    pub(super) action_macro_id: Option<Uuid>,
+    pub(super) action_macro_update_cookies: bool,
+    pub(super) action_macro_apply_extractions: bool,
     pub(super) action_macro_select: Entity<SelectState<Vec<String>>>,
     pub(super) draft_actions: Vec<SessionRuleAction>,
 
@@ -245,18 +253,15 @@ impl SessionsUi {
                 scx,
             )
         });
-        cx.subscribe_in(&action_macro_select, window, |this, _, event, _, cx| {
-            let SelectEvent::Confirm(Some(name)) = event else {
+        cx.subscribe_in(&action_macro_select, window, |this, state, event, _, cx| {
+            let SelectEvent::Confirm(Some(_)) = event else {
                 return;
             };
-            if let Some(pos) = this
-                .state
-                .sessions
-                .macros
-                .iter()
-                .position(|m| &m.name == name)
+            if let Some(pos) = state.read(cx).selected_index(cx).map(|p| p.row)
+                && let Some(mac) = this.state.sessions.macros.get(pos)
             {
                 this.sessions.action_macro_idx = pos;
+                this.sessions.action_macro_id = Some(mac.id);
             }
             cx.notify();
         })
@@ -290,9 +295,14 @@ impl SessionsUi {
                     .placeholder("逗号分隔 URL 前缀，如 https://api.example.com/")
             }),
             rule_req_param: cx
-                .new(|cx| InputState::new(window, cx).placeholder("必需参数名（可选）")),
+                .new(|cx| InputState::new(window, cx).placeholder("参数名（逗号分隔，可选）")),
+            rule_param_absent: false,
+            rule_header_contains: cx
+                .new(|cx| InputState::new(window, cx).placeholder("请求头包含（可选）")),
             draft_action_kind: DraftActionKind::UseCookieJar,
             action_kind_select,
+            action_jar_add_new: true,
+            action_jar_update_existing: true,
             action_header_name: cx.new(|cx| InputState::new(window, cx).placeholder("Header 名称")),
             action_header_val: cx.new(|cx| InputState::new(window, cx).placeholder("Header 值")),
             action_cookie_name: cx.new(|cx| InputState::new(window, cx).placeholder("Cookie 名称")),
@@ -301,12 +311,16 @@ impl SessionsUi {
             action_param_name: cx.new(|cx| InputState::new(window, cx).placeholder("URL 参数名")),
             action_param_val: cx.new(|cx| InputState::new(window, cx).placeholder("URL 参数值")),
             action_param_remove: false,
+            action_param_only_present: false,
             action_replace_match: cx
                 .new(|cx| InputState::new(window, cx).placeholder("匹配文本或正则表达式")),
             action_replace_with: cx
                 .new(|cx| InputState::new(window, cx).placeholder("替换为文本")),
             action_replace_regex: false,
             action_macro_idx: 0,
+            action_macro_id: None,
+            action_macro_update_cookies: true,
+            action_macro_apply_extractions: true,
             action_macro_select,
             draft_actions: vec![SessionRuleAction::UseCookieJar {
                 add_new_cookies: true,
@@ -332,7 +346,7 @@ impl SessionsUi {
             step_url: cx
                 .new(|cx| InputState::new(window, cx).placeholder("https://example.com/login")),
             step_headers: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("附加头 Name: Value（分号分隔，可选）")
+                InputState::new(window, cx).placeholder("附加头 Name: Value（分号或换行分隔，可选）")
             }),
             step_body: cx.new(|cx| InputState::new(window, cx).placeholder("请求正文（可选）")),
             step_status: cx
@@ -437,17 +451,41 @@ impl Settings {
         let macro_names: Vec<String> = if self.state.sessions.macros.is_empty() {
             vec!["（尚无已保存 Macro）".into()]
         } else {
+            let mut counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for m in &self.state.sessions.macros {
+                *counts.entry(m.name.as_str()).or_insert(0) += 1;
+            }
             self.state
                 .sessions
                 .macros
                 .iter()
-                .map(|m| m.name.clone())
+                .enumerate()
+                .map(|(idx, m)| {
+                    if counts.get(m.name.as_str()).copied().unwrap_or(0) > 1 {
+                        format!("{} (#{})", m.name, idx + 1)
+                    } else {
+                        m.name.clone()
+                    }
+                })
                 .collect()
         };
+        if let Some(id) = self.sessions.action_macro_id
+            && let Some(pos) = self.state.sessions.macros.iter().position(|m| m.id == id)
+        {
+            self.sessions.action_macro_idx = pos;
+        }
         let selected_idx = self
             .sessions
             .action_macro_idx
             .min(macro_names.len().saturating_sub(1));
+        self.sessions.action_macro_idx = selected_idx;
+        self.sessions.action_macro_id = self
+            .state
+            .sessions
+            .macros
+            .get(selected_idx)
+            .map(|m| m.id);
         self.sessions.action_macro_select.update(cx, |state, cx| {
             state.set_items(macro_names, window, cx);
             state.set_selected_index(Some(IndexPath::new(selected_idx)), window, cx);

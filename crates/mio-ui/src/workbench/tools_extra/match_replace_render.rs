@@ -3,7 +3,7 @@ use gpui_kit::base::CheckboxState;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::select::Select;
 use gpui_kit::component::table::DataTable;
-use mio_core::{MatchReplaceTarget, WsReplaceDirection};
+use mio_core::WsReplaceDirection;
 
 use super::*;
 
@@ -90,10 +90,6 @@ impl Workbench {
         let http_has_enabled = http_rules.iter().any(|r| r.enabled);
         let selected_id = self.extra_tools.mr_selected;
         let selected = selected_id.and_then(|id| http_rules.iter().position(|r| r.id == id));
-        let is_editing = self.extra_tools.mr_editing.is_some();
-        let http_editor_open = self.extra_tools.mr_editor_open;
-        let http_regex = self.extra_tools.mr_regex;
-        let http_error = self.extra_tools.mr_error.clone();
         let in_scope_only = self.workspace.proxy_messages.match_replace_in_scope_only;
 
         let mut http_actions = div()
@@ -137,28 +133,6 @@ impl Workbench {
             http_actions = http_actions.child(mr_action_button(id, label, tip, available).on_click(
                 cx.listener(move |this, _, window, cx| {
                     if action == 0 {
-                        this.extra_tools.mr_editing = None;
-                        this.extra_tools.mr_editor_open = true;
-                        this.extra_tools.mr_error = None;
-                        this.extra_tools.mr_regex = false;
-                        this.extra_tools.mr_target = MatchReplaceTarget::RequestHeader;
-                        this.extra_tools.mr_target_select.update(cx, |s, cx| {
-                            s.set_selected_index(
-                                Some(gpui_kit::component::IndexPath::new(0)),
-                                window,
-                                cx,
-                            );
-                        });
-                        for input in [
-                            &this.extra_tools.mr_match,
-                            &this.extra_tools.mr_replace,
-                            &this.extra_tools.mr_comment,
-                        ] {
-                            input.update(cx, |s, cx| s.set_value("", window, cx));
-                        }
-                        this.extra_tools
-                            .mr_match
-                            .update(cx, |s, cx| s.focus(window, cx));
                         if let Some(project) = this.project {
                             if let Some(prev) = this.extra_tools.mr_dialog.take() {
                                 let _ = prev.update(cx, |_, window, _| window.remove_window());
@@ -182,24 +156,22 @@ impl Workbench {
                     };
                     match action {
                         1 => {
-                            if let Some(rule) = &rule {
-                                this.load_http_match_replace_for_edit(rule, window, cx);
-                                if let Some(project) = this.project {
-                                    if let Some(prev) = this.extra_tools.mr_dialog.take() {
-                                        let _ =
-                                            prev.update(cx, |_, window, _| window.remove_window());
-                                    }
-                                    this.extra_tools.mr_dialog = open_http_match_replace_dialog(
-                                        cx.weak_entity(),
-                                        window.window_handle(),
-                                        project,
-                                        Some(rule.clone()),
-                                        "mr",
-                                        window,
-                                        cx,
-                                    )
-                                    .ok();
+                            if let Some(rule) = &rule
+                                && let Some(project) = this.project
+                            {
+                                if let Some(prev) = this.extra_tools.mr_dialog.take() {
+                                    let _ = prev.update(cx, |_, window, _| window.remove_window());
                                 }
+                                this.extra_tools.mr_dialog = open_http_match_replace_dialog(
+                                    cx.weak_entity(),
+                                    window.window_handle(),
+                                    project,
+                                    Some(rule.clone()),
+                                    "mr",
+                                    window,
+                                    cx,
+                                )
+                                .ok();
                             }
                         }
                         2 => this.remove_http_match_replace_rule(id, cx),
@@ -288,183 +260,6 @@ impl Workbench {
                 }))
             });
 
-        let http_inline_editor = if http_editor_open {
-            let regex_entity = cx.entity();
-            Some(
-                div()
-                    .mt(px(10.))
-                    .pl(p.gutter_indent)
-                    .child(
-                        div()
-                            .id("mr-inline-editor")
-                            .test_support()
-                            .max_w(p.button_col_w + px(6.) + http_table_w)
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            .p(px(10.))
-                            .border_1()
-                            .border_color(p.table_border)
-                            .rounded(px(3.))
-                            .bg(p.editor_bg)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .w(theme::scaled_px(72.).max(px(72.)))
-                                            .flex_shrink_0()
-                                            .child("项目类型:"),
-                                    )
-                                    .child(
-                                        div().w(theme::scaled_px(220.).max(px(200.))).child(
-                                            Select::new(&self.extra_tools.mr_target_select)
-                                                .id("mr-target-select")
-                                                .small()
-                                                .w_full()
-                                                .disabled(!editable),
-                                        ),
-                                    )
-                                    .child(
-                                        mr_checkbox(
-                                            "mr-regex-toggle",
-                                            "Regex match",
-                                            "Regex match",
-                                            http_regex,
-                                            editable,
-                                        )
-                                        .on_change(move |state, _, _, cx| {
-                                            regex_entity.update(cx, |this, cx| {
-                                                this.extra_tools.mr_regex =
-                                                    state == CheckboxState::Checked;
-                                                cx.notify();
-                                            });
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .w(theme::scaled_px(72.).max(px(72.)))
-                                            .flex_shrink_0()
-                                            .child("匹配内容:"),
-                                    )
-                                    .child(
-                                        div().flex_1().min_w_0().child(
-                                            Input::new(&self.extra_tools.mr_match)
-                                                .id("mr-match-input")
-                                                .aria_label("匹配内容")
-                                                .small()
-                                                .disabled(!editable),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .w(theme::scaled_px(72.).max(px(72.)))
-                                            .flex_shrink_0()
-                                            .child("替换为:"),
-                                    )
-                                    .child(
-                                        div().flex_1().min_w_0().child(
-                                            Input::new(&self.extra_tools.mr_replace)
-                                                .id("mr-replace-input")
-                                                .aria_label("替换为")
-                                                .small()
-                                                .disabled(!editable),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .w(theme::scaled_px(72.).max(px(72.)))
-                                            .flex_shrink_0()
-                                            .child("备注:"),
-                                    )
-                                    .child(
-                                        div().flex_1().min_w_0().child(
-                                            Input::new(&self.extra_tools.mr_comment)
-                                                .id("mr-comment-input")
-                                                .aria_label("备注")
-                                                .small()
-                                                .disabled(!editable),
-                                        ),
-                                    ),
-                            )
-                            .when_some(http_error, |card, error| {
-                                card.child(
-                                    div()
-                                        .id("mr-inline-error")
-                                        .test_support()
-                                        .role(gpui_kit::accesskit::Role::Alert)
-                                        .aria_label(error.clone())
-                                        .text_color(theme::danger_fg())
-                                        .child(error),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap(px(8.))
-                                    .child(
-                                        button("mr-add-button", if is_editing { "确定" } else { "添加" })
-                                            .primary()
-                                            .tooltip("保存并启用 HTTP 匹配与替换规则")
-                                            .disabled(!editable)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.add_match_replace(window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        button("mr-cancel-edit", "取消")
-                                            .tooltip("关闭编辑表单并放弃修改")
-                                            .disabled(!editable)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if let Some(dlg) = this.extra_tools.mr_dialog.take()
-                                                {
-                                                    let _ = dlg.update(cx, |_, window, _| {
-                                                        window.remove_window()
-                                                    });
-                                                }
-                                                this.extra_tools.mr_editing = None;
-                                                this.extra_tools.mr_editor_open = false;
-                                                this.extra_tools.mr_error = None;
-                                                for input in [
-                                                    &this.extra_tools.mr_match,
-                                                    &this.extra_tools.mr_replace,
-                                                    &this.extra_tools.mr_comment,
-                                                ] {
-                                                    input.update(cx, |s, cx| {
-                                                        s.set_value("", window, cx)
-                                                    });
-                                                }
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
-                    ),
-            )
-        } else {
-            None
-        };
-
         let http_scope_entity = cx.entity();
         let http_section = div()
             .flex_shrink_0()
@@ -534,7 +329,6 @@ impl Workbench {
                     }),
                 ),
             )
-            .when_some(http_inline_editor, |section, editor| section.child(editor))
             .child(
                 div()
                     .id("mr-rules")

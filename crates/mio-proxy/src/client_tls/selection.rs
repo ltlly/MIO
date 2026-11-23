@@ -4,9 +4,11 @@ use std::net::{IpAddr, Ipv6Addr};
 impl ClientCertificateRule {
     pub fn validate_host_pattern(pattern: &str) -> Result<String, ProxyError> {
         match parse_host_pattern(pattern)? {
+            ParsedHostPattern::Any => Ok("*".into()),
             ParsedHostPattern::ExactIp(ip) => Ok(ip.to_string()),
             ParsedHostPattern::ExactDomain(domain) => Ok(domain),
             ParsedHostPattern::WildcardSubdomain(suffix) => Ok(format!("*.{suffix}")),
+            ParsedHostPattern::Glob(glob) => Ok(glob),
         }
     }
 
@@ -23,7 +25,8 @@ impl ClientCertificateRule {
 ///
 /// Aligns with MIO Destination host wildcard semantics: `*.example.com` matches single- and
 /// multi-label subdomains (`api.example.com`, `a.b.example.com`) and never matches the apex
-/// `example.com` itself or IP literals.
+/// `example.com` itself or IP literals. `*` matches any concrete host or IP, and glob patterns
+/// (`10.0.*`, `api.*.example.invalid`) match concrete hosts/IPs via glob semantics.
 pub fn matches_host(pattern: &str, host: &str) -> bool {
     let Ok(parsed_pattern) = parse_host_pattern(pattern) else {
         return false;
@@ -31,8 +34,15 @@ pub fn matches_host(pattern: &str, host: &str) -> bool {
     let Ok(parsed_host) = parse_host_pattern(host) else {
         return false;
     };
+    let host_text = match &parsed_host {
+        ParsedHostPattern::ExactIp(ip) => ip.to_string(),
+        ParsedHostPattern::ExactDomain(dom) => dom.clone(),
+        ParsedHostPattern::Any
+        | ParsedHostPattern::WildcardSubdomain(_)
+        | ParsedHostPattern::Glob(_) => return false,
+    };
     match (parsed_pattern, parsed_host) {
-        (_, ParsedHostPattern::WildcardSubdomain(_)) => false,
+        (ParsedHostPattern::Any, _) => true,
         (ParsedHostPattern::ExactIp(expected), ParsedHostPattern::ExactIp(actual)) => {
             expected == actual
         }
@@ -44,6 +54,7 @@ pub fn matches_host(pattern: &str, host: &str) -> bool {
                 && actual.ends_with(&suffix)
                 && actual.as_bytes()[actual.len() - suffix.len() - 1] == b'.'
         }
+        (ParsedHostPattern::Glob(glob), _) => crate::route::matches_bypass_host(&glob, &host_text),
         _ => false,
     }
 }
@@ -75,9 +86,36 @@ pub fn resolve_client_identity(
 }
 
 enum ParsedHostPattern {
+    Any,
     ExactIp(IpAddr),
     ExactDomain(String),
     WildcardSubdomain(String),
+    Glob(String),
+}
+
+fn is_valid_glob_host(raw: &str) -> bool {
+    if raw.is_empty()
+        || raw.len() > MAX_HOST_PATTERN_BYTES
+        || raw.starts_with('.')
+        || raw.ends_with('.')
+        || raw.contains("..")
+    {
+        return false;
+    }
+    let colon_count = raw.bytes().filter(|&b| b == b':').count();
+    if colon_count == 1 {
+        return false;
+    }
+    if colon_count >= 2 {
+        return raw
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'*' | b'?'));
+    }
+    let has_alnum = raw.bytes().any(|b| b.is_ascii_alphanumeric());
+    has_alnum
+        && raw.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'*' | b'?')
+        })
 }
 
 fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
@@ -90,6 +128,9 @@ fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
             "客户端证书主机模式不能为空或包含空白／控制字符",
         ));
     }
+    if raw == "*" {
+        return Ok(ParsedHostPattern::Any);
+    }
     if raw.starts_with('[') || raw.ends_with(']') {
         let Some(inner) = raw
             .strip_prefix('[')
@@ -100,10 +141,18 @@ fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
         if inner.is_empty() || inner.len() > MAX_HOST_PATTERN_BYTES {
             return Err(ProxyError::invalid("客户端证书主机模式长度无效"));
         }
-        let ipv6 = inner
-            .parse::<Ipv6Addr>()
-            .map_err(|_| ProxyError::invalid("客户端证书方括号主机须为有效 IPv6 字面量"))?;
-        return Ok(ParsedHostPattern::ExactIp(IpAddr::V6(ipv6)));
+        if let Ok(ipv6) = inner.parse::<Ipv6Addr>() {
+            return Ok(ParsedHostPattern::ExactIp(IpAddr::V6(ipv6)));
+        }
+        if (inner.contains('*') || inner.contains('?'))
+            && inner.contains(':')
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'*' | b'?'))
+        {
+            return Ok(ParsedHostPattern::Glob(inner.to_ascii_lowercase()));
+        }
+        return Err(ProxyError::invalid("客户端证书方括号主机须为有效 IPv6 字面量"));
     }
     if raw.contains('[') || raw.contains(']') || raw.len() > MAX_HOST_PATTERN_BYTES {
         return Err(ProxyError::invalid(
@@ -111,18 +160,39 @@ fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
         ));
     }
     if let Some(suffix) = raw.strip_prefix("*.") {
-        if suffix.parse::<IpAddr>().is_ok() || !is_valid_dns_name(suffix) {
-            return Err(ProxyError::invalid(
-                "客户端证书通配符主机须为 *.domain 形式的合法域名",
+        if !suffix.contains('*') && !suffix.contains('?') {
+            if suffix.parse::<IpAddr>().is_ok() || !is_valid_dns_name(suffix) {
+                return Err(ProxyError::invalid(
+                    "客户端证书通配符主机须为 *.domain 形式的合法域名",
+                ));
+            }
+            return Ok(ParsedHostPattern::WildcardSubdomain(
+                suffix.to_ascii_lowercase(),
             ));
         }
-        return Ok(ParsedHostPattern::WildcardSubdomain(
-            suffix.to_ascii_lowercase(),
+        if suffix.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'*' | b'?'))
+        }) && suffix
+            .split('.')
+            .last()
+            .is_some_and(|last| last.bytes().any(|b| b.is_ascii_alphabetic() || b == b'*'))
+            && is_valid_glob_host(raw)
+        {
+            return Ok(ParsedHostPattern::Glob(raw.to_ascii_lowercase()));
+        }
+        return Err(ProxyError::invalid(
+            "客户端证书通配符主机须为 *.domain 形式的合法域名",
         ));
     }
-    if raw.contains('*') {
+    if raw.contains('*') || raw.contains('?') {
+        if is_valid_glob_host(raw) {
+            return Ok(ParsedHostPattern::Glob(raw.to_ascii_lowercase()));
+        }
         return Err(ProxyError::invalid(
-            "客户端证书主机模式仅支持精确主机或前导 *. 通配符",
+            "客户端证书主机模式包含无效通配符或端口／URL 字符",
         ));
     }
     if let Ok(ip) = raw.parse::<IpAddr>() {

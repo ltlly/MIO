@@ -353,7 +353,7 @@ impl State {
         );
         ensure!(
             self.repeater.sends.len() < MAX_REPEATER_SENDS,
-            "并发 Repeater 请求达到 16 个限额"
+            "并发 Repeater 请求达到 64 个限额"
         );
         ensure!(
             self.store.flows().read_optional(run_id)?.is_none(),

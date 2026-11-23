@@ -135,6 +135,7 @@ impl Workbench {
                     revision: base.revision,
                     live_passive_enabled: base.live_passive_enabled,
                     live_passive_crawl_enabled: base.live_passive_crawl_enabled,
+                    live_passive_suite_scope_only: base.live_passive_suite_scope_only,
                     tasks: Vec::new(),
                     findings: vec![finding],
                 })
@@ -153,6 +154,7 @@ impl Workbench {
                     revision: base.revision,
                     live_passive_enabled: base.live_passive_enabled,
                     live_passive_crawl_enabled: base.live_passive_crawl_enabled,
+                    live_passive_suite_scope_only: base.live_passive_suite_scope_only,
                     tasks: vec![task],
                     findings,
                 })

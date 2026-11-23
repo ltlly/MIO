@@ -387,12 +387,10 @@ impl Workbench {
                         Ok(text) => {
                             wizard.config_choice = ConfigChoice::ConfigFile;
                             let config_input = wizard.config_file_input.clone();
-                            if let Some(window) = cx.active_window() {
-                                let _ = window.update(cx, |_, window, cx| {
-                                    config_input
-                                        .update(cx, |state, cx| state.set_value(text, window, cx));
-                                });
-                            }
+                            let _ = self.owner_window.update(cx, |_, window, cx| {
+                                config_input
+                                    .update(cx, |state, cx| state.set_value(text, window, cx));
+                            });
                         }
                         Err(err) => {
                             wizard.error = Some(err);

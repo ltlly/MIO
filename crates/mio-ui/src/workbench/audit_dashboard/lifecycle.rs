@@ -484,6 +484,34 @@ impl Workbench {
         self.set_audit_live_passive_crawl(next, cx);
     }
 
+    pub(in crate::workbench) fn set_audit_live_passive_scope(
+        &mut self,
+        scope: LiveTaskTrafficScope,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.audit_can_operate() {
+            return;
+        }
+        let Some(project) = self.project else {
+            return;
+        };
+        let suite_scope_only = scope == LiveTaskTrafficScope::SuiteScopeOnly;
+        self.audit_dashboard.live_task_scope = scope;
+        if self.audit_dashboard.snapshot.live_passive_suite_scope_only == suite_scope_only {
+            return;
+        }
+        if self.enqueue(
+            Command::Audit(AuditCommand::SetLivePassiveScope {
+                project,
+                suite_scope_only,
+            }),
+            cx,
+        ) {
+            self.audit_dashboard.snapshot.live_passive_suite_scope_only = suite_scope_only;
+            cx.notify();
+        }
+    }
+
     pub(in crate::workbench) fn open_new_live_task_modal(&mut self, cx: &mut Context<Self>) {
         if self.audit_dashboard.new_live_task_open {
             self.audit_dashboard.new_live_task_open = false;
@@ -514,7 +542,7 @@ impl Workbench {
 
         self.set_audit_live_passive(audit_on, cx);
         self.set_audit_live_passive_crawl(crawl_on, cx);
-        self.audit_dashboard.live_task_scope = scope;
+        self.set_audit_live_passive_scope(scope, cx);
         self.audit_dashboard.new_live_task_open = false;
         self.clear_dashboard_intruder_selection(window, cx);
         self.audit_dashboard.selected_audit_task_id = None;

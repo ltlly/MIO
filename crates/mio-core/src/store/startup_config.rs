@@ -36,6 +36,7 @@ pub(crate) struct StartupProjectConfig {
     pub proxy_interception: Option<crate::ProxyInterceptionSettings>,
     pub proxy_messages: Option<crate::ProxyMessageSettings>,
     pub proxy_websocket_interception: Option<crate::ProxyWebSocketInterceptionSettings>,
+    pub ssl_pass_through_auto_add_on_failure: Option<bool>,
     pub ssl_pass_through_rules: Option<Vec<crate::SslPassThroughRule>>,
     pub ws_match_and_replace_rules: Option<Vec<crate::WsMatchAndReplaceRule>>,
     pub response_modification: Option<crate::ProxyResponseModificationSettings>,

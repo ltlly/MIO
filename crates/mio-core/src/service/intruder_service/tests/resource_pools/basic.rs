@@ -2,17 +2,28 @@ use super::*;
 
 #[tokio::test]
 async fn unlimited_shared_pools_preserve_global_request_and_active_run_resource_limits() {
-    // Exactly the internal boundary: sixteen one-byte loopback requests, no response bodies.
-    tokio::time::timeout(Duration::from_secs(8), async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Exactly the internal boundary: MAX_REQUESTS_IN_FLIGHT one-byte loopback requests, no response bodies.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(512).unwrap();
         let address = listener.local_addr().unwrap();
         let (seen_tx, seen) = tokio::sync::oneshot::channel();
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let origin = tokio::spawn(async move {
-            let mut streams = Vec::new();
+            let mut readers = Vec::with_capacity(MAX_REQUESTS_IN_FLIGHT);
             for _ in 0..MAX_REQUESTS_IN_FLIGHT {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                assert_eq!(request(&mut stream).await, 255);
-                streams.push(stream);
+                let accepted_tx = accepted_tx.clone();
+                readers.push(tokio::spawn(async move {
+                    assert_eq!(request(&mut stream).await, 255);
+                    let _ = accepted_tx.send(());
+                    stream
+                }));
+            }
+            let mut streams = Vec::with_capacity(MAX_REQUESTS_IN_FLIGHT);
+            for reader in readers {
+                streams.push(reader.await.unwrap());
             }
             seen_tx.send(()).unwrap();
             for mut stream in streams {
@@ -20,15 +31,23 @@ async fn unlimited_shared_pools_preserve_global_request_and_active_run_resource_
             }
             listener
         });
-        let (mut state, _events) = state();
+        let (mut state, mut events) = state();
+        let drain = tokio::spawn(async move {
+            while events.recv().await.is_some() {}
+        });
         let pools = [
             pool("first unlimited", None),
             pool("second unlimited", None),
         ];
         let catalog = install(&mut state, pools.to_vec());
+        let per_run = MAX_REQUESTS_IN_FLIGHT / MAX_RUNS;
         let mut ids = Vec::new();
         for index in 0..MAX_RUNS {
-            let mut input = spec(format!("http://{address}"), if index == 0 { 3 } else { 2 });
+            let mut input = spec(
+                format!("http://{address}"),
+                if index == 0 { per_run + 1 } else { per_run },
+            );
+            input.request_timeout_ms = 15_000;
             input.max_concurrent_requests = 1;
             input.resource_pool = Some(IntruderPoolSelection::Existing(pools[index % 2].id));
             ids.push(admit(&mut state, input));
@@ -53,8 +72,12 @@ async fn unlimited_shared_pools_preserve_global_request_and_active_run_resource_
         assert_eq!(state.intruder.resource_pools, catalog);
         assert_eq!(state.store.intruder_resource_pools().unwrap(), catalog);
         for id in &ids {
-            state.advance_intruder(*id).await.unwrap();
-            state.advance_intruder(*id).await.unwrap();
+            for _ in 0..per_run {
+                state.advance_intruder(*id).await.unwrap();
+            }
+            for _ in 0..per_run {
+                accepted_rx.recv().await.unwrap();
+            }
         }
         assert_eq!(state.intruder.requests.len(), MAX_REQUESTS_IN_FLIGHT);
         assert_eq!(state.intruder.jobs.len(), MAX_REQUESTS_IN_FLIGHT);
@@ -62,7 +85,7 @@ async fn unlimited_shared_pools_preserve_global_request_and_active_run_resource_
         state.advance_intruder(ids[0]).await.unwrap();
         assert_eq!(
             state.intruder_run(ids[0]).unwrap().dispatched,
-            2,
+            per_run as u64,
             "neither unlimited pool may exceed the shared global boundary"
         );
         seen.await.unwrap();
@@ -72,9 +95,10 @@ async fn unlimited_shared_pools_preserve_global_request_and_active_run_resource_
         for id in ids {
             let stopped = state.intruder_run(id).unwrap();
             assert_eq!(stopped.state, IntruderRunState::Stopped);
-            assert_eq!((stopped.dispatched, stopped.completed), (2, 2));
+            assert_eq!((stopped.dispatched, stopped.completed), (per_run as u64, per_run as u64));
         }
         no_extra(origin.await.unwrap());
+        drain.abort();
     })
     .await
     .expect("the sixteen-socket/eight-run resource boundary cancels and joins normally");
@@ -104,7 +128,10 @@ async fn shared_pool_replaces_old_run_cap_and_releases_capacity_after_join() {
             respond(&mut stream).await;
             listener
         });
-        let (mut state, _events) = state();
+        let (mut state, mut events) = state();
+        let drain = tokio::spawn(async move {
+            while events.recv().await.is_some() {}
+        });
         let shared = pool("shared", Some(2));
         install(&mut state, vec![shared.clone()]);
         let mut input = spec(format!("http://{address}"), 2);
@@ -165,6 +192,7 @@ async fn shared_pool_replaces_old_run_cap_and_releases_capacity_after_join() {
             );
         }
         no_extra(origin.await.unwrap());
+        drain.abort();
     })
     .await
     .expect("three tiny requests share one pool, a live cap edit and normal joins");

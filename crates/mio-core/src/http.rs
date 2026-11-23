@@ -28,6 +28,7 @@ mod inspector;
 mod intercept;
 mod intercept_rules;
 mod intercept_rules2;
+pub(crate) mod ip_range;
 mod match_replace;
 mod parse;
 mod parse_message;

@@ -8,12 +8,54 @@ impl Default for SelfHostedOastConfig {
             server_domain: None,
             authorization_header: None,
             poll_interval_ms: DEFAULT_SELF_HOSTED_POLL_INTERVAL_MS,
+            bind_address: None,
+            http_port: None,
+            dns_port: None,
+            dns_answer_ip: None,
+            allow_public_cloud_domains: false,
         }
     }
 }
 
 impl SelfHostedOastConfig {
+    pub fn effective_bind_ip(&self) -> Result<IpAddr> {
+        let Some(raw) = self
+            .bind_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        };
+        let clean = raw
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(raw);
+        clean
+            .parse::<IpAddr>()
+            .map_err(|_| anyhow!("Collaborator bind address is invalid: {raw}"))
+    }
+
+    pub fn effective_dns_answer_ip(&self, bound_ip: IpAddr) -> Result<Ipv4Addr> {
+        if let Some(raw) = self
+            .dns_answer_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return raw
+                .parse::<Ipv4Addr>()
+                .map_err(|_| anyhow!("Collaborator DNS answer IPv4 is invalid: {raw}"));
+        }
+        Ok(match bound_ip {
+            IpAddr::V4(v4) if !v4.is_unspecified() => v4,
+            _ => Ipv4Addr::LOCALHOST,
+        })
+    }
+
     pub fn validate(&self) -> Result<Option<Url>> {
+        let bind_ip = self.effective_bind_ip()?;
+        let _ = self.effective_dns_answer_ip(bind_ip)?;
         if !self.enabled {
             return Ok(None);
         }
@@ -36,7 +78,7 @@ impl SelfHostedOastConfig {
             .trim_end_matches('.')
             .to_ascii_lowercase();
         ensure!(
-            !is_blocked_cloud_domain(&polling_host),
+            self.allow_public_cloud_domains || !is_blocked_cloud_domain(&polling_host),
             "public third-party Collaborator domains are blocked by default"
         );
 
@@ -53,7 +95,7 @@ impl SelfHostedOastConfig {
                 "self-hosted server domain is invalid"
             );
             ensure!(
-                !is_blocked_cloud_domain(&normalized_domain),
+                self.allow_public_cloud_domains || !is_blocked_cloud_domain(&normalized_domain),
                 "public third-party Collaborator domains are blocked by default"
             );
         }

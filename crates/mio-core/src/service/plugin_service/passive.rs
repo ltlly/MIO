@@ -150,11 +150,16 @@ impl State {
         {
             return;
         }
-        if !self
-            .store
-            .audit()
-            .read_state()
-            .is_ok_and(|s| s.live_passive_enabled)
+        let Ok(audit_state) = self.store.audit().read_state() else {
+            return;
+        };
+        if !audit_state.live_passive_enabled
+            || (audit_state.live_passive_suite_scope_only
+                && self
+                    .store
+                    .metadata()
+                    .workspace_arc()
+                    .is_ok_and(|ws| !ws.scope.is_url_in_scope(&record.summary.url)))
         {
             return;
         }
@@ -219,7 +224,14 @@ impl State {
         let Ok(mut state) = self.store.audit().read_state() else {
             return;
         };
-        if !state.live_passive_enabled {
+        if !state.live_passive_enabled
+            || (state.live_passive_suite_scope_only
+                && self
+                    .store
+                    .metadata()
+                    .workspace_arc()
+                    .is_ok_and(|ws| !ws.scope.is_url_in_scope(&url)))
+        {
             return;
         }
         let incoming = convert_plugin_findings(flow_id, &url, &response, findings);

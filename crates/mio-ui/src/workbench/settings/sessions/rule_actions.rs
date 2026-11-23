@@ -33,22 +33,11 @@ impl Settings {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn add_draft_rule_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_draft_rule_action_with_jar_opts(true, true, window, cx);
-    }
-
-    pub(super) fn add_draft_rule_action_with_jar_opts(
-        &mut self,
-        jar_add_new_cookies: bool,
-        jar_update_existing_cookies: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         let action = match self.sessions.draft_action_kind {
             DraftActionKind::UseCookieJar => SessionRuleAction::UseCookieJar {
-                add_new_cookies: jar_add_new_cookies,
-                update_existing_cookies: jar_update_existing_cookies,
+                add_new_cookies: self.sessions.action_jar_add_new,
+                update_existing_cookies: self.sessions.action_jar_update_existing,
             },
             DraftActionKind::SetHeader => {
                 let name =
@@ -157,7 +146,7 @@ impl Settings {
                     name,
                     value,
                     remove: self.sessions.action_param_remove,
-                    only_if_present: self.sessions.action_only_present,
+                    only_if_present: self.sessions.action_param_only_present,
                 }
             }
             DraftActionKind::ReplaceRequestText => {
@@ -196,10 +185,10 @@ impl Settings {
             }
             DraftActionKind::RunMacro => {
                 let Some(mac) = self
-                    .state
                     .sessions
-                    .macros
-                    .get(self.sessions.action_macro_idx)
+                    .action_macro_id
+                    .and_then(|id| self.state.sessions.macros.iter().find(|m| m.id == id))
+                    .or_else(|| self.state.sessions.macros.get(self.sessions.action_macro_idx))
                     .or_else(|| self.state.sessions.macros.first())
                 else {
                     let msg = "请先在下方 Macros 区域创建至少一个 Macro。";
@@ -210,8 +199,8 @@ impl Settings {
                 };
                 SessionRuleAction::RunMacro {
                     macro_id: mac.id,
-                    update_cookies_from_jar: true,
-                    apply_extractions: true,
+                    update_cookies_from_jar: self.sessions.action_macro_update_cookies,
+                    apply_extractions: self.sessions.action_macro_apply_extractions,
                 }
             }
         };
@@ -255,8 +244,25 @@ impl Settings {
                 return;
             }
         };
+        let header_contains_raw =
+            match editing::input_snapshot(&self.sessions.rule_header_contains, window, cx) {
+                Ok(v) => v.trim().to_owned(),
+                Err(err) => {
+                    self.sessions.local_error = Some(err.into());
+                    self.settings_error(err, cx);
+                    cx.notify();
+                    return;
+                }
+            };
         if name.is_empty() {
             let msg = "Session 规则名称不能为空。";
+            self.sessions.local_error = Some(msg.into());
+            self.settings_error(msg, cx);
+            cx.notify();
+            return;
+        }
+        if self.sessions.draft_actions.is_empty() {
+            let msg = "会话规则至少需要 1 个处理动作。";
             self.sessions.local_error = Some(msg.into());
             self.settings_error(msg, cx);
             cx.notify();
@@ -275,14 +281,18 @@ impl Settings {
             _ => SessionUrlScope::AllUrls,
         };
         let param_condition = (!req_param_raw.is_empty()).then(|| {
-            SessionParamCondition::RequirePresent(
-                req_param_raw
-                    .split(',')
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            )
+            let list: Vec<String> = req_param_raw
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if self.sessions.rule_param_absent {
+                SessionParamCondition::RequireAbsent(list)
+            } else {
+                SessionParamCondition::RequirePresent(list)
+            }
         });
+        let header_contains = (!header_contains_raw.is_empty()).then_some(header_contains_raw);
         let rule = SessionRule {
             id: self.sessions.editing_rule_id.unwrap_or_else(Uuid::new_v4),
             name,
@@ -291,7 +301,7 @@ impl Settings {
             condition: SessionRuleCondition {
                 url_scope,
                 param_condition,
-                header_contains: None,
+                header_contains,
             },
             actions: self.sessions.draft_actions.clone(),
         };
@@ -308,6 +318,12 @@ impl Settings {
             self.sessions.editing_rule_id = None;
             self.sessions.rule_editor_open = false;
             self.sessions.default_rule_selected = false;
+            self.sessions.rule_param_absent = false;
+            self.sessions.action_jar_add_new = true;
+            self.sessions.action_jar_update_existing = true;
+            self.sessions.action_param_only_present = false;
+            self.sessions.action_macro_update_cookies = true;
+            self.sessions.action_macro_apply_extractions = true;
             self.sessions
                 .rule_name
                 .update(cx, |s, cx| s.set_value("", window, cx));
@@ -316,6 +332,9 @@ impl Settings {
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.sessions
                 .rule_req_param
+                .update(cx, |s, cx| s.set_value("", window, cx));
+            self.sessions
+                .rule_header_contains
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.sessions.draft_actions = vec![SessionRuleAction::UseCookieJar {
                 add_new_cookies: true,
@@ -335,6 +354,12 @@ impl Settings {
         self.sessions.rule_enabled = true;
         self.sessions.rule_tools = SessionToolScope::default();
         self.sessions.rule_url_mode = 0;
+        self.sessions.rule_param_absent = false;
+        self.sessions.action_jar_add_new = true;
+        self.sessions.action_jar_update_existing = true;
+        self.sessions.action_param_only_present = false;
+        self.sessions.action_macro_update_cookies = true;
+        self.sessions.action_macro_apply_extractions = true;
         self.sessions.url_scope_select.update(cx, |s, cx| {
             s.set_selected_index(Some(gpui_kit::component::IndexPath::new(0)), window, cx);
         });
@@ -354,6 +379,9 @@ impl Settings {
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.sessions
             .rule_req_param
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions
+            .rule_header_contains
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.sessions.local_error = None;
         cx.notify();
@@ -378,6 +406,12 @@ impl Settings {
                 mio_ai: false,
             };
             self.sessions.rule_url_mode = 0;
+            self.sessions.rule_param_absent = false;
+            self.sessions.action_jar_add_new = true;
+            self.sessions.action_jar_update_existing = true;
+            self.sessions.action_param_only_present = false;
+            self.sessions.action_macro_update_cookies = true;
+            self.sessions.action_macro_apply_extractions = true;
             self.sessions.url_scope_select.update(cx, |s, cx| {
                 s.set_selected_index(Some(gpui_kit::component::IndexPath::new(0)), window, cx);
             });
@@ -397,6 +431,9 @@ impl Settings {
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.sessions
                 .rule_req_param
+                .update(cx, |s, cx| s.set_value("", window, cx));
+            self.sessions
+                .rule_header_contains
                 .update(cx, |s, cx| s.set_value("", window, cx));
             self.sessions.local_error = None;
             cx.notify();
@@ -432,11 +469,54 @@ impl Settings {
                 cx,
             );
         });
-        let param_text = match &rule.condition.param_condition {
-            Some(SessionParamCondition::RequirePresent(list))
-            | Some(SessionParamCondition::RequireAbsent(list)) => list.join(", "),
-            None => String::new(),
+        let (param_absent, param_text) = match &rule.condition.param_condition {
+            Some(SessionParamCondition::RequirePresent(list)) => (false, list.join(", ")),
+            Some(SessionParamCondition::RequireAbsent(list)) => (true, list.join(", ")),
+            None => (false, String::new()),
         };
+        self.sessions.rule_param_absent = param_absent;
+        let (jar_add_new, jar_update_existing) = rule
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                SessionRuleAction::UseCookieJar {
+                    add_new_cookies,
+                    update_existing_cookies,
+                } => Some((*add_new_cookies, *update_existing_cookies)),
+                _ => None,
+            })
+            .unwrap_or((true, true));
+        self.sessions.action_jar_add_new = jar_add_new;
+        self.sessions.action_jar_update_existing = jar_update_existing;
+        let (macro_id_prefill, macro_cookies, macro_extract) = rule
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                SessionRuleAction::RunMacro {
+                    macro_id,
+                    update_cookies_from_jar,
+                    apply_extractions,
+                } => Some((Some(*macro_id), *update_cookies_from_jar, *apply_extractions)),
+                _ => None,
+            })
+            .unwrap_or((None, true, true));
+        if let Some(target_macro_id) = macro_id_prefill
+            && let Some(pos) = self
+                .state
+                .sessions
+                .macros
+                .iter()
+                .position(|m| m.id == target_macro_id)
+        {
+            self.sessions.action_macro_id = Some(target_macro_id);
+            self.sessions.action_macro_idx = pos;
+            self.sessions.action_macro_select.update(cx, |s, cx| {
+                s.set_selected_index(Some(gpui_kit::component::IndexPath::new(pos)), window, cx);
+            });
+        }
+        self.sessions.action_macro_update_cookies = macro_cookies;
+        self.sessions.action_macro_apply_extractions = macro_extract;
+        self.sessions.action_param_only_present = false;
         let (action_kind, action_idx) = match rule.actions.first() {
             Some(SessionRuleAction::SetHeader { .. }) => (DraftActionKind::SetHeader, 1),
             Some(SessionRuleAction::RewriteUrlParam { .. }) => (DraftActionKind::RewriteUrlParam, 2),
@@ -461,6 +541,9 @@ impl Settings {
         self.sessions
             .rule_req_param
             .update(cx, |s, cx| s.set_value(param_text, window, cx));
+        self.sessions.rule_header_contains.update(cx, |s, cx| {
+            s.set_value(rule.condition.header_contains.unwrap_or_default(), window, cx)
+        });
         self.sessions.local_error = None;
         cx.notify();
     }
@@ -481,6 +564,12 @@ impl Settings {
             mio_ai: false,
         };
         self.sessions.rule_url_mode = 0;
+        self.sessions.rule_param_absent = false;
+        self.sessions.action_jar_add_new = true;
+        self.sessions.action_jar_update_existing = true;
+        self.sessions.action_param_only_present = false;
+        self.sessions.action_macro_update_cookies = true;
+        self.sessions.action_macro_apply_extractions = true;
         self.sessions.url_scope_select.update(cx, |s, cx| {
             s.set_selected_index(Some(gpui_kit::component::IndexPath::new(0)), window, cx);
         });
@@ -500,6 +589,9 @@ impl Settings {
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.sessions
             .rule_req_param
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.sessions
+            .rule_header_contains
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.sessions.local_error = None;
         cx.notify();

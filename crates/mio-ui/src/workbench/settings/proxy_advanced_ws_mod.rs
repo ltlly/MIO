@@ -1,3 +1,5 @@
+use gpui_kit::component::select::Select;
+
 use super::*;
 
 pub(crate) struct WsMatchReplaceTable {
@@ -540,29 +542,38 @@ impl Settings {
             let focus = &self.proxy_advanced.resp_mod_focus[idx];
             let entity = self.owner.clone();
             let project = self.state.project;
+            let row_enabled = if idx == 1 {
+                enabled && mods.unhide_hidden_form_fields
+            } else {
+                enabled
+            };
             checks = checks.child(
-                settings_checkbox(id, label, checked, enabled, focus, window)
-                    .tab_stop(false)
-                    .on_change(move |state, _, _, cx| {
-                        let next_checked = state == CheckboxState::Checked;
-                        let _ = entity.update(cx, |view, cx| {
-                            let _ = view.update_proxy_advanced(
-                                project,
-                                |_, _, resp_mod| match idx {
-                                    0 => resp_mod.unhide_hidden_form_fields = next_checked,
-                                    1 => resp_mod.highlight_unhidden_fields = next_checked,
-                                    2 => resp_mod.enable_disabled_form_fields = next_checked,
-                                    3 => resp_mod.remove_input_field_length_limits = next_checked,
-                                    4 => resp_mod.remove_javascript_form_validation = next_checked,
-                                    5 => resp_mod.remove_all_javascript = next_checked,
-                                    6 => resp_mod.remove_object_tags = next_checked,
-                                    7 => resp_mod.convert_https_links_to_http = next_checked,
-                                    _ => resp_mod.remove_secure_flag_from_cookies = next_checked,
-                                },
-                                cx,
-                            );
-                        });
-                    }),
+                div()
+                    .when(idx == 1, |el| el.pl(px(20.)))
+                    .child(
+                        settings_checkbox(id, label, checked, row_enabled, focus, window)
+                            .tab_stop(false)
+                            .on_change(move |state, _, _, cx| {
+                                let next_checked = state == CheckboxState::Checked;
+                                let _ = entity.update(cx, |view, cx| {
+                                    let _ = view.update_proxy_advanced(
+                                        project,
+                                        |_, _, resp_mod| match idx {
+                                            0 => resp_mod.unhide_hidden_form_fields = next_checked,
+                                            1 => resp_mod.highlight_unhidden_fields = next_checked,
+                                            2 => resp_mod.enable_disabled_form_fields = next_checked,
+                                            3 => resp_mod.remove_input_field_length_limits = next_checked,
+                                            4 => resp_mod.remove_javascript_form_validation = next_checked,
+                                            5 => resp_mod.remove_all_javascript = next_checked,
+                                            6 => resp_mod.remove_object_tags = next_checked,
+                                            7 => resp_mod.convert_https_links_to_http = next_checked,
+                                            _ => resp_mod.remove_secure_flag_from_cookies = next_checked,
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }),
+                    ),
             );
         }
         div()

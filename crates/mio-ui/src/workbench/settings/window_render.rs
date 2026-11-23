@@ -437,8 +437,7 @@ impl Settings {
                         cx,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = SettingsPage::Intruder;
-                        cx.notify();
+                        this.select_page_without_refocus(SettingsPage::Intruder, cx)
                     })),
                 )
             })
@@ -452,8 +451,7 @@ impl Settings {
                         cx,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = SettingsPage::Repeater;
-                        cx.notify();
+                        this.select_page_without_refocus(SettingsPage::Repeater, cx)
                     })),
                 )
             })

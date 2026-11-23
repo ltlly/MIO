@@ -105,7 +105,8 @@ impl std::fmt::Debug for PlatformAuthRule {
 impl PlatformAuthRule {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.id.is_nil(), "平台认证规则 ID 无效");
-        crate::UpstreamProxyRule::validate_destination_host(&self.destination_host)?;
+        crate::validate_destination_glob_pattern(&self.destination_host)
+            .map_err(|err| anyhow::anyhow!("平台认证目标主机无效：{err}"))?;
         anyhow::ensure!(!self.username.trim().is_empty(), "平台认证必须填写用户名");
         if self.auth_type == PlatformAuthType::Basic {
             anyhow::ensure!(
@@ -770,5 +771,63 @@ impl UpstreamTlsSettings {
         }
         .validate()?;
         Ok(der)
+    }
+
+    /// Parses one or more X.509 CA certificates from a PEM bundle (up to 32 blocks / 256 KiB)
+    /// or a single DER certificate (up to 64 KiB).
+    pub fn parse_pem_or_der_certs(input: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+        const MAX_CA_BUNDLE_BYTES: usize = 256 * 1024;
+        const MAX_CA_BUNDLE_CERTS: usize = 32;
+        const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+        const END: &str = "-----END CERTIFICATE-----";
+
+        anyhow::ensure!(
+            !input.is_empty() && input.len() <= MAX_CA_BUNDLE_BYTES,
+            "CA 证书数据不能为空且不能超过 256 KiB"
+        );
+        let trimmed_bytes = input.trim_ascii();
+        if trimmed_bytes.starts_with(BEGIN.as_bytes()) {
+            let text = std::str::from_utf8(input)?;
+            let mut rest = text.trim();
+            let mut out = Vec::new();
+            while !rest.is_empty() {
+                let after_begin = rest.strip_prefix(BEGIN).ok_or_else(|| {
+                    anyhow::anyhow!("CA PEM 证书包包含无效文本或非证书块")
+                })?;
+                let (block, after_end) = after_begin.split_once(END).ok_or_else(|| {
+                    anyhow::anyhow!("CA PEM 证书块缺少结束标记")
+                })?;
+                anyhow::ensure!(
+                    !block.contains("-----"),
+                    "CA PEM 证书块中不能包含其它 PEM 标记或私钥"
+                );
+                let cleaned: Vec<u8> = block
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect();
+                anyhow::ensure!(!cleaned.is_empty(), "CA PEM 证书块内容不能为空");
+                let der = crate::codec_util::base64_decode(&cleaned)
+                    .map_err(|e| anyhow::anyhow!("PEM 证书 Base64 解码失败：{e}"))?;
+                mio_proxy::UpstreamTls::CustomRoots {
+                    certificates_der: vec![der.clone()],
+                    include_system: false,
+                }
+                .validate()?;
+                out.push(der);
+                anyhow::ensure!(
+                    out.len() <= MAX_CA_BUNDLE_CERTS,
+                    "单次最多导入 {MAX_CA_BUNDLE_CERTS} 个 CA 证书"
+                );
+                rest = after_end.trim_start();
+            }
+            anyhow::ensure!(!out.is_empty(), "未解析到有效 CA 证书");
+            Ok(out)
+        } else {
+            anyhow::ensure!(
+                !trimmed_bytes.starts_with(b"-----"),
+                "CA 证书 PEM 仅支持 CERTIFICATE 块，不能包含私钥或其它块"
+            );
+            Ok(vec![Self::parse_pem_or_der_cert(input)?])
+        }
     }
 }

@@ -160,6 +160,7 @@ async fn rejects_blocked_cloud_domains_and_deduplicates_self_hosted_polling() {
         server_domain: Some("sub.interactsh.com".to_owned()),
         authorization_header: None,
         poll_interval_ms: 1_000,
+        ..SelfHostedOastConfig::default()
     };
     assert!(
         state
@@ -226,6 +227,7 @@ async fn rejects_blocked_cloud_domains_and_deduplicates_self_hosted_polling() {
         server_domain: Some("self.local".to_owned()),
         authorization_header: Some("Bearer test-secret-token".to_owned()),
         poll_interval_ms: 500,
+        ..SelfHostedOastConfig::default()
     };
     state
         .collaborator_command(CollaboratorCommand::Start {
@@ -327,6 +329,7 @@ async fn self_hosted_poll_interval_triggers_background_polling_and_cancels_on_st
                 server_domain: Some("auto.local".to_owned()),
                 authorization_header: None,
                 poll_interval_ms: 250,
+                ..SelfHostedOastConfig::default()
             },
         })
         .await
@@ -340,6 +343,26 @@ async fn self_hosted_poll_interval_triggers_background_polling_and_cancels_on_st
         auto_event,
         CollaboratorEvent::InteractionObserved { ref interaction, .. } if interaction.id == auto_id
     ));
+    while events_rx.try_recv().is_ok() {}
+
+    state
+        .collaborator_command(CollaboratorCommand::DeleteInteraction {
+            project,
+            interaction_id: auto_id,
+        })
+        .await
+        .unwrap();
+    let after_delete = timeout(TEST_TIMEOUT, events_rx.recv())
+        .await
+        .unwrap()
+        .expect("DeleteInteraction emits Status event");
+    let Event::Collaborator(CollaboratorEvent::Status { status, .. }) = after_delete else {
+        panic!("expected Collaborator Status event after DeleteInteraction");
+    };
+    assert!(
+        status.interactions.iter().all(|i| i.id != auto_id),
+        "deleted interaction must stay removed in backend status"
+    );
 
     state
         .collaborator_command(CollaboratorCommand::Stop { project })

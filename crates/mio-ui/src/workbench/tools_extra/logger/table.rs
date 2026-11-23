@@ -420,7 +420,14 @@ pub(super) fn validate_logger_script(expr: &str) -> Result<(), String> {
     mio_core::validate_filter_script(&normalized).map_err(|err| err.to_string())
 }
 
-pub(super) fn eval_logger_script(entry: &FlowSummary, expr: &str) -> bool {
+pub(super) fn eval_logger_script_with_context(
+    entry: &FlowSummary,
+    expr: &str,
+    req_raw: Option<&[u8]>,
+    resp_raw: Option<&[u8]>,
+    notes: &str,
+    highlighted: bool,
+) -> bool {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
         return true;
@@ -432,13 +439,17 @@ pub(super) fn eval_logger_script(entry: &FlowSummary, expr: &str) -> bool {
         &entry.url,
         entry.status,
         entry.response_bytes,
-        None,
-        None,
-        "",
-        false,
+        req_raw,
+        resp_raw,
+        notes,
+        highlighted,
         None,
     )
     .unwrap_or(false)
+}
+
+pub(super) fn eval_logger_script(entry: &FlowSummary, expr: &str) -> bool {
+    eval_logger_script_with_context(entry, expr, None, None, "", false)
 }
 
 pub(super) fn matches_status_classes(status: Option<u16>, status_classes: &[bool; 4]) -> bool {
@@ -479,6 +490,7 @@ pub(super) fn matches_logger_capture_filter(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn filter_and_sort_logger<'a>(
     entries: &'a [FlowSummary],
     source_filter: &Option<TrafficSource>,
@@ -487,6 +499,8 @@ pub(super) fn filter_and_sort_logger<'a>(
     filters: &LoggerFilters,
     scope: &TargetScope,
     live_notes: &HashMap<FlowId, (u64, String)>,
+    live_highlights: &HashMap<FlowId, ExtHttpHighlight>,
+    loaded_details: &[&FlowRecord],
 ) -> Vec<(usize, &'a FlowSummary)> {
     let trimmed_search = search_term.trim();
     let trimmed_view_script = filters.view_filter_script.trim();
@@ -510,27 +524,58 @@ pub(super) fn filter_and_sort_logger<'a>(
             if !matches_status_classes(entry.status, &filters.status_classes) {
                 return false;
             }
-            if !trimmed_view_script.is_empty() && !eval_logger_script(entry, trimmed_view_script) {
-                return false;
+            if !trimmed_view_script.is_empty() || use_search_script {
+                let notes = live_notes
+                    .get(&entry.id)
+                    .map(|(_, text)| text.as_str())
+                    .unwrap_or("");
+                let highlighted = live_highlights
+                    .get(&entry.id)
+                    .is_some_and(|highlight| (1..=9).contains(&highlight.color));
+                let detail_record = loaded_details
+                    .iter()
+                    .copied()
+                    .find(|record| record.summary.id == entry.id);
+                let req_raw = detail_record.map(|record| request_to_raw(&record.request));
+                let resp_raw = detail_record
+                    .and_then(|record| record.response.as_ref().map(response_to_raw));
+                if !trimmed_view_script.is_empty()
+                    && !eval_logger_script_with_context(
+                        entry,
+                        trimmed_view_script,
+                        req_raw.as_deref(),
+                        resp_raw.as_deref(),
+                        notes,
+                        highlighted,
+                    )
+                {
+                    return false;
+                }
+                if use_search_script {
+                    return eval_logger_script_with_context(
+                        entry,
+                        trimmed_search,
+                        req_raw.as_deref(),
+                        resp_raw.as_deref(),
+                        notes,
+                        highlighted,
+                    );
+                }
             }
             if trimmed_search.is_empty() {
                 return true;
             }
-            if use_search_script {
-                eval_logger_script(entry, trimmed_search)
-            } else {
-                entry.url.to_lowercase().contains(&lower_search)
-                    || entry.method.to_lowercase().contains(&lower_search)
-                    || logger_source_label(&entry.source)
-                        .to_lowercase()
-                        .contains(&lower_search)
-                    || entry
-                        .status
-                        .is_some_and(|code| code.to_string().contains(&lower_search))
-                    || entry_comment(entry.id, live_notes)
-                        .to_lowercase()
-                        .contains(&lower_search)
-            }
+            entry.url.to_lowercase().contains(&lower_search)
+                || entry.method.to_lowercase().contains(&lower_search)
+                || logger_source_label(&entry.source)
+                    .to_lowercase()
+                    .contains(&lower_search)
+                || entry
+                    .status
+                    .is_some_and(|code| code.to_string().contains(&lower_search))
+                || entry_comment(entry.id, live_notes)
+                    .to_lowercase()
+                    .contains(&lower_search)
         })
         .map(|(idx, entry)| (idx + 1, entry))
         .collect();
@@ -1579,7 +1624,7 @@ impl Workbench {
         st.pending_batch = None;
     }
 
-    pub(super) fn logger_selected_target_ids(&self, fallback_id: FlowId) -> Vec<FlowId> {
+    pub(in crate::workbench) fn logger_selected_target_ids(&self, fallback_id: FlowId) -> Vec<FlowId> {
         let selected_set = self
             .extra_tools
             .logger_ui_table
@@ -1780,8 +1825,8 @@ impl Workbench {
                 cx.notify();
             }
             LoggerBatchKind::Comparer { response } => {
-                const MAX_COMPARER_ITEMS: usize = 32;
-                const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+                const MAX_COMPARER_ITEMS: usize = 64;
+                const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
                 let mut added = 0usize;
                 for record in &done.collected {
                     let bytes = if response {
@@ -1938,7 +1983,7 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(super) fn set_logger_batch_highlight(
+    pub(in crate::workbench) fn set_logger_batch_highlight(
         &mut self,
         ids: &[FlowId],
         color: u8,

@@ -152,8 +152,9 @@ impl RepeaterTargetDialog {
                             this.target.read(cx).document_revision() == input_revision
                                 && editing::input_snapshot(&this.target, window, cx).is_ok_and(
                                     |target| {
-                                        crate::workbench::wb_repeater::validate_repeater_target_input(
+                                        crate::workbench::wb_repeater::normalize_repeater_target_input(
                                             target.as_ref(),
+                                            &this.base_target,
                                         )
                                         .is_ok_and(|target| target == submitted)
                                     },
@@ -286,7 +287,10 @@ impl RepeaterTargetDialog {
         let result = editing::input_snapshot(&self.target, window, cx)
             .map_err(str::to_owned)
             .and_then(|target| {
-                crate::workbench::wb_repeater::validate_repeater_target_input(target.as_ref())
+                crate::workbench::wb_repeater::normalize_repeater_target_input(
+                    target.as_ref(),
+                    &self.base_target,
+                )
             })
             .and_then(|target| {
                 crate::workbench::wb_repeater::toggle_target_scheme_candidate(&target)
@@ -309,7 +313,10 @@ impl RepeaterTargetDialog {
         let target = match editing::input_snapshot(&self.target, window, cx)
             .map_err(str::to_owned)
             .and_then(|target| {
-                crate::workbench::wb_repeater::validate_repeater_target_input(target.as_ref())
+                crate::workbench::wb_repeater::normalize_repeater_target_input(
+                    target.as_ref(),
+                    &self.base_target,
+                )
             })
         {
             Ok(target) => target,

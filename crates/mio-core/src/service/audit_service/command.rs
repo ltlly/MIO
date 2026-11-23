@@ -52,6 +52,21 @@ impl State {
                 }
                 self.emit_audit_state(project, state).await;
             }
+            AuditCommand::SetLivePassiveScope {
+                project,
+                suite_scope_only,
+            } => {
+                self.check_project(project)?;
+                self.require_saved()?;
+                ensure!(!self.quiesced, "正在保存或切换项目；未更改实时任务作用域");
+                let mut state = self.store.audit().read_state()?;
+                if state.live_passive_suite_scope_only != suite_scope_only {
+                    state.live_passive_suite_scope_only = suite_scope_only;
+                    state.revision = next_audit_revision(state.revision);
+                    self.write_audit_snapshot(&state)?;
+                }
+                self.emit_audit_state(project, state).await;
+            }
             AuditCommand::StartScan {
                 project,
                 task_id,
@@ -367,6 +382,13 @@ impl State {
         let resp = record.response.as_ref()?;
         let mut state = self.store.audit().read_state().ok()?;
         let workspace = self.store.metadata().workspace_arc().ok();
+        if state.live_passive_suite_scope_only
+            && workspace
+                .as_ref()
+                .is_some_and(|ws| !ws.scope.is_url_in_scope(&record.summary.url))
+        {
+            return None;
+        }
         if state.live_passive_crawl_enabled
             && let Some(ws) = workspace.as_ref()
         {
@@ -565,29 +587,13 @@ impl State {
     ) -> Result<ScanPlan> {
         let workspace = self.store.metadata().workspace()?;
         let repeater_settings = &workspace.repeater_settings;
-        let upstream_tls = self
-            .preferences
-            .effective_upstream_tls(&workspace.upstream_tls)?;
         let request = http::parse_repeater_request(
             &draft.raw,
             &draft.target,
             draft.version,
             repeater_settings.update_content_length,
         )?;
-        let upstream_route = workspace
-            .upstream_proxy
-            .route_for_url_with_tls(&request.url, upstream_tls.clone())?;
-        let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
-        let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-        let mut send_config = SendConfig::default();
-        send_config.network.upstream_route = upstream_route;
-        send_config.network.hostname_overrides = hostname_overrides;
-        send_config.tls.trust = upstream_tls;
-        send_config.tls.options = workspace.upstream_tls.to_proxy_tls_options();
-        send_config.tls.client_certificates = self.tls.compiled_client_certs.clone();
-        send_config.limits.timeout =
-            Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600));
-        send_config.limits.streaming_timeout = streaming_timeout;
+        let mut send_config = self.build_tool_send_config_for_url(&workspace, &request.url)?;
         send_config.http.version = Some(request.version);
         send_config.http.update_content_length = repeater_settings.update_content_length;
         send_config.http.normalize_http1_line_endings =

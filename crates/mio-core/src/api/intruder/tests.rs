@@ -312,7 +312,7 @@ fn admission_rejects_invalid_identity_target_and_resource_settings() {
         invalid.draft.revision = revision;
         assert!(invalid.validate().is_err());
     }
-    for concurrent in [0, 17, u16::MAX] {
+    for concurrent in [0, crate::MAX_INTRUDER_CONCURRENT_REQUESTS + 1, u16::MAX] {
         let mut invalid = spec();
         invalid.max_concurrent_requests = concurrent;
         assert!(invalid.validate().is_err());
@@ -327,7 +327,7 @@ fn admission_rejects_invalid_identity_target_and_resource_settings() {
 #[test]
 fn input_and_output_limits_are_shared_with_plan_construction() {
     let mut boundary = spec();
-    boundary.max_concurrent_requests = 16;
+    boundary.max_concurrent_requests = crate::MAX_INTRUDER_CONCURRENT_REQUESTS;
     boundary.request_timeout_ms = 300_000;
     boundary.revision = i64::MAX as u64;
     boundary.draft.revision = i64::MAX as u64;

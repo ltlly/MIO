@@ -268,7 +268,7 @@ impl SequencerView {
         let concurrency = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(DEFAULT_SEQUENCER_CONCURRENCY.to_string())
-                .placeholder("1–16")
+                .placeholder("1–64")
         });
 
         let mut subscriptions = Vec::new();
@@ -405,7 +405,7 @@ impl SequencerView {
                 }
                 let escaped = escape_sequencer_regex_literal(&name);
                 let pattern = format!(
-                    r#"(?is)<input\b[^>]*\bname\s*=\s*["']?{escaped}["']?[^>]*\bvalue\s*=\s*["']([^"'<>]+)["']"#
+                    r#"(?is)<input\b(?:[^>]*\bname\s*=\s*["']?{escaped}["']?[^>]*\bvalue\s*=\s*["']([^"'<>]+)["']|[^>]*\bvalue\s*=\s*["']([^"'<>]+)["'][^>]*\bname\s*=\s*["']?{escaped}["']?)"#
                 );
                 Ok(SequencerTokenLocation::Regex { pattern })
             }

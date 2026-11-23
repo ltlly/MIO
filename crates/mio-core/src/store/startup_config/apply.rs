@@ -203,6 +203,12 @@ impl crate::store::MetadataRepo<&mut ProjectStore> {
                     workspace.proxy_messages = messages;
                     workspace_changed = true;
                 }
+                if let Some(auto_add) = config.ssl_pass_through_auto_add_on_failure
+                    && workspace.proxy_messages.ssl_pass_through_auto_add_on_failure != auto_add
+                {
+                    workspace.proxy_messages.ssl_pass_through_auto_add_on_failure = auto_add;
+                    workspace_changed = true;
+                }
                 if let Some(ssl_rules) = &config.ssl_pass_through_rules
                     && &workspace.ssl_pass_through_rules != ssl_rules
                 {

@@ -97,9 +97,11 @@ impl ScopeRule {
             if parsed.port_or_known_default() != Some(pat_port) {
                 return false;
             }
-            return host_lower == pat_host || host_lower.ends_with(&format!(".{pat_host}"));
+            return host_lower == pat_host
+                || (self.include_subdomains && host_lower.ends_with(&format!(".{pat_host}")));
         }
-        host_lower == pat_lower || host_lower.ends_with(&format!(".{pat_lower}"))
+        host_lower == pat_lower
+            || (self.include_subdomains && host_lower.ends_with(&format!(".{pat_lower}")))
     }
 }
 
@@ -157,6 +159,13 @@ impl TargetScope {
                 ("File", rule.file.trim()),
             ] {
                 if !pat.is_empty() {
+                    if label == "Host"
+                        && crate::http::ip_range::parse_cidr_or_ip_range(pat)
+                            .map_err(|err| anyhow::anyhow!("高级 Scope Host 网段无效：{err}"))?
+                            .is_some()
+                    {
+                        continue;
+                    }
                     regex::RegexBuilder::new(pat)
                         .case_insensitive(true)
                         .size_limit(256 * 1024)
@@ -310,11 +319,17 @@ impl AdvancedScopeRule {
         };
         let host_pat = self.host.trim();
         if !host_pat.is_empty() {
-            let Some(re) = cached_scope_regex(host_pat) else {
-                return false;
-            };
-            if !re.is_match(host) {
-                return false;
+            if let Ok(Some(range)) = crate::http::ip_range::parse_cidr_or_ip_range(host_pat) {
+                if !range.matches_host(host) {
+                    return false;
+                }
+            } else {
+                let Some(re) = cached_scope_regex(host_pat) else {
+                    return false;
+                };
+                if !re.is_match(host) {
+                    return false;
+                }
             }
         }
         let port_pattern = self.port.trim();

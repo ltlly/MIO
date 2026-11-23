@@ -1,11 +1,16 @@
-use std::{net::SocketAddr, path::Path};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+};
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::CheckboxState;
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{Column, TableDelegate};
 use gpui_kit::{Bounds, PathPromptOptions, WindowOptions, size};
 use mio_core::{MAX_CLIENT_CERT_BYTES, ProxyListenerCertMode, ProxyListenerConfig, Uuid};
@@ -27,20 +32,27 @@ fn read_bounded_pem_text(path: &Path, label: &str) -> Result<String, String> {
     Ok(text)
 }
 
-fn parse_loopback_listener(address: &str) -> Result<SocketAddr, String> {
+fn parse_listener_address(address: &str) -> Result<SocketAddr, String> {
     let address = address.trim();
     let address = if let Ok(port) = address.parse::<u16>() {
         format!("127.0.0.1:{port}")
     } else {
         address.to_owned()
     };
-    let listen: SocketAddr = address.parse().map_err(|_| {
-        "监听地址须包含 IP 和端口，例如 127.0.0.1:8080；端口 0 自动选择空闲端口。".to_owned()
-    })?;
-    if !listen.ip().is_loopback() {
-        return Err("当前 Proxy 只允许 loopback 监听，避免对外暴露代理。".into());
-    }
-    Ok(listen)
+    address.parse().map_err(|_| {
+        "监听地址须为端口或 IP:端口（如 8080、127.0.0.1:8080、0.0.0.0:8080）；端口 0 自动选择空闲端口。".to_owned()
+    })
+}
+
+fn next_available_listener_port(existing: &[ProxyListenerConfig]) -> u16 {
+    let used: std::collections::HashSet<u16> = existing
+        .iter()
+        .filter_map(|item| item.bind_address.trim().parse::<SocketAddr>().ok())
+        .map(|addr| addr.port())
+        .collect();
+    (8081..=u16::MAX)
+        .find(|port| !used.contains(port))
+        .unwrap_or(8081)
 }
 
 pub(crate) struct ProxyListenersTable {
@@ -219,10 +231,13 @@ impl TableDelegate for ProxyListenersTable {
                 .into_any_element()
             }
             1 => {
-                let text = if let Some(active) = active_address {
-                    format!("{} (运行中 {})", item.bind_address, active)
-                } else {
-                    item.bind_address.clone()
+                let text = match active_address {
+                    Some(active)
+                        if item.bind_address.trim().parse::<SocketAddr>().ok() != Some(active) =>
+                    {
+                        format!("{} (实际 {active})", item.bind_address)
+                    }
+                    _ => item.bind_address.clone(),
                 };
                 div().px(px(6.)).truncate().child(text).into_any_element()
             }
@@ -289,8 +304,10 @@ fn listener_column_text(item: &ProxyListenerConfig, column: usize) -> String {
         3 => {
             if item.redirect_to_host.is_empty() && item.redirect_to_port.is_none() {
                 String::new()
+            } else if let Some(port) = item.redirect_to_port {
+                format!("{}:{port}", item.redirect_to_host)
             } else {
-                format!("{}:{}", item.redirect_to_host, item.redirect_to_port.map(|port| port.to_string()).unwrap_or_default())
+                item.redirect_to_host.clone()
             }
         }
         4 => item.certificate_mode.label().into(),
@@ -343,7 +360,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let listen = parse_loopback_listener(&config.bind_address)?;
+        let listen = parse_listener_address(&config.bind_address)?;
         let mut next = self.workspace.effective_proxy_listeners();
         if config.enabled
             && listen.port() != 0
@@ -369,7 +386,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let listen = parse_loopback_listener(&config.bind_address)?;
+        let listen = parse_listener_address(&config.bind_address)?;
         let mut next = self.workspace.effective_proxy_listeners();
         if index >= next.len() {
             return Err("待编辑的监听器已不存在。".into());
@@ -410,10 +427,10 @@ impl Workbench {
             return Ok(());
         }
         let listeners = self.workspace.effective_proxy_listeners();
-        let Some(item) = listeners.get(index) else {
+        let Some(item) = listeners.get(index).cloned() else {
             return Err("待操作的监听器已不存在。".into());
         };
-        let project = project.unwrap();
+        let project_key = project.unwrap();
         if (self.proxy_address.is_some() || !self.proxy_listeners_bound.is_empty()) && !enabled {
             let first_enabled_idx = listeners.iter().position(|entry| entry.enabled);
             let bound_id = self
@@ -431,7 +448,15 @@ impl Workbench {
                         .parse::<SocketAddr>()
                         .is_ok_and(|address| self.proxy_address == Some(address)));
             if stop_single {
-                self.stop_proxy_listener(bound_id.unwrap_or(item.id), cx);
+                if !self.workspace.proxy_listeners.is_empty()
+                    && self.workspace.proxy_listeners.get(index).is_some_and(|l| l.enabled)
+                {
+                    let mut next = listeners;
+                    next[index].enabled = false;
+                    self.apply_proxy_listeners_change(Some(project_key), next, window, cx)?;
+                } else {
+                    self.stop_proxy_listener(bound_id.unwrap_or(item.id), cx);
+                }
                 return Ok(());
             }
             if let Some(cancel) = &self.proxy_cancel {
@@ -439,19 +464,26 @@ impl Workbench {
             }
             self.proxy_busy = true;
             self.status = "正在停止 Proxy；等待后台确认。".into();
-            if self.enqueue(Command::StopProxy { project }, cx) {
+            if self.enqueue(Command::StopProxy { project: project_key }, cx) {
                 self.proxy_busy = true;
             }
             cx.notify();
             return Ok(());
         }
-        if self.proxy_address.is_none()
-            && self.proxy_listeners_bound.is_empty()
-            && enabled
-            && (self.workspace.proxy_listeners.is_empty() || item.enabled)
-        {
-            let listen = parse_loopback_listener(&item.bind_address)?;
-            if self.enqueue(Command::StartProxy { project, listen }, cx) {
+        if self.proxy_address.is_none() && self.proxy_listeners_bound.is_empty() && enabled {
+            let listen = parse_listener_address(&item.bind_address)?;
+            if !self.workspace.proxy_listeners.is_empty() && !item.enabled {
+                let mut next = listeners;
+                next[index].enabled = true;
+                self.apply_proxy_listeners_change(Some(project_key), next, window, cx)?;
+            }
+            if self.enqueue(
+                Command::StartProxy {
+                    project: project_key,
+                    listen,
+                },
+                cx,
+            ) {
                 self.proxy_busy = true;
             }
             cx.notify();
@@ -459,7 +491,7 @@ impl Workbench {
         }
         let mut next = listeners;
         next[index].enabled = enabled;
-        self.apply_proxy_listeners_change(Some(project), next, window, cx)
+        self.apply_proxy_listeners_change(Some(project_key), next, window, cx)
     }
 
     pub(in crate::workbench) fn remove_proxy_listener(
@@ -487,11 +519,51 @@ impl Workbench {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenerBindMode {
+    Loopback,
+    AllInterfaces,
+    Specific,
+}
+
+#[derive(Clone)]
+struct SpecificBindChoice {
+    ip: String,
+    label: String,
+}
+
+impl SelectItem for SpecificBindChoice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &String {
+        &self.ip
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!(
+                "proxy-listener-specific-choice-{}",
+                self.ip
+            )))
+            .test_support()
+            .role(Role::Label)
+            .aria_label(self.label.clone())
+            .child(self.label.clone())
+    }
+}
+
 pub(super) struct ProxyListenerEditor {
     owner: WeakEntity<Workbench>,
     project: Option<ProjectKey>,
     index: Option<usize>,
     address: Entity<InputState>,
+    bind_mode: ListenerBindMode,
+    specific_ip: Entity<InputState>,
+    specific_ip_select: Entity<SelectState<Vec<SpecificBindChoice>>>,
     enabled: bool,
     config: ProxyListenerConfig,
     tab: u8,
@@ -502,6 +574,7 @@ pub(super) struct ProxyListenerEditor {
     custom_key_pem: Entity<EditorState>,
     error: Option<String>,
     focus: FocusHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ProxyListenerEditor {
@@ -542,12 +615,67 @@ impl ProxyListenerEditor {
         window.on_window_should_close(cx, |_, _| true);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+
+        let parsed_addr = item.bind_address.trim().parse::<SocketAddr>().ok();
+        let initial_port_or_addr = parsed_addr
+            .map(|addr| addr.port().to_string())
+            .unwrap_or_else(|| item.bind_address.clone());
+        let bind_mode = match parsed_addr.map(|addr| addr.ip()) {
+            Some(IpAddr::V4(v4)) if v4 == Ipv4Addr::LOCALHOST => ListenerBindMode::Loopback,
+            Some(IpAddr::V4(v4)) if v4 == Ipv4Addr::UNSPECIFIED => ListenerBindMode::AllInterfaces,
+            Some(_) => ListenerBindMode::Specific,
+            None => ListenerBindMode::Loopback,
+        };
+        let initial_specific_ip = parsed_addr
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_owned());
+
         let address =
-            cx.new(|cx| InputState::new(window, cx).default_value(item.bind_address.clone()));
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_port_or_addr));
         address.update(cx, |input, cx| {
             input.select_all(window, cx);
             input.focus(window, cx);
         });
+        let specific_ip =
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_specific_ip.clone()));
+
+        let choices: Vec<SpecificBindChoice> = mio_core::list_local_bind_addresses()
+            .into_iter()
+            .map(|entry| {
+                let ip = entry.ip.to_string();
+                let label = match entry.interface {
+                    Some(iface) => format!("{ip} ({iface})"),
+                    None => ip.clone(),
+                };
+                SpecificBindChoice { ip, label }
+            })
+            .collect();
+        let selected_choice = choices
+            .iter()
+            .position(|c| c.ip == initial_specific_ip)
+            .map(IndexPath::new);
+        let specific_ip_select = cx.new(|cx| SelectState::new(choices, selected_choice, window, cx));
+        let select_sub = cx.subscribe_in(&specific_ip_select, window, |this, _, event, window, cx| {
+            if let SelectEvent::Confirm(Some(ip)) = event {
+                let ip = ip.clone();
+                this.bind_mode = ListenerBindMode::Specific;
+                this.specific_ip
+                    .update(cx, |input, cx| input.set_value(ip, window, cx));
+                this.error = None;
+                cx.notify();
+            }
+        });
+        let addr_sub = cx.subscribe_in(&address, window, |_, _, event, _, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let spec_sub = cx.subscribe_in(&specific_ip, window, |_, _, event, _, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                cx.notify();
+            }
+        });
+
         let custom_cert_pem = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("plaintext")
@@ -575,6 +703,9 @@ impl ProxyListenerEditor {
             project,
             index,
             address,
+            bind_mode,
+            specific_ip,
+            specific_ip_select,
             enabled: item.enabled,
             redirect_host: cx.new(|cx| InputState::new(window, cx).default_value(item.redirect_to_host.clone())),
             redirect_port: cx.new(|cx| InputState::new(window, cx).default_value(item.redirect_to_port.map(|port| port.to_string()).unwrap_or_default())),
@@ -585,6 +716,7 @@ impl ProxyListenerEditor {
             tab: 0,
             error: None,
             focus,
+            _subscriptions: vec![select_sub, addr_sub, spec_sub],
         }
     }
 
@@ -667,8 +799,31 @@ impl ProxyListenerEditor {
 
     fn read_config(&self, window: &mut Window, cx: &mut Context<Self>) -> Result<ProxyListenerConfig, String> {
         let mut config = self.config.clone();
-        let address = editing::input_snapshot(&self.address, window, cx).map_err(str::to_owned)?;
-        config.bind_address = parse_loopback_listener(&address)?.to_string();
+        let raw_addr = editing::input_snapshot(&self.address, window, cx)
+            .map_err(str::to_owned)?
+            .trim()
+            .to_owned();
+        let bind_socket = if let Ok(full_addr) = raw_addr.parse::<SocketAddr>() {
+            full_addr
+        } else {
+            let port = raw_addr.parse::<u16>().map_err(|_| {
+                "监听端口必须是 0 到 65535 之间的整数，或输入完整 IP:端口（如 0.0.0.0:8080）。".to_owned()
+            })?;
+            match self.bind_mode {
+                ListenerBindMode::Loopback => SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                ListenerBindMode::AllInterfaces => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+                ListenerBindMode::Specific => {
+                    let ip_raw = editing::input_snapshot(&self.specific_ip, window, cx)
+                        .map_err(str::to_owned)?;
+                    let clean_ip = ip_raw.trim().trim_matches(['[', ']']);
+                    let ip: IpAddr = clean_ip.parse().map_err(|_| {
+                        "指定绑定地址必须是有效的 IPv4 或 IPv6 地址（例如 127.0.0.1 或 ::1）。".to_owned()
+                    })?;
+                    SocketAddr::new(ip, port)
+                }
+            }
+        };
+        config.bind_address = bind_socket.to_string();
         config.enabled = self.enabled;
         config.redirect_to_host = editing::input_snapshot(&self.redirect_host, window, cx).map_err(str::to_owned)?.trim().to_owned();
         let port = editing::input_snapshot(&self.redirect_port, window, cx).map_err(str::to_owned)?;
@@ -691,61 +846,179 @@ impl ProxyListenerEditor {
         config.custom_cert_pem = (!cert_pem.is_empty()).then_some(cert_pem);
         config.custom_key_pem = (!key_pem.is_empty()).then_some(key_pem);
         if !config.redirect_to_host.is_empty() {
-            mio_core::ClientCertificateRule::validate_host_pattern(&config.redirect_to_host).map_err(|error| error.to_string())?;
-            if config.redirect_to_host.contains('*') {
-                return Err("重定向主机必须为具体主机名或 IP 地址。".into());
-            }
+            config.redirect_to_host = mio_core::validate_redirect_host(&config.redirect_to_host)
+                .map_err(|error| error.to_string())?;
         }
         if config.certificate_mode == ProxyListenerCertMode::SpecificHostname {
-            mio_core::ClientCertificateRule::validate_host_pattern(&config.specific_cert_hostname).map_err(|error| error.to_string())?;
+            mio_core::validate_listener_specific_hostname(&config.specific_cert_hostname)
+                .map_err(|error| error.to_string())?;
         }
-        if config.certificate_mode == ProxyListenerCertMode::CustomCertificate
-            && config.custom_cert_pem.is_none()
-        {
-            return Err("使用自定义证书模式时，请提供证书 PEM 内容或选择 PEM 文件。".into());
+        if config.certificate_mode == ProxyListenerCertMode::CustomCertificate {
+            let Some(cert) = config.custom_cert_pem.as_deref() else {
+                return Err("使用自定义证书模式时，请提供证书 PEM 内容或选择 PEM 文件。".into());
+            };
+            mio_core::validate_listener_custom_pem(
+                cert,
+                config.custom_key_pem.as_deref().unwrap_or_default(),
+            )
+            .map_err(|error| error.to_string())?;
         }
         Ok(config)
     }
 
-    fn choose_bind_address(&mut self, ipv6: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let address = match editing::input_snapshot(&self.address, window, cx) {
-            Ok(address) => address,
-            Err(error) => {
-                self.error = Some(error.into());
-                cx.notify();
-                return;
-            }
-        };
-        match parse_loopback_listener(&address) {
-            Ok(address) => {
-                let host = if ipv6 { "[::1]" } else { "127.0.0.1" };
-                self.address.update(cx, |input, cx| input.set_value(format!("{host}:{}", address.port()), window, cx));
-                cx.notify();
-            }
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-            }
+    fn effective_is_non_loopback(&self, cx: &App) -> bool {
+        let raw = self.address.read(cx).value();
+        if let Ok(full_addr) = raw.trim().parse::<SocketAddr>() {
+            return !full_addr.ip().is_loopback();
+        }
+        match self.bind_mode {
+            ListenerBindMode::Loopback => false,
+            ListenerBindMode::AllInterfaces => true,
+            ListenerBindMode::Specific => self
+                .specific_ip
+                .read(cx)
+                .value()
+                .trim()
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| !ip.is_loopback()),
         }
     }
 
+    fn choose_bind_mode(
+        &mut self,
+        mode: ListenerBindMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(address) = editing::input_snapshot(&self.address, window, cx)
+            && let Ok(full_addr) = address.trim().parse::<SocketAddr>()
+        {
+            self.address
+                .update(cx, |input, cx| input.set_value(full_addr.port().to_string(), window, cx));
+        }
+        self.bind_mode = mode;
+        self.error = None;
+        cx.notify();
+    }
+
     fn render_tab_content(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut body = div().flex().flex_col().gap(px(12.));
+        let mut body = div().flex().flex_col().gap(px(10.));
         let e1 = cx.entity();
         let e2 = cx.entity();
         let e3 = cx.entity();
         let e4 = cx.entity();
         match self.tab {
             0 => {
-                let ipv6 = self.address.read(cx).value().starts_with('[');
+                let non_loopback = self.effective_is_non_loopback(cx);
+                let specific = self.bind_mode == ListenerBindMode::Specific;
+                let r_loop = cx.entity();
+                let r_all = cx.entity();
+                let r_spec = cx.entity();
                 body = body
                     .child(listener_input_row("Bind to port:", "proxy-listener-editor-address", &self.address))
-                    .child("输入端口或完整回环监听地址；端口 0 自动分配空闲端口。")
+                    .child(
+                        div()
+                            .text_size(theme::scaled_px(12.))
+                            .text_color(theme::muted_foreground())
+                            .child("输入监听端口（0 自动分配空闲端口），或直接输入完整 IP:端口。"),
+                    )
                     .child("Bind to address:")
-                    .child(settings_radio("proxy-listener-bind-loopback", "Loopback only (127.0.0.1)", !ipv6, true, window, cx)
-                        .on_click(cx.listener(|this, _, window, cx| this.choose_bind_address(false, window, cx))))
-                    .child(settings_radio("proxy-listener-bind-ipv6", "IPv6 Loopback ([::1])", ipv6, true, window, cx)
-                        .on_click(cx.listener(|this, _, window, cx| this.choose_bind_address(true, window, cx))))
+                    .child(
+                        settings_radio(
+                            "proxy-listener-bind-loopback",
+                            "Loopback only (127.0.0.1)",
+                            self.bind_mode == ListenerBindMode::Loopback,
+                            true,
+                            window,
+                            cx,
+                        )
+                        .on_change(move |checked, _, window, cx| {
+                            if checked {
+                                r_loop.update(cx, |this, cx| {
+                                    this.choose_bind_mode(ListenerBindMode::Loopback, window, cx)
+                                });
+                            }
+                        }),
+                    )
+                    .child(
+                        settings_radio(
+                            "proxy-listener-bind-all",
+                            "All interfaces (0.0.0.0)",
+                            self.bind_mode == ListenerBindMode::AllInterfaces,
+                            true,
+                            window,
+                            cx,
+                        )
+                        .on_change(move |checked, _, window, cx| {
+                            if checked {
+                                r_all.update(cx, |this, cx| {
+                                    this.choose_bind_mode(ListenerBindMode::AllInterfaces, window, cx)
+                                });
+                            }
+                        }),
+                    )
+                    .child(
+                        settings_radio(
+                            "proxy-listener-bind-specific",
+                            "Specific address:",
+                            specific,
+                            true,
+                            window,
+                            cx,
+                        )
+                        .on_change(move |checked, _, window, cx| {
+                            if checked {
+                                r_spec.update(cx, |this, cx| {
+                                    this.choose_bind_mode(ListenerBindMode::Specific, window, cx)
+                                });
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .pl(px(24.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .w(theme::scaled_px(240.).max(px(210.)))
+                                    .flex_shrink_0()
+                                    .child(
+                                        Select::new(&self.specific_ip_select)
+                                            .id("proxy-listener-specific-select")
+                                            .small()
+                                            .w_full()
+                                            .disabled(!specific),
+                                    ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.specific_ip)
+                                        .id("proxy-listener-specific-address")
+                                        .aria_label("指定绑定 IP 地址")
+                                        .small()
+                                        .disabled(!specific),
+                                ),
+                            ),
+                    )
+                    .when(non_loopback, |this| {
+                        this.child(
+                            div()
+                                .id("proxy-listener-non-loopback-warning")
+                                .test_support()
+                                .role(Role::Status)
+                                .p(px(8.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(rgb(if theme::is_dark() { 0x6b5320 } else { 0xe5c07b }))
+                                .bg(rgb(if theme::is_dark() { 0x3b2f13 } else { 0xfff8e1 }))
+                                .text_color(rgb(if theme::is_dark() { 0xf5d68a } else { 0x6b4f00 }))
+                                .text_size(theme::scaled_px(12.))
+                                .child("注意：绑定非回环地址（如 0.0.0.0 或局域网 IP）后，同一网络内的其他设备可连接到此代理监听器。"),
+                        )
+                    })
                     .child(indexed_checkbox("proxy-listener-editor-enabled", "Enable listener", self.enabled, true)
                         .on_change(move |state, _, _, cx| {
                             e1.update(cx, |this, cx| {
@@ -780,13 +1053,35 @@ impl ProxyListenerEditor {
                     ("proxy-listener-cert-fixed-host", "Generate a CA-signed certificate with a specific hostname", ProxyListenerCertMode::SpecificHostname),
                     ("proxy-listener-cert-custom", "Use a custom certificate", ProxyListenerCertMode::CustomCertificate),
                 ] {
+                    let cert_ent = cx.entity();
                     body = body.child(settings_radio(id, label, self.config.certificate_mode == mode, true, window, cx)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.config.certificate_mode = mode;
-                            cx.notify();
-                        })));
+                        .on_change(move |checked, _, _, cx| {
+                            if checked {
+                                cert_ent.update(cx, |this, cx| {
+                                    this.config.certificate_mode = mode;
+                                    cx.notify();
+                                });
+                            }
+                        }));
                 }
-                body = body.child(listener_input_row("Hostname:", "proxy-listener-cert-hostname", &self.cert_hostname));
+                let specific_host_enabled =
+                    self.config.certificate_mode == ProxyListenerCertMode::SpecificHostname;
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(div().w(theme::scaled_px(140.)).flex_shrink_0().child("Hostname:"))
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Input::new(&self.cert_hostname)
+                                    .id("proxy-listener-cert-hostname")
+                                    .aria_label("Hostname:")
+                                    .small()
+                                    .disabled(!specific_host_enabled),
+                            ),
+                        ),
+                );
                 if self.config.certificate_mode == ProxyListenerCertMode::CustomCertificate {
                     body = body
                         .child(
@@ -878,11 +1173,16 @@ impl ProxyListenerEditor {
                     ("proxy-listener-tls13", "TLSv1.3 only", "TLSv1.3 only"),
                     ("proxy-listener-tls12", "TLSv1.2 only", "TLSv1.2 only"),
                 ] {
+                    let tls_ent = cx.entity();
                     body = body.child(settings_radio(id, label, self.config.tls_protocols_label == value, true, window, cx)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.config.tls_protocols_label = value.into();
-                            cx.notify();
-                        })));
+                        .on_change(move |checked, _, _, cx| {
+                            if checked {
+                                tls_ent.update(cx, |this, cx| {
+                                    this.config.tls_protocols_label = value.into();
+                                    cx.notify();
+                                });
+                            }
+                        }));
                 }
                 body = body.child(indexed_checkbox("proxy-listener-http2", "Support HTTP/2", self.config.enable_http2, true)
                     .on_change(move |state, _, _, cx| {
@@ -1026,10 +1326,11 @@ impl Settings {
             };
             item
         } else {
+            let port = next_available_listener_port(&self.state.proxy_listeners);
             ProxyListenerConfig {
                 id: Uuid::new_v4(),
                 enabled: true,
-                bind_address: "127.0.0.1:8081".into(),
+                bind_address: format!("127.0.0.1:{port}"),
                 ..ProxyListenerConfig::default()
             }
         };
@@ -1040,8 +1341,8 @@ impl Settings {
             return;
         };
         let visible = display.visible_bounds();
-        let content_w = theme::scaled_px(620.).max(px(620.));
-        let content_h = theme::scaled_px(480.).max(px(480.));
+        let content_w = theme::scaled_px(640.).max(px(640.));
+        let content_h = theme::scaled_px(520.).max(px(520.));
         let raw_h = if cfg!(test) {
             content_h
         } else {

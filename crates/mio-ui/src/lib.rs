@@ -162,6 +162,8 @@ gpui_kit::actions!(
         AddToScope,
         ExcludeFromScope,
         AddHttpNotes,
+        ClearHighlight,
+        CloseOtherTabs,
         SendRequest,
         CancelRequest,
         NewTab,

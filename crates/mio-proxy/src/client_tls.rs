@@ -93,6 +93,8 @@ impl fmt::Debug for ClientCertificateRule {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientCertificateSummary {
     pub subject_hint: String,
+    #[serde(default)]
+    pub issuer_hint: String,
     pub cert_count: usize,
 }
 

@@ -463,6 +463,106 @@ pub(in crate::workbench) fn generate_csrf_poc_html(url: &str, raw_request: &[u8]
             .replace('<', "&lt;")
             .replace('>', "&gt;")
     }
+    fn percent_decode_form_component(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    let hi = (bytes[i + 1] as char).to_digit(16);
+                    let lo = (bytes[i + 2] as char).to_digit(16);
+                    if let (Some(hi), Some(lo)) = (hi, lo) {
+                        out.push(((hi << 4) | lo) as u8);
+                        i += 3;
+                    } else {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+    fn extract_multipart_boundary(raw_ct: &str) -> Option<String> {
+        for segment in raw_ct.split(';').skip(1) {
+            let trimmed = segment.trim();
+            if let Some((key, value)) = trimmed.split_once('=')
+                && key.trim().eq_ignore_ascii_case("boundary")
+            {
+                let v = value.trim();
+                let unquoted = v
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                    .unwrap_or(v);
+                if !unquoted.is_empty() {
+                    return Some(unquoted.to_owned());
+                }
+            }
+        }
+        None
+    }
+    fn extract_disposition_name(header_val: &str) -> Option<String> {
+        for segment in header_val.split(';') {
+            let trimmed = segment.trim();
+            if let Some((key, value)) = trimmed.split_once('=')
+                && key.trim().eq_ignore_ascii_case("name")
+            {
+                let v = value.trim();
+                let unquoted = v
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                    .unwrap_or(v);
+                return Some(unquoted.to_owned());
+            }
+        }
+        None
+    }
+    fn parse_multipart_fields(body: &str, boundary: &str) -> Vec<(String, String)> {
+        let delimiter = format!("--{boundary}");
+        let mut fields = Vec::new();
+        for part in body.split(&delimiter).skip(1) {
+            if part.starts_with("--") {
+                break;
+            }
+            let part = part
+                .strip_prefix("\r\n")
+                .or_else(|| part.strip_prefix('\n'))
+                .unwrap_or(part);
+            let Some((part_head, part_body)) =
+                part.split_once("\r\n\r\n").or_else(|| part.split_once("\n\n"))
+            else {
+                continue;
+            };
+            let mut field_name = None;
+            for line in part_head.lines() {
+                if let Some((hk, hv)) = line.split_once(':')
+                    && hk.trim().eq_ignore_ascii_case("content-disposition")
+                {
+                    field_name = extract_disposition_name(hv);
+                    break;
+                }
+            }
+            if let Some(name) = field_name {
+                let value = part_body
+                    .strip_suffix("\r\n")
+                    .or_else(|| part_body.strip_suffix('\n'))
+                    .unwrap_or(part_body);
+                fields.push((name, value.to_owned()));
+            }
+        }
+        fields
+    }
     let text = String::from_utf8_lossy(raw_request);
     let (head, body) = text
         .split_once("\r\n\r\n")
@@ -475,16 +575,17 @@ pub(in crate::workbench) fn generate_csrf_poc_html(url: &str, raw_request: &[u8]
     let form_method = if raw_method == "GET" { "GET" } else { "POST" };
     let target_path = parts.next().unwrap_or("/");
     let mut host = String::new();
-    let mut content_type = String::new();
+    let mut raw_content_type = String::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             if k.trim().eq_ignore_ascii_case("host") {
                 host = v.trim().to_owned();
             } else if k.trim().eq_ignore_ascii_case("content-type") {
-                content_type = v.trim().to_ascii_lowercase();
+                raw_content_type = v.trim().to_owned();
             }
         }
     }
+    let content_type = raw_content_type.to_ascii_lowercase();
     let action_url = if !url.trim().is_empty() {
         url.trim().to_owned()
     } else if target_path.starts_with("http://") || target_path.starts_with("https://") {
@@ -499,10 +600,12 @@ pub(in crate::workbench) fn generate_csrf_poc_html(url: &str, raw_request: &[u8]
         if let Some((_, query)) = action_url.split_once('?') {
             for pair in query.split('&').filter(|p| !p.is_empty()) {
                 let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                let dec_k = percent_decode_form_component(k);
+                let dec_v = percent_decode_form_component(v);
                 inputs.push_str(&format!(
                     "      <input type=\"hidden\" name=\"{}\" value=\"{}\" />\n",
-                    esc_attr(k),
-                    esc_attr(v)
+                    esc_attr(&dec_k),
+                    esc_attr(&dec_v)
                 ));
             }
         }
@@ -517,19 +620,32 @@ pub(in crate::workbench) fn generate_csrf_poc_html(url: &str, raw_request: &[u8]
             ),
         )
     } else if content_type.contains("multipart/form-data") {
-        (
-            "multipart/form-data",
+        let parsed = extract_multipart_boundary(&raw_content_type)
+            .map(|boundary| parse_multipart_fields(body, &boundary))
+            .unwrap_or_default();
+        let inputs = if parsed.is_empty() {
             format!(
                 "      <input type=\"hidden\" name=\"payload\" value=\"{}\" />\n",
                 esc_attr(body.trim())
-            ),
-        )
+            )
+        } else {
+            let mut buf = String::new();
+            for (name, val) in parsed {
+                buf.push_str(&format!(
+                    "      <input type=\"hidden\" name=\"{}\" value=\"{}\" />\n",
+                    esc_attr(&name),
+                    esc_attr(&val)
+                ));
+            }
+            buf
+        };
+        ("multipart/form-data", inputs)
     } else {
         let mut inputs = String::new();
         for pair in body.trim().split('&').filter(|p| !p.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let dec_k = k.replace('+', " ");
-            let dec_v = v.replace('+', " ");
+            let dec_k = percent_decode_form_component(k);
+            let dec_v = percent_decode_form_component(v);
             inputs.push_str(&format!(
                 "      <input type=\"hidden\" name=\"{}\" value=\"{}\" />\n",
                 esc_attr(&dec_k),
@@ -554,4 +670,28 @@ pub(in crate::workbench) fn generate_csrf_poc_html(url: &str, raw_request: &[u8]
         enctype = enctype,
         inputs = inputs_html
     )
+}
+
+#[cfg(test)]
+mod csrf_poc_tests {
+    use super::generate_csrf_poc_html;
+
+    #[test]
+    fn generates_percent_decoded_get_and_urlencoded_and_multipart_csrf_pocs() {
+        let get_req = b"GET /transfer?user%5Bname%5D=alice+smith&amount=100%25 HTTP/1.1\r\nHost: example.invalid\r\n\r\n";
+        let get_html = generate_csrf_poc_html("https://example.invalid/transfer?user%5Bname%5D=alice+smith&amount=100%25", get_req);
+        assert!(get_html.contains("name=\"user[name]\" value=\"alice smith\""));
+        assert!(get_html.contains("name=\"amount\" value=\"100%\""));
+
+        let post_req = b"POST /update HTTP/1.1\r\nHost: example.invalid\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nemail=a%40example.invalid&note=hello+world%21";
+        let post_html = generate_csrf_poc_html("https://example.invalid/update", post_req);
+        assert!(post_html.contains("name=\"email\" value=\"a@example.invalid\""));
+        assert!(post_html.contains("name=\"note\" value=\"hello world!\""));
+
+        let mp_req = b"POST /profile HTTP/1.1\r\nHost: example.invalid\r\nContent-Type: multipart/form-data; boundary=----MioBoundABC\r\n\r\n------MioBoundABC\r\nContent-Disposition: form-data; name=\"role\"\r\n\r\nadmin\r\n------MioBoundABC\r\nContent-Disposition: form-data; name=\"note\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nline1\r\nline2\r\n------MioBoundABC--\r\n";
+        let mp_html = generate_csrf_poc_html("https://example.invalid/profile", mp_req);
+        assert!(mp_html.contains("enctype=\"multipart/form-data\""));
+        assert!(mp_html.contains("name=\"role\" value=\"admin\""));
+        assert!(mp_html.contains("name=\"note\" value=\"line1\r\nline2\""));
+    }
 }

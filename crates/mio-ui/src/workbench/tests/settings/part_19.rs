@@ -695,6 +695,10 @@ Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(
+            window.find("settings-client-cert-remove-btn").disabled(),
+            Some(true)
+        );
+        assert_eq!(
             window
                 .find(("settings-client-cert-toggle", 0usize))
                 .checked(),
@@ -710,6 +714,10 @@ Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
 
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
+        assert_eq!(
+            window.find("settings-client-cert-remove-btn").disabled(),
+            None
+        );
         window.click("settings-client-cert-remove-btn", cx);
     })
     .unwrap();
@@ -717,4 +725,91 @@ Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
     let removed_ws = saved(&mut fixture.commands);
     assert!(removed_ws.client_certificates.is_empty());
     acknowledge(&fixture, removed_ws, cx);
+}
+
+#[gpui_kit::test]
+fn proxy_listener_editor_supports_all_interfaces_and_specific_bind_addresses(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = fixture(cx, Vec::new(), 64);
+    drain(&mut fixture.commands);
+    let settings = open_settings(&fixture, cx);
+
+    // 1. Add listener bound to All interfaces (0.0.0.0)
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-proxy", cx);
+        window.render_frame(cx);
+        window.click("proxy-listener-add", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let dlg_all = proxy_rule_dialog(settings, &fixture, cx);
+    cx.update_window(dlg_all, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("proxy-listener-non-loopback-warning").is_none());
+        window.click("proxy-listener-bind-all", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-listener-non-loopback-warning").visible());
+        window.click("proxy-listener-editor-ok", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let ws_all = saved(&mut fixture.commands);
+    assert_eq!(ws_all.proxy_listeners.len(), 2);
+    assert_eq!(ws_all.proxy_listeners[1].bind_address, "0.0.0.0:8081");
+    acknowledge(&fixture, ws_all, cx);
+
+    // 2. Add listener bound to a Specific IP address
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("proxy-listener-add", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let dlg_spec = proxy_rule_dialog(settings, &fixture, cx);
+    cx.update_window(dlg_spec, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("proxy-listener-bind-specific", cx);
+        window.render_frame(cx);
+        window.click("proxy-listener-editor-address", cx);
+        window.press(crate::kbd!("a"), cx);
+        window.input("8085", cx);
+        window.click("proxy-listener-specific-address", cx);
+        window.press(crate::kbd!("a"), cx);
+        window.input("192.0.2.10", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-listener-non-loopback-warning").visible());
+        window.click("proxy-listener-editor-ok", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let ws_spec = saved(&mut fixture.commands);
+    assert_eq!(ws_spec.proxy_listeners.len(), 3);
+    assert_eq!(ws_spec.proxy_listeners[2].bind_address, "192.0.2.10:8085");
+    acknowledge(&fixture, ws_spec, cx);
+
+    // 3. Add listener by typing full 0.0.0.0:8088 directly into Bind to port
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("proxy-listener-add", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let dlg_full = proxy_rule_dialog(settings, &fixture, cx);
+    cx.update_window(dlg_full, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("proxy-listener-editor-address", cx);
+        window.press(crate::kbd!("a"), cx);
+        window.input("0.0.0.0:8088", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-listener-non-loopback-warning").visible());
+        window.click("proxy-listener-editor-ok", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let ws_full = saved(&mut fixture.commands);
+    assert_eq!(ws_full.proxy_listeners.len(), 4);
+    assert_eq!(ws_full.proxy_listeners[3].bind_address, "0.0.0.0:8088");
+    acknowledge(&fixture, ws_full, cx);
 }

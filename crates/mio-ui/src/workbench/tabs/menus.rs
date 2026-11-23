@@ -291,15 +291,20 @@ pub(super) fn tab_menu(
         return menu;
     };
     let state = entity.read(cx);
-    let tabs = ordered_tabs(&state.workspace.tabs);
-    let Some(index) = tabs.iter().position(|tab| tab.id == id) else {
+    let Some(current_tab) = state.workspace.tabs.iter().find(|tab| tab.id == id) else {
         return menu;
     };
     let groups = state.workspace.groups.clone();
-    let left: Vec<_> = tabs[..index].iter().map(|tab| tab.id).collect();
-    let right: Vec<_> = tabs[index + 1..].iter().map(|tab| tab.id).collect();
+    let all_ordered = ordered_all_repeater_tab_ids(&state.workspace);
+    let (left, right) = match all_ordered.iter().position(|tab_id| *tab_id == id) {
+        Some(index) => (
+            all_ordered[..index].to_vec(),
+            all_ordered[index + 1..].to_vec(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     let others: Vec<_> = left.iter().chain(&right).copied().collect();
-    let current_group = tabs[index].group;
+    let current_group = current_tab.group;
     let grouped = current_group.is_some();
     let orientation = state.workspace.orientation;
     let can_restore = !state.workspace.closed.is_empty()

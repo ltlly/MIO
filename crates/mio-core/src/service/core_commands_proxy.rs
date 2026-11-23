@@ -193,6 +193,55 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn build_sessions_send_config(&self, workspace: &Workspace) -> Result<SendConfig> {
+        let upstream_tls = self
+            .preferences
+            .effective_upstream_tls(&workspace.upstream_tls)?;
+        let upstream_tls_options = workspace.upstream_tls.to_proxy_tls_options();
+        let eff_upstream = workspace
+            .upstream_proxy
+            .effective_for_runtime(&self.user_level_connections_cache);
+        let upstream_route = eff_upstream.to_route_with_tls(upstream_tls.clone())?;
+        let hostname_overrides = eff_upstream.compiled_hostname_overrides()?;
+        let request_timeout = Duration::from_secs(
+            workspace
+                .repeater_settings
+                .request_timeout_secs
+                .clamp(1, 3600),
+        );
+        let streaming_timeout = eff_upstream
+            .effective_streaming_timeout()
+            .or_else(|| workspace.repeater_settings.effective_streaming_timeout());
+        let mut cfg = SendConfig::default();
+        cfg.network.upstream_route = upstream_route;
+        cfg.network.hostname_overrides = hostname_overrides;
+        cfg.tls.trust = upstream_tls;
+        cfg.tls.options = upstream_tls_options;
+        cfg.tls.client_certificates = self.tls.compiled_client_certs.clone();
+        cfg.limits.timeout = request_timeout;
+        cfg.limits.streaming_timeout = streaming_timeout;
+        cfg.http.strip_100_continue_headers = workspace.network_http.remove_100_continue_headers;
+        cfg.http.default_to_http2 = workspace.network_http.default_to_http2;
+        cfg.auth.platform_enabled = eff_upstream.platform_auth.enabled;
+        cfg.auth.platform_rules = eff_upstream.compiled_platform_auth_rules();
+        cfg.auth.upstream_rules = eff_upstream.compiled_upstream_auth_rules();
+        Ok(cfg)
+    }
+
+    pub(crate) fn build_tool_send_config_for_url(
+        &self,
+        workspace: &Workspace,
+        url: &str,
+    ) -> Result<SendConfig> {
+        let mut cfg = self.build_sessions_send_config(workspace)?;
+        let eff_upstream = workspace
+            .upstream_proxy
+            .effective_for_runtime(&self.user_level_connections_cache);
+        cfg.network.upstream_route =
+            eff_upstream.route_for_url_with_tls(url, cfg.tls.trust.clone())?;
+        Ok(cfg)
+    }
+
     fn build_proxy_runtime_net_config(
         &mut self,
         workspace: &Workspace,
@@ -346,12 +395,6 @@ impl State {
         self.require_saved()?;
         ensure!(!self.quiesced, "正在保存并切换项目；监听未启动");
         ensure!(!self.proxy.is_running(), "Proxy 已在监听");
-        let allow_non_loopback =
-            std::env::var_os("MIO_ALLOW_NON_LOOPBACK_PROXY").is_some_and(|v| v == "1");
-        ensure!(
-            listen.ip().is_loopback() || allow_non_loopback,
-            "当前监听只允许 loopback 地址"
-        );
         let workspace = self.store.metadata().workspace()?;
         let client_certificates = self
             .compile_client_certificates(&workspace.client_certificates)
@@ -359,21 +402,9 @@ impl State {
         self.tls.compiled_client_certs = client_certificates.clone();
         let net = self.build_proxy_runtime_net_config(&workspace, true)?;
         self.sessions.runtime.sync_workspace(self.project, &workspace);
-        let mut session_send_cfg = SendConfig::default();
-        session_send_cfg.network.upstream_route = net.upstream_route.clone();
-        session_send_cfg.network.hostname_overrides = net.hostname_overrides.clone();
-        session_send_cfg.tls.trust = net.upstream_tls.clone();
-        session_send_cfg.tls.options = net.upstream_tls_options.clone();
-        session_send_cfg.tls.client_certificates = client_certificates;
-        session_send_cfg.limits.timeout = net.request_timeout;
-        session_send_cfg.limits.streaming_timeout = net.streaming_timeout;
-        session_send_cfg.http.strip_100_continue_headers =
-            workspace.network_http.remove_100_continue_headers;
-        session_send_cfg.http.default_to_http2 = workspace.network_http.default_to_http2;
-        session_send_cfg.auth.platform_enabled = net.eff_upstream.platform_auth.enabled;
-        session_send_cfg.auth.platform_rules = net.eff_upstream.compiled_platform_auth_rules();
-        session_send_cfg.auth.upstream_rules = net.eff_upstream.compiled_upstream_auth_rules();
-        self.sessions.runtime.set_proxy_send_config(session_send_cfg);
+        if let Ok(session_send_cfg) = self.build_sessions_send_config(&workspace) {
+            self.sessions.runtime.set_proxy_send_config(session_send_cfg);
+        }
         let listeners = workspace.effective_proxy_listeners();
         let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
         let enabled_listeners: Vec<ProxyListenerConfig> = if let Some(explicit) =
@@ -401,10 +432,6 @@ impl State {
             .into_iter()
             .map(|listener_cfg| {
                 let bind: SocketAddr = listener_cfg.bind_address.trim().parse()?;
-                ensure!(
-                    bind.ip().is_loopback() || allow_non_loopback,
-                    "当前监听只允许 loopback 地址"
-                );
                 Ok((listener_cfg, bind))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -467,8 +494,6 @@ impl State {
         if !self.proxy.is_running() {
             return Ok(());
         }
-        let allow_non_loopback =
-            std::env::var_os("MIO_ALLOW_NON_LOOPBACK_PROXY").is_some_and(|v| v == "1");
         let net = self.build_proxy_runtime_net_config(workspace, false)?;
 
         let current_addrs: Vec<SocketAddr> =
@@ -477,16 +502,15 @@ impl State {
         let listeners = workspace.effective_proxy_listeners();
         let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
         let desired_listeners: Vec<(ProxyListenerConfig, SocketAddr)> =
-            if has_explicit_listeners && listeners.iter().any(|l| l.enabled) {
+            if has_explicit_listeners {
+                if !listeners.iter().any(|l| l.enabled) {
+                    return self.stop_proxy().await;
+                }
                 listeners
                     .iter()
                     .filter(|l| l.enabled)
                     .map(|l| {
                         let mut addr: SocketAddr = l.bind_address.trim().parse()?;
-                        ensure!(
-                            addr.ip().is_loopback() || allow_non_loopback,
-                            "当前监听只允许 loopback 地址"
-                        );
                         if addr.port() == 0
                             && let Some(first_cur) = current_addrs.first()
                             && first_cur.ip() == addr.ip()
@@ -754,8 +778,17 @@ pub fn build_configured_browser_args(
     profile_dir: &Path,
     target_url: &str,
 ) -> Vec<String> {
+    let connect_address = if proxy_address.ip().is_unspecified() {
+        let local_ip = match proxy_address {
+            SocketAddr::V4(_) => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            SocketAddr::V6(_) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        SocketAddr::new(local_ip, proxy_address.port())
+    } else {
+        proxy_address
+    };
     vec![
-        format!("--proxy-server=http://{proxy_address}"),
+        format!("--proxy-server=http://{connect_address}"),
         "--proxy-bypass-list=<-loopback>".into(),
         format!("--ignore-certificate-errors-spki-list={spki_sha256_base64}"),
         format!("--user-data-dir={}", profile_dir.display()),
@@ -866,6 +899,16 @@ mod tests {
         assert!(args.contains(&format!("--ignore-certificate-errors-spki-list={spki}")));
         assert!(args.contains(&format!("--user-data-dir={}", dir.path().display())));
         assert_eq!(args.last().map(String::as_str), Some("https://example.com"));
+
+        let v4_all: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let args_v4_all =
+            build_configured_browser_args(v4_all, &spki, dir.path(), "https://example.invalid");
+        assert!(args_v4_all.contains(&"--proxy-server=http://127.0.0.1:8080".to_owned()));
+
+        let v6_all: SocketAddr = "[::]:8443".parse().unwrap();
+        let args_v6_all =
+            build_configured_browser_args(v6_all, &spki, dir.path(), "https://example.invalid");
+        assert!(args_v6_all.contains(&"--proxy-server=http://[::1]:8443".to_owned()));
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 use super::*;
 
-const COLLABORATOR_MAX_DECODER_BYTES: usize = 512 * 1024;
-const COLLABORATOR_MAX_COMPARER_ITEMS: usize = 32;
-const COLLABORATOR_MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+const COLLABORATOR_MAX_DECODER_BYTES: usize = 4 * 1024 * 1024;
+const COLLABORATOR_MAX_COMPARER_ITEMS: usize = 64;
+const COLLABORATOR_MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
 
 impl Workbench {
     fn collaborator_interaction_by_id(
@@ -344,6 +344,15 @@ impl Workbench {
         if self.collaborator_pane.selected_interaction == Some(interaction_id) {
             self.collaborator_pane.selected_interaction = None;
             self.collaborator_pane.raw_editor.load(b"", window, cx);
+        }
+        if let Some(project) = self.project {
+            let _ = self.enqueue(
+                Command::Collaborator(CollaboratorCommand::DeleteInteraction {
+                    project,
+                    interaction_id,
+                }),
+                cx,
+            );
         }
         self.collaborator_pane.error = None;
         self.collaborator_pane.notice = Some("已删除该 Collaborator 交互记录。".into());

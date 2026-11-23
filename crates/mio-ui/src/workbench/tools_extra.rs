@@ -32,18 +32,9 @@ mod tests_match_replace;
 type ComparerSideBlockPair = (Option<std::ops::Range<usize>>, Option<std::ops::Range<usize>>);
 
 pub(super) struct MatchReplacePane {
-    pub(super) mr_editing: Option<Uuid>,
     pub(super) mr_selected: Option<Uuid>,
-    pub(super) mr_editor_open: bool,
     pub(super) mr_dialog: Option<gpui_kit::AnyWindowHandle>,
-    pub(super) mr_error: Option<String>,
-    pub(super) mr_target_select: Entity<SelectState<Vec<&'static str>>>,
     pub(super) mr_table: Entity<TableState<WorkbenchMatchReplaceTable>>,
-    pub(super) mr_target: MatchReplaceTarget,
-    pub(super) mr_match: Entity<InputState>,
-    pub(super) mr_replace: Entity<InputState>,
-    pub(super) mr_comment: Entity<InputState>,
-    pub(super) mr_regex: bool,
     pub(super) ws_mr_selected: Option<Uuid>,
     pub(super) ws_mr_editor_open: bool,
     pub(super) ws_mr_editing: Option<Uuid>,
@@ -86,6 +77,7 @@ pub(super) struct MatchReplacePane {
     pub(super) logger_sort: LoggerSort,
     pub(super) logger_filters: logger::LoggerFilters,
     pub(super) logger_search: Entity<InputState>,
+    pub(super) logger_query_filter: String,
     pub(super) logger_query_revision: u64,
     pub(super) logger_query_cancel: Option<CancellationToken>,
     pub(super) logger_selected: Option<FlowId>,
@@ -441,6 +433,26 @@ impl HttpMatchReplaceEditor {
         let test_original = editing::new_editor(window, cx);
         let test_modified = editing::new_editor(window, cx);
         test_original.update(cx, |state, cx| state.set_value(if rule.item_type.is_response() { MR_TEST_RESPONSE } else { MR_TEST_REQUEST }, window, cx));
+        let dialog_handle = window.window_handle();
+        let rel_owner = owner.clone();
+        let rel_owner_window = owner_window;
+        let rel_prefix = prefix;
+        cx.on_release(move |_, cx| {
+            if rel_prefix == "mr" {
+                let owner = rel_owner.clone();
+                cx.defer(move |cx| {
+                    let _ = rel_owner_window.update(cx, |_, _, cx| {
+                        let _ = owner.update(cx, |view, cx| {
+                            if view.extra_tools.mr_dialog == Some(dialog_handle) {
+                                view.extra_tools.mr_dialog = None;
+                                cx.notify();
+                            }
+                        });
+                    });
+                });
+            }
+        })
+        .detach();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         window.set_window_title(if original.is_some() { "Edit match/replace rule" } else { "Add match/replace rule" });
@@ -518,10 +530,7 @@ impl HttpMatchReplaceEditor {
             let owner = self.owner.clone();
             let _ = self.owner_window.update(cx, |_, _, cx| {
                 let _ = owner.update(cx, |view, cx| {
-                    view.extra_tools.mr_editor_open = false;
-                    view.extra_tools.mr_editing = None;
                     view.extra_tools.mr_dialog = None;
-                    view.extra_tools.mr_error = None;
                     cx.notify();
                 });
             });
@@ -611,10 +620,7 @@ impl Render for HttpMatchReplaceEditor {
                 let owner = close_owner.clone();
                 let _ = close_owner_window.update(cx, |_, _, cx| {
                     let _ = owner.update(cx, |view, cx| {
-                        view.extra_tools.mr_editor_open = false;
-                        view.extra_tools.mr_editing = None;
                         view.extra_tools.mr_dialog = None;
-                        view.extra_tools.mr_error = None;
                         cx.notify();
                     });
                 });
@@ -890,21 +896,6 @@ impl TableDelegate for WorkbenchWsMatchReplaceTable {
 
 impl MatchReplacePane {
     pub(in crate::workbench) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
-        let mr_target_select = cx.new(|cx| {
-            SelectState::new(
-                MR_TARGET_LABELS.to_vec(),
-                Some(gpui_kit::component::IndexPath::new(0)),
-                window,
-                cx,
-            )
-        });
-        cx.subscribe_in(&mr_target_select, window, |this, _, event, _, cx| {
-            let SelectEvent::Confirm(value) = event;
-            if let Some(value) = value {
-                this.extra_tools.mr_target = mr_target_from_label(value);
-            }
-            cx.notify();
-        }).detach();
         let owner = cx.weak_entity();
         let mr_table = cx.new(|cx| {
             TableState::new(WorkbenchMatchReplaceTable { owner: owner.clone() }, window, cx)
@@ -916,23 +907,21 @@ impl MatchReplacePane {
                 this.extra_tools.mr_selected = rule.as_ref().map(|rule| rule.id);
                 if matches!(event, TableEvent::DoubleClickedRow(_))
                     && let Some(rule) = rule
+                    && let Some(project) = this.project
                 {
-                    this.load_http_match_replace_for_edit(&rule, window, cx);
-                    if let Some(project) = this.project {
-                        if let Some(prev) = this.extra_tools.mr_dialog.take() {
-                            let _ = prev.update(cx, |_, window, _| window.remove_window());
-                        }
-                        this.extra_tools.mr_dialog = open_http_match_replace_dialog(
-                            cx.weak_entity(),
-                            window.window_handle(),
-                            project,
-                            Some(rule),
-                            "mr",
-                            window,
-                            cx,
-                        )
-                        .ok();
+                    if let Some(prev) = this.extra_tools.mr_dialog.take() {
+                        let _ = prev.update(cx, |_, window, _| window.remove_window());
                     }
+                    this.extra_tools.mr_dialog = open_http_match_replace_dialog(
+                        cx.weak_entity(),
+                        window.window_handle(),
+                        project,
+                        Some(rule),
+                        "mr",
+                        window,
+                        cx,
+                    )
+                    .ok();
                 }
                 cx.notify();
             }
@@ -1021,18 +1010,9 @@ impl MatchReplacePane {
         })
         .detach();
         Self {
-            mr_editing: None,
             mr_selected: None,
-            mr_editor_open: false,
             mr_dialog: None,
-            mr_error: None,
-            mr_target_select,
             mr_table,
-            mr_target: MatchReplaceTarget::RequestHeader,
-            mr_match: cx.new(|cx| InputState::new(window, cx).placeholder("匹配内容或正则（留空则新增 Header）")),
-            mr_replace: cx.new(|cx| InputState::new(window, cx).placeholder("替换为（留空则删除匹配的 Header）")),
-            mr_comment: cx.new(|cx| InputState::new(window, cx).placeholder("备注")),
-            mr_regex: false,
             ws_mr_selected: None,
             ws_mr_editor_open: false,
             ws_mr_editing: None,
@@ -1076,6 +1056,7 @@ impl MatchReplacePane {
             logger_filters: logger::LoggerFilters::default(),
             logger_search: cx
                 .new(|cx| InputState::new(window, cx).placeholder("筛选 URL / 方法 / 状态码")),
+            logger_query_filter: String::new(),
             logger_query_revision: 0,
             logger_query_cancel: None,
             logger_selected: None,
@@ -1178,19 +1159,11 @@ impl Workbench {
         if let Some(dlg) = self.extra_tools.mr_dialog.take() {
             let _ = dlg.update(cx, |_, window, _| window.remove_window());
         }
-        self.extra_tools.mr_editing = None;
         self.extra_tools.mr_selected = None;
-        self.extra_tools.mr_editor_open = false;
-        self.extra_tools.mr_error = None;
-        self.extra_tools.mr_target = MatchReplaceTarget::RequestHeader;
-        self.extra_tools.mr_target_select.update(cx, |state, cx| {
-            state.set_selected_index(Some(gpui_kit::component::IndexPath::new(0)), window, cx);
-        });
         self.extra_tools.mr_table.update(cx, |table, cx| {
             table.clear_selection(cx);
             table.refresh(cx);
         });
-        self.extra_tools.mr_regex = false;
         self.extra_tools.ws_mr_selected = None;
         self.extra_tools.ws_mr_editor_open = false;
         self.extra_tools.ws_mr_editing = None;
@@ -1205,9 +1178,6 @@ impl Workbench {
         self.extra_tools.ws_mr_regex = false;
         self.extra_tools.ws_mr_error = None;
         for input in [
-            &self.extra_tools.mr_match,
-            &self.extra_tools.mr_replace,
-            &self.extra_tools.mr_comment,
             &self.extra_tools.ws_mr_match,
             &self.extra_tools.ws_mr_replace,
             &self.extra_tools.ws_mr_comment,
@@ -1251,6 +1221,7 @@ impl Workbench {
         }
         self.extra_tools.logger_query_revision =
             self.extra_tools.logger_query_revision.saturating_add(1);
+        self.extra_tools.logger_query_filter.clear();
         self.extra_tools.logger_entries.clear();
         self.extra_tools.logger_source_filter = None;
         self.extra_tools.logger_sort = LoggerSort::default();
@@ -1271,9 +1242,6 @@ impl Workbench {
         cx: &mut App,
     ) -> Result<(), &'static str> {
         for input in [
-            &self.extra_tools.mr_match,
-            &self.extra_tools.mr_replace,
-            &self.extra_tools.mr_comment,
             &self.extra_tools.ws_mr_match,
             &self.extra_tools.ws_mr_replace,
             &self.extra_tools.ws_mr_comment,

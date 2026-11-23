@@ -14,6 +14,8 @@ fn delete_and_clear_live_proxy_history_preserve_archive_repeater_and_pending_flo
     ws.validate().unwrap();
     assert_eq!(ws.effective_proxy_listeners()[0].bind_address, "127.0.0.1:8088");
     ws.proxy_listeners[0].bind_address = "0.0.0.0:8088".into();
+    ws.validate().unwrap();
+    ws.proxy_listeners[0].bind_address = "invalid-host:8088".into();
     assert!(ws.validate().is_err());
 
     let mut proxy_a = crate::store::tests::record();

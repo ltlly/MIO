@@ -57,7 +57,7 @@ pub use preferences::{
     UserMiscSettings, UserPreferences, UserPreferencesState, UserThemeMode,
     default_user_preferences_path,
 };
-pub use service::{Runtime, build_configured_browser_args};
+pub use service::{Runtime, build_configured_browser_args, is_valid_scheduled_task_trigger};
 pub use service::ai_ipc::{
     AiIpcEnvelope, AiIpcFlowDetail, AiIpcPayload, AiIpcPendingItem, AiIpcRequest,
     ENV_MIO_IPC_SOCKET, call_ai_ipc, default_ipc_socket_path, env_ipc_socket_path,
@@ -68,3 +68,7 @@ pub use sys_metrics::{
 };
 pub use updater::{UpdateInfo, UpdateStatus};
 pub use ext_archive::is_external_archive_file;
+pub use workspace::{
+    validate_destination_glob_pattern, validate_listener_custom_pem,
+    validate_listener_specific_hostname, validate_redirect_host,
+};

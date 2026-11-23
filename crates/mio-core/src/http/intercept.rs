@@ -317,7 +317,7 @@ pub(crate) fn validate_proxy_interception_shape(
                 rule.relationship,
                 RequestMatches | RequestDoesNotMatch | ResponseMatches | ResponseDoesNotMatch
             ) {
-                response && matches!(rule.match_type, CookieName | CookieValue | Body)
+                response && matches!(rule.match_type, CookieName | CookieValue | Body | Header)
             } else {
                 match (rule.match_type, rule.relationship) {
                     (Protocol, IsHttp | IsHttps) => true,

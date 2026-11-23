@@ -23,7 +23,7 @@ const HEADERS: [(&str, f32); 7] = [
     ("自动节流", 110.),
 ];
 
-const DEFAULT_POOL_FALLBACK: [&str; 7] = ["Default resource pool", "1", "10", "", "", "", "Yes"];
+const DEFAULT_POOL_FALLBACK: [&str; 7] = ["Default resource pool", "0", "10", "", "", "", "Yes"];
 
 impl PoolTable {
     fn uses_fallback(&self, cx: &App) -> bool {
@@ -944,31 +944,42 @@ impl Settings {
                                         .border_color(theme::border())
                                         .bg(theme::background())
                                         .child(
-                                            Select::new(&self.scheduled_task_action_select)
-                                                .id("settings-schedule-action-select")
-                                                .small()
+                                            div()
                                                 .w(px(120.))
-                                                .disabled(!self.state.enabled),
+                                                .flex_shrink_0()
+                                                .child(
+                                                    Select::new(&self.scheduled_task_action_select)
+                                                        .id("settings-schedule-action-select")
+                                                        .small()
+                                                        .w_full()
+                                                        .disabled(!self.state.enabled),
+                                                ),
                                         )
                                         .child(
                                             div().w(px(100.)).child(
                                                 Input::new(&self.scheduled_task_time)
                                                     .id("settings-schedule-time-input")
-                                                    .small(),
+                                                    .aria_label("定时触发时间")
+                                                    .small()
+                                                    .disabled(!self.state.enabled),
                                             ),
                                         )
                                         .child(
                                             div().w(px(100.)).child(
                                                 Input::new(&self.scheduled_task_repeat)
                                                     .id("settings-schedule-repeat-input")
-                                                    .small(),
+                                                    .aria_label("重复周期")
+                                                    .small()
+                                                    .disabled(!self.state.enabled),
                                             ),
                                         )
                                         .child(
                                             div().w(px(180.)).child(
                                                 Input::new(&self.scheduled_task_name)
                                                     .id("settings-schedule-name-input")
-                                                    .small(),
+                                                    .aria_label("描述或扫描目标 URL")
+                                                    .small()
+                                                    .disabled(!self.state.enabled),
                                             ),
                                         )
                                         .child(
@@ -995,7 +1006,9 @@ impl Settings {
                                                 let t = t_raw.trim();
                                                 let r = r_raw.trim();
                                                 let description = desc_raw.trim().to_owned();
-                                                let trigger_spec = if r.is_empty() {
+                                                let trigger_spec = if t.is_empty() {
+                                                    r.to_owned()
+                                                } else if r.is_empty() {
                                                     t.to_owned()
                                                 } else {
                                                     format!("{t} | {r}")
@@ -1003,11 +1016,14 @@ impl Settings {
                                                 if trigger_spec.is_empty()
                                                     || trigger_spec.len() > 512
                                                     || trigger_spec.contains('\0')
+                                                    || !mio_core::is_valid_scheduled_task_trigger(
+                                                        &trigger_spec,
+                                                    )
                                                     || description.len() > 1024
                                                     || description.contains('\0')
                                                 {
                                                     this.settings_error(
-                                                        "请填写有效的定时触发时间（触发规则不超过 512 字节，描述不超过 1024 字节）。",
+                                                        "请填写有效的定时触发时间或周期（如 09:00 / every:15m / 每30分钟；触发规则不超过 512 字节）。",
                                                         cx,
                                                     );
                                                     return;
@@ -1035,15 +1051,27 @@ impl Settings {
                                                         trigger_spec,
                                                         description,
                                                     });
-                                                }
-                                                let _ = this.owner.update(cx, |v, cx| {
-                                                    v.update_tasks_settings(
-                                                        project,
-                                                        None,
-                                                        Some(next),
+                                                } else {
+                                                    this.settings_error(
+                                                        "定时任务数量已达上限（128 条）。",
                                                         cx,
-                                                    )
-                                                });
+                                                    );
+                                                    return;
+                                                }
+                                                let committed = this
+                                                    .owner
+                                                    .update(cx, |v, cx| {
+                                                        v.update_tasks_settings(
+                                                            project,
+                                                            None,
+                                                            Some(next),
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .unwrap_or(false);
+                                                if !committed {
+                                                    return;
+                                                }
                                                 this.scheduled_task_editor_open = false;
                                                 this.scheduled_task_editing = None;
                                                 for inp in [

@@ -286,10 +286,12 @@ impl LocalOastServer {
         config: SelfHostedOastConfig,
     ) -> Result<Self> {
         let _validated_polling_url = config.validate()?;
-        let http_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let dns_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let bind_ip = config.effective_bind_ip()?;
+        let http_listener = TcpListener::bind((bind_ip, config.http_port.unwrap_or(0))).await?;
+        let dns_socket = UdpSocket::bind((bind_ip, config.dns_port.unwrap_or(0))).await?;
         let http_addr = http_listener.local_addr()?;
         let dns_addr = dns_socket.local_addr()?;
+        let dns_answer_ip = config.effective_dns_answer_ip(http_addr.ip())?;
         let cancel = CancellationToken::new();
         let connections = TaskTracker::new();
         let issued_tokens = Arc::new(RwLock::new(IssuedTokenBook::default()));
@@ -305,11 +307,13 @@ impl LocalOastServer {
             events_tx,
             cancel.clone(),
             issued_tokens.clone(),
+            dns_answer_ip,
         ));
 
         Ok(Self {
             http_addr,
             dns_addr,
+            dns_answer_ip,
             config,
             issued_tokens,
             cancel,
@@ -364,7 +368,15 @@ impl LocalOastServer {
                 .unwrap_or("http");
             format!("{scheme}://{domain}/oast/{token}")
         } else {
-            format!("http://{}/oast/{token}", self.http_addr)
+            let callback_host = if self.http_addr.ip().is_unspecified() {
+                match self.http_addr {
+                    SocketAddr::V4(v4) => SocketAddr::from((self.dns_answer_ip, v4.port())),
+                    SocketAddr::V6(v6) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, v6.port())),
+                }
+            } else {
+                self.http_addr
+            };
+            format!("http://{callback_host}/oast/{token}")
         };
         let payload = OastPayloadToken {
             token: token.clone(),

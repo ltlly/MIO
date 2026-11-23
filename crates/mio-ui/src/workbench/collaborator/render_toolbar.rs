@@ -546,6 +546,41 @@ impl CollaboratorView {
                         "{LOCAL_LOOPBACK_NOTICE}。{SELF_HOSTED_SECURITY_NOTE}"
                     )),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().min_w(theme::scaled_px(165.)).flex_shrink_0().child(field_row(
+                        "监听地址：",
+                        &self.bind_address_input,
+                        "collaborator-bind-address",
+                        "Collaborator 监听地址",
+                        Some(130.),
+                    )))
+                    .child(div().min_w(theme::scaled_px(140.)).flex_shrink_0().child(field_row(
+                        "HTTP 端口：",
+                        &self.http_port_input,
+                        "collaborator-http-port",
+                        "Collaborator HTTP 端口",
+                        Some(85.),
+                    )))
+                    .child(div().min_w(theme::scaled_px(140.)).flex_shrink_0().child(field_row(
+                        "DNS 端口：",
+                        &self.dns_port_input,
+                        "collaborator-dns-port",
+                        "Collaborator DNS 端口",
+                        Some(85.),
+                    )))
+                    .child(div().min_w(theme::scaled_px(195.)).flex_shrink_0().child(field_row(
+                        "DNS 应答 IP：",
+                        &self.dns_answer_ip_input,
+                        "collaborator-dns-answer-ip",
+                        "Collaborator DNS 应答 IP",
+                        Some(130.),
+                    ))),
+            )
             .when(self.self_hosted_enabled, |section| {
                 section
                     .child(field_row(
@@ -569,13 +604,33 @@ impl CollaboratorView {
                         "自托管认证请求头",
                         None,
                     ))
-                    .child(field_row(
-                        "轮询间隔 (ms)：",
-                        &self.poll_interval_input,
-                        "collaborator-poll-interval",
-                        "轮询间隔 (ms)",
-                        Some(160.),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(field_row(
+                                "轮询间隔 (ms)：",
+                                &self.poll_interval_input,
+                                "collaborator-poll-interval",
+                                "轮询间隔 (ms)",
+                                Some(160.),
+                            ))
+                            .child(
+                                button(
+                                    "collaborator-allow-public-domains",
+                                    "允许公共第三方 OAST 域名",
+                                )
+                                .selected(self.allow_public_cloud_domains)
+                                .tooltip("显式允许轮询公共第三方 Collaborator 域名")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.allow_public_cloud_domains =
+                                        !this.allow_public_cloud_domains;
+                                    cx.notify();
+                                })),
+                            ),
+                    )
             })
             .into_any_element()
     }

@@ -126,6 +126,27 @@ pub(in crate::workbench) fn validate_repeater_target_input(raw: &str) -> Result<
     Ok(canonical_origin)
 }
 
+pub(in crate::workbench) fn normalize_repeater_target_input(
+    raw: &str,
+    current_target: &str,
+) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty()
+        && !trimmed.contains("://")
+        && !trimmed.chars().any(char::is_whitespace)
+        && !trimmed.contains(['/', '?', '#', '\\', '@', '%'])
+    {
+        let use_https = trimmed.ends_with(":443")
+            || current_target
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("https://");
+        let scheme = if use_https { "https://" } else { "http://" };
+        return validate_repeater_target_input(&format!("{scheme}{trimmed}"));
+    }
+    validate_repeater_target_input(raw)
+}
+
 pub(in crate::workbench) fn format_repeater_target_display(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Ok(parsed) = url::Url::parse(trimmed)
@@ -435,9 +456,9 @@ impl Workbench {
         let mut ready_sends: Vec<(TabId, PendingSend)> = Vec::new();
         let mut dispatched = 0usize;
         for tab_id in ids {
-            if self.sending.len() + self.pending_sends.len() + ready_sends.len() >= 16 {
+            if self.sending.len() + self.pending_sends.len() + ready_sends.len() >= 64 {
                 self.fail(
-                    format!("并发 Repeater 请求达到 16 个限额；已提交 {dispatched} 个标签发送。"),
+                    format!("并发 Repeater 请求达到 64 个限额；已提交 {dispatched} 个标签发送。"),
                     cx,
                 );
                 break;
@@ -638,9 +659,9 @@ impl Workbench {
             if !still_in_group || !self.can_send(tab_id) {
                 continue;
             }
-            if self.sending.len() + self.pending_sends.len() >= 16 {
+            if self.sending.len() + self.pending_sends.len() >= 64 {
                 self.sequential_group_queue = None;
-                self.fail("并发 Repeater 请求达到 16 个限额；顺序发送队列已终止。", cx);
+                self.fail("并发 Repeater 请求达到 64 个限额；顺序发送队列已终止。", cx);
                 return;
             }
             if !self.flush_workspace(window, cx) {

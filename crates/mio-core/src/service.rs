@@ -41,6 +41,7 @@ mod core_commands_project;
 mod core_commands_proxy;
 pub use core_commands_proxy::build_configured_browser_args;
 mod core_lifecycle;
+pub use core_lifecycle::is_valid_scheduled_task_trigger;
 mod core_proxy;
 mod core_repeater_lifecycle;
 mod core_repeater_send;
@@ -78,7 +79,7 @@ mod websocket_repeater;
 const PROXY_EVENT_CAPACITY: usize = 128;
 const PROXY_MAX_CONNECTIONS: usize = 64;
 pub(crate) const MAX_PROXY_LISTENERS: usize = 32;
-const MAX_REPEATER_SENDS: usize = 16;
+const MAX_REPEATER_SENDS: usize = 64;
 // Terminal + passive audit + error per admitted send, plus coalesced History and delivery.
 const MAX_REPEATER_NOTIFICATIONS: usize = 4 * (MAX_REPEATER_SENDS + 16) + 4;
 // Bounded across up to MAX_PROXY_LISTENERS active listeners, shared event queue, and intercepts.

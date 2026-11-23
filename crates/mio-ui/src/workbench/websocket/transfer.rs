@@ -3,9 +3,9 @@ use mio_core::WebSocketRepeaterCommand;
 use super::*;
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
-const MAX_DECODER_BYTES: usize = 512 * 1024;
-const MAX_COMPARER_ITEMS: usize = 32;
-const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+const MAX_DECODER_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMPARER_ITEMS: usize = 64;
+const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub(in crate::workbench) enum PendingWsTransfer {

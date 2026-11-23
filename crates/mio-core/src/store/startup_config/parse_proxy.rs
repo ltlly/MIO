@@ -84,6 +84,7 @@ pub(super) struct RawProxyConfig {
 
 pub(super) type ParsedProxyExtras = (
     Option<crate::ProxyWebSocketInterceptionSettings>,
+    Option<bool>,
     Option<Vec<crate::SslPassThroughRule>>,
     Option<Vec<crate::WsMatchAndReplaceRule>>,
     Option<crate::ProxyResponseModificationSettings>,
@@ -91,16 +92,18 @@ pub(super) type ParsedProxyExtras = (
 
 pub(super) fn parse_proxy_section(proxy: Option<RawProxyConfig>) -> Result<ParsedProxyExtras> {
     let Some(proxy) = proxy else {
-        return Ok((None, None, None, None));
+        return Ok((None, None, None, None, None));
     };
-    let ssl = match proxy.ssl_pass_through {
+    let (ssl_auto_add, ssl) = match proxy.ssl_pass_through {
         Some(section) => {
-            let _ = section.automatically_add_entries_on_client_ssl_negotiation_failure;
             let converted = convert_ssl_rules(section.rules)?;
             crate::http::validate_ssl_and_ws_rules(&converted, &[])?;
-            Some(converted)
+            (
+                section.automatically_add_entries_on_client_ssl_negotiation_failure,
+                Some(converted),
+            )
         }
-        None => None,
+        None => (None, None),
     };
     let ws = match proxy.ws_match_replace_rules {
         Some(rules) => {
@@ -112,6 +115,7 @@ pub(super) fn parse_proxy_section(proxy: Option<RawProxyConfig>) -> Result<Parse
     };
     Ok((
         proxy.intercept_web_sockets_messages,
+        ssl_auto_add,
         ssl,
         ws,
         proxy.response_modification,

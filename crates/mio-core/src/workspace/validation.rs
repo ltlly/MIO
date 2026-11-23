@@ -13,18 +13,156 @@ fn is_valid_dns_hostname(hostname: &str) -> bool {
             && !label.ends_with('-')
             && label
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
     })
+}
+
+pub fn validate_redirect_host(host: &str) -> Result<String> {
+    let trimmed = host.trim();
+    ensure!(
+        !trimmed.is_empty()
+            && trimmed.len() <= 253
+            && !trimmed
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            && !trimmed.contains("://")
+            && !trimmed.contains(['*', '/', '\\', '?', '#', '@']),
+        "重定向主机必须为具体主机名或 IP 地址"
+    );
+    let clean = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    if trimmed.starts_with('[') || trimmed.ends_with(']') {
+        let ipv6: std::net::Ipv6Addr = clean
+            .parse()
+            .map_err(|_| anyhow::anyhow!("重定向主机方括号内容须为有效 IPv6 地址"))?;
+        return Ok(ipv6.to_string());
+    }
+    if let Ok(ip) = clean.parse::<IpAddr>() {
+        return Ok(ip.to_string());
+    }
+    ensure!(
+        !trimmed.contains(':') && is_valid_dns_hostname(trimmed),
+        "重定向主机必须为具体主机名或 IP 地址"
+    );
+    Ok(trimmed.trim_end_matches('.').to_ascii_lowercase())
+}
+
+pub fn validate_listener_specific_hostname(hostname: &str) -> Result<String> {
+    let trimmed = hostname.trim();
+    mio_proxy::ListenerCertMode::SpecificHostname(trimmed.to_owned())
+        .validate()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    Ok(trimmed.to_owned())
+}
+
+pub fn validate_listener_custom_pem(cert_pem: &str, key_pem: &str) -> Result<()> {
+    mio_proxy::ListenerCertMode::CustomPem {
+        cert_pem: cert_pem.to_owned(),
+        key_pem: key_pem.to_owned(),
+    }
+    .validate()
+    .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+pub fn validate_destination_glob_pattern(pattern: &str) -> Result<String> {
+    let trimmed = pattern.trim();
+    ensure!(
+        !trimmed.is_empty()
+            && trimmed.len() <= 253
+            && !trimmed
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            && !trimmed.contains("://")
+            && !trimmed.contains(['/', '\\', '#', '@']),
+        "目标主机模式不能为空、包含空白/URL 路径，或超过 253 字节"
+    );
+    if trimmed == "*" {
+        return Ok("*".into());
+    }
+    if let Some(rest) = trimmed.strip_prefix('.') {
+        ensure!(
+            !rest.is_empty() && !rest.starts_with('.'),
+            "目标主机后缀模式格式无效：{trimmed}"
+        );
+        if !rest.contains('*') && !rest.contains('?') {
+            ensure!(
+                is_valid_dns_hostname(rest),
+                "目标主机后缀须为合法域名（如 .example.invalid）：{trimmed}"
+            );
+            return Ok(format!(".{}", rest.trim_end_matches('.').to_ascii_lowercase()));
+        }
+    }
+    if trimmed.starts_with('[') || trimmed.ends_with(']') {
+        let Some(inner) = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+        else {
+            anyhow::bail!("目标主机 IPv6 方括号不匹配：{trimmed}");
+        };
+        ensure!(
+            !inner.is_empty()
+                && inner.contains(':')
+                && inner
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'*' | b'?')),
+            "目标主机方括号须为合法 IPv6 地址或 IPv6 通配模式：{trimmed}"
+        );
+        return Ok(inner.to_ascii_lowercase());
+    }
+    ensure!(
+        !trimmed.contains(['[', ']']),
+        "目标主机包含无效方括号：{trimmed}"
+    );
+    let colon_count = trimmed.bytes().filter(|&b| b == b':').count();
+    if colon_count == 1 {
+        anyhow::bail!("目标主机模式不能包含端口：{trimmed}");
+    }
+    if colon_count >= 2 {
+        ensure!(
+            trimmed
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'*' | b'?')),
+            "目标 IPv6 主机模式格式无效：{trimmed}"
+        );
+        return Ok(trimmed.to_ascii_lowercase());
+    }
+    if let Some(suffix) = trimmed.strip_prefix("*.")
+        && !suffix.contains('*')
+        && !suffix.contains('?')
+    {
+        ensure!(
+            is_valid_dns_hostname(suffix),
+            "目标通配符主机须为 *.domain 形式的合法域名：{trimmed}"
+        );
+        return Ok(format!("*.{}", suffix.trim_end_matches('.').to_ascii_lowercase()));
+    }
+    if trimmed.contains('*') || trimmed.contains('?') {
+        ensure!(
+            !trimmed.ends_with('.')
+                && !trimmed.contains("..")
+                && trimmed.bytes().any(|b| b.is_ascii_alphanumeric())
+                && trimmed.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'*' | b'?')
+                }),
+            "目标主机通配模式格式无效：{trimmed}"
+        );
+        return Ok(trimmed.to_ascii_lowercase());
+    }
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return Ok(ip.to_string());
+    }
+    ensure!(
+        is_valid_dns_hostname(trimmed),
+        "目标主机须为纯主机名、IP 或通配模式：{trimmed}"
+    );
+    Ok(trimmed.trim_end_matches('.').to_ascii_lowercase())
 }
 
 impl UpstreamProxyRule {
     pub fn validate_destination_host(pattern: &str) -> Result<String> {
-        let trimmed = pattern.trim();
-        ensure!(!trimmed.is_empty(), "上游代理规则目标主机不能为空");
-        if trimmed == "*" {
-            return Ok("*".into());
-        }
-        mio_proxy::ClientCertificateRule::validate_host_pattern(trimmed)
+        validate_destination_glob_pattern(pattern)
             .map_err(|err| anyhow::anyhow!("上游代理规则目标主机无效：{err}"))
     }
 
@@ -32,11 +170,7 @@ impl UpstreamProxyRule {
         if !self.enabled {
             return false;
         }
-        let pat = self.destination_host.trim();
-        if pat == "*" {
-            return true;
-        }
-        mio_proxy::matches_host(pat, host)
+        mio_proxy::matches_bypass_host(&self.destination_host, host)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -45,9 +179,11 @@ impl UpstreamProxyRule {
         ensure!(
             matches!(
                 self.protocol,
-                UpstreamProxyProtocol::Http | UpstreamProxyProtocol::Https
+                UpstreamProxyProtocol::Direct
+                    | UpstreamProxyProtocol::Http
+                    | UpstreamProxyProtocol::Https
             ),
-            "上游代理规则列表仅支持 HTTP 或 HTTPS 代理协议"
+            "上游代理规则列表仅支持 Direct、HTTP 或 HTTPS 协议"
         );
         ensure!(
             self.host.len() <= 253
@@ -75,6 +211,9 @@ impl UpstreamProxyRule {
         &self,
         tls: mio_proxy::UpstreamTls,
     ) -> Result<mio_proxy::UpstreamRoute> {
+        if self.protocol == UpstreamProxyProtocol::Direct {
+            return Ok(mio_proxy::UpstreamRoute::Direct);
+        }
         let host = self.host.trim();
         ensure!(
             !host.is_empty() && self.port > 0,
@@ -113,9 +252,10 @@ impl UpstreamProxyRule {
             credentials,
         };
         let route = match self.protocol {
+            UpstreamProxyProtocol::Direct => mio_proxy::UpstreamRoute::Direct,
             UpstreamProxyProtocol::Http => mio_proxy::UpstreamRoute::Http(endpoint),
             UpstreamProxyProtocol::Https => mio_proxy::UpstreamRoute::Https { endpoint, tls },
-            UpstreamProxyProtocol::Direct | UpstreamProxyProtocol::Socks5 => {
+            UpstreamProxyProtocol::Socks5 => {
                 anyhow::bail!("上游代理规则协议不支持：{:?}", self.protocol)
             }
         };
@@ -310,12 +450,10 @@ impl UpstreamProxySettings {
     ) -> Result<mio_proxy::UpstreamRoute> {
         let socks = &self.socks;
         if socks.use_proxy {
-            if let Some(host) = destination_host
-                && socks.should_bypass_host(host)
-            {
-                return Ok(mio_proxy::UpstreamRoute::Direct);
+            let bypassed = destination_host.is_some_and(|host| socks.should_bypass_host(host));
+            if !bypassed {
+                return socks.to_route();
             }
-            return socks.to_route();
         }
         let rules = &self.rules;
         if !rules.is_empty() {
@@ -349,6 +487,13 @@ impl UpstreamProxySettings {
         &self,
         tls: mio_proxy::UpstreamTls,
     ) -> Result<mio_proxy::UpstreamRouteResolver> {
+        let mut compiled_rules = Vec::new();
+        for rule in &self.rules {
+            if rule.enabled {
+                let route = rule.to_route_with_tls(tls.clone())?;
+                compiled_rules.push((rule.clone(), route));
+            }
+        }
         if self.socks.use_proxy {
             let socks = self.socks.clone();
             let socks_route = socks.to_route()?;
@@ -357,18 +502,17 @@ impl UpstreamProxySettings {
             }
             return Ok(Arc::new(move |host: &str| {
                 if socks.should_bypass_host(host) {
+                    let clean = host.trim().trim_matches(['[', ']']);
+                    for (rule, route) in &compiled_rules {
+                        if rule.matches_destination(clean) {
+                            return route.clone();
+                        }
+                    }
                     mio_proxy::UpstreamRoute::Direct
                 } else {
                     socks_route.clone()
                 }
             }));
-        }
-        let mut compiled_rules = Vec::new();
-        for rule in &self.rules {
-            if rule.enabled {
-                let route = rule.to_route_with_tls(tls.clone())?;
-                compiled_rules.push((rule.clone(), route));
-            }
         }
         if !compiled_rules.is_empty() {
             return Ok(Arc::new(move |host: &str| {
@@ -431,15 +575,23 @@ impl Workspace {
                 .bind_address
                 .parse()
                 .context("Proxy 监听地址格式无效，须为 IP:端口")?;
-            ensure!(
-                addr.ip().is_loopback(),
-                "Proxy 监听地址仅允许 loopback 地址（如 127.0.0.1:8080）"
-            );
             if listener.enabled && addr.port() != 0 {
                 ensure!(
                     enabled_listen_addrs.insert(addr),
                     "启用的 Proxy 监听地址重复：{addr}"
                 );
+            }
+            ensure!(
+                listener.redirect_to_port != Some(0),
+                "Proxy 监听器重定向端口必须在 1 到 65535 之间"
+            );
+            if !listener.redirect_to_host.trim().is_empty() {
+                validate_redirect_host(&listener.redirect_to_host)?;
+            }
+            if listener.certificate_mode == crate::ProxyListenerCertMode::SpecificHostname
+                && !listener.specific_cert_hostname.trim().is_empty()
+            {
+                validate_listener_specific_hostname(&listener.specific_cert_hostname)?;
             }
             if let Some(cert_pem) = &listener.custom_cert_pem {
                 ensure!(
@@ -452,6 +604,18 @@ impl Workspace {
                     key_pem.len() <= mio_proxy::MAX_CLIENT_CERT_BYTES && !key_pem.contains('\0'),
                     "Proxy 监听器自定义私钥 PEM 超过大小上限或包含 NUL"
                 );
+            }
+            if validate_certs
+                && listener.certificate_mode == crate::ProxyListenerCertMode::CustomCertificate
+                && let Some(cert_pem) = listener
+                    .custom_cert_pem
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+            {
+                validate_listener_custom_pem(
+                    cert_pem,
+                    listener.custom_key_pem.as_deref().unwrap_or_default(),
+                )?;
             }
         }
         ensure!(
@@ -529,13 +693,20 @@ impl Workspace {
                 !rule.id.is_nil() && rule_ids.insert(rule.id),
                 "Match and replace 规则 ID 无效或重复"
             );
+            let allow_newlines = matches!(
+                rule.item_type,
+                crate::MatchReplaceTarget::RequestBody
+                    | crate::MatchReplaceTarget::ResponseBody
+                    | crate::MatchReplaceTarget::RequestParamValue
+            );
             ensure!(
                 rule.match_pattern.len() <= 4096
                     && rule.replace_with.len() <= 4096
                     && rule.comment.len() <= 1024
                     && rule.script_name.len() <= 256
                     && rule.filter_script.len() <= 64 * 1024
-                    && !rule.replace_with.contains(['\r', '\n', '\0']),
+                    && !rule.replace_with.contains('\0')
+                    && (allow_newlines || !rule.replace_with.contains(['\r', '\n'])),
                 "Match and replace 规则文本过长或包含非法换行/NUL"
             );
             if rule.item_type.is_script() {

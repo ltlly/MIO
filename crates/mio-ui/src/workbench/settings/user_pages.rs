@@ -21,7 +21,7 @@ pub(super) const SCALE_FACTOR_OPTIONS: [&str; 9] = [
 ];
 pub(super) const SCALE_FACTOR_PERCENTS: [u16; 9] = [80, 90, 100, 110, 120, 125, 130, 140, 150];
 pub(super) const SEND_HOTKEY_LABELS: [&str; 3] = ["⌘Enter", "⌃Enter", "⌘⇧Enter"];
-pub(super) const CHARSET_OPTIONS: [&str; 8] = [
+pub(super) const CHARSET_OPTIONS: [&str; 13] = [
     "UTF-8",
     "Big5",
     "GBK",
@@ -30,6 +30,11 @@ pub(super) const CHARSET_OPTIONS: [&str; 8] = [
     "Shift_JIS",
     "EUC-KR",
     "US-ASCII",
+    "Windows-1252",
+    "Windows-1251",
+    "ISO-8859-15",
+    "UTF-16LE",
+    "UTF-16BE",
 ];
 pub(super) const USER_TABLE_CARET_RIGHT_SVG: &[u8] =
     br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path fill="currentColor" d="M2 1.5 L8.5 5 L2 8.5 Z"/></svg>"#;
@@ -465,6 +470,39 @@ impl Settings {
         self.submit_user_workbench(display, editor, misc, cx);
     }
 
+    pub(super) fn reset_user_hotkeys_defaults(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if editing::input_snapshot(&self.user_pages.editor_font_size_input, window, cx).is_err()
+            || self.has_hidden_header_composition(window, cx)
+        {
+            self.user_pages.local_error = Some(editing::COMPOSITION_PENDING.into());
+            cx.notify();
+            return;
+        }
+        let defaults = UserMiscSettings::default();
+        let mut misc = self.state.preferences.misc.clone();
+        misc.hotkey_send_request = defaults.hotkey_send_request.clone();
+        misc.custom_hotkeys.clear();
+        if misc == self.state.preferences.misc {
+            self.user_pages.local_error = None;
+            cx.notify();
+            return;
+        }
+        let display = self.state.preferences.display.clone();
+        let editor = self.state.preferences.message_editor.clone();
+        if self.submit_user_workbench(display, editor, misc, cx) {
+            self.user_pages.local_error = None;
+            let idx = IndexPath::new(hotkey_key_to_index(&defaults.hotkey_send_request));
+            self.user_pages
+                .send_hotkey_select
+                .update(cx, |s, cx| s.set_selected_index(Some(idx), window, cx));
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn reset_user_misc_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if editing::input_snapshot(&self.user_pages.editor_font_size_input, window, cx).is_err() {
             self.user_pages.local_error = Some(editing::COMPOSITION_PENDING.into());

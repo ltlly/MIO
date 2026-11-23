@@ -246,14 +246,14 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
     proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
     cx.update_window(dialog, |_, window, cx| {
         window.render_frame(cx);
-        for label in ["Matches", "Does not match", "Is in target scope"] {
+        for label in [
+            "Matches",
+            "Does not match",
+            "Is in target scope",
+            "Is not in target scope",
+        ] {
             assert!(!window.find_all_by_label(label).is_empty());
         }
-        assert!(
-            window
-                .find_all_by_label("Is not in target scope")
-                .is_empty()
-        );
     })
     .unwrap();
     cx.simulate_keystrokes(dialog, "up enter");

@@ -269,6 +269,7 @@ fn plugin_storage_and_audit_state_coexist_with_intruder_discard_and_pin_flows() 
                 revision: 1,
                 live_passive_enabled: true,
                 live_passive_crawl_enabled: true,
+                live_passive_suite_scope_only: false,
                 tasks: Vec::new(),
                 findings: vec![sample_finding(Some(pinned_flow.summary.id))],
             },
@@ -298,6 +299,7 @@ fn plugin_storage_and_audit_state_coexist_with_intruder_discard_and_pin_flows() 
                 revision: 2,
                 live_passive_enabled: true,
                 live_passive_crawl_enabled: true,
+                live_passive_suite_scope_only: false,
                 tasks: Vec::new(),
                 findings: vec![
                     sample_finding(Some(pinned_flow.summary.id)),

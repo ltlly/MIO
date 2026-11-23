@@ -203,6 +203,11 @@ impl Workbench {
                 tab.group = None;
             }
         }
+        for tab in &mut self.workspace.websocket_tabs {
+            if tab.group == Some(id) {
+                tab.group = None;
+            }
+        }
         self.workspace.groups.retain(|group| group.id != id);
         self.save_workspace(cx);
         cx.notify();

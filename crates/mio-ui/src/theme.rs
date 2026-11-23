@@ -686,11 +686,23 @@ fn resolve_custom_hotkey_action(action_id: &str) -> Option<CustomHotkeyActionSpe
             contexts: WORKSPACE,
             make_action: || Box::new(crate::ChangeRequestMethod),
         }),
+        "find_in_message" | "Search" => Some(CustomHotkeyActionSpec {
+            action_name: "input::Search",
+            default_key: "cmd-f",
+            contexts: WORKSPACE,
+            make_action: || Box::new(gpui_kit::component::input::Search),
+        }),
         "add_notes" | "AddHttpNotes" => Some(CustomHotkeyActionSpec {
             action_name: "mio::AddHttpNotes",
             default_key: "",
             contexts: WORKSPACE,
             make_action: || Box::new(crate::AddHttpNotes),
+        }),
+        "clear_highlight" | "ClearHighlight" => Some(CustomHotkeyActionSpec {
+            action_name: "mio::ClearHighlight",
+            default_key: "",
+            contexts: WORKSPACE,
+            make_action: || Box::new(crate::ClearHighlight),
         }),
         "add_to_scope" | "AddToScope" => Some(CustomHotkeyActionSpec {
             action_name: "mio::AddToScope",
@@ -745,6 +757,12 @@ fn resolve_custom_hotkey_action(action_id: &str) -> Option<CustomHotkeyActionSpe
             default_key: "cmd-w",
             contexts: WORKSPACE,
             make_action: || Box::new(crate::CloseTab),
+        }),
+        "close_other_tabs" | "CloseOtherTabs" => Some(CustomHotkeyActionSpec {
+            action_name: "mio::CloseOtherTabs",
+            default_key: "",
+            contexts: WORKSPACE,
+            make_action: || Box::new(crate::CloseOtherTabs),
         }),
         "toggle_tab_orientation" | "ToggleTabOrientation" => Some(CustomHotkeyActionSpec {
             action_name: "mio::ToggleTabOrientation",
@@ -1064,5 +1082,20 @@ mod ui_preferences_state_tests {
                 &UiPreferencesState::default()
             );
         });
+    }
+
+    #[test]
+    fn custom_hotkey_specs_match_action_names() {
+        for action_id in [
+            "find_in_message",
+            "clear_highlight",
+            "close_other_tabs",
+            "send_to_organiser",
+            "change_request_method",
+        ] {
+            let spec = resolve_custom_hotkey_action(action_id)
+                .unwrap_or_else(|| panic!("missing spec for {action_id}"));
+            assert_eq!(spec.action_name, (spec.make_action)().name());
+        }
     }
 }

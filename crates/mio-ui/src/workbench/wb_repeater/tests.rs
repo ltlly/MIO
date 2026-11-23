@@ -1241,3 +1241,31 @@ fn repeater_toolbar_mio_ai_button_and_split_history_geometry(cx: &mut TestAppCon
         assert!(f.view.read(cx).mio_ai_context.is_some());
     });
 }
+
+#[test]
+fn bare_repeater_target_normalization_adds_scheme_and_respects_https_context() {
+    use super::normalize_repeater_target_input;
+
+    assert_eq!(
+        normalize_repeater_target_input("127.0.0.1:8080", "http://127.0.0.1:9001").unwrap(),
+        "http://127.0.0.1:8080"
+    );
+    assert_eq!(
+        normalize_repeater_target_input("example.invalid:443", "http://127.0.0.1:8080").unwrap(),
+        "https://example.invalid:443"
+    );
+    assert_eq!(
+        normalize_repeater_target_input("[::1]:8080", "http://127.0.0.1:8080").unwrap(),
+        "http://[::1]:8080"
+    );
+    assert_eq!(
+        normalize_repeater_target_input("example.invalid:8443", "https://example.invalid:443")
+            .unwrap(),
+        "https://example.invalid:8443"
+    );
+    assert_eq!(
+        normalize_repeater_target_input("http://example.invalid:8080", "https://example.invalid:443")
+            .unwrap(),
+        "http://example.invalid:8080"
+    );
+}

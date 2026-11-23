@@ -243,9 +243,12 @@ pub async fn start(
                         Ok(None) => return,
                         Err(ProxyError::Cancelled) => return,
                         Err(error) => {
+                            let host = crate::route::format_host_for_authority(
+                                &state.config.network.listen.ip().to_string(),
+                            );
                             let failed = HttpRequest {
                                 method: "CONNECT".into(),
-                                url: format!("proxy://127.0.0.1:{}", state.listener_port),
+                                url: format!("proxy://{host}:{}", state.listener_port),
                                 version: HttpVersion::Http11,
                                 headers: Vec::new(),
                                 body: Vec::new(),
@@ -291,6 +294,72 @@ pub async fn start(
     })
 }
 
+fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
+    if data.len() < 9 || data[0] != 0x16 || data[1] != 0x03 {
+        return None;
+    }
+    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    let record_end = data.len().min(5usize.saturating_add(record_len));
+    let handshake = data.get(5..record_end)?;
+    if handshake.len() < 4 || handshake[0] != 0x01 {
+        return None;
+    }
+    let hello_len = ((handshake[1] as usize) << 16)
+        | ((handshake[2] as usize) << 8)
+        | (handshake[3] as usize);
+    let hello_end = handshake.len().min(4usize.saturating_add(hello_len));
+    let body = handshake.get(4..hello_end)?;
+    if body.len() < 35 {
+        return None;
+    }
+    let mut cursor = 34usize;
+    let session_id_len = *body.get(cursor)? as usize;
+    cursor = cursor.checked_add(1 + session_id_len)?;
+    let cs_bytes = body.get(cursor..cursor.checked_add(2)?)?;
+    let cipher_suites_len = u16::from_be_bytes([cs_bytes[0], cs_bytes[1]]) as usize;
+    cursor = cursor.checked_add(2 + cipher_suites_len)?;
+    let comp_len = *body.get(cursor)? as usize;
+    cursor = cursor.checked_add(1 + comp_len)?;
+    let ext_len_bytes = body.get(cursor..cursor.checked_add(2)?)?;
+    let ext_len = u16::from_be_bytes([ext_len_bytes[0], ext_len_bytes[1]]) as usize;
+    cursor = cursor.checked_add(2)?;
+    let ext_end = body.len().min(cursor.saturating_add(ext_len));
+    while cursor + 4 <= ext_end {
+        let ext_type = u16::from_be_bytes([body[cursor], body[cursor + 1]]);
+        let item_len = u16::from_be_bytes([body[cursor + 2], body[cursor + 3]]) as usize;
+        cursor += 4;
+        let Some(ext_payload) = body.get(cursor..cursor.checked_add(item_len)?) else {
+            break;
+        };
+        if ext_type == 0x0000 {
+            if ext_payload.len() < 2 {
+                return None;
+            }
+            let list_len = u16::from_be_bytes([ext_payload[0], ext_payload[1]]) as usize;
+            let list_end = ext_payload.len().min(2usize.saturating_add(list_len));
+            let mut pos = 2usize;
+            while pos + 3 <= list_end {
+                let name_type = ext_payload[pos];
+                let name_len = u16::from_be_bytes([ext_payload[pos + 1], ext_payload[pos + 2]]) as usize;
+                pos += 3;
+                let Some(name_bytes) = ext_payload.get(pos..pos.checked_add(name_len)?) else {
+                    break;
+                };
+                if name_type == 0x00 {
+                    return std::str::from_utf8(name_bytes)
+                        .ok()
+                        .map(crate::route::normalize_host)
+                        .filter(|s| !s.is_empty());
+                }
+                pos += name_len;
+            }
+            return None;
+        }
+        cursor += item_len;
+    }
+    None
+}
+
 async fn serve_invisible_tls(
     stream: tokio::net::TcpStream,
     state: Arc<State>,
@@ -312,6 +381,74 @@ async fn serve_invisible_tls(
         })
         .unwrap_or("localhost")
         .to_owned();
+    let has_passthrough = state.dynamic.borrow().ssl_pass_through.is_some();
+    if has_passthrough {
+        let mut peek_buf = [0u8; 4096];
+        let peeked = tokio::select! {
+            biased;
+            _ = state.cancel.cancelled() => return,
+            res = tokio::time::timeout(state.config.limits.request_timeout, stream.peek(&mut peek_buf)) => res,
+        };
+        let peeked_len = match peeked {
+            Ok(Ok(n)) if n > 0 => n,
+            Ok(Ok(_)) => return,
+            Ok(Err(err)) => {
+                if is_benign_tunnel_disconnect(&err) {
+                    return;
+                }
+                let failed = HttpRequest {
+                    method: "CONNECT".into(),
+                    url: format!(
+                        "{fallback_host}:{}",
+                        state.config.network.redirect_to_port.unwrap_or(443)
+                    ),
+                    version: HttpVersion::Http11,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    trailers: Vec::new(),
+                };
+                state.failure(failed, &ProxyError::network(err)).await;
+                return;
+            }
+            Err(_) => {
+                let failed = HttpRequest {
+                    method: "CONNECT".into(),
+                    url: format!(
+                        "{fallback_host}:{}",
+                        state.config.network.redirect_to_port.unwrap_or(443)
+                    ),
+                    version: HttpVersion::Http11,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    trailers: Vec::new(),
+                };
+                state.failure(failed, &ProxyError::Timeout).await;
+                return;
+            }
+        };
+        let sni = parse_client_hello_sni(&peek_buf[..peeked_len]);
+        let candidate_host = sni.as_deref().unwrap_or(&fallback_host);
+        let candidate_port = state.config.network.redirect_to_port.unwrap_or(443);
+        if ssl_passthrough::should_pass_through(&state, candidate_host, candidate_port) {
+            let (pt_host, pt_port) =
+                state.effective_passthrough_target(candidate_host, candidate_port);
+            let failed_request = HttpRequest {
+                method: "CONNECT".into(),
+                url: format!("{pt_host}:{pt_port}"),
+                version: HttpVersion::Http11,
+                headers: Vec::new(),
+                body: Vec::new(),
+                trailers: Vec::new(),
+            };
+            if let Err(error) =
+                ssl_passthrough::relay_stream(stream, &pt_host, pt_port, &state).await
+                && !matches!(error, ProxyError::Cancelled)
+            {
+                state.failure(failed_request, &error).await;
+            }
+            return;
+        }
+    }
     let observed_sni = Arc::new(std::sync::Mutex::new(None::<String>));
     let tls_config = state.config.tls.ca.invisible_server_config(
         state.listener_tls_options(),

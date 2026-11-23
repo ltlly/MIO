@@ -255,8 +255,8 @@ impl Workbench {
         else {
             return;
         };
-        const MAX_COMPARER_ITEMS: usize = 32;
-        const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+        const MAX_COMPARER_ITEMS: usize = 64;
+        const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
 
         let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
         let loaded_matches = self

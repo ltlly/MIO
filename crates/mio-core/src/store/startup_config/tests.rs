@@ -381,7 +381,7 @@ fn ext_proxy_ssl_passthrough_ws_match_replace_and_response_mod_startup_import_ro
         "proxy": {
             "request_listeners": [],
             "ssl_pass_through": {
-                "automatically_add_entries_on_client_ssl_negotiation_failure": false,
+                "automatically_add_entries_on_client_ssl_negotiation_failure": true,
                 "rules": [
                     {"enabled": true, "host": "*.pinning.example.com", "port": "443", "is_simple_match": true},
                     {"enabled": false, "host_pattern": "^127\\.0\\.0\\.1$", "port": 8443, "is_regex": true}
@@ -449,11 +449,13 @@ fn ext_proxy_ssl_passthrough_ws_match_replace_and_response_mod_startup_import_ro
         ws_rules[0].direction,
         crate::WsReplaceDirection::ClientToServer
     );
+    assert_eq!(parsed.ssl_pass_through_auto_add_on_failure, Some(true));
     assert!(
         ws.proxy_messages
             .response_modification
             .enable_disabled_form_fields
     );
+    assert!(ws.proxy_messages.ssl_pass_through_auto_add_on_failure);
     store
         .apply_startup_options(None, &StartupDefaultConfig::Defaults, None, &cancel)
         .unwrap();

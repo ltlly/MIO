@@ -267,24 +267,26 @@ impl ScopeUi {
             oos_custom: make_simple(ScopeRuleList::OutOfScopeCustom, window, cx),
         };
         let adv_state = cx.new(|cx| SettingsAdvScopeState::new(weak, window, cx));
-        let protocol_select = adv_state.read(cx).protocol_select.clone();
-        let adv_for_sub = adv_state.clone();
-        cx.subscribe_in(
-            &protocol_select,
-            window,
-            move |_, _, event: &gpui_kit::component::select::SelectEvent<Vec<&'static str>>, _, cx| {
-                if let gpui_kit::component::select::SelectEvent::Confirm(Some(value)) = event {
-                    let proto = match *value {
-                        "HTTP" => mio_core::ScopeProtocol::Http,
-                        "HTTPS" => mio_core::ScopeProtocol::Https,
-                        _ => mio_core::ScopeProtocol::Any,
-                    };
-                    adv_for_sub.update(cx, |st, _| st.protocol = proto);
-                    cx.notify();
-                }
-            },
-        )
-        .detach();
+        let protocol_selects = adv_state.read(cx).protocol_selects.clone();
+        for (side, protocol_select) in protocol_selects.into_iter().enumerate() {
+            let adv_for_sub = adv_state.clone();
+            cx.subscribe_in(
+                &protocol_select,
+                window,
+                move |_, _, event: &gpui_kit::component::select::SelectEvent<Vec<&'static str>>, _, cx| {
+                    if let gpui_kit::component::select::SelectEvent::Confirm(Some(value)) = event {
+                        let proto = match *value {
+                            "HTTP" => mio_core::ScopeProtocol::Http,
+                            "HTTPS" => mio_core::ScopeProtocol::Https,
+                            _ => mio_core::ScopeProtocol::Any,
+                        };
+                        adv_for_sub.update(cx, |st, _| st.protocols[side] = proto);
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+        }
         Self {
             simple_tables,
             adv_state,
@@ -490,6 +492,7 @@ impl Settings {
         include: bool,
         id: Uuid,
         prefix: String,
+        include_subdomains: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -504,6 +507,7 @@ impl Settings {
         }
         let side = usize::from(!include);
         self.scope_editor_open[side] = true;
+        self.scope_editor_subdomains[side] = include_subdomains;
         let _ = self.owner.update(cx, |view, _| {
             view.target_pane.settings_editing_scope[side] = Some(id);
         });
@@ -611,22 +615,42 @@ impl Settings {
             },
         );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await
-                && let Some(path) = paths.into_iter().next()
-                && let Ok(text) = mio_core::ui_files::read_file_to_string(&path)
-            {
-                let _ = this.update_in(cx, |this, _, cx| {
-                    for line in text.lines() {
-                        let trimmed = line.trim().to_owned();
-                        if !trimmed.is_empty() {
+            let picked = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => return,
+                Ok(Err(err)) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error(format!("打开文件选择器失败：{err}"), cx);
+                    });
+                    return;
+                }
+                Err(_) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error("文件选择器通道意外关闭。", cx);
+                    });
+                    return;
+                }
+            };
+            let Some(path) = picked else {
+                return;
+            };
+            let result: Result<Vec<String>, String> = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048) })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(entries) => {
+                        for trimmed in entries {
                             let _ = this.owner.update(cx, |view, cx| {
                                 view.add_scope_rule(project, include, trimmed, cx);
                             });
                         }
                     }
-                    cx.notify();
-                });
-            }
+                    Err(err) => this.settings_error(err, cx),
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -650,11 +674,19 @@ impl Settings {
         }
         let project = self.state.project;
         let side = usize::from(!include);
+        let include_subdomains = self.scope_editor_subdomains[side];
         let saved = self
             .owner
             .update(cx, |view, cx| {
                 let edit_id = view.target_pane.settings_editing_scope[side];
-                let ok = view.upsert_simple_scope_rule(project, include, edit_id, prefix, cx);
+                let ok = view.upsert_simple_scope_rule_with_subdomains(
+                    project,
+                    include,
+                    edit_id,
+                    prefix,
+                    Some(include_subdomains),
+                    cx,
+                );
                 if ok {
                     view.target_pane.settings_editing_scope[side] = None;
                 }
@@ -663,6 +695,7 @@ impl Settings {
             .unwrap_or(false);
         if saved {
             self.scope_editor_open[side] = false;
+            self.scope_editor_subdomains[side] = false;
             input.update(cx, |state, cx| state.set_value("", window, cx));
             cx.notify();
         }
@@ -822,6 +855,11 @@ impl Settings {
             .tab_stop(false)
             .on_click(cx.listener(move |this, _, _, cx| {
                 adv_reset.update(cx, |st, _| st.editing = [None, None]);
+                this.scope_editor_open = [false, false];
+                this.scope_editor_subdomains = [false, false];
+                this.scope_oos_custom_editor_open = false;
+                this.scope_oos_custom_editing = None;
+                this.scope_oos_custom_subdomains = false;
                 let _ = this
                     .owner
                     .update(cx, |view, cx| view.reset_scope_rules(project, cx));
@@ -1230,6 +1268,12 @@ impl Settings {
         let selected_for_edit = selected_rule.clone();
         let selected_for_remove = selected_rule.map(|rule| rule.id);
         let editor_open = self.scope_editor_open[side];
+        let is_editing = self
+            .owner
+            .upgrade()
+            .is_some_and(|wb| wb.read(cx).target_pane.settings_editing_scope[side].is_some());
+        let editor_subdomains = self.scope_editor_subdomains[side];
+        let e_sub = cx.entity();
         let side_buttons = div()
             .w(theme::scaled_px(88.).max(px(84.)))
             .flex_shrink_0()
@@ -1245,8 +1289,13 @@ impl Settings {
                         } else {
                             this.scope_exclude_input.clone()
                         };
-                        if !this.scope_editor_open[side] {
+                        let currently_editing = this
+                            .owner
+                            .upgrade()
+                            .is_some_and(|wb| wb.read(cx).target_pane.settings_editing_scope[side].is_some());
+                        if !this.scope_editor_open[side] || currently_editing {
                             this.scope_editor_open[side] = true;
+                            this.scope_editor_subdomains[side] = false;
                             let _ = this.owner.update(cx, |view, _| {
                                 view.target_pane.settings_editing_scope[side] = None;
                             });
@@ -1273,6 +1322,7 @@ impl Settings {
                             include,
                             rule.id,
                             rule.prefix.clone(),
+                            rule.include_subdomains,
                             window,
                             cx,
                         );
@@ -1346,10 +1396,11 @@ impl Settings {
                     div()
                         .pl(theme::scaled_px(97.).max(px(93.)))
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(8.))
                         .child(
-                            div().flex_1().max_w(px(420.)).child(
+                            div().flex_1().min_w(px(220.)).max_w(px(360.)).child(
                                 Input::new(input)
                                     .id(input_id)
                                     .aria_label(aria)
@@ -1358,13 +1409,32 @@ impl Settings {
                             ),
                         )
                         .child(
+                            listeners_tls::indexed_checkbox(
+                                if include {
+                                    "settings-scope-include-sub-cb"
+                                } else {
+                                    "settings-scope-exclude-sub-cb"
+                                },
+                                "Include subdomains",
+                                editor_subdomains,
+                                enabled,
+                            )
+                            .on_change(move |st, _, _, cx| {
+                                e_sub.update(cx, |this, cx| {
+                                    this.scope_editor_subdomains[side] =
+                                        st == CheckboxState::Checked;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .child(
                             settings_action_button(
                                 if include {
                                     "settings-scope-include-confirm"
                                 } else {
                                     "settings-scope-exclude-confirm"
                                 },
-                                "确定",
+                                if is_editing { "保存" } else { "确定" },
                                 !enabled,
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1383,6 +1453,7 @@ impl Settings {
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.scope_editor_open[side] = false;
+                                this.scope_editor_subdomains[side] = false;
                                 let _ = this.owner.update(cx, |view, _| {
                                     view.target_pane.settings_editing_scope[side] = None;
                                 });

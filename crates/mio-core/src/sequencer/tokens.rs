@@ -88,7 +88,13 @@ fn extract_regex_token(response: &HttpResponse, pattern: &str) -> Option<String>
         .ok()?;
     let raw = crate::response_to_raw(response);
     let caps = re.captures(&raw)?;
-    let matched = caps.get(1).or_else(|| caps.get(0))?.as_bytes();
+    let matched = caps
+        .iter()
+        .skip(1)
+        .flatten()
+        .next()
+        .or_else(|| caps.get(0))?
+        .as_bytes();
     if !(MIN_TOKEN_BYTES..=MAX_TOKEN_BYTES).contains(&matched.len()) {
         return None;
     }

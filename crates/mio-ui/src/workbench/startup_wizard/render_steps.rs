@@ -17,7 +17,6 @@ impl Workbench {
         let config_file_input = wizard.config_file_input.clone();
         let recent_table = wizard.recent_table.clone();
         let selected_recent_row = recent_table.read(cx).selected_row();
-        let recent_rows_empty = recent_table.read(cx).delegate().rows.is_empty();
         let missing_recent_count = recent_table.read(cx).delegate().missing_count();
         let recent_save_pending = wizard.pending_recent_save.is_some();
         let config_list_scroll = wizard.config_list_scroll.clone();
@@ -123,7 +122,8 @@ impl Workbench {
                 .flex_col()
                 .overflow_y_scroll()
                 .child(
-                    div().pt(px(12.)).pb(px(16.)).flex_shrink_0().child(
+                    div().pt(px(12.)).pb(px(16.)).flex_shrink_0().child({
+                        let wb = cx.entity();
                         wizard_radio(
                             "wizard-mode-temp",
                             "内存中临时项目",
@@ -132,10 +132,18 @@ impl Workbench {
                             window,
                             cx,
                         )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_wizard_project_mode(ProjectMode::Temporary, window, cx);
-                        })),
-                    ),
+                        .on_change(move |checked, _, window, cx| {
+                            if checked && controls_enabled {
+                                wb.update(cx, |this, cx| {
+                                    this.select_wizard_project_mode(
+                                        ProjectMode::Temporary,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        })
+                    }),
                 )
                 .child(wizard_divider_line())
                 .child(
@@ -146,7 +154,8 @@ impl Workbench {
                         .items_start()
                         .gap(px(12.))
                         .child(
-                            div().w(left_col_w).flex_shrink_0().child(
+                            div().w(left_col_w).flex_shrink_0().child({
+                                let wb = cx.entity();
                                 wizard_radio(
                                     "wizard-mode-new",
                                     "磁盘上新建项目",
@@ -155,14 +164,18 @@ impl Workbench {
                                     window,
                                     cx,
                                 )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.select_wizard_project_mode(
-                                        ProjectMode::NewOnDisk,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                            ),
+                                .on_change(move |checked, _, window, cx| {
+                                    if checked && controls_enabled {
+                                        wb.update(cx, |this, cx| {
+                                            this.select_wizard_project_mode(
+                                                ProjectMode::NewOnDisk,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                            }),
                         )
                         .child(
                             div()
@@ -220,7 +233,8 @@ impl Workbench {
                         .items_start()
                         .gap(px(12.))
                         .child(
-                            div().w(left_col_w).flex_shrink_0().child(
+                            div().w(left_col_w).flex_shrink_0().child({
+                                let wb = cx.entity();
                                 wizard_radio(
                                     "wizard-mode-open",
                                     "打开已有项目",
@@ -229,14 +243,18 @@ impl Workbench {
                                     window,
                                     cx,
                                 )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.select_wizard_project_mode(
-                                        ProjectMode::OpenExisting,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                            ),
+                                .on_change(move |checked, _, window, cx| {
+                                    if checked && controls_enabled {
+                                        wb.update(cx, |this, cx| {
+                                            this.select_wizard_project_mode(
+                                                ProjectMode::OpenExisting,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                            }),
                         )
                         .child(
                             div()
@@ -309,7 +327,7 @@ impl Workbench {
                                                 Some("批量清理磁盘上已不存在的最近项目历史记录"),
                                                 controls_enabled
                                                     && !recent_save_pending
-                                                    && !recent_rows_empty,
+                                                    && missing_recent_count > 0,
                                                 WizardButtonSize::Compact,
                                             )
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -347,7 +365,8 @@ impl Workbench {
                                         .flex()
                                         .flex_col()
                                         .gap(px(4.))
-                                        .child(
+                                        .child({
+                                            let wb = cx.entity();
                                             wizard_checkbox(
                                                 "wizard-trust-project",
                                                 "信任此项目文件",
@@ -356,17 +375,24 @@ impl Workbench {
                                                 window,
                                                 cx,
                                             )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    if let Some(wizard) = &mut this.startup_wizard {
-                                                        wizard.trust_project_file =
-                                                            !wizard.trust_project_file;
-                                                        cx.notify();
-                                                    }
-                                                }),
-                                            ),
-                                        )
-                                        .child(
+                                            .on_change(move |state, _, _, cx| {
+                                                if open_enabled {
+                                                    let checked =
+                                                        state == gpui_kit::base::CheckboxState::Checked;
+                                                    wb.update(cx, |this, cx| {
+                                                        if let Some(wizard) =
+                                                            &mut this.startup_wizard
+                                                            && wizard.mode == ProjectMode::OpenExisting
+                                                        {
+                                                            wizard.trust_project_file = checked;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                }
+                                            })
+                                        })
+                                        .child({
+                                            let wb = cx.entity();
                                             wizard_checkbox(
                                                 "wizard-pause-tasks",
                                                 "暂停自动任务",
@@ -375,16 +401,22 @@ impl Workbench {
                                                 window,
                                                 cx,
                                             )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    if let Some(wizard) = &mut this.startup_wizard {
-                                                        wizard.pause_automated_tasks =
-                                                            !wizard.pause_automated_tasks;
-                                                        cx.notify();
-                                                    }
-                                                }),
-                                            ),
-                                        ),
+                                            .on_change(move |state, _, _, cx| {
+                                                if open_enabled {
+                                                    let checked =
+                                                        state == gpui_kit::base::CheckboxState::Checked;
+                                                    wb.update(cx, |this, cx| {
+                                                        if let Some(wizard) =
+                                                            &mut this.startup_wizard
+                                                            && wizard.mode == ProjectMode::OpenExisting
+                                                        {
+                                                            wizard.pause_automated_tasks = checked;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                }
+                                            })
+                                        }),
                                 ),
                         ),
                 )
@@ -398,7 +430,8 @@ impl Workbench {
                 .flex_col()
                 .overflow_y_scroll()
                 .child(
-                    div().pt(px(12.)).pb(px(16.)).flex_shrink_0().child(
+                    div().pt(px(12.)).pb(px(16.)).flex_shrink_0().child({
+                        let wb = cx.entity();
                         wizard_radio(
                             "wizard-cfg-defaults",
                             "使用 MIO 默认配置",
@@ -407,20 +440,25 @@ impl Workbench {
                             window,
                             cx,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(wizard) = &mut this.startup_wizard {
-                                wizard.config_choice = ConfigChoice::Defaults;
-                                wizard.config_choice_customized = true;
-                                wizard.last_start_failed = false;
-                                wizard.error = None;
-                                cx.notify();
+                        .on_change(move |checked, _, _, cx| {
+                            if checked && controls_enabled {
+                                wb.update(cx, |this, cx| {
+                                    if let Some(wizard) = &mut this.startup_wizard {
+                                        wizard.config_choice = ConfigChoice::Defaults;
+                                        wizard.config_choice_customized = true;
+                                        wizard.last_start_failed = false;
+                                        wizard.error = None;
+                                        cx.notify();
+                                    }
+                                });
                             }
-                        })),
-                    ),
+                        })
+                    }),
                 )
                 .child(wizard_divider_line())
                 .child(
-                    div().py(px(16.)).flex_shrink_0().child(
+                    div().py(px(16.)).flex_shrink_0().child({
+                        let wb = cx.entity();
                         wizard_radio(
                             "wizard-cfg-project",
                             "使用随项目保存的设置",
@@ -429,18 +467,22 @@ impl Workbench {
                             window,
                             cx,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(wizard) = &mut this.startup_wizard
-                                && wizard.mode == ProjectMode::OpenExisting
-                            {
-                                wizard.config_choice = ConfigChoice::Project;
-                                wizard.config_choice_customized = true;
-                                wizard.last_start_failed = false;
-                                wizard.error = None;
-                                cx.notify();
+                        .on_change(move |checked, _, _, cx| {
+                            if checked && project_cfg_enabled {
+                                wb.update(cx, |this, cx| {
+                                    if let Some(wizard) = &mut this.startup_wizard
+                                        && wizard.mode == ProjectMode::OpenExisting
+                                    {
+                                        wizard.config_choice = ConfigChoice::Project;
+                                        wizard.config_choice_customized = true;
+                                        wizard.last_start_failed = false;
+                                        wizard.error = None;
+                                        cx.notify();
+                                    }
+                                });
                             }
-                        })),
-                    ),
+                        })
+                    }),
                 )
                 .child(wizard_divider_line())
                 .child(
@@ -453,7 +495,8 @@ impl Workbench {
                         .items_start()
                         .gap(px(12.))
                         .child(
-                            div().w(left_col_w).flex_shrink_0().child(
+                            div().w(left_col_w).flex_shrink_0().child({
+                                let wb = cx.entity();
                                 wizard_radio(
                                     "wizard-cfg-file",
                                     "从配置文件加载",
@@ -462,16 +505,20 @@ impl Workbench {
                                     window,
                                     cx,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(wizard) = &mut this.startup_wizard {
-                                        wizard.config_choice = ConfigChoice::ConfigFile;
-                                        wizard.config_choice_customized = true;
-                                        wizard.last_start_failed = false;
-                                        wizard.error = None;
-                                        cx.notify();
+                                .on_change(move |checked, _, _, cx| {
+                                    if checked && controls_enabled {
+                                        wb.update(cx, |this, cx| {
+                                            if let Some(wizard) = &mut this.startup_wizard {
+                                                wizard.config_choice = ConfigChoice::ConfigFile;
+                                                wizard.config_choice_customized = true;
+                                                wizard.last_start_failed = false;
+                                                wizard.error = None;
+                                                cx.notify();
+                                            }
+                                        });
                                     }
-                                })),
-                            ),
+                                })
+                            }),
                         )
                         .child(
                             div()
@@ -628,7 +675,8 @@ impl Workbench {
                         .flex()
                         .flex_col()
                         .gap(px(4.))
-                        .child(
+                        .child({
+                            let wb = cx.entity();
                             wizard_checkbox(
                                 "wizard-default-future",
                                 "今后默认使用以上配置",
@@ -637,14 +685,20 @@ impl Workbench {
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(wizard) = &mut this.startup_wizard {
-                                    wizard.default_in_future = !wizard.default_in_future;
-                                    cx.notify();
+                            .on_change(move |state, _, _, cx| {
+                                if controls_enabled {
+                                    let checked = state == gpui_kit::base::CheckboxState::Checked;
+                                    wb.update(cx, |this, cx| {
+                                        if let Some(wizard) = &mut this.startup_wizard {
+                                            wizard.default_in_future = checked;
+                                            cx.notify();
+                                        }
+                                    });
                                 }
-                            })),
-                        )
-                        .child(
+                            })
+                        })
+                        .child({
+                            let wb = cx.entity();
                             wizard_checkbox(
                                 "wizard-disable-extensions",
                                 "禁用扩展",
@@ -653,14 +707,19 @@ impl Workbench {
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(wizard) = &mut this.startup_wizard {
-                                    wizard.disable_extensions = !wizard.disable_extensions;
-                                    wizard.disable_extensions_customized = true;
-                                    cx.notify();
+                            .on_change(move |state, _, _, cx| {
+                                if controls_enabled {
+                                    let checked = state == gpui_kit::base::CheckboxState::Checked;
+                                    wb.update(cx, |this, cx| {
+                                        if let Some(wizard) = &mut this.startup_wizard {
+                                            wizard.disable_extensions = checked;
+                                            wizard.disable_extensions_customized = true;
+                                            cx.notify();
+                                        }
+                                    });
                                 }
-                            })),
-                        ),
+                            })
+                        }),
                 )
                 .into_any_element(),
             WizardStep::Starting => div()

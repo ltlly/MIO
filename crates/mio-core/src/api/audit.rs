@@ -20,7 +20,7 @@ pub const MAX_AUDIT_TASKS: usize = 512;
 pub const MAX_AUDIT_FINDINGS: usize = 4_096;
 pub const MAX_AUDIT_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLABORATOR_INTERACTIONS: usize = 2_048;
-pub const MAX_COLLABORATOR_BATCH_PAYLOADS: usize = 32;
+pub const MAX_COLLABORATOR_BATCH_PAYLOADS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +163,8 @@ pub struct AuditStateSnapshot {
     #[serde(default = "default_live_passive")]
     pub live_passive_crawl_enabled: bool,
     #[serde(default)]
+    pub live_passive_suite_scope_only: bool,
+    #[serde(default)]
     pub tasks: Vec<AuditTaskSummary>,
     #[serde(default)]
     pub findings: Vec<AuditFinding>,
@@ -174,6 +176,7 @@ impl Default for AuditStateSnapshot {
             revision: 0,
             live_passive_enabled: true,
             live_passive_crawl_enabled: true,
+            live_passive_suite_scope_only: false,
             tasks: Vec::new(),
             findings: Vec::new(),
         }
@@ -193,6 +196,10 @@ pub enum AuditCommand {
     SetLivePassiveCrawl {
         project: ProjectKey,
         enabled: bool,
+    },
+    SetLivePassiveScope {
+        project: ProjectKey,
+        suite_scope_only: bool,
     },
     StartScan {
         project: ProjectKey,
@@ -251,6 +258,7 @@ impl AuditCommand {
             Self::QueryState { project, .. }
             | Self::SetLivePassive { project, .. }
             | Self::SetLivePassiveCrawl { project, .. }
+            | Self::SetLivePassiveScope { project, .. }
             | Self::StartScan { project, .. }
             | Self::StopScan { project, .. }
             | Self::PauseScan { project, .. }
@@ -328,6 +336,10 @@ pub enum CollaboratorCommand {
     ClearInteractions {
         project: ProjectKey,
     },
+    DeleteInteraction {
+        project: ProjectKey,
+        interaction_id: Uuid,
+    },
 }
 
 impl CollaboratorCommand {
@@ -338,7 +350,8 @@ impl CollaboratorCommand {
             | Self::Stop { project }
             | Self::GeneratePayloads { project, .. }
             | Self::PollNow { project }
-            | Self::ClearInteractions { project } => *project,
+            | Self::ClearInteractions { project }
+            | Self::DeleteInteraction { project, .. } => *project,
         }
     }
 }

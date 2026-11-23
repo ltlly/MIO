@@ -68,6 +68,8 @@ struct LoggerRowsCacheKey {
     view_filter_script: String,
     param_counts_sig: (usize, usize),
     live_notes_sig: (usize, u64),
+    live_highlights_sig: (usize, u64),
+    loaded_details_sig: [Option<(FlowId, u64)>; 2],
 }
 
 pub(in crate::workbench::tools_extra) struct LoggerRowsCacheEntry {
@@ -108,6 +110,21 @@ fn logger_live_notes_fingerprint(
         sum = sum.wrapping_add(h.finish());
     }
     (live_notes.len(), sum)
+}
+
+fn logger_live_highlights_fingerprint(
+    live_highlights: &std::collections::HashMap<FlowId, mio_core::ExtHttpHighlight>,
+) -> (usize, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut sum = 0u64;
+    for (id, highlight) in live_highlights {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        highlight.revision.hash(&mut h);
+        highlight.color.hash(&mut h);
+        sum = sum.wrapping_add(h.finish());
+    }
+    (live_highlights.len(), sum)
 }
 
 fn logger_checkbox_indicator(checked: bool) -> CheckboxIndicator {
@@ -1434,7 +1451,9 @@ impl Workbench {
         let extended_sort = filters.extended_sort;
         let use_search_script = !search_term.is_empty()
             && (filters.script_enabled || table::is_script_expression(&search_term));
-        let needs_notes_sig = (!search_term.is_empty() && !use_search_script)
+        let has_script = use_search_script || !filters.view_filter_script.trim().is_empty();
+        let needs_notes_sig = has_script
+            || !search_term.is_empty()
             || matches!(extended_sort, Some((LoggerExtendedSortColumn::Comment, _)));
         let param_counts_sig = if matches!(
             extended_sort,
@@ -1451,11 +1470,36 @@ impl Workbench {
         } else {
             (0, 0)
         };
-        let live_notes_sig = if needs_notes_sig {
-            let live_notes = self.history.read(cx).delegate().live_notes.borrow();
-            logger_live_notes_fingerprint(&live_notes)
+        let (live_notes_sig, live_highlights_sig) = if needs_notes_sig || has_script {
+            let delegate = self.history.read(cx).delegate();
+            let notes_sig = if needs_notes_sig {
+                let live_notes = delegate.live_notes.borrow();
+                logger_live_notes_fingerprint(&live_notes)
+            } else {
+                (0, 0)
+            };
+            let highlights_sig = if has_script {
+                let live_highlights = delegate.live_highlights.borrow();
+                logger_live_highlights_fingerprint(&live_highlights)
+            } else {
+                (0, 0)
+            };
+            (notes_sig, highlights_sig)
         } else {
-            (0, 0)
+            ((0, 0), (0, 0))
+        };
+        let loaded_details_sig = if has_script {
+            [
+                self.extra_tools
+                    .logger_loaded_detail
+                    .as_deref()
+                    .map(|(record, _)| (record.summary.id, record.summary.revision)),
+                self.detail
+                    .as_deref()
+                    .map(|record| (record.summary.id, record.summary.revision)),
+            ]
+        } else {
+            [None, None]
         };
 
         let cached_rows = self
@@ -1479,6 +1523,8 @@ impl Workbench {
                     && k.view_filter_script == filters.view_filter_script
                     && k.param_counts_sig == param_counts_sig
                     && k.live_notes_sig == live_notes_sig
+                    && k.live_highlights_sig == live_highlights_sig
+                    && k.loaded_details_sig == loaded_details_sig
                     && (!filters.in_scope_only || k.scope.as_ref() == Some(&self.workspace.scope))
             })
             .map(|entry| Rc::clone(&entry.rows));
@@ -1487,7 +1533,10 @@ impl Workbench {
             hit
         } else {
             let computed = {
-                let live_notes = self.history.read(cx).delegate().live_notes.borrow();
+                let loaded_details = self.logger_loaded_detail_records();
+                let delegate = self.history.read(cx).delegate();
+                let live_notes = delegate.live_notes.borrow();
+                let live_highlights = delegate.live_highlights.borrow();
                 let visible_rows = table::filter_and_sort_logger(
                     entries,
                     &source_filter,
@@ -1496,6 +1545,8 @@ impl Workbench {
                     filters,
                     &self.workspace.scope,
                     &live_notes,
+                    &live_highlights,
+                    &loaded_details,
                 );
                 Rc::new(
                     visible_rows
@@ -1521,6 +1572,8 @@ impl Workbench {
                     view_filter_script: filters.view_filter_script.clone(),
                     param_counts_sig,
                     live_notes_sig,
+                    live_highlights_sig,
+                    loaded_details_sig,
                 },
                 rows: Rc::clone(&computed),
             });

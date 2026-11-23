@@ -45,8 +45,14 @@ pub fn validate_ssl_and_ws_rules(
             compile_bounded_regex(&rule.host_pattern, true)
                 .context("SSL Pass Through 主机正则表达式无效或超过 256 KiB 限额")?;
         } else {
-            mio_proxy::ClientCertificateRule::validate_host_pattern(rule.host_pattern.trim())
-                .map_err(|error| anyhow::anyhow!("SSL Pass Through 主机模式无效：{error}"))?;
+            let pat = rule.host_pattern.trim();
+            if crate::http::ip_range::parse_cidr_or_ip_range(pat)
+                .map_err(|err| anyhow::anyhow!("SSL Pass Through IP 段无效：{err}"))?
+                .is_none()
+            {
+                crate::validate_destination_glob_pattern(pat)
+                    .map_err(|error| anyhow::anyhow!("SSL Pass Through 主机模式无效：{error}"))?;
+            }
         }
     }
     ensure!(
@@ -64,8 +70,8 @@ pub fn validate_ssl_and_ws_rules(
                 && rule.match_pattern.len() <= 4096
                 && rule.replace_with.len() <= 4096
                 && rule.comment.len() <= 960
-                && !rule.replace_with.contains(['\r', '\n', '\0']),
-            "WebSocket Match and Replace 规则不能为空、包含换行/NUL 或超过长度上限"
+                && !rule.replace_with.contains('\0'),
+            "WebSocket Match and Replace 规则不能为空、包含 NUL 或超过长度上限"
         );
         if rule.is_regex {
             compile_bounded_regex(&rule.match_pattern, false)
@@ -84,36 +90,51 @@ fn compile_bounded_regex(pattern: &str, case_insensitive: bool) -> Result<Regex>
         .map_err(Into::into)
 }
 
+enum CompiledSslMatcher {
+    Regex(Regex),
+    IpRange(crate::http::ip_range::IpRangeMatcher),
+    Glob,
+}
+
 pub fn build_ssl_pass_through_matcher(
     rules: &[SslPassThroughRule],
 ) -> Result<Option<mio_proxy::SslPassThroughMatcher>> {
     let mut compiled = Vec::new();
     for rule in rules.iter().filter(|rule| rule.enabled) {
-        let regex = if rule.is_regex {
-            Some(
+        let matcher = if rule.is_regex {
+            CompiledSslMatcher::Regex(
                 compile_bounded_regex(&rule.host_pattern, true)
                     .context("SSL Pass Through 正则表达式无效")?,
             )
         } else {
-            let _ =
-                mio_proxy::ClientCertificateRule::validate_host_pattern(rule.host_pattern.trim())
+            let pat = rule.host_pattern.trim();
+            if let Some(ip_range) = crate::http::ip_range::parse_cidr_or_ip_range(pat)
+                .map_err(|err| anyhow::anyhow!("SSL Pass Through IP 段无效：{err}"))?
+            {
+                CompiledSslMatcher::IpRange(ip_range)
+            } else {
+                crate::validate_destination_glob_pattern(pat)
                     .map_err(|error| anyhow::anyhow!("SSL Pass Through 主机模式无效：{error}"))?;
-            None
+                CompiledSslMatcher::Glob
+            }
         };
-        compiled.push((rule.clone(), regex));
+        compiled.push((rule.clone(), matcher));
     }
     if compiled.is_empty() {
         return Ok(None);
     }
     Ok(Some(Arc::new(move |host: &str, port: u16| {
         let normalized = host.trim().trim_matches(['[', ']']);
-        compiled.iter().any(|(rule, regex)| {
+        compiled.iter().any(|(rule, matcher)| {
             if rule.port.is_some_and(|expected| expected != port) {
                 return false;
             }
-            match regex {
-                Some(re) => re.is_match(normalized),
-                None => mio_proxy::matches_host(rule.host_pattern.trim(), normalized),
+            match matcher {
+                CompiledSslMatcher::Regex(re) => re.is_match(normalized),
+                CompiledSslMatcher::IpRange(range) => range.matches_host(normalized),
+                CompiledSslMatcher::Glob => {
+                    mio_proxy::matches_bypass_host(rule.host_pattern.trim(), normalized)
+                }
             }
         })
     })))

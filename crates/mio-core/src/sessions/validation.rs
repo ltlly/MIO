@@ -32,6 +32,13 @@ pub(crate) fn valid_header_value(value: &str) -> bool {
 
 pub fn normalize_cookie_domain(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(&trimmed);
+    if let Ok(std::net::IpAddr::V6(v6)) = unbracketed.parse::<std::net::IpAddr>() {
+        return Ok(v6.to_string());
+    }
     ensure!(
         !trimmed.is_empty()
             && trimmed.len() <= 253

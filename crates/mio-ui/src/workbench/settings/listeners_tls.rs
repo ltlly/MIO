@@ -7,7 +7,7 @@ use gpui_kit::component::{
     table::TableDelegate,
 };
 use gpui_kit::{ClickEvent, FontWeight, Hsla, Pixels};
-use mio_core::ClientCertificateFormat;
+use mio_core::{ClientCertificateFormat, ClientCertificateRule, ClientCertificateSummary};
 
 use super::*;
 
@@ -23,10 +23,13 @@ pub(super) struct ListenersTlsUi {
     pub(super) dialog_opening: bool,
     pub(super) listener_error: Option<String>,
     pub(super) client_cert_editor_visible: bool,
+    pub(super) client_cert_editing: Option<usize>,
+    pub(super) client_cert_saving: bool,
     pub(super) client_cert_format: ClientCertificateFormat,
     client_cert_table: Entity<TableState<client_certs::ClientCertTable>>,
     pub(super) client_cert_selected: Option<usize>,
-    client_cert_format_select: Entity<SelectState<Vec<&'static str>>>,
+    pub(super) client_cert_summary_cache: Vec<(ClientCertificateRule, ClientCertificateSummary)>,
+    pub(super) client_cert_format_select: Entity<SelectState<Vec<&'static str>>>,
     pub(super) client_cert_host: Entity<InputState>,
     pub(super) client_cert_path: Entity<InputState>,
     pub(super) client_cert_key_path: Entity<InputState>,
@@ -114,12 +117,20 @@ impl ListenersTlsUi {
             .sortable(false)
             .col_selectable(false)
         });
-        cx.subscribe_in(&client_cert_table, window, |this, _, event, _, cx| {
-            if let TableEvent::SelectRow(row) = event {
+        cx.subscribe_in(&client_cert_table, window, |this, _, event, window, cx| match event {
+            TableEvent::SelectRow(row) => {
                 this.listeners_tls.client_cert_selected =
                     (*row < this.state.client_certificates.len()).then_some(*row);
                 cx.notify();
             }
+            TableEvent::DoubleClickedRow(row) => {
+                if *row < this.state.client_certificates.len() {
+                    this.listeners_tls.client_cert_selected = Some(*row);
+                    this.open_client_cert_editor(Some(*row), window, cx);
+                }
+                cx.notify();
+            }
+            _ => {}
         })
         .detach();
         let client_cert_format_select = cx.new(|scx| {
@@ -152,6 +163,9 @@ impl ListenersTlsUi {
                             this.listeners_tls.selected_index = None;
                             this.listeners_tls.listener_error = None;
                             this.listeners_tls.client_cert_editor_visible = false;
+                            this.listeners_tls.client_cert_editing = None;
+                            this.listeners_tls.client_cert_saving = false;
+                            this.listeners_tls.client_cert_selected = None;
                             this.listeners_tls.selected_server_cert = None;
                             this.listeners_tls.inspected_server_cert = None;
                             this.listeners_tls.server_cert_copied = None;
@@ -218,9 +232,12 @@ impl ListenersTlsUi {
             dialog_opening: false,
             listener_error: None,
             client_cert_editor_visible: false,
+            client_cert_editing: None,
+            client_cert_saving: false,
             client_cert_format: ClientCertificateFormat::Pem,
             client_cert_table,
             client_cert_selected: None,
+            client_cert_summary_cache: Vec::new(),
             client_cert_format_select,
             client_cert_host: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("api.example.com 或 *.example.com")
@@ -231,8 +248,11 @@ impl ListenersTlsUi {
             client_cert_key_path: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("PEM 私钥路径（合并 PEM 时可留空）")
             }),
-            client_cert_password: cx
-                .new(|cx| InputState::new(window, cx).placeholder("PKCS#12 口令（可选）")),
+            client_cert_password: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("PKCS#12 口令（可选）")
+                    .masked(true)
+            }),
             client_cert_error: None,
             server_cert_table,
             selected_server_cert: None,
@@ -259,6 +279,62 @@ impl ListenersTlsUi {
             table.refresh(cx);
             cx.notify();
         });
+    }
+
+    pub(super) fn cache_client_cert_summary(
+        &mut self,
+        rule: ClientCertificateRule,
+        summary: ClientCertificateSummary,
+    ) {
+        if let Some((_, slot)) = self
+            .client_cert_summary_cache
+            .iter_mut()
+            .find(|(cached, _)| {
+                cached.format == rule.format
+                    && cached.certificate_bytes == rule.certificate_bytes
+                    && cached.private_key_pem == rule.private_key_pem
+                    && cached.password == rule.password
+            })
+        {
+            *slot = summary;
+            return;
+        }
+        if self.client_cert_summary_cache.len() >= 128 {
+            self.client_cert_summary_cache.remove(0);
+        }
+        self.client_cert_summary_cache.push((rule, summary));
+    }
+
+    pub(super) fn sync_client_cert_summaries(&mut self, rules: &[ClientCertificateRule]) {
+        for rule in rules {
+            let cached = self.client_cert_summary_cache.iter().any(|(c, _)| {
+                c.format == rule.format
+                    && c.certificate_bytes == rule.certificate_bytes
+                    && c.private_key_pem == rule.private_key_pem
+                    && c.password == rule.password
+            });
+            if !cached
+                && rule.format == ClientCertificateFormat::Pem
+                && let Ok(parsed) = rule.parse_identity()
+            {
+                self.cache_client_cert_summary(rule.clone(), parsed.summary().clone());
+            }
+        }
+    }
+
+    pub(super) fn lookup_client_cert_summary(
+        &self,
+        rule: &ClientCertificateRule,
+    ) -> Option<&ClientCertificateSummary> {
+        self.client_cert_summary_cache
+            .iter()
+            .find(|(c, _)| {
+                c.format == rule.format
+                    && c.certificate_bytes == rule.certificate_bytes
+                    && c.private_key_pem == rule.private_key_pem
+                    && c.password == rule.password
+            })
+            .map(|(_, summary)| summary)
     }
 }
 

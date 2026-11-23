@@ -143,6 +143,7 @@ fn validate_and_build_identity(
     private_key: PrivateKeyDer<'static>,
 ) -> Result<ParsedClientIdentity, ProxyError> {
     let mut subject_hint = None;
+    let mut issuer_hint = None;
     for (index, cert) in certs.iter().enumerate() {
         let (remaining, parsed) =
             rama::crypto::dep::x509_parser::parse_x509_certificate(cert.as_ref()).map_err(
@@ -167,6 +168,14 @@ fn validate_and_build_identity(
             } else {
                 hint
             });
+            let issuer = if let Some(cn) = parsed.issuer().iter_common_name().next() {
+                cn.as_str()
+                    .map(str::to_owned)
+                    .map_err(|error| ProxyError::Tls(format!("客户端证书签发者 CN 无法解码：{error}")))?
+            } else {
+                parsed.issuer().to_string()
+            };
+            issuer_hint = Some(issuer);
         }
     }
 
@@ -184,6 +193,7 @@ fn validate_and_build_identity(
         private_key,
         summary: ClientCertificateSummary {
             subject_hint: subject_hint.unwrap_or_else(|| "客户端证书".into()),
+            issuer_hint: issuer_hint.unwrap_or_default(),
             cert_count,
         },
     })

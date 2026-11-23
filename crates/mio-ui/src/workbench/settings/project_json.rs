@@ -5,30 +5,8 @@ pub(super) fn export_project_settings_json(ws: &Workspace) -> Result<String, Str
 }
 
 pub(super) fn apply_project_settings_subset(ws: &mut Workspace, raw: &str) -> Result<(), String> {
-    let subset = mio_core::parse_project_settings_json(raw)?;
-
-    let mut candidate = ws.clone();
-    candidate.repeater_settings = subset.repeater_settings;
-    candidate.network_http = subset.network_http;
-    candidate.upstream_proxy = subset.upstream_proxy;
-    candidate.upstream_tls = subset.upstream_tls;
-    candidate.proxy_listeners = subset.proxy_listeners;
-    candidate.client_certificates = subset.client_certificates;
-    candidate.scope = subset.scope;
-    candidate.match_and_replace_rules = subset.match_and_replace_rules;
-    candidate.ssl_pass_through_rules = subset.ssl_pass_through_rules;
-    candidate.ws_match_and_replace_rules = subset.ws_match_and_replace_rules;
-    candidate.proxy_interception = subset.proxy_interception;
-    candidate.proxy_messages = subset.proxy_messages;
-    candidate.proxy_websocket_interception = subset.proxy_websocket_interception;
-    candidate.sessions = subset.sessions;
-    candidate.tasks_auto_start = subset.tasks_auto_start;
-    candidate.scheduled_tasks = subset.scheduled_tasks;
-    candidate
-        .validate_structure()
-        .map_err(|err| err.to_string())?;
-    *ws = candidate;
-    Ok(())
+    let patch = mio_core::parse_project_settings_patch(raw)?;
+    patch.apply_to(ws)
 }
 
 impl Settings {
@@ -40,6 +18,8 @@ impl Settings {
         for input in [
             &self.search_input,
             &self.repeater_timeout_input,
+            &self.repeater_redirect_max_hops_input,
+            &self.repeater_request_timeout_input,
             &self.upstream_host,
             &self.upstream_port,
             &self.upstream_username,
@@ -49,12 +29,23 @@ impl Settings {
             &self.connections.rule_port,
             &self.connections.rule_username,
             &self.connections.rule_password,
+            &self.connections.rule_domain,
+            &self.connections.rule_workstation,
             &self.connections.rule_description,
+            &self.connections.platform_destination,
+            &self.connections.platform_username,
+            &self.connections.platform_password,
+            &self.connections.platform_domain,
+            &self.connections.platform_hostname,
             &self.connections.socks_bypass_input,
             &self.connections.normal_timeout_input,
             &self.connections.open_ended_timeout_input,
             &self.connections.dns_hostname_input,
             &self.connections.dns_ip_input,
+            &self.listeners_tls.client_cert_host,
+            &self.listeners_tls.client_cert_path,
+            &self.listeners_tls.client_cert_key_path,
+            &self.listeners_tls.client_cert_password,
             &self.http_streaming_scope_input,
             &self.scheduled_task_time,
             &self.scheduled_task_repeat,
@@ -200,6 +191,15 @@ impl Settings {
         });
         match res {
             Ok(Ok(())) => {
+                if let Some(dialog) = self.listeners_tls.dialog.take() {
+                    let _ = dialog.update(cx, |_, window, _| window.remove_window());
+                }
+                if let Some(dialog) = self.interception_dialog.take() {
+                    let _ = dialog.update(cx, |_, window, _| window.remove_window());
+                }
+                if let Some(dialog) = self.proxy_advanced.http_dialog.take() {
+                    let _ = dialog.update(cx, |_, window, _| window.remove_window());
+                }
                 self.project_json_feedback = Some((false, "已从剪贴板导入项目设置 JSON。".into()));
             }
             Ok(Err(err)) => {
@@ -292,6 +292,21 @@ mod tests {
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
+        const TEST_LISTENER_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBbTCCARSgAwIBAgIUVIpxIWbRtuDLpYl1477vzV1ugh0wCgYIKoZIzj0EAwIw\n\
+HTEbMBkGA1UEAwwSY2xpZW50LmV4YW1wbGUuY29tMB4XDTI2MTExMjA1MzA1NloX\n\
+DTM2MTEwOTA1MzA1NlowHTEbMBkGA1UEAwwSY2xpZW50LmV4YW1wbGUuY29tMFkw\n\
+EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIbSR+tNi17qXQFl59/hH+44RmlzWWDXc\n\
+PEoCCPz1C/LzkFknUsbyvWR0EFyYoN31/z+spQ+LUJ8jj+u+DnVYUaMyMDAwHQYD\n\
+VR0OBBYEFPiXZXvod4JsIMGiUYlRQAUcuszHMA8GA1UdEwEB/wQFMAMBAf8wCgYI\n\
+KoZIzj0EAwIDRwAwRAIgaOz+x4MzyOceAJOUPHMeueynmih/2RJdlZ8u/MVFd5EC\n\
+IF63cYtN914wygUdSOfm2bLCW6p5IoVVbzuVti6y/Qml\n\
+-----END CERTIFICATE-----\n";
+        const TEST_LISTENER_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4XlmnemZ2BNPQoa8\n\
+WzmlhPk1AkNyYLQDHfm6fDB64SChRANCAAQhtJH602LXupdAWXn3+Ef7jhGaXNZY\n\
+Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
+-----END PRIVATE KEY-----\n";
         ws.proxy_listeners.push(ProxyListenerConfig {
             id: Uuid::new_v4(),
             enabled: true,
@@ -304,8 +319,8 @@ mod tests {
             specific_cert_hostname: String::new(),
             enable_http2: false,
             tls_protocols_label: "TLSv1.3 only".into(),
-            custom_cert_pem: Some("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----".into()),
-            custom_key_pem: Some("-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----".into()),
+            custom_cert_pem: Some(TEST_LISTENER_CERT_PEM.into()),
+            custom_key_pem: Some(TEST_LISTENER_KEY_PEM.into()),
         });
 
         ws.scope.include.push(ScopeRule {
@@ -397,5 +412,24 @@ mod tests {
         assert!(from_legacy.upstream_proxy.platform_auth.is_default());
         assert!(!from_legacy.scope.include[0].include_subdomains);
         assert!(!from_legacy.scope.drop_out_of_scope);
+
+        // Partial import into an existing workspace must preserve omitted sections.
+        let mut partial_target = restored.clone();
+        let partial_scope = format!(
+            r#"{{
+              "format": "mio.project_settings.v1",
+              "scope": {{"include": [{{"id": "{}", "enabled": true, "prefix": "https://only-scope.example.invalid"}}]}}
+            }}"#,
+            Uuid::new_v4()
+        );
+        apply_project_settings_subset(&mut partial_target, &partial_scope)
+            .expect("partial merge must succeed");
+        assert_eq!(partial_target.scope.include.len(), 1);
+        assert_eq!(
+            partial_target.scope.include[0].prefix,
+            "https://only-scope.example.invalid"
+        );
+        assert_eq!(partial_target.proxy_listeners, restored.proxy_listeners);
+        assert_eq!(partial_target.upstream_proxy, restored.upstream_proxy);
     }
 }

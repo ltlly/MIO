@@ -75,7 +75,7 @@ const HOTKEY_TABLE: [HotkeyRowSpec; 33] = [
         icon: AssetIconName::FolderPlus,
         action: "发送到 Organiser",
         category: "工具",
-        default_key: "",
+        default_key: "cmd-o",
     },
     HotkeyRowSpec {
         action_id: "find_in_message",
@@ -145,7 +145,7 @@ const HOTKEY_TABLE: [HotkeyRowSpec; 33] = [
         icon: AssetIconName::RefreshCw,
         action: "修改请求方法",
         category: "编辑",
-        default_key: "",
+        default_key: "cmd-alt-m",
     },
     HotkeyRowSpec {
         action_id: "add_notes",
@@ -261,6 +261,23 @@ const HOTKEY_TABLE: [HotkeyRowSpec; 33] = [
     },
 ];
 
+fn is_function_key(key: &str) -> bool {
+    matches!(
+        key,
+        "f1" | "f2"
+            | "f3"
+            | "f4"
+            | "f5"
+            | "f6"
+            | "f7"
+            | "f8"
+            | "f9"
+            | "f10"
+            | "f11"
+            | "f12"
+    )
+}
+
 fn format_hotkey_display(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -269,9 +286,16 @@ fn format_hotkey_display(raw: &str) -> String {
     if matches!(trimmed, "cmd-enter" | "ctrl-enter" | "cmd-shift-enter") {
         return send_hotkey_display_label(trimmed);
     }
+    let (prefix_str, trailing_key) = if trimmed == "-" || trimmed.ends_with("--") {
+        (&trimmed[..trimmed.len() - 1], Some("-".to_owned()))
+    } else if trimmed == "+" || trimmed.ends_with("-+") {
+        (&trimmed[..trimmed.len() - 1], Some("+".to_owned()))
+    } else {
+        (trimmed, None)
+    };
     let mut out = String::new();
     let mut key_part = String::new();
-    for token in trimmed.split('-').filter(|t| !t.is_empty()) {
+    for token in prefix_str.split('-').filter(|t| !t.is_empty()) {
         match token.to_ascii_lowercase().as_str() {
             "cmd" | "command" | "platform" | "meta" => out.push('⌘'),
             "ctrl" | "control" => out.push('⌃'),
@@ -280,6 +304,8 @@ fn format_hotkey_display(raw: &str) -> String {
             "enter" | "return" => key_part = "Enter".into(),
             "period" | "." => key_part = ".".into(),
             "comma" | "," => key_part = ",".into(),
+            "minus" => key_part = "-".into(),
+            "equal" => key_part = "=".into(),
             "space" => key_part = "Space".into(),
             "escape" | "esc" => key_part = "Esc".into(),
             "backspace" => key_part = "Backspace".into(),
@@ -287,8 +313,14 @@ fn format_hotkey_display(raw: &str) -> String {
             other if other.len() == 1 && other.is_ascii() => {
                 key_part = other.to_ascii_uppercase();
             }
+            other if is_function_key(&other.to_ascii_lowercase()) => {
+                key_part = other.to_ascii_uppercase();
+            }
             other => key_part = other.to_owned(),
         }
+    }
+    if let Some(tk) = trailing_key {
+        key_part = tk;
     }
     out.push_str(&key_part);
     if out.is_empty() {
@@ -303,23 +335,36 @@ fn normalize_hotkey_input(raw: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Ok(String::new());
     }
+    let chars: Vec<char> = trimmed.chars().collect();
     let mut expanded = String::with_capacity(trimmed.len() + 16);
-    for ch in trimmed.chars() {
+    for (idx, &ch) in chars.iter().enumerate() {
+        let is_last = idx + 1 == chars.len();
         match ch {
             '⌘' => expanded.push_str("cmd-"),
             '⌃' => expanded.push_str("ctrl-"),
             '⌥' => expanded.push_str("alt-"),
             '⇧' => expanded.push_str("shift-"),
-            '+' | ' ' => expanded.push('-'),
+            ' ' => expanded.push('-'),
+            '+' if !is_last => expanded.push('-'),
             other => expanded.push(other),
         }
     }
+    let (prefix_slice, forced_key) = if expanded == "-" {
+        ("", Some("-".to_owned()))
+    } else if expanded.ends_with("--") || expanded.ends_with("-+") {
+        let last = expanded.chars().last().unwrap_or('-');
+        (&expanded[..expanded.len() - 1], Some(last.to_string()))
+    } else if expanded.ends_with('+') {
+        (&expanded[..expanded.len() - 1], None)
+    } else {
+        (expanded.as_str(), None)
+    };
     let mut has_cmd = false;
     let mut has_ctrl = false;
     let mut has_alt = false;
     let mut has_shift = false;
-    let mut key: Option<String> = None;
-    for token in expanded.split('-').filter(|t| !t.is_empty()) {
+    let mut key: Option<String> = forced_key;
+    for token in prefix_slice.split('-').filter(|t| !t.is_empty()) {
         match token.to_ascii_lowercase().as_str() {
             "cmd" | "command" | "platform" | "meta" => has_cmd = true,
             "ctrl" | "control" => has_ctrl = true,
@@ -351,12 +396,17 @@ fn normalize_hotkey_input(raw: &str) -> Result<String, String> {
             }
         }
     }
-    if !has_cmd && !has_ctrl {
-        return Err("所有快捷键都必须包含 Command (cmd) 或 Control (ctrl) 修饰键。".into());
-    }
     let Some(key_name) = key else {
-        return Err("请输入完整的快捷键组合（例如 cmd-shift-r 或 ctrl-k）。".into());
+        return Err("请输入完整的快捷键组合（例如 cmd-shift-r、ctrl-k 或 f5）。".into());
     };
+    if !is_valid_hotkey_key_name(&key_name) {
+        return Err(format!(
+            "无法识别快捷键组合“{trimmed}”，请使用如 cmd-shift-r 格式。"
+        ));
+    }
+    if !has_cmd && !has_ctrl && !is_function_key(&key_name) {
+        return Err("非功能键快捷键都必须包含 Command (cmd) 或 Control (ctrl) 修饰键。".into());
+    }
     let mut parts: Vec<&str> = Vec::new();
     if has_cmd {
         parts.push("cmd");
@@ -371,11 +421,6 @@ fn normalize_hotkey_input(raw: &str) -> Result<String, String> {
         parts.push("shift");
     }
     parts.push(&key_name);
-    if !is_valid_hotkey_key_name(&key_name) {
-        return Err(format!(
-            "无法识别快捷键组合“{trimmed}”，请使用如 cmd-shift-r 格式。"
-        ));
-    }
     Ok(parts.join("-"))
 }
 
@@ -385,7 +430,7 @@ fn is_valid_hotkey_key_name(key: &str) -> bool {
         return b.is_ascii_alphanumeric()
             || matches!(
                 b,
-                b'.' | b',' | b'/' | b'\\' | b'-' | b'=' | b'[' | b']' | b';' | b'\'' | b'`'
+                b'.' | b',' | b'/' | b'\\' | b'-' | b'+' | b'=' | b'[' | b']' | b';' | b'\'' | b'`'
             );
     }
     matches!(
@@ -411,19 +456,7 @@ fn is_valid_hotkey_key_name(key: &str) -> bool {
             | "backslash"
             | "minus"
             | "equal"
-            | "f1"
-            | "f2"
-            | "f3"
-            | "f4"
-            | "f5"
-            | "f6"
-            | "f7"
-            | "f8"
-            | "f9"
-            | "f10"
-            | "f11"
-            | "f12"
-    )
+    ) || is_function_key(key)
 }
 
 fn keystroke_to_canonical_string(keystroke: &gpui_kit::Keystroke) -> Option<String> {
@@ -446,8 +479,16 @@ fn keystroke_to_canonical_string(keystroke: &gpui_kit::Keystroke) -> Option<Stri
     {
         return None;
     }
+    let key_name = match key_lower.as_str() {
+        "." => "period",
+        "return" => "enter",
+        other => other,
+    };
+    if !is_valid_hotkey_key_name(key_name) {
+        return None;
+    }
     let m = keystroke.modifiers;
-    if !m.platform && !m.control {
+    if !m.platform && !m.control && !is_function_key(key_name) {
         return None;
     }
     let mut parts: Vec<&str> = Vec::new();
@@ -462,14 +503,6 @@ fn keystroke_to_canonical_string(keystroke: &gpui_kit::Keystroke) -> Option<Stri
     }
     if m.shift {
         parts.push("shift");
-    }
-    let key_name = match key_lower.as_str() {
-        "." => "period",
-        "return" => "enter",
-        other => other,
-    };
-    if !is_valid_hotkey_key_name(key_name) {
-        return None;
     }
     parts.push(key_name);
     Some(parts.join("-"))
@@ -534,6 +567,20 @@ impl Settings {
             }
         };
         let mut misc = self.state.preferences.misc.clone();
+        if !normalized.is_empty()
+            && let Some((_, conflict)) = HOTKEY_TABLE.iter().enumerate().find(|&(idx, other)| {
+                idx != row_index
+                    && effective_hotkey_raw(idx, other, &misc).eq_ignore_ascii_case(&normalized)
+            })
+        {
+            self.user_pages.local_error = Some(format!(
+                "快捷键 {} 已被“{}”占用，请先清除或更换其他组合。",
+                format_hotkey_display(&normalized),
+                conflict.action
+            ));
+            cx.notify();
+            return false;
+        }
         if row_index == 0 {
             if normalized.is_empty() {
                 self.user_pages.local_error =
@@ -1277,12 +1324,9 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let _ = (
-            &self.user_pages.confirm_close_focus,
-            &self.user_pages.redact_curl_focus,
-            &self.user_pages.send_hotkey_select,
-        );
+        let _ = &self.user_pages.send_hotkey_select;
         let enabled = self.user_settings_enabled();
+        let misc = &self.state.preferences.misc;
 
         let settings_weak_sub = cx.weak_entity();
         let hotkey_ui = window.use_keyed_state("settings-user-hotkey-editor-ui", cx, |window, cx| {
@@ -1346,9 +1390,78 @@ impl Settings {
                     ui.capturing = false;
                     cx.notify();
                 });
-                let _ = owner.update(cx, |this, cx| this.reset_user_misc_defaults(window, cx));
+                let _ = owner.update(cx, |this, cx| this.reset_user_hotkeys_defaults(window, cx));
             }))
         });
+
+        let weak_close = cx.weak_entity();
+        let confirm_close_cb = settings_checkbox(
+            "settings-user-confirm-close-unsaved",
+            "关闭含未保存草稿的标签页前确认",
+            misc.confirm_on_close_tab_with_unsaved_draft,
+            enabled,
+            &self.user_pages.confirm_close_focus,
+            window,
+        )
+        .on_change(move |state, _, window, cx| {
+            let checked = state == CheckboxState::Checked;
+            let _ = weak_close.update(cx, |this, cx| {
+                this.toggle_user_misc(
+                    |m| m.confirm_on_close_tab_with_unsaved_draft = checked,
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        let weak_redact = cx.weak_entity();
+        let redact_curl_cb = settings_checkbox(
+            "settings-user-redact-curl",
+            "复制为 cURL 时脱敏敏感请求头",
+            misc.redact_sensitive_headers_in_copy_curl,
+            enabled,
+            &self.user_pages.redact_curl_focus,
+            window,
+        )
+        .on_change(move |state, _, window, cx| {
+            let checked = state == CheckboxState::Checked;
+            let _ = weak_redact.update(cx, |this, cx| {
+                this.toggle_user_misc(
+                    |m| m.redact_sensitive_headers_in_copy_curl = checked,
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        let behavior_section = div()
+            .id("settings-user-behavior-section")
+            .test_support()
+            .mt(px(12.))
+            .pt(px(14.))
+            .border_t_1()
+            .border_color(theme::border())
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(user_section_heading(
+                Some("settings-user-behavior-heading"),
+                Some("settings-user-behavior-scope"),
+                "通用行为",
+            ))
+            .child(user_desc_row_with_icon(
+                user_gear_static_icon(),
+                "配置跨项目生效的标签页关闭确认与导出脱敏安全选项。",
+            ))
+            .child(
+                div()
+                    .pl(px(29.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(confirm_close_cb)
+                    .child(redact_curl_cb),
+            );
 
         let hotkey_table = self.render_user_misc_hotkey_table(&hotkey_ui, window, cx);
         let toolbar_row = self.render_user_misc_hotkey_toolbar(&hotkey_ui, enabled, cx);
@@ -1375,7 +1488,7 @@ impl Settings {
                     .pl(px(29.))
                     .pt(px(2.))
                     .text_color(theme::foreground())
-                    .child("选择一个操作以更改其快捷键。所有快捷键都必须包含 Command 键（Mac）或 Control 键（Windows），也可组合 Shift 等修饰键。"),
+                    .child("选择一个操作以更改其快捷键。除 F1–F12 功能键外，快捷键须包含 Command 键（Mac）或 Control 键（Windows/Linux），也可组合 Alt/Shift 修饰键。"),
             );
         let body = self
             .append_user_pages_feedback(body, cx)
@@ -1389,6 +1502,7 @@ impl Settings {
                     .child(toolbar_row)
                     .child(hotkey_table),
             )
+            .child(behavior_section)
             .child(update_section);
 
         settings_scrollable_pane(
@@ -1397,5 +1511,24 @@ impl Settings {
             body,
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_hotkey_input_handles_minus_plus_and_function_keys() {
+        assert_eq!(normalize_hotkey_input("cmd--").unwrap(), "cmd--");
+        assert_eq!(normalize_hotkey_input("⌘-").unwrap(), "cmd--");
+        assert_eq!(format_hotkey_display("cmd--"), "⌘-");
+        assert_eq!(normalize_hotkey_input("⌘+").unwrap(), "cmd-+");
+        assert_eq!(normalize_hotkey_input("f5").unwrap(), "f5");
+        assert_eq!(normalize_hotkey_input("F12").unwrap(), "f12");
+        assert_eq!(format_hotkey_display("f5"), "F5");
+        assert_eq!(normalize_hotkey_input("cmd-shift-r").unwrap(), "cmd-shift-r");
+        assert!(normalize_hotkey_input("r").is_err());
+        assert!(normalize_hotkey_input("cmd-").is_err());
     }
 }

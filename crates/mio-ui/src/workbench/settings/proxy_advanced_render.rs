@@ -250,7 +250,7 @@ impl Settings {
     }
 
     fn render_http_match_replace_card(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let enabled = self.state.enabled && !self.proxy_advanced.http_editor_open;
+        let enabled = self.state.enabled;
         let selected_id = self.proxy_advanced.http_selected;
         let selected = selected_id.and_then(|id| {
             self.proxy_advanced
@@ -282,32 +282,21 @@ impl Settings {
                     .tab_stop(false)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if action == 0 {
-                            this.proxy_advanced.http_editor_open = true;
-                            this.proxy_advanced.http_editing = None;
-                            this.proxy_advanced.http_error = None;
-                            this.proxy_advanced.http_is_regex = false;
-                            this.proxy_advanced.http_target = MatchReplaceTarget::RequestHeader;
-                            this.proxy_advanced.http_target_select.update(cx, |s, cx| {
-                                s.set_selected_index(
-                                    Some(gpui_kit::component::IndexPath::new(0)),
-                                    window,
-                                    cx,
-                                );
-                            });
-                            for input in [
-                                &this.proxy_advanced.http_match,
-                                &this.proxy_advanced.http_replace,
-                                &this.proxy_advanced.http_comment,
-                            ] {
-                                input.update(cx, |s, cx| s.set_value("", window, cx));
-                            }
                             if let Some(project) = this.state.project {
                                 if let Some(prev) = this.proxy_advanced.http_dialog.take() {
                                     let _ = prev.update(cx, |_, window, _| window.remove_window());
                                 }
-                                this.proxy_advanced.http_dialog = crate::workbench::tools_extra::open_http_match_replace_dialog(
-                                    this.owner.clone(), this.owner_window, project, None, "proxy-http-mr", window, cx,
-                                ).ok();
+                                this.proxy_advanced.http_dialog =
+                                    crate::workbench::tools_extra::open_http_match_replace_dialog(
+                                        this.owner.clone(),
+                                        this.owner_window,
+                                        project,
+                                        None,
+                                        "proxy-http-mr",
+                                        window,
+                                        cx,
+                                    )
+                                    .ok();
                             }
                             cx.notify();
                             return;
@@ -317,22 +306,26 @@ impl Settings {
                         };
                         match action {
                             1 => {
-                                if let Some(rule) = &rule {
-                                    this.load_http_rule_into_editor(rule, window, cx);
-                                    if let Some(project) = this.state.project {
-                                        if let Some(prev) = this.proxy_advanced.http_dialog.take() {
-                                            let _ = prev.update(cx, |_, window, _| window.remove_window());
-                                        }
-                                        this.proxy_advanced.http_dialog = crate::workbench::tools_extra::open_http_match_replace_dialog(
-                                            this.owner.clone(), this.owner_window, project, Some(rule.clone()), "proxy-http-mr", window, cx,
-                                        ).ok();
+                                if let Some(rule) = &rule
+                                    && let Some(project) = this.state.project
+                                {
+                                    if let Some(prev) = this.proxy_advanced.http_dialog.take() {
+                                        let _ = prev.update(cx, |_, window, _| window.remove_window());
                                     }
+                                    this.proxy_advanced.http_dialog =
+                                        crate::workbench::tools_extra::open_http_match_replace_dialog(
+                                            this.owner.clone(),
+                                            this.owner_window,
+                                            project,
+                                            Some(rule.clone()),
+                                            "proxy-http-mr",
+                                            window,
+                                            cx,
+                                        )
+                                        .ok();
                                 }
                             }
                             2 => {
-                                if this.proxy_advanced.http_editing == Some(id) {
-                                    this.proxy_advanced.http_editing = None;
-                                }
                                 let _ = this.owner.update(cx, |view, cx| {
                                     view.remove_http_match_replace_rule(id, cx);
                                 });
@@ -354,8 +347,6 @@ impl Settings {
             );
         }
 
-        let regex_entity = cx.entity();
-        let is_editing = self.proxy_advanced.http_editing.is_some();
         let scope_owner = self.owner.clone();
         let project = self.state.project;
         let in_scope_only = self.state.proxy_messages.match_replace_in_scope_only;
@@ -417,152 +408,6 @@ impl Settings {
                             )),
                     ),
             )
-            .when(self.proxy_advanced.http_editor_open, |this| {
-                this.child(
-                    div()
-                        .id("proxy-http-mr-editor")
-                        .test_support()
-                        .ml(px(26.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .p(px(10.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::background())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(
-                                    div()
-                                        .w(theme::scaled_px(88.).max(px(88.)))
-                                        .flex_shrink_0()
-                                        .child("Rule type:"),
-                                )
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        Select::new(&self.proxy_advanced.http_target_select)
-                                            .id("proxy-http-mr-target-select")
-                                            .small()
-                                            .w_full(),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Match:"))
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        Input::new(&self.proxy_advanced.http_match)
-                                            .id("proxy-http-mr-match-input")
-                                            .aria_label("HTTP 匹配模式")
-                                            .small(),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Replace:"))
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        Input::new(&self.proxy_advanced.http_replace)
-                                            .id("proxy-http-mr-replace-input")
-                                            .aria_label("HTTP 替换内容")
-                                            .small(),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Comment:"))
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        Input::new(&self.proxy_advanced.http_comment)
-                                            .id("proxy-http-mr-comment-input")
-                                            .aria_label("HTTP 替换规则备注")
-                                            .small(),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            adv_checkbox(
-                                "proxy-http-mr-regex",
-                                "Regex match",
-                                self.proxy_advanced.http_is_regex,
-                                true,
-                            )
-                            .on_change(move |state, _, _, cx| {
-                                regex_entity.update(cx, |this, cx| {
-                                    this.proxy_advanced.http_is_regex = state == CheckboxState::Checked;
-                                    cx.notify();
-                                });
-                            }),
-                        )
-                        .when_some(self.proxy_advanced.http_error.clone(), |this, err| {
-                            this.child(
-                                div()
-                                    .id("proxy-http-mr-error")
-                                    .test_support()
-                                    .role(Role::Alert)
-                                    .aria_label(err.clone())
-                                    .text_color(theme::danger_fg())
-                                    .child(err),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap(px(8.))
-                                .child(
-                                    button("proxy-http-mr-submit", "OK")
-                                        .primary()
-                                        .tooltip(if is_editing {
-                                            "保存当前修改的 HTTP 匹配与替换规则"
-                                        } else {
-                                            "添加新的 HTTP 匹配与替换规则"
-                                        })
-                                        .tab_stop(false)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit_http_match_replace(window, cx)
-                                        })),
-                                )
-                                .child(
-                                    settings_action_button("proxy-http-mr-cancel-edit", "Cancel", false)
-                                        .tab_stop(false)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if let Some(dlg) = this.proxy_advanced.http_dialog.take() {
-                                                let _ = dlg.update(cx, |_, window, _| window.remove_window());
-                                            }
-                                            this.proxy_advanced.http_editing = None;
-                                            this.proxy_advanced.http_editor_open = false;
-                                            this.proxy_advanced.http_error = None;
-                                            this.proxy_advanced.http_is_regex = false;
-                                            for input in [
-                                                &this.proxy_advanced.http_match,
-                                                &this.proxy_advanced.http_replace,
-                                                &this.proxy_advanced.http_comment,
-                                            ] {
-                                                input.update(cx, |s, cx| s.set_value("", window, cx));
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-            })
     }
 
     fn render_ssl_passthrough_card(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -588,6 +433,7 @@ impl Settings {
             ("proxy-ssl-pt-edit", "编辑", "编辑选中的 TLS pass through 目标", enabled && selected.is_some(), 1u8),
             ("proxy-ssl-pt-remove", "移除", "移除选中的 TLS pass through 目标", enabled && selected.is_some(), 2u8),
             ("proxy-ssl-pt-paste-url", "粘贴 URL", "从剪贴板解析 URL 并添加主机与端口", enabled, 3u8),
+            ("proxy-ssl-pt-clear", "清空", "清空全部 TLS pass through 规则", enabled && !ssl_rules.is_empty(), 4u8),
         ] {
             let rule = selected.and_then(|i| ssl_rules.get(i)).cloned();
             actions = actions.child(
@@ -612,6 +458,20 @@ impl Settings {
                         }
                         if action == 3 {
                             this.paste_ssl_pass_through_url(window, cx);
+                            return;
+                        }
+                        if action == 4 {
+                            this.proxy_advanced.ssl_editing = None;
+                            this.proxy_advanced.ssl_editor_open = false;
+                            this.proxy_advanced.ssl_error = None;
+                            let _ = this.owner.update(cx, |view, cx| {
+                                let _ = view.update_proxy_advanced(
+                                    project,
+                                    |ssl, _, _| ssl.clear(),
+                                    cx,
+                                );
+                            });
+                            cx.notify();
                             return;
                         }
                         let Some(id) = selected_id else {

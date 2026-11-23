@@ -193,7 +193,11 @@ impl Settings {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.restore_interception_defaults(response, window, cx)
             }));
-            let master_off = !response && !self.state.intercept_requests;
+            let master_off = if response {
+                !self.state.intercept_responses
+            } else {
+                !self.state.intercept_requests
+            };
             body = body.child(
                 div()
                     .flex()

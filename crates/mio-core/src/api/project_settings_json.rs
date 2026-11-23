@@ -6,6 +6,115 @@ use super::*;
 pub const PROJECT_SETTINGS_JSON_FORMAT: &str = "mio.project_settings.v1";
 pub const MAX_PROJECT_SETTINGS_JSON_BYTES: usize = 512 * 1024;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectSettingsPatch {
+    pub repeater_settings: Option<RepeaterSettings>,
+    pub network_http: Option<NetworkHttpSettings>,
+    pub upstream_proxy: Option<UpstreamProxySettings>,
+    pub upstream_tls: Option<UpstreamTlsSettings>,
+    pub proxy_listeners: Option<Vec<ProxyListenerConfig>>,
+    pub client_certificates: Option<Vec<ClientCertificateRule>>,
+    pub scope: Option<TargetScope>,
+    pub match_and_replace_rules: Option<Vec<MatchAndReplaceRule>>,
+    pub ssl_pass_through_rules: Option<Vec<SslPassThroughRule>>,
+    pub ws_match_and_replace_rules: Option<Vec<WsMatchAndReplaceRule>>,
+    pub proxy_interception: Option<ProxyInterceptionSettings>,
+    pub proxy_messages: Option<ProxyMessageSettings>,
+    pub proxy_websocket_interception: Option<ProxyWebSocketInterceptionSettings>,
+    pub sessions: Option<SessionSettings>,
+    pub tasks_auto_start: Option<bool>,
+    pub scheduled_tasks: Option<Vec<ScheduledTask>>,
+}
+
+impl ProjectSettingsPatch {
+    fn validate_present(&self) -> Result<(), String> {
+        let mut probe = Workspace::default();
+        self.apply_inner(&mut probe, true)
+    }
+
+    pub fn apply_to(&self, ws: &mut Workspace) -> Result<(), String> {
+        self.apply_inner(ws, false)
+    }
+
+    fn apply_inner(&self, ws: &mut Workspace, validate_certs: bool) -> Result<(), String> {
+        let mut candidate = ws.clone();
+        if let Some(v) = &self.repeater_settings {
+            candidate.repeater_settings = v.clone();
+        }
+        if let Some(v) = &self.network_http {
+            candidate.network_http = v.clone();
+        }
+        if let Some(v) = &self.upstream_proxy {
+            candidate.upstream_proxy = v.clone();
+        }
+        if let Some(v) = &self.upstream_tls {
+            candidate.upstream_tls = v.clone();
+        }
+        if let Some(v) = &self.proxy_listeners {
+            candidate.proxy_listeners = v.clone();
+        }
+        if let Some(v) = &self.client_certificates {
+            candidate.client_certificates = v.clone();
+        }
+        if let Some(v) = &self.scope {
+            candidate.scope = v.clone();
+        }
+        if let Some(v) = &self.match_and_replace_rules {
+            candidate.match_and_replace_rules = v.clone();
+        }
+        if let Some(v) = &self.ssl_pass_through_rules {
+            candidate.ssl_pass_through_rules = v.clone();
+        }
+        if let Some(v) = &self.ws_match_and_replace_rules {
+            candidate.ws_match_and_replace_rules = v.clone();
+        }
+        if let Some(v) = &self.proxy_interception {
+            candidate.proxy_interception = v.clone();
+        }
+        if let Some(v) = &self.proxy_messages {
+            candidate.proxy_messages = *v;
+        }
+        if let Some(v) = &self.proxy_websocket_interception {
+            candidate.proxy_websocket_interception = *v;
+        }
+        if let Some(v) = &self.sessions {
+            candidate.sessions = v.clone();
+        }
+        if let Some(v) = self.tasks_auto_start {
+            candidate.tasks_auto_start = v;
+        }
+        if let Some(v) = &self.scheduled_tasks {
+            candidate.scheduled_tasks = v.clone();
+        }
+        let subset = ProjectSettingsSubset::from_workspace(&candidate);
+        if validate_certs {
+            subset.validate()?;
+        } else {
+            for listener in &candidate.proxy_listeners {
+                if listener.redirect_to_port == Some(0) {
+                    return Err("Proxy 监听器重定向端口必须在 1 到 65535 之间。".into());
+                }
+            }
+            crate::validate_ssl_and_ws_rules(
+                &candidate.ssl_pass_through_rules,
+                &candidate.ws_match_and_replace_rules,
+            )
+            .map_err(|err| err.to_string())?;
+            candidate
+                .validate_structure()
+                .map_err(|err| err.to_string())?;
+        }
+        *ws = candidate;
+        Ok(())
+    }
+
+    pub fn into_subset(self) -> ProjectSettingsSubset {
+        let mut ws = Workspace::default();
+        let _ = self.apply_to(&mut ws);
+        ProjectSettingsSubset::from_workspace(&ws)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSettingsSubset {
     pub repeater_settings: RepeaterSettings,
@@ -127,7 +236,7 @@ pub fn export_project_settings_json(ws: &Workspace) -> Result<String, String> {
     Ok(encoded)
 }
 
-pub fn parse_project_settings_json(raw: &str) -> Result<ProjectSettingsSubset, String> {
+pub fn parse_project_settings_patch(raw: &str) -> Result<ProjectSettingsPatch, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("剪贴板中没有可导入的项目设置 JSON 文本。".into());
@@ -162,7 +271,14 @@ pub fn parse_project_settings_json(raw: &str) -> Result<ProjectSettingsSubset, S
         return Err("项目设置 JSON 未包含任何可导入的项目配置段。".into());
     }
 
-    let subset = doc.into_subset()?;
+    let patch = doc.into_patch()?;
+    patch.validate_present()?;
+    Ok(patch)
+}
+
+pub fn parse_project_settings_json(raw: &str) -> Result<ProjectSettingsSubset, String> {
+    let patch = parse_project_settings_patch(raw)?;
+    let subset = patch.into_subset();
     subset.validate()?;
     Ok(subset)
 }
@@ -303,53 +419,48 @@ impl ProjectSettingsImportDoc {
             || self.scheduled_tasks.is_some()
     }
 
-    fn into_subset(self) -> Result<ProjectSettingsSubset, String> {
+    fn into_patch(self) -> Result<ProjectSettingsPatch, String> {
         let upstream_tls = self
             .upstream_tls
             .map(UpstreamTlsImportJson::into_core)
-            .transpose()?
-            .unwrap_or_default();
+            .transpose()?;
         let client_certificates = self
             .client_certificates
-            .unwrap_or_default()
-            .into_iter()
-            .map(ClientCertificateJson::into_core)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|certs| {
+                certs
+                    .into_iter()
+                    .map(ClientCertificateJson::into_core)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let sessions = self
             .sessions
             .map(SessionSettingsJson::into_core)
-            .transpose()?
-            .unwrap_or_default();
+            .transpose()?;
 
-        Ok(ProjectSettingsSubset {
-            repeater_settings: self.repeater_settings.unwrap_or_default(),
-            network_http: self.network_http.unwrap_or_default(),
+        Ok(ProjectSettingsPatch {
+            repeater_settings: self.repeater_settings,
+            network_http: self.network_http,
             upstream_proxy: self
                 .upstream_proxy
-                .map(UpstreamProxyImportJson::into_core)
-                .unwrap_or_default(),
+                .map(UpstreamProxyImportJson::into_core),
             upstream_tls,
-            proxy_listeners: self.proxy_listeners.unwrap_or_default(),
+            proxy_listeners: self.proxy_listeners,
             client_certificates,
-            scope: self.scope.unwrap_or_default(),
-            match_and_replace_rules: self.match_and_replace_rules.unwrap_or_default(),
-            ssl_pass_through_rules: self.ssl_pass_through_rules.unwrap_or_default(),
-            ws_match_and_replace_rules: self.ws_match_and_replace_rules.unwrap_or_default(),
+            scope: self.scope,
+            match_and_replace_rules: self.match_and_replace_rules,
+            ssl_pass_through_rules: self.ssl_pass_through_rules,
+            ws_match_and_replace_rules: self.ws_match_and_replace_rules,
             proxy_interception: self
                 .proxy_interception
-                .map(ProxyInterceptionSettings::from)
-                .unwrap_or_default(),
-            proxy_messages: self
-                .proxy_messages
-                .map(ProxyMessageSettings::from)
-                .unwrap_or_default(),
+                .map(ProxyInterceptionSettings::from),
+            proxy_messages: self.proxy_messages.map(ProxyMessageSettings::from),
             proxy_websocket_interception: self
                 .proxy_websocket_interception
-                .map(ProxyWebSocketInterceptionSettings::from)
-                .unwrap_or_default(),
+                .map(ProxyWebSocketInterceptionSettings::from),
             sessions,
-            tasks_auto_start: self.tasks_auto_start.unwrap_or(true),
-            scheduled_tasks: self.scheduled_tasks.unwrap_or_default(),
+            tasks_auto_start: self.tasks_auto_start,
+            scheduled_tasks: self.scheduled_tasks,
         })
     }
 }
@@ -1448,6 +1559,13 @@ mod tests {
         ws.upstream_tls.disable_session_resume = true;
         ws.upstream_tls.client_certs_override_project_only = true;
 
+        let listener_auth = mio_proxy::MitmAuthority::generate().expect("generate listener cert");
+        let listener_cert_pem = listener_auth.certificate_pem();
+        let listener_key_pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            b64_encode(&listener_auth.private_key_der())
+        );
+
         ws.proxy_listeners.push(ProxyListenerConfig {
             id: Uuid::new_v4(),
             enabled: true,
@@ -1460,8 +1578,8 @@ mod tests {
             specific_cert_hostname: String::new(),
             enable_http2: false,
             tls_protocols_label: "TLSv1.3 only".into(),
-            custom_cert_pem: Some("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----".into()),
-            custom_key_pem: Some("-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----".into()),
+            custom_cert_pem: Some(listener_cert_pem),
+            custom_key_pem: Some(listener_key_pem),
         });
 
         ws.client_certificates.push(ClientCertificateRule {
@@ -1851,7 +1969,7 @@ mod tests {
                 r#"{{"proxy_listeners": [{{"id": "{listener_id}", "enabled": true, "bind_address": "127.0.0.1:8080", "redirect_to_port": 0}}]}}"#
             ),
             &format!(
-                r#"{{"proxy_listeners": [{{"id": "{listener_id}", "enabled": true, "bind_address": "192.0.2.10:8080"}}]}}"#
+                r#"{{"proxy_listeners": [{{"id": "{listener_id}", "enabled": true, "bind_address": "not-an-ip:8080"}}]}}"#
             ),
             r#"{"upstream_tls": {"custom_ca_ders_b64": ["not-valid-base64!"]}}"#,
             r#"{"client_certificates": [{"host_pattern": "example.invalid", "certificate_b64": "!!!"}]}"#,
@@ -1878,5 +1996,54 @@ mod tests {
                 "expected validation failure for input: {case}"
             );
         }
+
+        let all_interfaces = format!(
+            r#"{{"proxy_listeners": [{{"id": "{listener_id}", "enabled": true, "bind_address": "0.0.0.0:8080"}}]}}"#
+        );
+        let parsed_all = parse_project_settings_json(&all_interfaces).unwrap();
+        assert_eq!(parsed_all.proxy_listeners[0].bind_address, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn project_settings_patch_merges_partial_json_without_wiping_existing_sections() {
+        let listener_id = Uuid::new_v4();
+        let existing_rule_id = Uuid::new_v4();
+        let new_scope_id = Uuid::new_v4();
+        let mut ws = Workspace::default();
+        ws.proxy_listeners = vec![ProxyListenerConfig {
+            id: listener_id,
+            enabled: true,
+            bind_address: "0.0.0.0:8080".into(),
+            ..ProxyListenerConfig::default()
+        }];
+        ws.match_and_replace_rules = vec![MatchAndReplaceRule {
+            id: existing_rule_id,
+            enabled: true,
+            item_type: MatchReplaceTarget::RequestHeader,
+            match_pattern: "User-Agent: old".into(),
+            replace_with: "User-Agent: new".into(),
+            regex: false,
+            comment: "keep me".into(),
+            script_name: String::new(),
+            filter_script: String::new(),
+        }];
+        ws.tasks_auto_start = false;
+
+        let partial = format!(
+            r#"{{
+              "format": "mio.project_settings.v1",
+              "scope": {{"include": [{{"id": "{new_scope_id}", "enabled": true, "prefix": "https://app.example.invalid"}}]}}
+            }}"#
+        );
+        let patch = parse_project_settings_patch(&partial).unwrap();
+        patch.apply_to(&mut ws).unwrap();
+
+        assert_eq!(ws.scope.include.len(), 1);
+        assert_eq!(ws.scope.include[0].id, new_scope_id);
+        assert_eq!(ws.proxy_listeners.len(), 1);
+        assert_eq!(ws.proxy_listeners[0].bind_address, "0.0.0.0:8080");
+        assert_eq!(ws.match_and_replace_rules.len(), 1);
+        assert_eq!(ws.match_and_replace_rules[0].id, existing_rule_id);
+        assert!(!ws.tasks_auto_start);
     }
 }

@@ -1,5 +1,20 @@
 use super::*;
 
+fn group_member_states(workspace: &Workspace) -> Vec<(TabId, Option<Uuid>)> {
+    workspace
+        .tabs
+        .iter()
+        .map(|tab| (tab.id, tab.group))
+        .chain(
+            workspace
+                .websocket_tabs
+                .iter()
+                .filter(|tab| !tab.closed)
+                .map(|tab| (tab.id, tab.group)),
+        )
+        .collect()
+}
+
 impl GroupEditor {
     pub(super) fn new(
         (owner, owner_window): (Entity<Workbench>, AnyWindowHandle),
@@ -9,13 +24,19 @@ impl GroupEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let base_groups = owner.read(cx).workspace.groups.clone();
-        let tabs = owner
-            .read(cx)
-            .workspace
+        let workspace = &owner.read(cx).workspace;
+        let base_groups = workspace.groups.clone();
+        let tabs = workspace
             .tabs
             .iter()
             .map(|tab| (tab.id, tab.title.clone(), tab.group))
+            .chain(
+                workspace
+                    .websocket_tabs
+                    .iter()
+                    .filter(|tab| !tab.closed)
+                    .map(|tab| (tab.id, format!("[WS] {}", tab.title), tab.group)),
+            )
             .collect::<Vec<_>>();
         let frame = window.bounds().size;
         let viewport = window.viewport_size();
@@ -146,12 +167,7 @@ impl GroupEditor {
                     {
                         return Err("项目状态已改变；分组草稿仍保留。".into());
                     }
-                    let current_members = view
-                        .workspace
-                        .tabs
-                        .iter()
-                        .map(|tab| (tab.id, tab.group))
-                        .collect::<Vec<_>>();
+                    let current_members = group_member_states(&view.workspace);
                     if view.workspace.groups != groups || current_members != members {
                         return Err("标签或分组已被其它操作修改；未覆盖当前工作区。".into());
                     }
@@ -176,16 +192,22 @@ impl GroupEditor {
                             tab.group = None;
                         }
                     }
+                    for tab in &mut workspace.websocket_tabs {
+                        if tab.closed {
+                            continue;
+                        }
+                        if selected.contains(&tab.id) {
+                            tab.group = Some(group.id);
+                        } else if tab.group == Some(group.id) {
+                            tab.group = None;
+                        }
+                    }
                     workspace
                         .validate_structure()
                         .map_err(|error| error.to_string())?;
                     applied_metadata = Some((
                         workspace.groups.clone(),
-                        workspace
-                            .tabs
-                            .iter()
-                            .map(|tab| (tab.id, tab.group))
-                            .collect(),
+                        group_member_states(&workspace),
                     ));
                     view.workspace = workspace;
                     if !view.save_workspace(cx) {

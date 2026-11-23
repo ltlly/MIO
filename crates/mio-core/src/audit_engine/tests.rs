@@ -333,6 +333,7 @@ fn report_renderers_escape_xss_and_summarize_all_severities() {
         revision: 7,
         live_passive_enabled: true,
         live_passive_crawl_enabled: true,
+        live_passive_suite_scope_only: false,
         tasks: vec![AuditTaskSummary {
             id: Uuid::new_v4(),
             title: "Task <img src=1 onerror=alert(9)>".into(),

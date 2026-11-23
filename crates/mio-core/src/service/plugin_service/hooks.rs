@@ -444,37 +444,8 @@ impl State {
 
     pub(crate) fn sync_sessions_workspace(&self, workspace: &Workspace) {
         self.sessions.runtime.sync_workspace(self.project, workspace);
-        if let Ok(upstream_tls) = self
-            .preferences
-            .effective_upstream_tls(&workspace.upstream_tls)
-            && let Ok(upstream_route) = workspace
-                .upstream_proxy
-                .to_route_with_tls(upstream_tls.clone())
-            && let Ok(hostname_overrides) = workspace.upstream_proxy.compiled_hostname_overrides()
-        {
-            self.sessions.runtime.set_proxy_send_config(SendConfig {
-                network: mio_proxy::SendNetworkConfig {
-                    upstream_route,
-                    hostname_overrides,
-                },
-                tls: mio_proxy::UpstreamTlsConfig {
-                    trust: upstream_tls,
-                    options: workspace.upstream_tls.to_proxy_tls_options(),
-                    client_certificates: self.tls.compiled_client_certs.clone(),
-                    ..Default::default()
-                },
-                limits: mio_proxy::SendLimits {
-                    timeout: Duration::from_secs(
-                        workspace
-                            .repeater_settings
-                            .request_timeout_secs
-                            .clamp(1, 3600),
-                    ),
-                    streaming_timeout: workspace.upstream_proxy.effective_streaming_timeout(),
-                    ..Default::default()
-                },
-                ..SendConfig::default()
-            });
+        if let Ok(config) = self.build_sessions_send_config(workspace) {
+            self.sessions.runtime.set_proxy_send_config(config);
         }
         self.sync_proxy_plugin_hooks();
     }

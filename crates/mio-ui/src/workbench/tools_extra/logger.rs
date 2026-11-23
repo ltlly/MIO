@@ -207,7 +207,10 @@ impl Workbench {
             }
         };
         let (count, csv) = {
-            let live_notes = self.history.read(cx).delegate().live_notes.borrow();
+            let loaded_details = self.logger_loaded_detail_records();
+            let delegate = self.history.read(cx).delegate();
+            let live_notes = delegate.live_notes.borrow();
+            let live_highlights = delegate.live_highlights.borrow();
             let rows = table::filter_and_sort_logger(
                 &self.extra_tools.logger_entries,
                 &self.extra_tools.logger_source_filter,
@@ -216,6 +219,8 @@ impl Workbench {
                 &self.extra_tools.logger_filters,
                 &self.workspace.scope,
                 &live_notes,
+                &live_highlights,
+                &loaded_details,
             );
             (rows.len(), table::format_logger_csv(&rows))
         };
@@ -257,6 +262,7 @@ impl Workbench {
         }
         self.extra_tools.logger_query_revision =
             self.extra_tools.logger_query_revision.saturating_add(1);
+        self.extra_tools.logger_query_filter = filter.clone();
         let query_revision = self.extra_tools.logger_query_revision;
         let cancel = self.shutdown.child_token();
         if self.enqueue(
@@ -274,6 +280,21 @@ impl Workbench {
             self.extra_tools.logger_query_cancel = Some(cancel);
         }
         cx.notify();
+    }
+
+    pub(super) fn logger_loaded_detail_records(&self) -> Vec<&FlowRecord> {
+        let mut details = Vec::with_capacity(2);
+        if let Some((record, _)) = self.extra_tools.logger_loaded_detail.as_deref() {
+            details.push(record);
+        }
+        if let Some(record) = self.detail.as_deref()
+            && details
+                .first()
+                .is_none_or(|first| first.summary.id != record.summary.id)
+        {
+            details.push(record);
+        }
+        details
     }
 
     pub(in crate::workbench) fn record_logger_flow(&mut self, summary: &FlowSummary) {

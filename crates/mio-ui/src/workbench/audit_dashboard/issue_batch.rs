@@ -277,8 +277,8 @@ impl Workbench {
         if self.transition.is_some() {
             return;
         }
-        const MAX_COMPARER_ITEMS: usize = 32;
-        const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+        const MAX_COMPARER_ITEMS: usize = 64;
+        const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
         let id_set: HashSet<Uuid> = ids.iter().copied().collect();
         let findings: Vec<AuditFinding> = self
             .audit_dashboard

@@ -141,7 +141,11 @@ fn encode_dns_formerr(packet: &[u8]) -> Vec<u8> {
     response
 }
 
-fn encode_dns_response(question: &ParsedDnsQuestion, matched_token: bool) -> Vec<u8> {
+fn encode_dns_response(
+    question: &ParsedDnsQuestion,
+    matched_token: bool,
+    dns_answer_ip: Ipv4Addr,
+) -> Vec<u8> {
     let should_answer = matched_token
         && matches!(question.qtype, DNS_QTYPE_A | DNS_QTYPE_ANY)
         && matches!(question.qclass, DNS_QCLASS_IN | DNS_QCLASS_ANY);
@@ -179,7 +183,7 @@ fn encode_dns_response(question: &ParsedDnsQuestion, matched_token: bool) -> Vec
         response.extend_from_slice(&DNS_QCLASS_IN.to_be_bytes());
         response.extend_from_slice(&60_u32.to_be_bytes());
         response.extend_from_slice(&4_u16.to_be_bytes());
-        response.extend_from_slice(&[127, 0, 0, 1]);
+        response.extend_from_slice(&dns_answer_ip.octets());
     }
     response
 }
@@ -189,6 +193,7 @@ pub(super) async fn run_dns_server(
     events_tx: EventSender,
     cancel: CancellationToken,
     issued_tokens: IssuedTokens,
+    dns_answer_ip: Ipv4Addr,
 ) {
     let mut buffer = vec![0_u8; MAX_RAW_REQUEST_BYTES];
     loop {
@@ -217,7 +222,7 @@ pub(super) async fn run_dns_server(
             let token = book.match_candidates(&labels);
             let response = parsed.as_ref().map_or_else(
                 || encode_dns_formerr(&packet),
-                |question| encode_dns_response(question, token.is_some()),
+                |question| encode_dns_response(question, token.is_some(), dns_answer_ip),
             );
             (token, response)
         };

@@ -1,4 +1,4 @@
-pub(super) const MAX_DECODER_BYTES: usize = 512 * 1024;
+pub(super) const MAX_DECODER_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_DECODER_STEPS: usize = 16;
 const STEP_PREVIEW_CHARS: usize = 36;
 
@@ -57,7 +57,7 @@ impl DecoderOp {
             }
         };
         if output.len() > MAX_DECODER_BYTES {
-            return Err("Decoder 输出超过 512 KiB 上限。".into());
+            return Err("Decoder 输出超过 4 MiB 上限。".into());
         }
         Ok((output, None))
     }
@@ -287,7 +287,7 @@ impl Workbench {
             return editing::hex_decode(&text).map(|bytes| (bytes, text));
         }
         if text.len() > MAX_DECODER_BYTES {
-            return Err("Decoder 输入超过 512 KiB 上限。".into());
+            return Err("Decoder 输入超过 4 MiB 上限。".into());
         }
         Ok((text.as_bytes().to_vec(), text))
     }

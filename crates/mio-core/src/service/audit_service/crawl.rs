@@ -15,6 +15,7 @@ pub(super) struct ActiveTarget {
 pub(super) struct CrawlStageOutcome {
     pub(super) targets: Vec<ActiveTarget>,
     pub(super) cancelled: bool,
+    pub(super) crawl_error: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -53,6 +54,7 @@ pub(super) async fn collect_active_targets(
         return CrawlStageOutcome {
             targets,
             cancelled: cancel.is_cancelled(),
+            crawl_error: None,
         };
     }
 
@@ -73,6 +75,7 @@ pub(super) async fn collect_active_targets(
         );
     }
     let mut crawled_flows = Vec::new();
+    let mut crawl_error = None;
 
     match crate::audit_engine::crawl_in_scope_endpoints_with_headers(
         &base_req.url,
@@ -134,6 +137,7 @@ pub(super) async fn collect_active_targets(
                 return CrawlStageOutcome {
                     targets,
                     cancelled: true,
+                    crawl_error: None,
                 };
             }
             crawled_flows = report.flows;
@@ -144,15 +148,21 @@ pub(super) async fn collect_active_targets(
             return CrawlStageOutcome {
                 targets,
                 cancelled: true,
+                crawl_error: None,
             };
         }
-        Err(_) => {}
+        Err(err) => {
+            let msg = err.to_string();
+            let detail: String = msg.chars().take(200).collect();
+            crawl_error = Some(format!("同源爬行部分跳过或失败：{detail}"));
+        }
     }
 
     if mode != AuditTaskMode::PassiveAndActive {
         return CrawlStageOutcome {
             targets,
             cancelled: cancel.is_cancelled(),
+            crawl_error,
         };
     }
 
@@ -165,6 +175,7 @@ pub(super) async fn collect_active_targets(
             return CrawlStageOutcome {
                 targets,
                 cancelled: true,
+                crawl_error: None,
             };
         }
         let key = (
@@ -206,6 +217,7 @@ pub(super) async fn collect_active_targets(
                     return CrawlStageOutcome {
                         targets,
                         cancelled: true,
+                        crawl_error: None,
                     };
                 }
                 res = send(ep.request.clone(), crawl_cfg.clone(), cancel.child_token()) => res,
@@ -216,6 +228,7 @@ pub(super) async fn collect_active_targets(
                     return CrawlStageOutcome {
                         targets,
                         cancelled: true,
+                        crawl_error: None,
                     };
                 }
                 Err(_) => {
@@ -271,5 +284,6 @@ pub(super) async fn collect_active_targets(
     CrawlStageOutcome {
         targets,
         cancelled: cancel.is_cancelled(),
+        crawl_error,
     }
 }

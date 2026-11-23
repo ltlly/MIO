@@ -14,6 +14,8 @@ mod events;
 pub use events::*;
 mod history;
 pub use history::*;
+mod local_interfaces;
+pub use local_interfaces::*;
 mod intruder;
 pub use intruder::*;
 mod organiser;

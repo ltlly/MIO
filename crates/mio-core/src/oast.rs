@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, PoisonError, RwLock},
 };
 
@@ -84,6 +84,16 @@ pub struct SelfHostedOastConfig {
     pub server_domain: Option<String>,
     pub authorization_header: Option<String>,
     pub poll_interval_ms: u64,
+    #[serde(default)]
+    pub bind_address: Option<String>,
+    #[serde(default)]
+    pub http_port: Option<u16>,
+    #[serde(default)]
+    pub dns_port: Option<u16>,
+    #[serde(default)]
+    pub dns_answer_ip: Option<String>,
+    #[serde(default)]
+    pub allow_public_cloud_domains: bool,
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +108,7 @@ type EventSender = mpsc::Sender<OastInteraction>;
 pub struct LocalOastServer {
     pub(super) http_addr: SocketAddr,
     pub(super) dns_addr: SocketAddr,
+    pub(super) dns_answer_ip: Ipv4Addr,
     pub(super) config: SelfHostedOastConfig,
     pub(super) issued_tokens: IssuedTokens,
     pub(super) cancel: CancellationToken,

@@ -451,3 +451,88 @@ fn proxy_intercept_parameter_rules_use_original_data_not_cookies_or_transfer_fra
         .contains("4 MiB")
     );
 }
+
+#[test]
+fn proxy_intercept_supports_not_in_scope_and_response_rule_matching_request_header() {
+    let cancel = CancellationToken::new();
+    let limits = (std::time::Instant::now() + Duration::from_secs(3), MAX_BODY);
+    let scope = crate::TargetScope {
+        include: vec![crate::ScopeRule {
+            id: crate::Uuid::new_v4(),
+            enabled: true,
+            prefix: "https://inscope.example.invalid".into(),
+            include_subdomains: false,
+        }],
+        ..Default::default()
+    };
+
+    let mut settings = crate::ProxyInterceptionSettings {
+        request: crate::ProxyInterceptRuleSet {
+            enabled: true,
+            rules: vec![crate::ProxyInterceptRule {
+                id: crate::Uuid::new_v4(),
+                enabled: true,
+                operator: crate::ProxyInterceptOperator::And,
+                match_type: crate::ProxyInterceptType::Url,
+                relationship: crate::ProxyInterceptRelation::NotInScope,
+                condition: String::new(),
+            }],
+        },
+        response: crate::ProxyInterceptRuleSet {
+            enabled: true,
+            rules: vec![crate::ProxyInterceptRule {
+                id: crate::Uuid::new_v4(),
+                enabled: true,
+                operator: crate::ProxyInterceptOperator::And,
+                match_type: crate::ProxyInterceptType::Header,
+                relationship: crate::ProxyInterceptRelation::RequestMatches,
+                condition: "^X-Intercept-Resp: yes$".into(),
+            }],
+        },
+    };
+
+    let filter = build_intercept_filter(settings.clone(), scope.clone()).unwrap();
+    let mut record = interception_record();
+    record.request.url = "https://external.example.invalid/item".into();
+    assert!(
+        filter(&record, false, false, false, false, eval_port(8080), &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
+    record.request.url = "https://inscope.example.invalid/item".into();
+    assert!(
+        !filter(&record, false, false, false, false, eval_port(8080), &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
+
+    record.request.headers = vec![Header {
+        name: "X-Intercept-Resp".into(),
+        value: b"yes".to_vec(),
+    }];
+    record.response = Some(crate::HttpResponse {
+        version: HttpVersion::Http11,
+        status: 200,
+        reason_phrase: Some(b"OK".to_vec()),
+        headers: vec![Header {
+            name: "Server".into(),
+            value: b"edge".to_vec(),
+        }],
+        body: Vec::new(),
+        trailers: Vec::new(),
+    });
+    assert!(
+        filter(&record, true, false, false, false, eval_port(8080), &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
+
+    settings.response.rules[0].relationship = crate::ProxyInterceptRelation::ResponseMatches;
+    settings.response.rules[0].condition = "^Server: edge$".into();
+    let resp_filter = build_intercept_filter(settings, scope).unwrap();
+    assert!(
+        resp_filter(&record, true, false, false, false, eval_port(8080), &cancel, limits)
+            .unwrap()
+            .should_intercept()
+    );
+}

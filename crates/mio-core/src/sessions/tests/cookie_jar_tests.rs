@@ -296,3 +296,29 @@ fn mio_ai_cookie_jar_monitoring_follows_monitor_mio_ai_flag() {
     assert_eq!(runtime.cookie_jar_snapshot()[0].name, "ai_sid");
     assert_eq!(runtime.cookie_jar_snapshot()[0].value, "blocked");
 }
+
+#[test]
+fn cookie_jar_accepts_ipv6_literal_host_only_and_rejects_ports() {
+    assert_eq!(
+        crate::sessions::normalize_cookie_domain("[::1]").unwrap(),
+        "::1"
+    );
+    assert_eq!(
+        crate::sessions::normalize_cookie_domain("::1").unwrap(),
+        "::1"
+    );
+    assert!(crate::sessions::normalize_cookie_domain("example.invalid:8443").is_err());
+
+    let entry = CookieJarEntry {
+        id: Uuid::new_v4(),
+        domain: "::1".into(),
+        host_only: true,
+        path: "/".into(),
+        name: "sid".into(),
+        value: "v6".into(),
+        secure: false,
+        http_only: true,
+        expires_unix_ms: None,
+    };
+    entry.validate().unwrap();
+}

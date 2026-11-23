@@ -84,8 +84,8 @@ impl ConnectionsUi {
                     .sortable(false)
                     .col_selectable(false)
             });
-            cx.subscribe_in(&table, window, move |this, _, event, _, cx| {
-                if let TableEvent::SelectRow(row) = event {
+            cx.subscribe_in(&table, window, move |this, _, event, window, cx| match event {
+                TableEvent::SelectRow(row) => {
                     match kind {
                         ConnectionsTableKind::Upstream => {
                             this.connections.selected_rule = this
@@ -115,12 +115,58 @@ impl ConnectionsUi {
                     }
                     cx.notify();
                 }
+                TableEvent::DoubleClickedRow(row) => {
+                    match kind {
+                        ConnectionsTableKind::Upstream => {
+                            this.connections.selected_rule = this
+                                .state
+                                .upstream_proxy
+                                .rules
+                                .get(*row)
+                                .map(|rule| rule.id);
+                            if this.connections.selected_rule.is_some() && this.state.enabled {
+                                this.open_upstream_editor(false, window, cx);
+                            }
+                        }
+                        ConnectionsTableKind::Hostname => {
+                            this.connections.selected_dns = this
+                                .state
+                                .upstream_proxy
+                                .hostname_resolutions
+                                .get(*row)
+                                .map(|rule| rule.id);
+                            if this.connections.selected_dns.is_some() && this.state.enabled {
+                                this.open_hostname_editor(false, window, cx);
+                            }
+                        }
+                        ConnectionsTableKind::PlatformAuth => {
+                            this.connections.selected_platform_auth = this
+                                .state
+                                .upstream_proxy
+                                .platform_auth
+                                .rules
+                                .get(*row)
+                                .map(|rule| rule.id);
+                            if this.connections.selected_platform_auth.is_some() && this.state.enabled
+                            {
+                                this.open_platform_auth_editor(false, window, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }
+                _ => {}
             })
             .detach();
             table
         });
         let rule_protocol = cx.new(|scx| {
-            SelectState::new(vec!["HTTP", "HTTPS"], Some(IndexPath::new(0)), window, scx)
+            SelectState::new(
+                vec!["HTTP", "HTTPS", "Direct"],
+                Some(IndexPath::new(0)),
+                window,
+                scx,
+            )
         });
         let rule_auth = cx.new(|scx| {
             SelectState::new(
@@ -206,7 +252,7 @@ impl ConnectionsUi {
             rule_host: cx.new(|icx| InputState::new(window, icx).placeholder("proxy.example.com")),
             rule_port: cx.new(|icx| InputState::new(window, icx).default_value("8080")),
             rule_username: cx.new(|icx| InputState::new(window, icx)),
-            rule_password: cx.new(|icx| InputState::new(window, icx)),
+            rule_password: cx.new(|icx| InputState::new(window, icx).masked(true)),
             rule_domain: cx.new(|icx| InputState::new(window, icx).placeholder("可选 NTLM 域")),
             rule_workstation: cx
                 .new(|icx| InputState::new(window, icx).placeholder("可选 NTLM 工作站")),
@@ -214,7 +260,7 @@ impl ConnectionsUi {
             platform_destination: cx
                 .new(|icx| InputState::new(window, icx).default_value("*")),
             platform_username: cx.new(|icx| InputState::new(window, icx)),
-            platform_password: cx.new(|icx| InputState::new(window, icx)),
+            platform_password: cx.new(|icx| InputState::new(window, icx).masked(true)),
             platform_domain: cx.new(|icx| InputState::new(window, icx).placeholder("可选域")),
             platform_hostname: cx
                 .new(|icx| InputState::new(window, icx).placeholder("可选主机名")),
@@ -304,18 +350,39 @@ impl ConnectionsTable {
             }
             ConnectionsTableKind::Upstream => {
                 let rule = settings.state.upstream_proxy.rules.get(row)?;
+                let is_direct = rule.protocol == UpstreamProxyProtocol::Direct;
                 Some(match column {
                     0 => if rule.enabled { "Yes" } else { "No" }.into(),
                     1 => rule.destination_host.clone(),
-                    2 => rule.host.clone(),
-                    3 => rule.port.to_string(),
-                    4 => rule.auth_type.label().into(),
+                    2 => {
+                        if is_direct {
+                            "(直连 / Direct)".into()
+                        } else {
+                            rule.host.clone()
+                        }
+                    }
+                    3 => {
+                        if is_direct && rule.port == 0 {
+                            String::new()
+                        } else {
+                            rule.port.to_string()
+                        }
+                    }
+                    4 => {
+                        if is_direct {
+                            "Direct".into()
+                        } else {
+                            rule.auth_type.label().into()
+                        }
+                    }
                     5 => rule.username.clone(),
                     _ => {
                         if !rule.description.is_empty() {
                             rule.description.clone()
                         } else if rule.protocol == UpstreamProxyProtocol::Https {
                             "HTTPS".into()
+                        } else if is_direct {
+                            "Direct".into()
                         } else {
                             String::new()
                         }
@@ -458,13 +525,14 @@ impl TableDelegate for ConnectionsTable {
                     match kind {
                         ConnectionsTableKind::Hostname => {
                             let mut next = this.state.upstream_proxy.clone();
-                            let entry = next
+                            if let Some(entry) = next
                                 .hostname_resolutions
                                 .iter_mut()
                                 .find(|entry| entry.id == id)
-                                .expect("选中的主机名解析规则存在");
-                            entry.enabled = value == CheckboxState::Checked;
-                            this.commit_connections(next, cx);
+                            {
+                                entry.enabled = value == CheckboxState::Checked;
+                                this.commit_connections(next, cx);
+                            }
                         }
                         ConnectionsTableKind::PlatformAuth => {
                             let mut next = this.state.upstream_proxy.clone();
@@ -475,17 +543,16 @@ impl TableDelegate for ConnectionsTable {
                                 .find(|entry| entry.id == id)
                             {
                                 entry.enabled = value == CheckboxState::Checked;
+                                this.commit_connections(next, cx);
                             }
-                            this.commit_connections(next, cx);
                         }
                         ConnectionsTableKind::Upstream => {
                             this.change_upstream_rules(
                                 |rules| {
-                                    let entry = rules
-                                        .iter_mut()
-                                        .find(|entry| entry.id == id)
-                                        .expect("选中的上游代理规则存在");
-                                    entry.enabled = value == CheckboxState::Checked;
+                                    if let Some(entry) = rules.iter_mut().find(|entry| entry.id == id)
+                                    {
+                                        entry.enabled = value == CheckboxState::Checked;
+                                    }
                                 },
                                 cx,
                             );
@@ -708,14 +775,13 @@ impl Settings {
             rule
         };
         self.connections.editing_rule = (!new).then_some(rule.id);
+        let proto_idx = match rule.protocol {
+            UpstreamProxyProtocol::Http => 0,
+            UpstreamProxyProtocol::Https => 1,
+            UpstreamProxyProtocol::Direct | UpstreamProxyProtocol::Socks5 => 2,
+        };
         self.connections.rule_protocol.update(cx, |select, cx| {
-            select.set_selected_index(
-                Some(IndexPath::new(usize::from(
-                    rule.protocol == UpstreamProxyProtocol::Https,
-                ))),
-                window,
-                cx,
-            )
+            select.set_selected_index(Some(IndexPath::new(proto_idx)), window, cx)
         });
         let auth_idx = match rule.auth_type {
             UpstreamAuthType::None => 0,
@@ -727,10 +793,15 @@ impl Settings {
         self.connections.rule_auth.update(cx, |select, cx| {
             select.set_selected_index(Some(IndexPath::new(auth_idx)), window, cx)
         });
+        let port_text = if rule.protocol == UpstreamProxyProtocol::Direct && rule.port == 0 {
+            String::new()
+        } else {
+            rule.port.to_string()
+        };
         for (input, value) in [
             (&self.connections.rule_destination, rule.destination_host),
             (&self.connections.rule_host, rule.host),
-            (&self.connections.rule_port, rule.port.to_string()),
+            (&self.connections.rule_port, port_text),
             (&self.connections.rule_username, rule.username),
             (&self.connections.rule_password, rule.password),
             (&self.connections.rule_domain, rule.domain),
@@ -769,11 +840,6 @@ impl Settings {
             self.settings_error(editing::COMPOSITION_PENDING, cx);
             return;
         };
-        let Ok(port) = port.trim().parse::<u16>() else {
-            self.connections.error = Some("代理端口必须在 1 到 65535 之间。".into());
-            cx.notify();
-            return;
-        };
         let protocol = match self
             .connections
             .rule_protocol
@@ -784,35 +850,71 @@ impl Settings {
         {
             "HTTP" => UpstreamProxyProtocol::Http,
             "HTTPS" => UpstreamProxyProtocol::Https,
+            "Direct" => UpstreamProxyProtocol::Direct,
             _ => unreachable!(),
         };
-        let auth_type = match self
-            .connections
-            .rule_auth
-            .read(cx)
-            .selected_value()
-            .copied()
-            .expect("认证类型已选择")
-        {
-            "None" => UpstreamAuthType::None,
-            "Basic" => UpstreamAuthType::Basic,
-            "Digest" => UpstreamAuthType::Digest,
-            "NTLM v1" => UpstreamAuthType::NtlmV1,
-            "NTLM v2" => UpstreamAuthType::NtlmV2,
-            _ => unreachable!(),
+        let is_direct = protocol == UpstreamProxyProtocol::Direct;
+        let port = if is_direct && port.trim().is_empty() {
+            0
+        } else {
+            let Ok(port) = port.trim().parse::<u16>() else {
+                self.connections.error = Some("代理端口必须在 1 到 65535 之间。".into());
+                cx.notify();
+                return;
+            };
+            port
+        };
+        let auth_type = if is_direct {
+            UpstreamAuthType::None
+        } else {
+            match self
+                .connections
+                .rule_auth
+                .read(cx)
+                .selected_value()
+                .copied()
+                .expect("认证类型已选择")
+            {
+                "None" => UpstreamAuthType::None,
+                "Basic" => UpstreamAuthType::Basic,
+                "Digest" => UpstreamAuthType::Digest,
+                "NTLM v1" => UpstreamAuthType::NtlmV1,
+                "NTLM v2" => UpstreamAuthType::NtlmV2,
+                _ => unreachable!(),
+            }
         };
         let rule = UpstreamProxyRule {
             id: self.connections.editing_rule.unwrap_or_else(Uuid::new_v4),
             enabled: true,
             destination_host: destination.trim().into(),
             protocol,
-            host: host.trim().into(),
+            host: if is_direct {
+                String::new()
+            } else {
+                host.trim().into()
+            },
             port,
             auth_type,
-            username: username.to_string(),
-            password: password.to_string(),
-            domain: domain.trim().to_owned(),
-            workstation: workstation.trim().to_owned(),
+            username: if is_direct {
+                String::new()
+            } else {
+                username.to_string()
+            },
+            password: if is_direct {
+                String::new()
+            } else {
+                password.to_string()
+            },
+            domain: if is_direct {
+                String::new()
+            } else {
+                domain.trim().to_owned()
+            },
+            workstation: if is_direct {
+                String::new()
+            } else {
+                workstation.trim().to_owned()
+            },
             description: description.trim().to_owned(),
         };
         if let Err(error) = rule.validate() {
@@ -1226,6 +1328,14 @@ impl Settings {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let selected_protocol = self
+            .connections
+            .rule_protocol
+            .read(cx)
+            .selected_value()
+            .copied()
+            .unwrap_or("HTTP");
+        let is_direct = selected_protocol == "Direct";
         let selected_auth = self
             .connections
             .rule_auth
@@ -1233,8 +1343,8 @@ impl Settings {
             .selected_value()
             .copied()
             .unwrap_or("None");
-        let auth = selected_auth != "None";
-        let is_ntlm = matches!(selected_auth, "NTLM v1" | "NTLM v2");
+        let auth = !is_direct && selected_auth != "None";
+        let is_ntlm = !is_direct && matches!(selected_auth, "NTLM v1" | "NTLM v2");
         let mut editor = div()
             .ml(px(30.))
             .p(px(10.))
@@ -1259,7 +1369,7 @@ impl Settings {
                     .id("settings-upstream-auth-type")
                     .small()
                     .w(px(280.))
-                    .disabled(!enabled),
+                    .disabled(!enabled || is_direct),
             ));
         for (id, label, input, field_enabled) in [
             (
@@ -1272,13 +1382,13 @@ impl Settings {
                 "settings-upstream-rule-host",
                 "Proxy host",
                 &self.connections.rule_host,
-                true,
+                !is_direct,
             ),
             (
                 "settings-upstream-rule-port",
                 "Proxy port",
                 &self.connections.rule_port,
-                true,
+                !is_direct,
             ),
             (
                 "settings-upstream-rule-username",
@@ -1296,13 +1406,13 @@ impl Settings {
                 "settings-upstream-rule-domain",
                 "Domain",
                 &self.connections.rule_domain,
-                auth || is_ntlm,
+                is_ntlm,
             ),
             (
                 "settings-upstream-rule-workstation",
                 "Workstation",
                 &self.connections.rule_workstation,
-                auth || is_ntlm,
+                is_ntlm,
             ),
             (
                 "settings-upstream-rule-description",
@@ -1311,14 +1421,15 @@ impl Settings {
                 true,
             ),
         ] {
-            editor = editor.child(connection_field(
-                label,
-                Input::new(input)
-                    .id(id)
-                    .aria_label(label)
-                    .small()
-                    .disabled(!enabled || !field_enabled),
-            ));
+            let mut field = Input::new(input)
+                .id(id)
+                .aria_label(label)
+                .small()
+                .disabled(!enabled || !field_enabled);
+            if id == "settings-upstream-rule-password" {
+                field = field.mask_toggle();
+            }
+            editor = editor.child(connection_field(label, field));
         }
         editor
             .child(
@@ -1515,6 +1626,7 @@ impl Settings {
                             .id("settings-upstream-password")
                             .aria_label("Password")
                             .small()
+                            .mask_toggle()
                             .disabled(!enabled),
                     )),
             )
@@ -1801,7 +1913,7 @@ impl Settings {
             .child(connection_dual_section_header(
                 "settings-socks-heading",
                 "SOCKS 代理",
-                "使用这些设置配置 MIO 对所有出站通信使用 SOCKS 代理。此设置在 TCP 层生效，所有出站请求都会经由此代理发送。如果同时配置了上游 HTTP 代理规则，发往上游代理的请求也会经由此处配置的 SOCKS 代理发送。",
+                "使用这些设置配置 MIO 对所有出站通信使用 SOCKS 代理。此设置在 TCP 层生效，除绕过列表外的出站请求均会经由此代理发送；命中绕过列表的主机将回退匹配上方上游 HTTP 代理规则或直连。",
                 socks_override,
                 false,
             ))
@@ -1828,11 +1940,17 @@ impl Settings {
                         enabled,
                         cx.listener(|this, checked: &bool, window, cx| {
                             this.connections.socks_enabled = *checked;
+                            if !*checked {
+                                let mut next = this.state.upstream_proxy.clone();
+                                next.socks.use_proxy = false;
+                                this.commit_connections(next, cx);
+                                return;
+                            }
                             let configured = &this.state.upstream_proxy.socks;
-                            if *checked && configured.host.trim().is_empty() {
+                            if configured.host.trim().is_empty() {
                                 this.connections.socks_editor_visible = true;
                                 cx.notify();
-                            } else if !configured.host.trim().is_empty() && configured.port > 0 {
+                            } else if configured.port > 0 {
                                 this.save_socks(window, cx);
                             } else {
                                 cx.notify();
@@ -1853,7 +1971,7 @@ impl Settings {
             .child(connection_project_section_header(
                 "settings-timeouts-heading",
                 "超时",
-                "使用这些设置指定各项网络任务的超时时间（单位：秒）。若设为 0 或留空则视为无超时限制，失焦或按回车后自动应用。",
+                "使用这些设置指定各项网络任务的超时时间（单位：秒）。普通超时范围为 1–3600 秒；开放式响应超时设为 0 或留空表示无超时限制，失焦或按回车后自动应用。",
             ))
             .child(
                 div()
@@ -2029,36 +2147,49 @@ impl Settings {
                     .w(px(280.))
                     .disabled(!enabled),
             ));
-        for (id, label, input) in [
+        let selected_plat_auth = self
+            .connections
+            .platform_auth_type
+            .read(cx)
+            .selected_value()
+            .copied()
+            .unwrap_or("Basic");
+        let is_ntlm = matches!(selected_plat_auth, "NTLM v1" | "NTLM v2");
+        for (id, label, input, field_enabled) in [
             (
                 "settings-platform-auth-username",
                 "Username",
                 &self.connections.platform_username,
+                true,
             ),
             (
                 "settings-platform-auth-password",
                 "Password",
                 &self.connections.platform_password,
+                true,
             ),
             (
                 "settings-platform-auth-domain",
                 "Domain",
                 &self.connections.platform_domain,
+                is_ntlm,
             ),
             (
                 "settings-platform-auth-hostname",
                 "Hostname",
                 &self.connections.platform_hostname,
+                is_ntlm,
             ),
         ] {
-            plat_editor = plat_editor.child(connection_field(
-                label,
-                Input::new(input)
-                    .id(id)
-                    .aria_label(label)
-                    .small()
-                    .disabled(!enabled),
-            ));
+            let mut field = Input::new(input)
+                .id(id)
+                .aria_label(label)
+                .small()
+                .disabled(!enabled || !field_enabled);
+            if id == "settings-platform-auth-password" {
+                field = field.mask_toggle();
+            }
+            plat_editor = plat_editor.child(connection_field(label, field));
         }
         plat_editor
             .child(
@@ -2203,17 +2334,27 @@ impl Settings {
                             this.commit_connections(next, cx);
                         }),
                     ))
-                    .child(sleek_mio_switch(
-                        "settings-platform-auth-prompt",
-                        "平台认证失败时提示输入凭据 (Prompt for credentials on platform authentication failure)",
-                        plat_prompt,
-                        enabled,
-                        cx.listener(|this, checked: &bool, _, cx| {
-                            let mut next = this.state.upstream_proxy.clone();
-                            next.platform_auth.prompt_on_failure = *checked;
-                            this.commit_connections(next, cx);
-                        }),
-                    ))
+                    .child(
+                        div()
+                            .id("settings-platform-auth-prompt-wrap")
+                            .tooltip(|w, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "保存该兼容选项以便导出与跨项目同步；当前运行时暂不触发交互式失败弹窗重试。",
+                                )
+                                .build(w, cx)
+                            })
+                            .child(sleek_mio_switch(
+                                "settings-platform-auth-prompt",
+                                "平台认证失败时提示输入凭据 (Prompt for credentials on platform authentication failure)",
+                                plat_prompt,
+                                enabled,
+                                cx.listener(|this, checked: &bool, _, cx| {
+                                    let mut next = this.state.upstream_proxy.clone();
+                                    next.platform_auth.prompt_on_failure = *checked;
+                                    this.commit_connections(next, cx);
+                                }),
+                            )),
+                    )
                     .child(connection_table(
                         &self.connections.platform_table,
                         plat_actions,

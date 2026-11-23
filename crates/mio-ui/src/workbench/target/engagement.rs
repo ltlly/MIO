@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
-pub(super) const MAX_COMPARER_ITEMS: usize = 32;
-pub(super) const MAX_COMPARER_ITEM_BYTES: usize = 256 * 1024;
+pub(super) const MAX_COMPARER_ITEMS: usize = 64;
+pub(super) const MAX_COMPARER_ITEM_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_COMPARE_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]

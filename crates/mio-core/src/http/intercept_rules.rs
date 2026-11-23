@@ -97,7 +97,9 @@ pub(super) fn intercept_rule_matches<'a>(
                 }
                 Url => matcher.is_match(record.request.url.as_bytes()),
                 Header | ContentTypeHeader => {
-                    let headers = if response {
+                    let headers = if response
+                        && !matches!(rule.relationship, RequestMatches | RequestDoesNotMatch)
+                    {
                         &record
                             .response
                             .as_ref()

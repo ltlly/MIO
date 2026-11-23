@@ -8,17 +8,14 @@ impl Settings {
     pub(super) fn render_rule_editor_panel(
         &self,
         enabled: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let jar_opts = window.use_keyed_state(
-            "settings-sessions-jar-action-opts",
-            cx,
-            |_, _| (true, true),
-        );
-        let (jar_add_new, jar_update_existing) = *jar_opts.read(cx);
+        let jar_add_new = self.sessions.action_jar_add_new;
+        let jar_update_existing = self.sessions.action_jar_update_existing;
 
         let mut draft_actions_row = div().flex().flex_wrap().items_center().gap(px(6.));
+        let draft_len = self.sessions.draft_actions.len();
         for (idx, act) in self.sessions.draft_actions.iter().enumerate() {
             let label = describe_action(act, &self.state.sessions.macros);
             draft_actions_row = draft_actions_row.child(
@@ -35,19 +32,41 @@ impl Settings {
                     .child(format!("{}. {label}", idx + 1))
                     .child(
                         settings_action_button(
-                            ("settings-sessions-draft-act-del", idx),
-                            "×",
-                            !enabled || self.sessions.draft_actions.len() <= 1,
+                            ("settings-sessions-draft-act-up", idx),
+                            "↑",
+                            !enabled || idx == 0,
                         )
-                        .tooltip("从当前草稿规则中移除此会话处理动作")
+                        .tooltip("上移此会话处理动作")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if idx < this.sessions.draft_actions.len()
-                                && this.sessions.draft_actions.len() > 1
-                            {
-                                this.sessions.draft_actions.remove(idx);
+                            if idx > 0 && idx < this.sessions.draft_actions.len() {
+                                this.sessions.draft_actions.swap(idx, idx - 1);
                                 cx.notify();
                             }
                         })),
+                    )
+                    .child(
+                        settings_action_button(
+                            ("settings-sessions-draft-act-down", idx),
+                            "↓",
+                            !enabled || idx + 1 >= draft_len,
+                        )
+                        .tooltip("下移此会话处理动作")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if idx + 1 < this.sessions.draft_actions.len() {
+                                this.sessions.draft_actions.swap(idx, idx + 1);
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(
+                        settings_action_button(("settings-sessions-draft-act-del", idx), "×", !enabled)
+                            .tooltip("从当前草稿规则中移除此会话处理动作")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if idx < this.sessions.draft_actions.len() {
+                                    this.sessions.draft_actions.remove(idx);
+                                    cx.notify();
+                                }
+                            })),
                     ),
             );
         }
@@ -55,8 +74,6 @@ impl Settings {
         let kind = self.sessions.draft_action_kind;
         let action_editor = match kind {
             DraftActionKind::UseCookieJar => {
-                let opts_add = jar_opts.clone();
-                let opts_upd = jar_opts.clone();
                 let e_add = cx.entity();
                 let e_upd = cx.entity();
                 div()
@@ -79,19 +96,15 @@ impl Settings {
                                 )
                                 .on_change(move |st, _, _, cx| {
                                     let checked = st == CheckboxState::Checked;
-                                    opts_add.update(cx, |o, cx| {
-                                        o.0 = checked;
-                                        cx.notify();
-                                    });
                                     e_add.update(cx, |this, cx| {
-                                        for act in &mut this.sessions.draft_actions {
-                                            if let SessionRuleAction::UseCookieJar {
+                                        this.sessions.action_jar_add_new = checked;
+                                        if this.sessions.draft_actions.len() == 1
+                                            && let Some(SessionRuleAction::UseCookieJar {
                                                 add_new_cookies,
                                                 ..
-                                            } = act
-                                            {
-                                                *add_new_cookies = checked;
-                                            }
+                                            }) = this.sessions.draft_actions.first_mut()
+                                        {
+                                            *add_new_cookies = checked;
                                         }
                                         cx.notify();
                                     });
@@ -106,19 +119,15 @@ impl Settings {
                                 )
                                 .on_change(move |st, _, _, cx| {
                                     let checked = st == CheckboxState::Checked;
-                                    opts_upd.update(cx, |o, cx| {
-                                        o.1 = checked;
-                                        cx.notify();
-                                    });
                                     e_upd.update(cx, |this, cx| {
-                                        for act in &mut this.sessions.draft_actions {
-                                            if let SessionRuleAction::UseCookieJar {
+                                        this.sessions.action_jar_update_existing = checked;
+                                        if this.sessions.draft_actions.len() == 1
+                                            && let Some(SessionRuleAction::UseCookieJar {
                                                 update_existing_cookies,
                                                 ..
-                                            } = act
-                                            {
-                                                *update_existing_cookies = checked;
-                                            }
+                                            }) = this.sessions.draft_actions.first_mut()
+                                        {
+                                            *update_existing_cookies = checked;
                                         }
                                         cx.notify();
                                     });
@@ -248,6 +257,22 @@ impl Settings {
                             });
                         }),
                     )
+                    .child({
+                        let entity = cx.entity();
+                        inline_checkbox(
+                            "settings-sessions-act-param-only-present",
+                            "仅替换已有",
+                            self.sessions.action_param_only_present,
+                            enabled,
+                        )
+                        .on_change(move |st, _, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.sessions.action_param_only_present =
+                                    st == CheckboxState::Checked;
+                                cx.notify();
+                            });
+                        })
+                    })
                     .into_any_element()
             }
             DraftActionKind::ReplaceRequestText => {
@@ -293,6 +318,8 @@ impl Settings {
             }
             DraftActionKind::RunMacro => {
                 let has_macros = !self.state.sessions.macros.is_empty();
+                let e_jar = cx.entity();
+                let e_ext = cx.entity();
                 div()
                     .flex()
                     .flex_wrap()
@@ -310,6 +337,36 @@ impl Settings {
                                     .w_full()
                                     .disabled(!enabled || !has_macros),
                             ),
+                    )
+                    .child(
+                        inline_checkbox(
+                            "settings-sessions-act-macro-jar",
+                            "更新 Cookie Jar",
+                            self.sessions.action_macro_update_cookies,
+                            enabled && has_macros,
+                        )
+                        .on_change(move |st, _, _, cx| {
+                            e_jar.update(cx, |this, cx| {
+                                this.sessions.action_macro_update_cookies =
+                                    st == CheckboxState::Checked;
+                                cx.notify();
+                            });
+                        }),
+                    )
+                    .child(
+                        inline_checkbox(
+                            "settings-sessions-act-macro-extract",
+                            "应用提取参数",
+                            self.sessions.action_macro_apply_extractions,
+                            enabled && has_macros,
+                        )
+                        .on_change(move |st, _, _, cx| {
+                            e_ext.update(cx, |this, cx| {
+                                this.sessions.action_macro_apply_extractions =
+                                    st == CheckboxState::Checked;
+                                cx.notify();
+                            });
+                        }),
                     )
                     .into_any_element()
             }
@@ -496,7 +553,31 @@ impl Settings {
                         div().w(theme::scaled_px(150.).max(px(150.))).child(
                             Input::new(&self.sessions.rule_req_param)
                                 .id("settings-sessions-rule-req-param")
-                                .aria_label("必需参数名")
+                                .aria_label("条件参数名")
+                                .small()
+                                .disabled(!enabled),
+                        ),
+                    )
+                    .child({
+                        let entity = cx.entity();
+                        inline_checkbox(
+                            "settings-sessions-rule-param-absent",
+                            "要求参数缺失",
+                            self.sessions.rule_param_absent,
+                            enabled,
+                        )
+                        .on_change(move |st, _, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.sessions.rule_param_absent = st == CheckboxState::Checked;
+                                cx.notify();
+                            });
+                        })
+                    })
+                    .child(
+                        div().w(theme::scaled_px(160.).max(px(160.))).child(
+                            Input::new(&self.sessions.rule_header_contains)
+                                .id("settings-sessions-rule-header-contains")
+                                .aria_label("请求头包含")
                                 .small()
                                 .disabled(!enabled),
                         ),
@@ -525,12 +606,7 @@ impl Settings {
                         sessions_mio_button("settings-sessions-action-add", "加入动作", !enabled)
                             .tooltip("将当前编辑的会话动作追加到草稿规则动作链")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.add_draft_rule_action_with_jar_opts(
-                                    jar_add_new,
-                                    jar_update_existing,
-                                    window,
-                                    cx,
-                                )
+                                this.add_draft_rule_action(window, cx)
                             })),
                     ),
             )
@@ -562,7 +638,6 @@ impl Settings {
                         ),
                     )
                     .when(self.sessions.editing_rule_id.is_none(), |this| {
-                        let opts_tpl = jar_opts.clone();
                         this.child(
                             sessions_mio_button(
                                 "settings-sessions-rule-default-template",
@@ -571,7 +646,6 @@ impl Settings {
                             )
                             .tooltip("填充「Use cookies from MIO's cookie jar」默认规则模板")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                opts_tpl.update(cx, |o, _| *o = (true, true));
                                 this.apply_default_cookie_jar_template(window, cx);
                             })),
                         )

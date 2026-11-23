@@ -143,11 +143,16 @@ fn proxy_advanced_rules_add_toggle_edit_remove_and_save_persist(cx: &mut TestApp
     scroll_to_heading(settings, "proxy-http-match-replace-heading", -900., cx);
 
     proxy_rule_click(settings, "proxy-http-mr-add", cx);
-    select_dropdown_down(settings, "proxy-http-mr-target-select", 2, cx);
-    input_value(settings, "proxy-http-mr-match-input", "Server: Apache", cx);
-    input_value(settings, "proxy-http-mr-replace-input", "Server: MIO", cx);
-    input_value(settings, "proxy-http-mr-comment-input", "mask server", cx);
-    proxy_rule_click(settings, "proxy-http-mr-submit", cx);
+    let add_dialog = *cx
+        .windows()
+        .iter()
+        .find(|&&w| w != fixture.window && w != settings)
+        .expect("HTTP match/replace dialog must open");
+    select_dropdown_down(add_dialog, "proxy-http-mr-type-select", 2, cx);
+    input_value(add_dialog, "proxy-http-mr-match-input", "Server: Apache", cx);
+    input_value(add_dialog, "proxy-http-mr-replace-input", "Server: MIO", cx);
+    input_value(add_dialog, "proxy-http-mr-comment-input", "mask server", cx);
+    proxy_rule_click(add_dialog, "proxy-http-mr-submit", cx);
     let saved_http = saved(&mut fixture.commands);
     assert_eq!(saved_http.match_and_replace_rules.len(), 1);
     assert_eq!(

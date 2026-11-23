@@ -24,11 +24,39 @@ impl Workbench {
         self.open_settings_filtered(Some(SettingsPage::ProjectTasks), None, false, window, cx);
     }
 
+    pub(in crate::workbench) fn open_project_tasks_scheduled_prefill(
+        &mut self,
+        task_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_inner(
+            Some(SettingsPage::ProjectTasks),
+            None,
+            false,
+            Some(task_name),
+            window,
+            cx,
+        );
+    }
+
     pub(in crate::workbench) fn open_settings_filtered(
         &mut self,
         page: Option<SettingsPage>,
         scope: Option<SettingsScopeFilter>,
         focus_search: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_inner(page, scope, focus_search, None, window, cx);
+    }
+
+    fn open_settings_inner(
+        &mut self,
+        page: Option<SettingsPage>,
+        scope: Option<SettingsScopeFilter>,
+        focus_search: bool,
+        scheduled_task_prefill: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -58,6 +86,9 @@ impl Workbench {
                                         });
                                     }
                                     settings.select_page(page, window, cx);
+                                }
+                                if let Some(prefill_name) = scheduled_task_prefill.clone() {
+                                    settings.open_scheduled_task_prefill(prefill_name, window, cx);
                                 }
                                 if focus_search {
                                     settings.search_input.update(cx, |input, cx| {
@@ -109,6 +140,9 @@ impl Workbench {
                         if let Some(scope) = scope {
                             view.set_scope_filter(scope, cx);
                         }
+                        if let Some(prefill_name) = scheduled_task_prefill.clone() {
+                            view.open_scheduled_task_prefill(prefill_name, window, cx);
+                        }
                         if focus_search {
                             view.search_input
                                 .update(cx, |input, cx| input.focus(window, cx));
@@ -139,6 +173,7 @@ impl Settings {
                 project_changed,
                 normal_timeout_changed,
                 streaming_timeout_changed,
+                redirect_max_hops_changed,
                 network_http_changed,
                 scheduled_tasks_changed,
                 observed_certs_changed,
@@ -162,6 +197,15 @@ impl Settings {
                             .workspace
                             .repeater_settings
                             .streaming_response_timeout_secs;
+                let redirect_max_hops_changed = project_changed
+                    || this
+                        .state
+                        .repeater_settings
+                        .auto_follow_redirections_max_hops
+                        != view
+                            .workspace
+                            .repeater_settings
+                            .auto_follow_redirections_max_hops;
                 let network_http_changed =
                     project_changed || this.state.network_http != view.workspace.network_http;
                 let scheduled_tasks_changed =
@@ -195,6 +239,7 @@ impl Settings {
                     project_changed,
                     normal_timeout_changed,
                     streaming_timeout_changed,
+                    redirect_max_hops_changed,
                     network_http_changed,
                     scheduled_tasks_changed,
                     observed_certs_changed,
@@ -273,9 +318,31 @@ impl Settings {
                     }
                 });
             }
+            if redirect_max_hops_changed {
+                let display_hops = this
+                    .state
+                    .repeater_settings
+                    .auto_follow_redirections_max_hops
+                    .to_string();
+                this.repeater_redirect_max_hops_input.update(cx, |input, cx| {
+                    if !input.focus_handle(cx).is_focused(window)
+                        && input.value().as_ref() != display_hops.as_str()
+                    {
+                        input.set_value(display_hops, window, cx)
+                    }
+                });
+            }
             if normal_timeout_changed {
+                let req_timeout_str = this.state.request_timeout_secs.to_string();
                 this.connections.normal_timeout_input.update(cx, |input, cx| {
-                    input.set_value(this.state.request_timeout_secs.to_string(), window, cx)
+                    input.set_value(req_timeout_str.clone(), window, cx)
+                });
+                this.repeater_request_timeout_input.update(cx, |input, cx| {
+                    if !input.focus_handle(cx).is_focused(window)
+                        && input.value().as_ref() != req_timeout_str.as_str()
+                    {
+                        input.set_value(req_timeout_str, window, cx)
+                    }
                 });
             }
             if network_http_changed {
@@ -339,6 +406,8 @@ impl Settings {
             }
             if client_certs_changed {
                 let len = this.state.client_certificates.len();
+                let certs = this.state.client_certificates.clone();
+                this.listeners_tls.sync_client_cert_summaries(&certs);
                 this.listeners_tls.refresh_client_cert_table(len, cx);
             }
             if scope_changed {
@@ -393,6 +462,9 @@ impl Settings {
             if let Some(dialog) = settings.interception_dialog.take() {
                 let _ = dialog.update(cx, |_, window, _| window.remove_window());
             }
+            if let Some(dialog) = settings.proxy_advanced.http_dialog.take() {
+                let _ = dialog.update(cx, |_, window, _| window.remove_window());
+            }
             let _ = weak_owner.update(cx, |view, cx| {
                 view.intruder.resource_pools.management.cancel_pending();
                 if let Some(picker) = settings.tls_import {
@@ -405,6 +477,8 @@ impl Settings {
         cx.defer(move |cx| {
             let _ = weak_init.update(cx, |this, cx| {
                 let cert_len = this.state.client_certificates.len();
+                let certs = this.state.client_certificates.clone();
+                this.listeners_tls.sync_client_cert_summaries(&certs);
                 this.listeners_tls.refresh_client_cert_table(cert_len, cx);
                 this.scope_ui.refresh_tables(&this.state.scope, cx);
                 if page == SettingsPage::ProjectTasks {
@@ -445,6 +519,73 @@ impl Settings {
                 }
             }
         })
+        .detach();
+        let initial_max_hops = state
+            .repeater_settings
+            .auto_follow_redirections_max_hops
+            .to_string();
+        let repeater_redirect_max_hops_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_max_hops));
+        let _ = repeater_redirect_max_hops_input.focus_handle(cx).tab_stop(false);
+        cx.subscribe_in(
+            &repeater_redirect_max_hops_input,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::Change | InputEvent::PressEnter { .. } | InputEvent::Blur
+                ) {
+                    let raw = this
+                        .repeater_redirect_max_hops_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_owned();
+                    if let Ok(hops) = raw.parse::<u8>()
+                        && (1..=20).contains(&hops)
+                    {
+                        let project = this.state.project;
+                        let _ = this.owner.update(cx, |view, cx| {
+                            view.set_repeater_redirect_max_hops(project, hops, cx)
+                        });
+                    } else if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.apply_repeater_redirect_max_hops(window, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+        let initial_request_timeout = state.repeater_settings.request_timeout_secs.to_string();
+        let repeater_request_timeout_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_request_timeout));
+        let _ = repeater_request_timeout_input.focus_handle(cx).tab_stop(false);
+        cx.subscribe_in(
+            &repeater_request_timeout_input,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::Change | InputEvent::PressEnter { .. } | InputEvent::Blur
+                ) {
+                    let raw = this
+                        .repeater_request_timeout_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_owned();
+                    if let Ok(secs) = raw.parse::<u64>()
+                        && (1..=3600).contains(&secs)
+                    {
+                        let project = this.state.project;
+                        let _ = this.owner.update(cx, |view, cx| {
+                            view.set_repeater_request_timeout(project, secs, cx)
+                        });
+                    } else if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.apply_repeater_request_timeout(window, cx);
+                    }
+                }
+            },
+        )
         .detach();
         let mut listeners_tls = boxed_with(|| listeners_tls::ListenersTlsUi::new(window, cx));
         if !state.proxy_listeners.is_empty() {
@@ -520,7 +661,9 @@ impl Settings {
             InputState::new(window, cx).default_value(state.upstream_proxy.socks.username.clone())
         });
         let upstream_password = cx.new(|cx| {
-            InputState::new(window, cx).default_value(state.upstream_proxy.socks.password.clone())
+            InputState::new(window, cx)
+                .default_value(state.upstream_proxy.socks.password.clone())
+                .masked(true)
         });
         let tls_names = certificate_names(&state.preferences);
         let tls_legacy_names = tls_certificate_names(&state.upstream_tls.custom_ca_ders).join("、");
@@ -564,8 +707,8 @@ impl Settings {
                 .sortable(false)
                 .col_selectable(false)
             });
-            cx.subscribe_in(&table, window, move |this, _, event, _, cx| {
-                if let TableEvent::SelectRow(row) = event {
+            cx.subscribe_in(&table, window, move |this, _, event, window, cx| match event {
+                TableEvent::SelectRow(row) => {
                     this.interception_selected[index] =
                         intercept_set(&this.state.proxy_interception, index == 1)
                             .rules
@@ -573,6 +716,18 @@ impl Settings {
                             .map(|rule| rule.id);
                     cx.notify();
                 }
+                TableEvent::DoubleClickedRow(row) => {
+                    this.interception_selected[index] =
+                        intercept_set(&this.state.proxy_interception, index == 1)
+                            .rules
+                            .get(*row)
+                            .map(|rule| rule.id);
+                    if this.interception_selected[index].is_some() {
+                        this.open_interception_editor(index == 1, false, window, cx);
+                    }
+                    cx.notify();
+                }
+                _ => {}
             })
             .detach();
             table
@@ -592,6 +747,8 @@ impl Settings {
             checkbox_focus: cx.focus_handle(),
             normalize_http1_focus: cx.focus_handle(),
             repeater_timeout_input,
+            repeater_redirect_max_hops_input,
+            repeater_request_timeout_input,
             http_streaming_scope_table,
             http_streaming_scope_selected: None,
             http_streaming_scope_editing: None,
@@ -608,6 +765,7 @@ impl Settings {
             scheduled_task_repeat: cx.new(|cx| InputState::new(window, cx).placeholder("每日")),
             scheduled_task_name: cx.new(|cx| InputState::new(window, cx).placeholder("描述（可选）")),
             scope_editor_open: [false, false],
+            scope_editor_subdomains: [false, false],
             scope_oos_custom_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("例如 https://api.example.com")),
             scope_oos_custom_editor_open: false,
@@ -645,5 +803,31 @@ impl Settings {
             interception_error: None,
             _subscription: subscription,
         }
+    }
+
+    pub(in crate::workbench) fn open_scheduled_task_prefill(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scheduled_task_editing = None;
+        self.scheduled_task_editor_open = true;
+        self.scheduled_task_action_select.update(cx, |select, cx| {
+            select.set_selected_index(
+                Some(gpui_kit::component::IndexPath::new(2)),
+                window,
+                cx,
+            )
+        });
+        self.scheduled_task_time
+            .update(cx, |input, cx| input.set_value("09:00", window, cx));
+        self.scheduled_task_repeat
+            .update(cx, |input, cx| input.set_value("每日", window, cx));
+        self.scheduled_task_name
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        self.scheduled_task_time
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 }

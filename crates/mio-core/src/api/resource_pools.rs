@@ -7,6 +7,7 @@ use crate::Uuid;
 mod models;
 
 pub const MAX_INTRUDER_RESOURCE_POOLS: usize = 64;
+pub const MAX_INTRUDER_CONCURRENT_REQUESTS: u16 = 256;
 pub const MAX_INTRUDER_RESOURCE_POOLS_BYTES: usize = 512 * 1024;
 
 /// Counts retained tasks, including finished tasks, by their current pool binding.

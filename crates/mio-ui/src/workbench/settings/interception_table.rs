@@ -136,6 +136,7 @@ pub(super) fn intercept_relations(
         ProxyInterceptType::CookieName
         | ProxyInterceptType::CookieValue
         | ProxyInterceptType::Body
+        | ProxyInterceptType::Header
             if response =>
         {
             vec![
@@ -156,7 +157,7 @@ pub(super) fn intercept_relations(
             WasNotAnnotated,
         ],
         ProxyInterceptType::Request => vec![ContainsParameters, DoesNotContainParameters],
-        ProxyInterceptType::Url => vec![Matches, DoesNotMatch, InScope],
+        ProxyInterceptType::Url => vec![Matches, DoesNotMatch, InScope, NotInScope],
         _ => vec![Matches, DoesNotMatch],
     }
 }

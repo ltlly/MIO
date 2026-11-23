@@ -638,6 +638,7 @@ impl Settings {
             SettingsScopeFilter::User => matches!(
                 page,
                 SettingsPage::Intruder
+                    | SettingsPage::NetworkConnections
                     | SettingsPage::NetworkTls
                     | SettingsPage::UserDisplay
                     | SettingsPage::UserMessageEditor
@@ -654,6 +655,13 @@ impl Settings {
                 "listener",
                 "listeners",
                 "bind",
+                "0.0.0.0",
+                "all interfaces",
+                "specific address",
+                "loopback",
+                "http/2",
+                "invisible",
+                "redirect",
                 "intercept",
                 "interception",
                 "ssl",
@@ -668,7 +676,10 @@ impl Settings {
                 "form",
                 "代理",
                 "监听",
+                "绑定",
                 "拦截",
+                "重定向",
+                "隐形",
                 "解包",
                 "直通",
                 "替换",
@@ -739,15 +750,23 @@ impl Settings {
                 "include",
                 "exclude",
                 "prefix",
+                "cidr",
+                "ip range",
+                "regex",
                 "目标范围",
                 "包含",
                 "排除",
+                "网段",
             ],
             SettingsPage::NetworkConnections => &[
                 "network",
                 "connections",
                 "connection",
                 "upstream",
+                "direct",
+                "bypass",
+                "ntlm",
+                "platform",
                 "socks",
                 "socks5",
                 "authentication",
@@ -758,6 +777,9 @@ impl Settings {
                 "resolution",
                 "port",
                 "上游代理",
+                "直连",
+                "平台认证",
+                "绕过",
                 "认证",
                 "超时",
                 "主机名",
@@ -778,6 +800,7 @@ impl Settings {
                 "event-stream",
                 "流式",
                 "长连接",
+                "重定向",
             ],
             SettingsPage::NetworkTls => &[
                 "network",
@@ -789,12 +812,18 @@ impl Settings {
                 "ca",
                 "custom ca",
                 "client tls",
+                "cipher",
+                "protocol",
+                "verify",
                 "pem",
                 "pkcs12",
                 "p12",
                 "证书",
                 "根证书",
                 "客户端证书",
+                "密码套件",
+                "协议",
+                "验证",
                 "双向",
             ],
             SettingsPage::UserDisplay => &[
@@ -933,10 +962,9 @@ impl Settings {
         cx.notify();
     }
 
-    pub(super) fn select_page(
+    pub(super) fn select_page_without_refocus(
         &mut self,
         page: SettingsPage,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.page = page;
@@ -949,11 +977,20 @@ impl Settings {
             .misc_scroll
             .set_offset(gpui_kit::point(px(0.), px(0.)));
         self.collapsed_groups[Self::page_group_index(page)] = false;
-        self.focus.focus(window, cx);
         if page == SettingsPage::ProjectTasks {
             self.refresh_pool_page(cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn select_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page_without_refocus(page, cx);
+        self.focus.focus(window, cx);
     }
 
     pub(super) fn save(&self, save_as: bool, cx: &mut Context<Self>) {

@@ -293,15 +293,31 @@ fn host_matcher_and_ordered_selection_handle_wildcards_case_and_ipv6() {
         ClientCertificateRule::validate_host_pattern("[2001:0db8::1]").unwrap(),
         "2001:db8::1"
     );
+    assert_eq!(
+        ClientCertificateRule::validate_host_pattern("*").unwrap(),
+        "*"
+    );
+    assert_eq!(
+        ClientCertificateRule::validate_host_pattern("10.0.*").unwrap(),
+        "10.0.*"
+    );
+    assert_eq!(
+        ClientCertificateRule::validate_host_pattern("api.*.example.invalid").unwrap(),
+        "api.*.example.invalid"
+    );
+    assert!(matches_host("*", "api.example.invalid"));
+    assert!(matches_host("*", "192.0.2.10"));
+    assert!(matches_host("10.0.*", "10.0.42.7"));
+    assert!(!matches_host("10.0.*", "10.1.0.7"));
+    assert!(matches_host("api.*.example.invalid", "api.v2.example.invalid"));
+    assert!(!matches_host("api.*.example.invalid", "web.v2.example.invalid"));
 
     for invalid in [
         "",
         " ",
-        "*",
-        "*example.com",
-        "api.*.example.com",
         "*.127.0.0.1",
         "example.com:8443",
+        "https://example.invalid",
         "[::1",
         "::1]",
         "[example.com]",

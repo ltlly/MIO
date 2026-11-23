@@ -411,38 +411,96 @@ impl Workbench {
             return;
         };
         let selected = editors.payload_position;
-        let entries = self.current_intruder_processing_rules(id, editors);
-        let enabled_rules: Vec<PayloadProcessingRule> = entries
-            .into_iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| entry.rule)
-            .collect();
-        if enabled_rules.is_empty() {
-            self.fail("当前尚无已启用的 Payload Processing 管线规则。", cx);
-            return;
-        }
-        self.try_change_intruder_spec(
-            id,
-            |spec| {
-                let mut next_sets = spec.payload_sets.clone();
-                if let Some(index) = selected {
+        let configs = self.workspace.intruder.payload_configs.get(&id).cloned();
+        let applied = if let Some(index) = selected {
+            let enabled_rules: Vec<PayloadProcessingRule> = configs
+                .as_ref()
+                .and_then(|list| list.get(index))
+                .map(|cfg| {
+                    cfg.processing_rules
+                        .iter()
+                        .filter(|entry| entry.enabled)
+                        .map(|entry| entry.rule.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if enabled_rules.is_empty() {
+                self.fail("当前尚无已启用的 Payload Processing 管线规则。", cx);
+                return;
+            }
+            self.try_change_intruder_spec(
+                id,
+                |spec| {
+                    let mut next_sets = spec.payload_sets.clone();
                     let set = next_sets.get_mut(index).ok_or_else(|| {
                         "选中的 payload 位置尚无列表；未改变其它位置。".to_owned()
                     })?;
                     *set = apply_payload_processing_rules(set, &enabled_rules)
                         .map_err(|error| error.to_string())?;
-                } else {
-                    for set in &mut next_sets {
-                        *set = apply_payload_processing_rules(set, &enabled_rules)
-                            .map_err(|error| error.to_string())?;
+                    spec.payload_sets = next_sets;
+                    Ok(())
+                },
+                window,
+                cx,
+            )
+        } else {
+            let per_pos_rules: Vec<Vec<PayloadProcessingRule>> = configs
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|cfg| {
+                    cfg.processing_rules
+                        .iter()
+                        .filter(|entry| entry.enabled)
+                        .map(|entry| entry.rule.clone())
+                        .collect()
+                })
+                .collect();
+            if per_pos_rules.iter().all(Vec::is_empty) {
+                self.fail("当前尚无已启用的 Payload Processing 管线规则。", cx);
+                return;
+            }
+            self.try_change_intruder_spec(
+                id,
+                |spec| {
+                    let mut next_sets = spec.payload_sets.clone();
+                    for (idx, set) in next_sets.iter_mut().enumerate() {
+                        if let Some(rules) = per_pos_rules.get(idx)
+                            && !rules.is_empty()
+                        {
+                            *set = apply_payload_processing_rules(set, rules)
+                                .map_err(|error| error.to_string())?;
+                        }
                     }
-                }
-                spec.payload_sets = next_sets;
-                Ok(())
-            },
-            window,
-            cx,
-        );
+                    spec.payload_sets = next_sets;
+                    Ok(())
+                },
+                window,
+                cx,
+            )
+        };
+        if applied {
+            self.update_intruder_payload_set_configs(
+                id,
+                |configs, pos| {
+                    if let Some(target) = pos {
+                        if let Some(cfg) = configs.get_mut(target) {
+                            for item in &mut cfg.processing_rules {
+                                item.enabled = false;
+                            }
+                        }
+                    } else {
+                        for cfg in configs.iter_mut() {
+                            for item in &mut cfg.processing_rules {
+                                item.enabled = false;
+                            }
+                        }
+                    }
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     pub(in crate::workbench) fn append_intruder_payloads_from_plugin(

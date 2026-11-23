@@ -6,6 +6,22 @@ use mio_core::intruder::{DateOutputFormat, PayloadProcessingRule};
 
 use super::*;
 
+fn update_target_payload_configs(
+    configs: &mut [IntruderPayloadSetConfig],
+    selected: Option<usize>,
+    mut f: impl FnMut(&mut IntruderPayloadSetConfig),
+) {
+    if let Some(target) = selected {
+        if let Some(cfg) = configs.get_mut(target) {
+            f(cfg);
+        }
+    } else {
+        for cfg in configs.iter_mut() {
+            f(cfg);
+        }
+    }
+}
+
 impl Workbench {
     fn generator_card(
         title: &'static str,
@@ -357,13 +373,17 @@ impl Workbench {
                                     this.update_intruder_payload_set_configs(
                                         id,
                                         |configs, selected| {
-                                            let target = selected.unwrap_or(0);
-                                            if let Some(cfg) = configs.get_mut(target)
-                                                && let Some(item) =
-                                                    cfg.processing_rules.get_mut(idx)
-                                            {
-                                                item.enabled = *value;
-                                            }
+                                            update_target_payload_configs(
+                                                configs,
+                                                selected,
+                                                |cfg| {
+                                                    if let Some(item) =
+                                                        cfg.processing_rules.get_mut(idx)
+                                                    {
+                                                        item.enabled = *value;
+                                                    }
+                                                },
+                                            );
                                         },
                                         window,
                                         cx,
@@ -378,13 +398,11 @@ impl Workbench {
                                 this.update_intruder_payload_set_configs(
                                     id,
                                     |configs, selected| {
-                                        let target = selected.unwrap_or(0);
-                                        if let Some(cfg) = configs.get_mut(target)
-                                            && idx > 0
-                                            && idx < cfg.processing_rules.len()
-                                        {
-                                            cfg.processing_rules.swap(idx - 1, idx);
-                                        }
+                                        update_target_payload_configs(configs, selected, |cfg| {
+                                            if idx > 0 && idx < cfg.processing_rules.len() {
+                                                cfg.processing_rules.swap(idx - 1, idx);
+                                            }
+                                        });
                                     },
                                     window,
                                     cx,
@@ -398,12 +416,11 @@ impl Workbench {
                                 this.update_intruder_payload_set_configs(
                                     id,
                                     |configs, selected| {
-                                        let target = selected.unwrap_or(0);
-                                        if let Some(cfg) = configs.get_mut(target)
-                                            && idx + 1 < cfg.processing_rules.len()
-                                        {
-                                            cfg.processing_rules.swap(idx, idx + 1);
-                                        }
+                                        update_target_payload_configs(configs, selected, |cfg| {
+                                            if idx + 1 < cfg.processing_rules.len() {
+                                                cfg.processing_rules.swap(idx, idx + 1);
+                                            }
+                                        });
                                     },
                                     window,
                                     cx,
@@ -418,12 +435,11 @@ impl Workbench {
                                 this.update_intruder_payload_set_configs(
                                     id,
                                     |configs, selected| {
-                                        let target = selected.unwrap_or(0);
-                                        if let Some(cfg) = configs.get_mut(target)
-                                            && idx < cfg.processing_rules.len()
-                                        {
-                                            cfg.processing_rules.remove(idx);
-                                        }
+                                        update_target_payload_configs(configs, selected, |cfg| {
+                                            if idx < cfg.processing_rules.len() {
+                                                cfg.processing_rules.remove(idx);
+                                            }
+                                        });
                                     },
                                     window,
                                     cx,

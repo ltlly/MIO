@@ -1,11 +1,11 @@
 use gpui_kit::accesskit::Role;
 use gpui_kit::base::{Checkbox, CheckboxIndicator, CheckboxState};
 use gpui_kit::component::{Icon, IconName};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::table::{Column, TableDelegate};
 use mio_core::{
-    MatchAndReplaceRule, MatchReplaceTarget, ProxyResponseModificationSettings, SslPassThroughRule,
-    Uuid, WsMatchAndReplaceRule, WsReplaceDirection, validate_ssl_and_ws_rules,
+    MatchAndReplaceRule, ProxyResponseModificationSettings, SslPassThroughRule, Uuid,
+    WsMatchAndReplaceRule, WsReplaceDirection, validate_ssl_and_ws_rules,
 };
 
 use super::*;
@@ -21,35 +21,6 @@ mod proxy_advanced_ws_mod;
 pub(super) use proxy_advanced_render::{HttpMatchReplaceTable, SslPassThroughTable};
 pub(super) use proxy_advanced_ws_mod::WsMatchReplaceTable;
 use gpui_kit::component::button::ButtonVariants;
-
-pub(super) const HTTP_TARGET_LABELS: [&str; 7] = [
-    "Request header",
-    "Request body",
-    "Response header",
-    "Response body",
-    "Request param name",
-    "Request param value",
-    "Request first line",
-];
-
-pub(super) fn http_target_to_index(target: MatchReplaceTarget) -> usize {
-    match target {
-        MatchReplaceTarget::RequestHeader => 0,
-        MatchReplaceTarget::RequestBody => 1,
-        MatchReplaceTarget::ResponseHeader => 2,
-        MatchReplaceTarget::ResponseBody => 3,
-        MatchReplaceTarget::RequestParamName => 4,
-        MatchReplaceTarget::RequestParamValue => 5,
-        MatchReplaceTarget::RequestFirstLine => 6,
-        MatchReplaceTarget::RequestScript => 0,
-        MatchReplaceTarget::ResponseScript => 1,
-    }
-}
-
-pub(super) fn http_target_from_label(label: &str) -> MatchReplaceTarget {
-    crate::workbench::tools_extra::mr_target_from_label(label)
-}
-
 
 pub(super) const WS_DIRECTION_LABELS: [&str; 3] = [
     "Both",
@@ -87,15 +58,6 @@ pub(super) struct ProxyAdvancedUi {
     pub(super) http_selected: Option<Uuid>,
     pub(super) ssl_selected: Option<Uuid>,
     pub(super) ws_selected: Option<Uuid>,
-    pub(super) http_editor_open: bool,
-    pub(super) http_editing: Option<Uuid>,
-    pub(super) http_target: MatchReplaceTarget,
-    pub(super) http_target_select: Entity<SelectState<Vec<&'static str>>>,
-    pub(super) http_match: Entity<InputState>,
-    pub(super) http_replace: Entity<InputState>,
-    pub(super) http_comment: Entity<InputState>,
-    pub(super) http_is_regex: bool,
-    pub(super) http_error: Option<String>,
     pub(super) ssl_editor_open: bool,
     pub(super) ssl_editing: Option<Uuid>,
     pub(super) ssl_host: Entity<InputState>,
@@ -153,14 +115,21 @@ impl ProxyAdvancedUi {
             TableEvent::DoubleClickedRow(row) => {
                 if let Some(rule) = this.proxy_advanced.http_rules.get(*row).cloned() {
                     this.proxy_advanced.http_selected = Some(rule.id);
-                    this.load_http_rule_into_editor(&rule, window, cx);
                     if let Some(project) = this.state.project {
                         if let Some(prev) = this.proxy_advanced.http_dialog.take() {
                             let _ = prev.update(cx, |_, window, _| window.remove_window());
                         }
-                        this.proxy_advanced.http_dialog = crate::workbench::tools_extra::open_http_match_replace_dialog(
-                            this.owner.clone(), this.owner_window, project, Some(rule), "proxy-http-mr", window, cx,
-                        ).ok();
+                        this.proxy_advanced.http_dialog =
+                            crate::workbench::tools_extra::open_http_match_replace_dialog(
+                                this.owner.clone(),
+                                this.owner_window,
+                                project,
+                                Some(rule),
+                                "proxy-http-mr",
+                                window,
+                                cx,
+                            )
+                            .ok();
                     }
                 }
             }
@@ -228,23 +197,6 @@ impl ProxyAdvancedUi {
         })
         .detach();
 
-        let http_target_select = cx.new(|cx| {
-            SelectState::new(
-                HTTP_TARGET_LABELS.to_vec(),
-                Some(gpui_kit::component::IndexPath::new(0)),
-                window,
-                cx,
-            )
-        });
-        cx.subscribe_in(&http_target_select, window, |this, _, event, _, cx| {
-            let SelectEvent::Confirm(value) = event;
-            if let Some(value) = value {
-                this.proxy_advanced.http_target = http_target_from_label(value);
-            }
-            cx.notify();
-        })
-        .detach();
-
         let ws_direction_select = cx.new(|cx| {
             SelectState::new(
                 WS_DIRECTION_LABELS.to_vec(),
@@ -265,8 +217,6 @@ impl ProxyAdvancedUi {
         cx.observe_in(owner, window, move |this, owner, _, cx| {
             let ws = &owner.read(cx).workspace;
             this.proxy_advanced.http_rules = ws.match_and_replace_rules.clone();
-            this.proxy_advanced.http_editor_open = false;
-            this.proxy_advanced.http_editing = None;
             this.proxy_advanced.ssl_rules = ws.ssl_pass_through_rules.clone();
             this.proxy_advanced.ws_rules = ws.ws_match_and_replace_rules.clone();
 
@@ -341,15 +291,6 @@ impl ProxyAdvancedUi {
             http_selected: None,
             ssl_selected: None,
             ws_selected: None,
-            http_editor_open: false,
-            http_editing: None,
-            http_target: MatchReplaceTarget::RequestHeader,
-            http_target_select,
-            http_match: cx.new(|cx| InputState::new(window, cx).placeholder("匹配内容或正则表达式")),
-            http_replace: cx.new(|cx| InputState::new(window, cx).placeholder("替换为（可留空）")),
-            http_comment: cx.new(|cx| InputState::new(window, cx).placeholder("备注（可选）")),
-            http_is_regex: false,
-            http_error: None,
             ssl_editor_open: false,
             ssl_editing: None,
             ssl_host: cx
@@ -482,119 +423,6 @@ impl Workbench {
 }
 
 impl Settings {
-    pub(super) fn submit_http_match_replace(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let snapshots = [
-            &self.proxy_advanced.http_match,
-            &self.proxy_advanced.http_replace,
-            &self.proxy_advanced.http_comment,
-        ]
-        .map(|input| editing::input_snapshot(input, window, cx));
-        let [Ok(match_raw), Ok(replace_raw), Ok(comment_raw)] = snapshots else {
-            self.proxy_advanced.http_error = Some(editing::COMPOSITION_PENDING.into());
-            cx.notify();
-            return;
-        };
-        let is_header = matches!(self.proxy_advanced.http_target, MatchReplaceTarget::RequestHeader | MatchReplaceTarget::ResponseHeader);
-        if match_raw.is_empty() && !is_header {
-            self.proxy_advanced.http_error = Some("请填写 HTTP 匹配模式（不能为空）。".into());
-            cx.notify();
-            return;
-        }
-        let match_pattern = match_raw.to_string();
-        let replace_with = replace_raw.to_string();
-        let comment = comment_raw.trim().to_owned();
-        let item_type = self.proxy_advanced.http_target;
-        let regex = self.proxy_advanced.http_is_regex;
-        let editing_id = self.proxy_advanced.http_editing;
-        let project = self.state.project;
-        let outcome = self.owner.update(cx, |view, cx| {
-            view.upsert_http_match_replace_rule(
-                project,
-                editing_id,
-                item_type,
-                match_pattern,
-                replace_with,
-                regex,
-                comment,
-                cx,
-            )
-        });
-        match outcome {
-            Ok(Ok(())) => {
-                if let Some(dlg) = self.proxy_advanced.http_dialog.take() {
-                    let _ = dlg.update(cx, |_, window, _| window.remove_window());
-                }
-                self.proxy_advanced.http_editing = None;
-                self.proxy_advanced.http_editor_open = false;
-                self.proxy_advanced.http_error = None;
-                self.proxy_advanced.http_is_regex = false;
-                for input in [
-                    &self.proxy_advanced.http_match,
-                    &self.proxy_advanced.http_replace,
-                    &self.proxy_advanced.http_comment,
-                ] {
-                    input.update(cx, |s, cx| s.set_value("", window, cx));
-                }
-            }
-            Ok(Err(err)) => self.proxy_advanced.http_error = Some(err),
-            Err(_) => {
-                self.proxy_advanced.http_error =
-                    Some("主工作台已关闭；HTTP 匹配与替换规则未保存。".into())
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn load_http_rule_into_editor(
-        &mut self,
-        rule: &MatchAndReplaceRule,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let any_composing =
-            editing::input_snapshot(&self.proxy_advanced.http_match, window, cx).is_err()
-                || editing::input_snapshot(&self.proxy_advanced.http_replace, window, cx).is_err()
-                || editing::input_snapshot(&self.proxy_advanced.http_comment, window, cx).is_err();
-        if any_composing {
-            self.proxy_advanced.http_error = Some(editing::COMPOSITION_PENDING.into());
-            cx.notify();
-            return;
-        }
-        self.proxy_advanced.http_editing = Some(rule.id);
-        self.proxy_advanced.http_editor_open = true;
-        self.proxy_advanced.http_target = rule.item_type;
-        self.proxy_advanced
-            .http_target_select
-            .update(cx, |state, cx| {
-                state.set_selected_index(
-                    Some(gpui_kit::component::IndexPath::new(http_target_to_index(
-                        rule.item_type,
-                    ))),
-                    window,
-                    cx,
-                );
-            });
-        self.proxy_advanced.http_is_regex = rule.regex;
-        self.proxy_advanced.http_error = None;
-        let m = rule.match_pattern.clone();
-        let r = rule.replace_with.clone();
-        let c = rule.comment.clone();
-        self.proxy_advanced
-            .http_match
-            .update(cx, |s, cx| s.set_value(m, window, cx));
-        self.proxy_advanced
-            .http_replace
-            .update(cx, |s, cx| s.set_value(r, window, cx));
-        self.proxy_advanced
-            .http_comment
-            .update(cx, |s, cx| s.set_value(c, window, cx));
-        cx.notify();
-    }
-
     pub(super) fn submit_ssl_pass_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let snapshots = [&self.proxy_advanced.ssl_host, &self.proxy_advanced.ssl_port]
             .map(|input| editing::input_snapshot(input, window, cx));
@@ -712,11 +540,33 @@ impl Settings {
         self.proxy_advanced.ssl_host.update(cx, |s, cx| s.set_value(host.clone(), window, cx));
         self.proxy_advanced.ssl_port.update(cx, |s, cx| s.set_value(port.map(|p| p.to_string()).unwrap_or_default(), window, cx));
         let project = self.state.project;
-        let _ = self.owner.update(cx, |view, cx| {
-            let _ = view.update_proxy_advanced(project, |ssl, _, _| {
-                ssl.push(SslPassThroughRule { id: Uuid::new_v4(), enabled: true, host_pattern: host, port, is_regex: false });
-            }, cx);
+        let outcome = self.owner.update(cx, |view, cx| {
+            view.update_proxy_advanced(
+                project,
+                |ssl, _, _| {
+                    ssl.push(SslPassThroughRule {
+                        id: Uuid::new_v4(),
+                        enabled: true,
+                        host_pattern: host,
+                        port,
+                        is_regex: false,
+                    });
+                },
+                cx,
+            )
         });
+        match outcome {
+            Ok(Ok(())) => {
+                self.proxy_advanced.ssl_error = None;
+            }
+            Ok(Err(err)) => {
+                self.proxy_advanced.ssl_error = Some(err);
+            }
+            Err(_) => {
+                self.proxy_advanced.ssl_error =
+                    Some("主工作台已关闭；SSL Pass Through 规则未保存。".into());
+            }
+        }
         cx.notify();
     }
 

@@ -300,6 +300,33 @@ fn regex_token_extraction_and_compression_helpers_roundtrip() {
         ),
         Some("body_tok_7766".into())
     );
+    let dual_order_pattern = r#"(?is)<input\b(?:[^>]*\bname\s*=\s*["']?csrf["']?[^>]*\bvalue\s*=\s*["']([^"'<>]+)["']|[^>]*\bvalue\s*=\s*["']([^"'<>]+)["'][^>]*\bname\s*=\s*["']?csrf["']?)"#.to_owned();
+    let form_name_first = crate::HttpResponse {
+        body: br#"<form><input type="hidden" name="csrf" value="tok_name_first"></form>"#.to_vec(),
+        ..response.clone()
+    };
+    let form_value_first = crate::HttpResponse {
+        body: br#"<form><input value="tok_value_first" type="hidden" name="csrf"></form>"#.to_vec(),
+        ..response
+    };
+    assert_eq!(
+        extract_token(
+            &form_name_first,
+            &SequencerTokenLocation::Regex {
+                pattern: dual_order_pattern.clone(),
+            }
+        ),
+        Some("tok_name_first".into())
+    );
+    assert_eq!(
+        extract_token(
+            &form_value_first,
+            &SequencerTokenLocation::Regex {
+                pattern: dual_order_pattern,
+            }
+        ),
+        Some("tok_value_first".into())
+    );
 
     let payload = b"deflate and gzip roundtrip payload";
     let deflated = crate::compress_deflate_bytes(payload, 4096).unwrap();

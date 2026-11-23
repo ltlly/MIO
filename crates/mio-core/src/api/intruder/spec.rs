@@ -41,8 +41,8 @@ impl IntruderSpec {
             pool.validate()?;
         }
         ensure!(
-            (1..=16).contains(&self.max_concurrent_requests),
-            "Intruder 并发数必须为 1–16（MIO 资源限额）"
+            (1..=crate::MAX_INTRUDER_CONCURRENT_REQUESTS).contains(&self.max_concurrent_requests),
+            "Intruder 并发数必须为 1–256（MIO 资源限额）"
         );
         ensure!(
             (1..=300_000).contains(&self.request_timeout_ms),

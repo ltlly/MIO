@@ -455,7 +455,7 @@ impl Settings {
                                         uniform_editor_button(
                                             SharedString::from(format!("{prefix}-clear")),
                                             "清空",
-                                            !enabled,
+                                            !enabled || names.is_empty(),
                                         )
                                         .w(px(92.))
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -490,6 +490,11 @@ impl Settings {
                                 div().w(theme::scaled_px(250.).max(px(250.))).child(
                                     Input::new(&self.hidden_header_input(response))
                                         .id(SharedString::from(format!("{prefix}-input")))
+                                        .aria_label(if response {
+                                            "隐藏响应头名称"
+                                        } else {
+                                            "隐藏请求头名称"
+                                        })
                                         .small()
                                         .disabled(!enabled),
                                 ),
@@ -587,17 +592,21 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         let trimmed = charset.trim().to_owned();
+        let current = &self.state.preferences.message_editor;
         if trimmed.is_empty()
-            || self
-                .state
-                .preferences
-                .message_editor
-                .specific_charset
-                .eq_ignore_ascii_case(&trimmed)
+            || (current.charset_mode == 3
+                && current.specific_charset.eq_ignore_ascii_case(&trimmed))
         {
             return;
         }
-        self.toggle_user_editor(|editor| editor.specific_charset = trimmed, window, cx);
+        self.toggle_user_editor(
+            |editor| {
+                editor.charset_mode = 3;
+                editor.specific_charset = trimmed;
+            },
+            window,
+            cx,
+        );
     }
 
     pub(super) fn reset_user_editor_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -768,7 +777,7 @@ impl Settings {
                                             .id("settings-user-editor-charset-select")
                                             .small()
                                             .w_full()
-                                            .disabled(!enabled),
+                                            .disabled(!enabled || editor.charset_mode != 3),
                                     ),
                             ),
                     ),
@@ -793,28 +802,39 @@ impl Settings {
                 "使用以下设置控制工具内 HTML 内容的渲染行为。",
             ))
             .child(
-                div().pl(px(29.)).child(
-                    settings_checkbox(
-                        "settings-user-editor-html-requests",
-                        "发起额外 HTTP 请求以渲染外部资源",
-                        editor.html_render_external_requests,
-                        enabled,
-                        &self.user_pages.html_render_focus,
-                        window,
+                div()
+                    .pl(px(29.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        settings_checkbox(
+                            "settings-user-editor-html-requests",
+                            "发起额外 HTTP 请求以渲染外部资源",
+                            editor.html_render_external_requests,
+                            enabled,
+                            &self.user_pages.html_render_focus,
+                            window,
+                        )
+                        .on_change(move |state, _, window, cx| {
+                            let _ = weak_html.update(cx, |this, cx| {
+                                this.toggle_user_editor(
+                                    |ed| {
+                                        ed.html_render_external_requests =
+                                            state == CheckboxState::Checked
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
                     )
-                    .on_change(move |state, _, window, cx| {
-                        let _ = weak_html.update(cx, |this, cx| {
-                            this.toggle_user_editor(
-                                |ed| {
-                                    ed.html_render_external_requests =
-                                        state == CheckboxState::Checked
-                                },
-                                window,
-                                cx,
-                            );
-                        });
-                    }),
-                ),
+                    .child(
+                        div()
+                            .text_size(theme::scaled_px(11.5))
+                            .text_color(theme::muted_foreground())
+                            .child("内置渲染预览默认保持离线结构化视图，不会自动向外部 URL 发起资源请求。"),
+                    ),
             );
 
         // Section 3: HTTP message search
@@ -1012,6 +1032,7 @@ impl Settings {
                                 div().w(theme::scaled_px(58.).max(px(58.))).child(
                                     Input::new(&self.user_pages.editor_font_size_input)
                                         .id("settings-user-editor-font-input")
+                                        .aria_label("等宽字体大小")
                                         .small()
                                         .disabled(!enabled),
                                 ),

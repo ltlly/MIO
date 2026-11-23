@@ -362,10 +362,11 @@ async fn eight_runs_sixteen_completions_retain_all_write_faults_within_34_notifi
         let mut ids = Vec::new();
         let mut workers = Vec::new();
         let mut releases = Vec::new();
+        const PER_RUN_COMPLETIONS: usize = MAX_REQUESTS_IN_FLIGHT / MAX_RUNS;
         for _ in 0..MAX_RUNS {
-            let id = admit(&mut state, spec("http://127.0.0.1:1".into(), 3));
+            let id = admit(&mut state, spec("http://127.0.0.1:1".into(), PER_RUN_COMPLETIONS + 1));
             ids.push(id);
-            for ordinal in 0..2 {
+            for ordinal in 0..PER_RUN_COMPLETIONS as u64 {
                 let (worker, release) = held_cancelled_completion(&mut state, id, ordinal);
                 workers.push(worker);
                 releases.push(release);
@@ -430,7 +431,7 @@ async fn eight_runs_sixteen_completions_retain_all_write_faults_within_34_notifi
         }
         let before: Vec<_> = ids
             .iter()
-            .map(|id| state.intruder_result_page(*id, None, 3).unwrap())
+            .map(|id| state.intruder_result_page(*id, None, PER_RUN_COMPLETIONS + 1).unwrap())
             .collect();
         state.store.reject_writes(false);
         let directory = tempfile::tempdir().unwrap();
@@ -441,7 +442,7 @@ async fn eight_runs_sixteen_completions_retain_all_write_faults_within_34_notifi
         saved.unwrap();
         assert!(!returned_while_full && stayed_full);
         assert!(reclaimed_by_wait, "capacity waiting must reclaim every ready sender and run transition");
-        assert_eq!(MAX_NOTIFICATIONS, 34);
+        assert_eq!(MAX_NOTIFICATIONS, 2 + MAX_REQUESTS_IN_FLIGHT + 2 * MAX_RUNS);
         assert_eq!(queued, MAX_NOTIFICATIONS);
         assert_eq!(delivered.len(), MAX_NOTIFICATIONS);
         assert!(matches!(
@@ -456,17 +457,26 @@ async fn eight_runs_sixteen_completions_retain_all_write_faults_within_34_notifi
         ));
         assert_eq!(delivered.iter().filter(|event| matches!(event, Event::IntruderRunControl { .. })).count(), 1);
         assert_eq!(delivered.iter().filter(|event| matches!(event, Event::HistoryChanged { project: owner } if *owner == project)).count(), 1);
-        assert_eq!(delivered.iter().filter(|event| matches!(event, Event::Error { project: Some(owner), operation: "intruder", message } if *owner == project && !message.is_empty())).count(), 32);
+        assert_eq!(delivered.iter().filter(|event| matches!(event, Event::Error { project: Some(owner), operation: "intruder", message } if *owner == project && !message.is_empty())).count(), MAX_REQUESTS_IN_FLIGHT + 2 * MAX_RUNS);
         for (id, before) in ids.into_iter().zip(before) {
             assert!(!before.persisted);
             assert!(matches!(before.run.state, IntruderRunState::Failed(_)));
-            assert_eq!((before.run.total, before.run.dispatched, before.run.completed), (3, 2, 2));
-            assert_eq!(before.rows.len(), 2);
+            assert_eq!(
+                (before.run.total, before.run.dispatched, before.run.completed),
+                (
+                    PER_RUN_COMPLETIONS as u64 + 1,
+                    PER_RUN_COMPLETIONS as u64,
+                    PER_RUN_COMPLETIONS as u64
+                )
+            );
+            assert_eq!(before.rows.len(), PER_RUN_COMPLETIONS);
             assert!(before.rows.iter().all(|row| matches!(
                 &row.outcome,
                 IntruderResultOutcome::Flow(flow) if flow.state == FlowState::Cancelled
             )));
-            let after = state.intruder_result_page(id, None, 3).unwrap();
+            let after = state
+                .intruder_result_page(id, None, PER_RUN_COMPLETIONS + 1)
+                .unwrap();
             assert!(after.persisted);
             assert_eq!((after.run, after.rows), (before.run, before.rows));
         }

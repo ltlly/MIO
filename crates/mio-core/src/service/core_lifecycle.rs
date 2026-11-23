@@ -441,13 +441,13 @@ impl State {
     }
 
     pub(super) async fn run_scheduled_tasks_tick(&mut self) {
-        if self.quiesced || self.automated_tasks_paused || self.unsaved_count() != 0 {
+        if self.quiesced || self.unsaved_count() != 0 {
             return;
         }
         let Ok(workspace) = self.store.metadata().workspace_arc() else {
             return;
         };
-        if !workspace.tasks_auto_start || workspace.scheduled_tasks.is_empty() {
+        if workspace.scheduled_tasks.is_empty() {
             return;
         }
         let now_secs = crate::codec_util::now_unix_ms() / 1000;
@@ -466,9 +466,10 @@ impl State {
             .cloned()
             .collect();
         for task in due_tasks {
-            self.last_scheduled_fire.insert(task.id, now_min);
             match task.action {
                 ScheduledTaskAction::PauseTasks => {
+                    self.last_scheduled_fire.insert(task.id, now_min);
+                    self.automated_tasks_paused = true;
                     if let Ok(audit_state) = self.store.audit().read_state() {
                         for t in audit_state
                             .tasks
@@ -489,6 +490,8 @@ impl State {
                     }
                 }
                 ScheduledTaskAction::ResumeTasks => {
+                    self.last_scheduled_fire.insert(task.id, now_min);
+                    self.automated_tasks_paused = false;
                     if let Ok(audit_state) = self.store.audit().read_state() {
                         for t in audit_state
                             .tasks
@@ -509,18 +512,11 @@ impl State {
                     }
                 }
                 ScheduledTaskAction::RunScan => {
-                    let target_url = if task.description.trim().starts_with("http://")
-                        || task.description.trim().starts_with("https://")
-                    {
-                        Some(task.description.trim().to_owned())
-                    } else {
-                        workspace
-                            .scope
-                            .include
-                            .iter()
-                            .find(|r| r.enabled && !r.prefix.trim().is_empty())
-                            .map(|r| r.prefix.trim().to_owned())
-                    };
+                    if self.automated_tasks_paused || !workspace.tasks_auto_start {
+                        continue;
+                    }
+                    self.last_scheduled_fire.insert(task.id, now_min);
+                    let target_url = scheduled_run_scan_target(&workspace, &task.description);
                     if let Some(url) = target_url
                         && let Ok(parsed) = url::Url::parse(&url)
                         && let Some(host) = parsed.host_str()
@@ -561,39 +557,287 @@ impl State {
     }
 }
 
+fn has_regex_meta(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '^' | '$' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '\\'))
+}
+
+fn concrete_url_from_advanced_scope_rule(rule: &crate::AdvancedScopeRule) -> Option<String> {
+    if !rule.enabled {
+        return None;
+    }
+    let host = rule.host.trim();
+    if host.is_empty() || has_regex_meta(host) {
+        return None;
+    }
+    let scheme = match rule.protocol {
+        crate::ScopeProtocol::Http => "http",
+        crate::ScopeProtocol::Https | crate::ScopeProtocol::Any => "https",
+    };
+    let host_part = if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let port_part = match rule.port.trim() {
+        "" => String::new(),
+        raw => {
+            let p = raw.parse::<u16>().ok().filter(|&p| p > 0)?;
+            format!(":{p}")
+        }
+    };
+    let file_raw = rule.file.trim();
+    let path = if file_raw.starts_with('/') && !has_regex_meta(file_raw) {
+        file_raw
+    } else {
+        "/"
+    };
+    Some(format!("{scheme}://{host_part}{port_part}{path}"))
+}
+
+fn scheduled_run_scan_target(workspace: &Workspace, description: &str) -> Option<String> {
+    let trimmed = description.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Some(trimmed.to_owned());
+    }
+    if workspace.scope.advanced_mode
+        && let Some(url) = workspace
+            .scope
+            .advanced_include
+            .iter()
+            .find_map(concrete_url_from_advanced_scope_rule)
+    {
+        return Some(url);
+    }
+    workspace
+        .scope
+        .include
+        .iter()
+        .find(|r| r.enabled && !r.prefix.trim().is_empty())
+        .map(|r| r.prefix.trim().to_owned())
+}
+
 fn current_local_hh_mm(now_secs: i64) -> (u32, u32) {
     crate::codec_util::local_hh_mm(now_secs)
 }
 
-fn scheduled_task_due(trigger_spec: &str, now_secs: i64, last_fired_min: Option<i64>) -> bool {
-    let spec = trigger_spec.trim();
-    if spec.is_empty() {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScheduledTrigger {
+    Interval {
+        start: Option<(u32, u32)>,
+        interval_mins: i64,
+    },
+    DailyAt {
+        hour: u32,
+        minute: u32,
+    },
+}
+
+fn parse_hh_mm(raw: &str) -> Option<(u32, u32)> {
+    let (hh, mm) = raw.trim().split_once(':')?;
+    let h = hh.trim().parse::<u32>().ok()?;
+    let m = mm.trim().parse::<u32>().ok()?;
+    (h <= 23 && m <= 59).then_some((h, m))
+}
+
+fn parse_repeat_interval_minutes(raw: &str) -> Option<i64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
     }
+    let stripped = t
+        .strip_prefix("every:")
+        .or_else(|| t.strip_prefix("EVERY:"))
+        .unwrap_or(t)
+        .trim();
+    if stripped == "每分钟" {
+        return Some(1);
+    }
+    if stripped == "每小时" || stripped.eq_ignore_ascii_case("hourly") {
+        return Some(60);
+    }
+    let normalized = stripped.strip_prefix('每').unwrap_or(stripped).trim();
+    if let Some(num) = normalized
+        .strip_suffix("分钟")
+        .or_else(|| normalized.strip_suffix('分'))
+        .or_else(|| normalized.strip_suffix('m'))
+        .or_else(|| normalized.strip_suffix('M'))
+    {
+        return num.trim().parse::<i64>().ok().filter(|&m| m >= 1);
+    }
+    if let Some(num) = normalized
+        .strip_suffix("小时")
+        .or_else(|| normalized.strip_suffix('h'))
+        .or_else(|| normalized.strip_suffix('H'))
+    {
+        let hours = num.trim().parse::<i64>().ok().filter(|&h| h >= 1)?;
+        return hours.checked_mul(60);
+    }
+    None
+}
+
+fn is_daily_or_once_keyword(raw: &str) -> bool {
+    let t = raw.trim();
+    t.is_empty()
+        || matches!(t, "每日" | "每天" | "单次")
+        || t.eq_ignore_ascii_case("daily")
+        || t.eq_ignore_ascii_case("once")
+}
+
+fn parse_scheduled_trigger(trigger_spec: &str) -> Option<ScheduledTrigger> {
+    let spec = trigger_spec.trim();
+    if spec.is_empty() || spec.contains('\0') {
+        return None;
+    }
+    match spec.split_once('|') {
+        None => {
+            if let Some(interval_mins) = parse_repeat_interval_minutes(spec) {
+                Some(ScheduledTrigger::Interval {
+                    start: None,
+                    interval_mins,
+                })
+            } else {
+                parse_hh_mm(spec).map(|(hour, minute)| ScheduledTrigger::DailyAt { hour, minute })
+            }
+        }
+        Some((left, right)) => {
+            if right.contains('|') {
+                return None;
+            }
+            let left = left.trim();
+            let right = right.trim();
+            if left.is_empty() {
+                parse_repeat_interval_minutes(right).map(|interval_mins| {
+                    ScheduledTrigger::Interval {
+                        start: None,
+                        interval_mins,
+                    }
+                })
+            } else if let Some((hour, minute)) = parse_hh_mm(left) {
+                if is_daily_or_once_keyword(right) {
+                    Some(ScheduledTrigger::DailyAt { hour, minute })
+                } else {
+                    parse_repeat_interval_minutes(right).map(|interval_mins| {
+                        ScheduledTrigger::Interval {
+                            start: Some((hour, minute)),
+                            interval_mins,
+                        }
+                    })
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub fn is_valid_scheduled_task_trigger(trigger_spec: &str) -> bool {
+    parse_scheduled_trigger(trigger_spec).is_some()
+}
+
+fn scheduled_task_due(trigger_spec: &str, now_secs: i64, last_fired_min: Option<i64>) -> bool {
+    let Some(parsed) = parse_scheduled_trigger(trigger_spec) else {
+        return false;
+    };
     let now_min = now_secs / 60;
     if last_fired_min == Some(now_min) {
         return false;
     }
-    if let Some(rest) = spec
-        .strip_prefix("every:")
-        .or_else(|| spec.strip_prefix("EVERY:"))
-        .map(str::trim)
-    {
-        let mins = rest
-            .trim_end_matches(['m', 'M'])
-            .parse::<i64>()
-            .ok()
-            .filter(|&m| m >= 1);
-        if let Some(interval) = mins {
-            return last_fired_min.is_none_or(|prev| now_min - prev >= interval)
-                && (now_min % interval == 0 || last_fired_min.is_some());
+    match parsed {
+        ScheduledTrigger::Interval {
+            start,
+            interval_mins,
+        } => {
+            let after_start = start.is_none_or(|(sh, sm)| {
+                last_fired_min.is_some() || current_local_hh_mm(now_secs) >= (sh, sm)
+            });
+            after_start
+                && last_fired_min.is_none_or(|prev| now_min - prev >= interval_mins)
+                && (now_min % interval_mins == 0 || last_fired_min.is_some())
+        }
+        ScheduledTrigger::DailyAt { hour, minute } => {
+            let (cur_h, cur_m) = current_local_hh_mm(now_secs);
+            cur_h == hour && cur_m == minute
         }
     }
-    if let Some((hh, mm)) = spec.split_once(':')
-        && let (Ok(h), Ok(m)) = (hh.trim().parse::<u32>(), mm.trim().parse::<u32>())
-    {
-        let (cur_h, cur_m) = current_local_hh_mm(now_secs);
-        return cur_h == h && cur_m == m;
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    #[test]
+    fn scheduled_task_trigger_parser_handles_daily_repeat_and_rejects_invalid() {
+        for valid in [
+            "09:00",
+            "09:00 | 每日",
+            "09:00 | daily",
+            "09:00 | once",
+            "every:15m",
+            "09:00 | every:30m",
+            " | every:10m",
+            "每30分钟",
+            "00:05 | 每15分钟",
+            "2h",
+        ] {
+            assert!(
+                is_valid_scheduled_task_trigger(valid),
+                "expected valid trigger spec: {valid}"
+            );
+        }
+        for invalid in ["", "   ", "99:99", "09:60", "09:00 | bogus", "a | b | c", "09:00\0"] {
+            assert!(
+                !is_valid_scheduled_task_trigger(invalid),
+                "expected invalid trigger spec: {invalid}"
+            );
+        }
     }
-    false
+
+    #[test]
+    fn scheduled_task_due_fires_for_daily_with_repeat_label_and_intervals() {
+        let local_epoch_secs = 9 * 3600;
+        let (h, m) = current_local_hh_mm(local_epoch_secs);
+        let daily_spec = format!("{h:02}:{m:02} | 每日");
+        assert!(scheduled_task_due(&daily_spec, local_epoch_secs, None));
+        assert!(!scheduled_task_due(
+            &daily_spec,
+            local_epoch_secs,
+            Some(local_epoch_secs / 60)
+        ));
+
+        let interval_spec = "every:15m";
+        assert!(scheduled_task_due(interval_spec, 15 * 60, None));
+        assert!(!scheduled_task_due(interval_spec, 16 * 60, Some(15)));
+        assert!(scheduled_task_due(interval_spec, 30 * 60, Some(15)));
+
+        let start_and_repeat = format!("{h:02}:{m:02} | 每30分钟");
+        assert!(scheduled_task_due(&start_and_repeat, local_epoch_secs, None));
+        assert!(!scheduled_task_due(
+            &format!("{:02}:59 | every:15m", (h + 1) % 24),
+            local_epoch_secs,
+            None
+        ));
+    }
+
+    #[test]
+    fn run_scan_derives_target_from_concrete_advanced_scope_when_enabled() {
+        let mut ws = Workspace::default();
+        ws.scope.advanced_mode = true;
+        ws.scope.advanced_include.push(crate::AdvancedScopeRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            protocol: crate::ScopeProtocol::Https,
+            host: "app.example.invalid".into(),
+            port: "8443".into(),
+            file: "/api".into(),
+        });
+        assert_eq!(
+            scheduled_run_scan_target(&ws, "").as_deref(),
+            Some("https://app.example.invalid:8443/api")
+        );
+        assert_eq!(
+            scheduled_run_scan_target(&ws, "http://127.0.0.1:8080/login").as_deref(),
+            Some("http://127.0.0.1:8080/login")
+        );
+    }
 }

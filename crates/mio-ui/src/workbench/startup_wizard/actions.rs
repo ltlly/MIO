@@ -175,7 +175,7 @@ impl Workbench {
             pause_automated_tasks: if mode == ProjectMode::OpenExisting {
                 pause_automated_tasks
             } else {
-                true
+                false
             },
             trust_project_file: if mode == ProjectMode::OpenExisting {
                 trust_project_file

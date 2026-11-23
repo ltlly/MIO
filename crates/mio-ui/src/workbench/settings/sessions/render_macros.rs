@@ -23,12 +23,14 @@ impl Settings {
         let e_jar = cx.entity();
 
         let mut steps_summary = div().flex().flex_col().gap(px(4.));
+        let step_len = self.sessions.draft_steps.len();
         for (idx, step) in self.sessions.draft_steps.iter().enumerate() {
             steps_summary = steps_summary.child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(8.))
                     .px(px(8.))
                     .py(px(3.))
                     .rounded(px(4.))
@@ -43,14 +45,52 @@ impl Settings {
                         step.extractions.len()
                     ))
                     .child(
-                        settings_action_button(("settings-macro-draft-step-del", idx), "移除", !enabled)
-                            .tooltip("从当前草稿 Macro 中移除此请求步骤")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if idx < this.sessions.draft_steps.len() {
-                                    this.sessions.draft_steps.remove(idx);
-                                    cx.notify();
-                                }
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                settings_action_button(
+                                    ("settings-macro-draft-step-up", idx),
+                                    "↑",
+                                    !enabled || idx == 0,
+                                )
+                                .tooltip("上移此 Macro 请求步骤")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if idx > 0 && idx < this.sessions.draft_steps.len() {
+                                        this.sessions.draft_steps.swap(idx, idx - 1);
+                                        cx.notify();
+                                    }
+                                })),
+                            )
+                            .child(
+                                settings_action_button(
+                                    ("settings-macro-draft-step-down", idx),
+                                    "↓",
+                                    !enabled || idx + 1 >= step_len,
+                                )
+                                .tooltip("下移此 Macro 请求步骤")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if idx + 1 < this.sessions.draft_steps.len() {
+                                        this.sessions.draft_steps.swap(idx, idx + 1);
+                                        cx.notify();
+                                    }
+                                })),
+                            )
+                            .child(
+                                settings_action_button(
+                                    ("settings-macro-draft-step-del", idx),
+                                    "移除",
+                                    !enabled,
+                                )
+                                .tooltip("从当前草稿 Macro 中移除此请求步骤")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if idx < this.sessions.draft_steps.len() {
+                                        this.sessions.draft_steps.remove(idx);
+                                        cx.notify();
+                                    }
+                                })),
+                            ),
                     ),
             );
         }

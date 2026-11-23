@@ -1,5 +1,13 @@
 use super::*;
 
+fn should_skip_proxy_history(ws: Option<&Arc<Workspace>>, url: &str) -> bool {
+    ws.is_some_and(|ws| {
+        ws.proxy_messages.misc.disable_history_logging
+            || (ws.proxy_messages.misc.disable_out_of_scope_history_logging
+                && !ws.scope.is_url_in_scope(url))
+    })
+}
+
 impl State {
     pub(super) async fn capture(&mut self, event: ProxyEvent) -> Result<()> {
         let result = self.capture_without_waiting_for_ui(event, false);
@@ -54,11 +62,7 @@ impl State {
                     return Ok(());
                 }
                 let ws_opt = self.store.metadata().workspace_arc().ok();
-                let skip_history = ws_opt.as_ref().is_some_and(|ws| {
-                    ws.proxy_messages.misc.disable_history_logging
-                        || (ws.proxy_messages.misc.disable_out_of_scope_history_logging
-                            && !ws.scope.is_url_in_scope(&record.request.url))
-                });
+                let skip_history = should_skip_proxy_history(ws_opt.as_ref(), &record.request.url);
                 if record.summary.state != FlowState::Intercepted
                     && self.proxy.pending.remove(&record.summary.id).is_some()
                 {
@@ -111,7 +115,16 @@ impl State {
                 if project != self.project {
                     return Ok(());
                 }
-                self.persist_capture_with_metrics(&record, response_stream.as_ref(), listener_port, &capture_metrics)?;
+                let ws_opt = self.store.metadata().workspace_arc().ok();
+                let skip_history = should_skip_proxy_history(ws_opt.as_ref(), &record.request.url);
+                if !skip_history {
+                    self.persist_capture_with_metrics(
+                        &record,
+                        response_stream.as_ref(),
+                        listener_port,
+                        &capture_metrics,
+                    )?;
+                }
                 if !stopping && !reply.is_closed() {
                     let stage = if record.response.is_some() {
                         InterceptStage::Response
@@ -329,5 +342,54 @@ impl State {
             intercept_responses: self.proxy.intercept_responses,
         });
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disable_history_logging_skips_persisting_intercepted_flows_while_keeping_pending() {
+        let (events, mut rx) = mpsc::channel(32);
+        let mut state = State::new(events, CancellationToken::new()).unwrap();
+        let project = state.project;
+        let mut ws = state.store.workspace().unwrap();
+        ws.revision += 1;
+        ws.proxy_messages.misc.disable_history_logging = true;
+        state.store.save_workspace(&ws).unwrap();
+
+        let mut record = crate::service::tests::completed_flow();
+        let flow_id = record.summary.id;
+        record.summary.source = TrafficSource::Proxy;
+        record.summary.state = FlowState::Intercepted;
+        record.response = None;
+        let (reply, _reply_rx) = tokio::sync::oneshot::channel();
+
+        state
+            .capture(ProxyEvent::Intercepted {
+                project,
+                record,
+                reply,
+                response_head_only: false,
+                response_stream: None,
+                listener_port: Some(8080),
+                capture_metrics: mio_proxy::CapturedFlowMetrics::default(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            state.store.read_optional(flow_id).unwrap().is_none(),
+            "intercepted flow must not be persisted when disable_history_logging is enabled"
+        );
+        assert!(state.proxy.pending.contains_key(&flow_id));
+        let mut saw_pending = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, Event::InterceptPending { project: p, .. } if p == project) {
+                saw_pending = true;
+            }
+        }
+        assert!(saw_pending, "Event::InterceptPending must still be emitted");
     }
 }

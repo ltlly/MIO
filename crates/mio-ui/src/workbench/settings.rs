@@ -275,6 +275,8 @@ struct Settings {
     checkbox_focus: FocusHandle,
     normalize_http1_focus: FocusHandle,
     repeater_timeout_input: Entity<InputState>,
+    repeater_redirect_max_hops_input: Entity<InputState>,
+    repeater_request_timeout_input: Entity<InputState>,
     http_streaming_scope_table: Entity<TableState<window_render::HttpStreamingScopeTable>>,
     http_streaming_scope_selected: Option<usize>,
     http_streaming_scope_editing: Option<mio_core::Uuid>,
@@ -291,6 +293,7 @@ struct Settings {
     scheduled_task_repeat: Entity<InputState>,
     scheduled_task_name: Entity<InputState>,
     scope_editor_open: [bool; 2],
+    scope_editor_subdomains: [bool; 2],
     scope_oos_custom_input: Entity<InputState>,
     scope_oos_custom_editor_open: bool,
     scope_oos_custom_editing: Option<mio_core::Uuid>,
@@ -381,13 +384,13 @@ impl Workbench {
         tasks_auto_start: Option<bool>,
         scheduled_tasks: Option<Vec<mio_core::ScheduledTask>>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if project.is_none()
             || self.project != project
             || !self.backend_available()
             || self.transition.is_some()
         {
-            return;
+            return false;
         }
         let mut changed = false;
         if let Some(auto_start) = tasks_auto_start
@@ -403,9 +406,11 @@ impl Workbench {
             changed = true;
         }
         if changed {
-            self.save_workspace(cx);
+            let saved = self.save_workspace(cx);
             cx.notify();
+            return saved;
         }
+        true
     }
 
     pub(in crate::workbench) fn regenerate_ca(&mut self, cx: &mut Context<Self>) {

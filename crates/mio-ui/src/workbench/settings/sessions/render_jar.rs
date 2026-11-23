@@ -438,6 +438,26 @@ impl Settings {
                                                     .on_click(cx.listener(|this, _, window, cx| {
                                                         this.save_cookie_jar_entry(window, cx)
                                                     })),
+                                                )
+                                                .when(
+                                                    self.sessions.editing_cookie_id.is_some(),
+                                                    |this| {
+                                                        this.child(
+                                                            sessions_mio_button(
+                                                                "settings-cookie-jar-cancel-edit",
+                                                                "取消编辑",
+                                                                !enabled,
+                                                            )
+                                                            .tooltip("放弃当前编辑并清空 Cookie 表单")
+                                                            .on_click(cx.listener(
+                                                                |this, _, window, cx| {
+                                                                    this.cancel_cookie_edit(
+                                                                        window, cx,
+                                                                    )
+                                                                },
+                                                            )),
+                                                        )
+                                                    },
                                                 ),
                                         ),
                                 ),

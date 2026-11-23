@@ -132,8 +132,8 @@ impl IntruderResourcePool {
         );
         ensure!(
             self.max_concurrent_requests
-                .is_none_or(|limit| (1..=16).contains(&limit)),
-            "Intruder 资源池并发上限必须为 1–16（MIO 资源限额）"
+                .is_none_or(|limit| (1..=crate::MAX_INTRUDER_CONCURRENT_REQUESTS).contains(&limit)),
+            "Intruder 资源池并发上限必须为 1–256（MIO 资源限额）"
         );
         if let Some(delay) = self.delay {
             delay.validate()?;

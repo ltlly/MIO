@@ -90,21 +90,8 @@ impl State {
             });
         let config: Result<SendConfig> = (|| {
             let workspace = self.store.metadata().workspace_arc()?;
-            let upstream_tls = self
-                .preferences
-                .effective_upstream_tls(&workspace.upstream_tls)?;
-            let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
-            let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-            let mut send_cfg = SendConfig::default();
-            send_cfg.network.upstream_route = workspace
-                .upstream_proxy
-                .route_for_url_with_tls(&run.target, upstream_tls.clone())?;
-            send_cfg.network.hostname_overrides = hostname_overrides;
-            send_cfg.tls.trust = upstream_tls;
-            send_cfg.tls.options = workspace.upstream_tls.to_proxy_tls_options();
-            send_cfg.tls.client_certificates = self.tls.compiled_client_certs.clone();
+            let mut send_cfg = self.build_tool_send_config_for_url(&workspace, &run.target)?;
             send_cfg.limits.timeout = run.timeout;
-            send_cfg.limits.streaming_timeout = streaming_timeout;
             send_cfg.http.version = Some(run.version);
             Ok(send_cfg)
         })();

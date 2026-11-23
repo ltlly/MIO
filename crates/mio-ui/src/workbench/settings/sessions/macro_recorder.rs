@@ -9,9 +9,24 @@ pub(super) struct ImportedMacroStepDraft {
     pub(super) body_text: String,
 }
 
-fn extract_host_header_origin(raw: &[u8]) -> Option<String> {
+fn extract_host_header_origin(raw: &[u8], default_https: bool) -> Option<String> {
     let text = std::str::from_utf8(raw).ok()?;
-    for line in text.lines().skip(1) {
+    let mut lines = text.lines();
+    if let Some(req_line) = lines.next()
+        && let Some(target) = req_line.split_whitespace().nth(1)
+        && let Ok(parsed) = url::Url::parse(target)
+        && matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+    {
+        return Some(format!(
+            "{}://{}",
+            parsed.scheme(),
+            parsed
+                .port()
+                .map_or_else(|| parsed.host_str().unwrap_or_default().to_owned(), |p| format!("{}:{p}", parsed.host_str().unwrap_or_default()))
+        ));
+    }
+    for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             break;
@@ -21,7 +36,12 @@ fn extract_host_header_origin(raw: &[u8]) -> Option<String> {
         {
             let host = val.trim();
             if !host.is_empty() {
-                return Some(format!("http://{host}"));
+                let scheme = if host.ends_with(":443") || (default_https && !host.ends_with(":80")) {
+                    "https"
+                } else {
+                    "http"
+                };
+                return Some(format!("{scheme}://{host}"));
             }
         }
     }
@@ -43,7 +63,7 @@ fn format_macro_step_from_request(req: &HttpRequest, skip_cookie: bool) -> Impor
         }
         if let Ok(val_str) = std::str::from_utf8(&h.value) {
             let val_trimmed = val_str.trim();
-            if !val_trimmed.is_empty() && !val_trimmed.contains(';') {
+            if !val_trimmed.is_empty() {
                 header_parts.push(format!("{}: {}", h.name.trim(), val_trimmed));
             }
         }
@@ -104,7 +124,7 @@ pub(super) fn snapshot_active_request_for_macro(
                 let origin = row
                     .origin
                     .clone()
-                    .or_else(|| extract_host_header_origin(&raw))
+                    .or_else(|| extract_host_header_origin(&raw, false))
                     .ok_or_else(|| "归档请求缺少目标 Origin。".to_owned())?;
                 let req = parse_request(&raw, &origin, HttpVersion::Http11)
                     .map_err(|e| format!("解析归档 HTTP 请求失败：{e}"))?;
@@ -129,7 +149,7 @@ pub(super) fn snapshot_active_request_for_macro(
             (tab.draft.target.trim().to_owned(), tab.draft.raw.clone())
         };
         let effective_target = if target.is_empty() {
-            extract_host_header_origin(&raw)
+            extract_host_header_origin(&raw, tab.draft.target.trim().starts_with("https://"))
                 .ok_or_else(|| "当前 Repeater 草稿缺少连接目标 URL（http/https）。".to_owned())?
         } else {
             target

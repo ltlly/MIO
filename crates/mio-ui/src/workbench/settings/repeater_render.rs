@@ -96,6 +96,36 @@ impl Settings {
                                 )
                             });
                         }),
+                    )
+                    .when(rs.enforce_http1_connection_close, |this| {
+                        this.child(
+                            div()
+                                .id("settings-repeater-h1-close-note")
+                                .test_support()
+                                .pt(px(2.))
+                                .text_size(theme::scaled_px(12.))
+                                .text_color(theme::muted_foreground())
+                                .child("提示：当前已启用强制 HTTP/1 Connection: close（可在 Network > HTTP 或 Repeater 菜单修改），将覆盖 HTTP/1 连接复用。"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .pt(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child("请求超时（1–3600 秒）：")
+                            .child(
+                                div()
+                                    .w(theme::scaled_px(86.).max(px(86.)))
+                                    .child(
+                                        Input::new(&self.repeater_request_timeout_input)
+                                            .id("settings-repeater-request-timeout")
+                                            .aria_label("Repeater 请求超时（秒）")
+                                            .small()
+                                            .disabled(!enabled),
+                                    ),
+                            ),
                     ),
             );
 
@@ -267,6 +297,25 @@ impl Settings {
                         )
                     });
                 }),
+            )
+            .child(
+                div()
+                    .pt(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child("最大重定向跳数（1–20）：")
+                    .child(
+                        div()
+                            .w(theme::scaled_px(72.).max(px(72.)))
+                            .child(
+                                Input::new(&self.repeater_redirect_max_hops_input)
+                                    .id("settings-repeater-redirect-max-hops")
+                                    .aria_label("Repeater 最大重定向跳数")
+                                    .small()
+                                    .disabled(!enabled),
+                            ),
+                    ),
             );
 
         let content = div()
@@ -326,10 +375,12 @@ impl Settings {
                             !enabled,
                         )
                         .tab_stop(false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             let _ = this.owner.update(cx, |view, cx| {
                                 view.reset_repeater_redirect_settings(project, cx)
                             });
+                            this.repeater_redirect_max_hops_input
+                                .update(cx, |input, cx| input.set_value("10", window, cx));
                             cx.notify();
                         })),
                         "控制 Repeater 如何处理重定向响应。",

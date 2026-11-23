@@ -381,6 +381,42 @@ impl Workbench {
         .detach();
         cx.notify();
     }
+
+    pub(in crate::workbench) fn clear_selected_tool_highlight(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.tool {
+            Tool::Proxy => {
+                let mut ids: Vec<HistoryEntryId> = self
+                    .history
+                    .read(cx)
+                    .delegate()
+                    .selection_rows()
+                    .into_iter()
+                    .map(HistoryRow::id)
+                    .collect();
+                if ids.is_empty()
+                    && let Some(id) = self.selected_history
+                {
+                    ids.push(id);
+                }
+                if !ids.is_empty() {
+                    self.set_http_highlights(&ids, 0, cx);
+                }
+            }
+            Tool::Logger => {
+                if let Some(sel_id) = self.extra_tools.logger_selected {
+                    let ids = self.logger_selected_target_ids(sel_id);
+                    self.set_logger_batch_highlight(&ids, 0, cx);
+                }
+            }
+            Tool::Organiser => self.set_selected_organiser_highlight(None, window, cx),
+            Tool::Target => self.set_target_selected_highlights(0, cx),
+            _ => {}
+        }
+    }
 }
 
 fn valid_receipts(

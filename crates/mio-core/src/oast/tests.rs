@@ -194,6 +194,7 @@ async fn captures_partial_slow_tcp_probe_and_uses_self_hosted_domain_url() {
         server_domain: Some("oast.internal".to_owned()),
         authorization_header: None,
         poll_interval_ms: 1_000,
+        ..SelfHostedOastConfig::default()
     };
     let mut server = LocalOastServer::start_with_config(events_tx, config)
         .await
@@ -224,5 +225,54 @@ async fn captures_partial_slow_tcp_probe_and_uses_self_hosted_domain_url() {
     .expect("interaction channel open");
     assert_eq!(interaction.token.as_deref(), Some(payload.token.as_str()));
     drop(slow_stream);
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn oast_supports_non_loopback_bind_custom_dns_answer_and_opt_in_cloud_domain() {
+    let opt_in = SelfHostedOastConfig {
+        enabled: true,
+        polling_url: Some("https://collector.interact.sh/poll".to_owned()),
+        allow_public_cloud_domains: true,
+        ..SelfHostedOastConfig::default()
+    };
+    assert!(opt_in.validate().is_ok());
+
+    let (events_tx, _events_rx) = mpsc::channel(8);
+    let bind_cfg = SelfHostedOastConfig {
+        bind_address: Some("0.0.0.0".to_owned()),
+        dns_answer_ip: Some("192.0.2.55".to_owned()),
+        ..SelfHostedOastConfig::default()
+    };
+    let mut server = LocalOastServer::start_with_config(events_tx, bind_cfg)
+        .await
+        .unwrap();
+    assert_eq!(server.http_addr().ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let payload = server.issue_payload("non-loopback");
+    assert!(
+        payload
+            .http_callback_url
+            .starts_with("http://192.0.2.55:")
+    );
+
+    let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let connect_dns = SocketAddr::from((Ipv4Addr::LOCALHOST, server.dns_addr().port()));
+    let mut query = vec![
+        0x42, 0x24, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    for label in payload.dns_qname.split('.') {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]);
+    sock.send_to(&query, connect_dns).await.unwrap();
+    let mut buf = [0_u8; 512];
+    let (len, _) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(len >= 4);
+    assert_eq!(&buf[len - 4..len], &[192, 0, 2, 55]);
+
     server.stop().await.unwrap();
 }

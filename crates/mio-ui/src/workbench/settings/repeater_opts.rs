@@ -54,7 +54,6 @@ impl Workbench {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub(in crate::workbench) fn set_repeater_redirect_max_hops(
         &mut self,
         project: Option<ProjectKey>,
@@ -197,7 +196,6 @@ impl Workbench {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub(in crate::workbench) fn set_repeater_request_timeout(
         &mut self,
         project: Option<ProjectKey>,
@@ -253,6 +251,60 @@ impl Settings {
                 cx,
             )
         });
+    }
+
+    pub(in crate::workbench) fn apply_repeater_redirect_max_hops(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value =
+            match editing::input_snapshot(&self.repeater_redirect_max_hops_input, window, cx) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.settings_error(error, cx);
+                    return;
+                }
+            };
+        let Ok(hops) = value.trim().parse::<u8>() else {
+            self.settings_error("Repeater 最大重定向跳数必须在 1 到 20 之间。", cx);
+            return;
+        };
+        if !(1..=20).contains(&hops) {
+            self.settings_error("Repeater 最大重定向跳数必须在 1 到 20 之间。", cx);
+            return;
+        }
+        let project = self.state.project;
+        let _ = self
+            .owner
+            .update(cx, |view, cx| view.set_repeater_redirect_max_hops(project, hops, cx));
+    }
+
+    pub(in crate::workbench) fn apply_repeater_request_timeout(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value =
+            match editing::input_snapshot(&self.repeater_request_timeout_input, window, cx) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.settings_error(error, cx);
+                    return;
+                }
+            };
+        let Ok(secs) = value.trim().parse::<u64>() else {
+            self.settings_error("Repeater 请求超时必须在 1 到 3600 秒之间。", cx);
+            return;
+        };
+        if !(1..=3600).contains(&secs) {
+            self.settings_error("Repeater 请求超时必须在 1 到 3600 秒之间。", cx);
+            return;
+        }
+        let project = self.state.project;
+        let _ = self
+            .owner
+            .update(cx, |view, cx| view.set_repeater_request_timeout(project, secs, cx));
     }
 
     pub(super) fn render_timeout(&self, cx: &mut Context<Self>) -> AnyElement {

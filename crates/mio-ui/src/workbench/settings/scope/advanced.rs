@@ -191,8 +191,8 @@ fn adv_scope_cell(rule: &AdvancedScopeRule, column: usize) -> String {
 }
 
 pub(super) struct SettingsAdvScopeState {
-    pub(super) protocol: ScopeProtocol,
-    pub(super) protocol_select: Entity<SelectState<Vec<&'static str>>>,
+    pub(super) protocols: [ScopeProtocol; 2],
+    pub(super) protocol_selects: [Entity<SelectState<Vec<&'static str>>>; 2],
     pub(in crate::workbench::settings) tables: [Entity<TableState<AdvScopeTable>>; 2],
     pub(super) include: [Entity<InputState>; 3],
     pub(super) exclude: [Entity<InputState>; 3],
@@ -207,19 +207,22 @@ impl SettingsAdvScopeState {
     ) -> Self {
         let mk = |window: &mut Window, cx: &mut App| {
             [
-                cx.new(|cx| InputState::new(window, cx).placeholder("Host / IP range 正则")),
+                cx.new(|cx| InputState::new(window, cx).placeholder("Host / IP 段 / 正则")),
                 cx.new(|cx| InputState::new(window, cx).placeholder("Port 正则")),
                 cx.new(|cx| InputState::new(window, cx).placeholder("File 正则")),
             ]
         };
-        let protocol_select = cx.new(|scx| {
-            SelectState::new(
-                vec!["Any", "HTTP", "HTTPS"],
-                Some(IndexPath::new(0)),
-                window,
-                scx,
-            )
-        });
+        let make_select = |window: &mut Window, cx: &mut App| {
+            cx.new(|scx| {
+                SelectState::new(
+                    vec!["Any", "HTTP", "HTTPS"],
+                    Some(IndexPath::new(0)),
+                    window,
+                    scx,
+                )
+            })
+        };
+        let protocol_selects = [make_select(window, cx), make_select(window, cx)];
         let inc_owner = owner.clone();
         let inc_table = cx.new(|tcx| {
             TableState::new(
@@ -246,8 +249,8 @@ impl SettingsAdvScopeState {
             .col_selectable(false)
         });
         Self {
-            protocol: ScopeProtocol::Any,
-            protocol_select,
+            protocols: [ScopeProtocol::Any, ScopeProtocol::Any],
+            protocol_selects,
             tables: [inc_table, exc_table],
             include: mk(window, cx),
             exclude: mk(window, cx),
@@ -316,7 +319,11 @@ impl Settings {
             } else {
                 st.exclude.clone()
             };
-            let proto = match st.protocol_select.read(cx).selected_value().copied() {
+            let proto = match st.protocol_selects[side]
+                .read(cx)
+                .selected_value()
+                .copied()
+            {
                 Some("HTTP") => ScopeProtocol::Http,
                 Some("HTTPS") => ScopeProtocol::Https,
                 _ => ScopeProtocol::Any,
@@ -361,11 +368,20 @@ impl Settings {
 
     fn split_settings_advanced_url(
         &mut self,
+        include: bool,
         adv: &Entity<SettingsAdvScopeState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let inputs = adv.read(cx).include.clone();
+        let side = usize::from(!include);
+        let inputs = {
+            let st = adv.read(cx);
+            if include {
+                st.include.clone()
+            } else {
+                st.exclude.clone()
+            }
+        };
         let url = match editing::input_snapshot(&inputs[0], window, cx) {
             Ok(val) => val.trim().to_owned(),
             Err(err) => {
@@ -374,22 +390,105 @@ impl Settings {
             }
         };
         let (protocol, host, port, file) = AdvancedScopeRule::split_url_patterns(&url);
-        if protocol != ScopeProtocol::Any {
-            let idx = match protocol {
-                ScopeProtocol::Any => 0,
-                ScopeProtocol::Http => 1,
-                ScopeProtocol::Https => 2,
-            };
-            let sel = adv.read(cx).protocol_select.clone();
-            sel.update(cx, |s, cx| {
-                s.set_selected_index(Some(IndexPath::new(idx)), window, cx)
-            });
-            adv.update(cx, |st, _| st.protocol = protocol);
-        }
+        let idx = match protocol {
+            ScopeProtocol::Any => 0,
+            ScopeProtocol::Http => 1,
+            ScopeProtocol::Https => 2,
+        };
+        let sel = adv.read(cx).protocol_selects[side].clone();
+        sel.update(cx, |s, cx| {
+            s.set_selected_index(Some(IndexPath::new(idx)), window, cx)
+        });
+        adv.update(cx, |st, _| st.protocols[side] = protocol);
         for (input, value) in inputs.iter().zip([host, port, file]) {
             input.update(cx, |s, cx| s.set_value(value, window, cx));
         }
         cx.notify();
+    }
+
+    fn load_advanced_scope_rules_from_file(
+        &mut self,
+        include: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.enabled {
+            return;
+        }
+        let project = self.state.project;
+        let paths = crate::native_terminate::prompt_for_paths(
+            window,
+            cx,
+            gpui_kit::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some(if include {
+                    "加载高级包含范围规则（URL、主机或网段列表）".into()
+                } else {
+                    "加载高级排除范围规则（URL、主机或网段列表）".into()
+                }),
+            },
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => return,
+                Ok(Err(err)) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error(format!("打开文件选择器失败：{err}"), cx);
+                    });
+                    return;
+                }
+                Err(_) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.settings_error("文件选择器通道意外关闭。", cx);
+                    });
+                    return;
+                }
+            };
+            let Some(path) = picked else {
+                return;
+            };
+            let result: Result<Vec<String>, String> = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048) })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(lines) => {
+                        for line in lines {
+                            let (protocol, host, port, file) = if line.contains("://") {
+                                AdvancedScopeRule::split_url_patterns(&line)
+                            } else {
+                                (ScopeProtocol::Any, line, String::new(), String::new())
+                            };
+                            let rule = AdvancedScopeRule {
+                                id: Uuid::new_v4(),
+                                enabled: true,
+                                protocol,
+                                host,
+                                port,
+                                file,
+                            };
+                            let res = this
+                                .owner
+                                .update(cx, |view, cx| {
+                                    view.upsert_advanced_scope_rule(project, include, None, rule, cx)
+                                })
+                                .unwrap_or_else(|_| Err("主窗口已关闭。".into()));
+                            if let Err(err) = res {
+                                this.settings_error(err, cx);
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => this.settings_error(err, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn render_settings_advanced_scope(
@@ -398,29 +497,10 @@ impl Settings {
         adv: &Entity<SettingsAdvScopeState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let proto_select = adv.read(cx).protocol_select.clone();
-        let adv_split = adv.clone();
-        let proto_bar = toolbar()
-            .child("Protocol:")
-            .child(
-                Select::new(&proto_select)
-                    .id("settings-scope-protocol-select")
-                    .small()
-                    .w(theme::scaled_px(160.).max(px(160.)))
-                    .disabled(!enabled),
-            )
-            .child(
-                settings_action_button("settings-scope-advanced-paste", "解析 URL 为正则", !enabled)
-                    .tooltip("将包含框中的完整 URL 自动拆分为协议、主机、端口与路径正则")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.split_settings_advanced_url(&adv_split, window, cx);
-                    })),
-            );
         div()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(proto_bar)
             .child(self.render_settings_adv_card(true, enabled, adv, cx))
             .child(self.render_settings_adv_card(false, enabled, adv, cx))
             .into_any_element()
@@ -444,7 +524,7 @@ impl Settings {
                 },
                 st.editing[side],
                 st.tables[side].clone(),
-                st.protocol_select.clone(),
+                st.protocol_selects[side].clone(),
             )
         };
         let fields = if include {
@@ -460,8 +540,7 @@ impl Settings {
         let selected_row = table
             .read(cx)
             .selected_row()
-            .filter(|&row| row < rules.len())
-            .or_else(|| (!rules.is_empty()).then_some(0));
+            .filter(|&row| row < rules.len());
         let selected_rule = selected_row.and_then(|row| rules.get(row).cloned());
         let (title, add_id, cancel_id, _, edit_pfx, rm_pfx, paste_id) = ADV_META[side];
         let adv_add = adv.clone();
@@ -473,6 +552,7 @@ impl Settings {
         let selected_for_edit = selected_rule.clone();
         let selected_for_remove = selected_rule.map(|rule| rule.id);
         let project = self.state.project;
+        let proto_select_bar = proto_select.clone();
         let side_buttons = div()
             .w(theme::scaled_px(88.).max(px(84.)))
             .flex_shrink_0()
@@ -517,7 +597,7 @@ impl Settings {
                     });
                     adv_edit.update(cx, |st, _| {
                         st.editing[side] = Some(cloned.id);
-                        st.protocol = cloned.protocol;
+                        st.protocols[side] = cloned.protocol;
                     });
                     for (inp, val) in inputs_edit.iter().zip([
                         cloned.host.clone(),
@@ -595,14 +675,43 @@ impl Settings {
                 )
                 .w_full()
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.load_scope_rules_from_file(include, window, cx)
+                    this.load_advanced_scope_rules_from_file(include, window, cx)
                 })),
             );
+        let adv_split = adv.clone();
+        let proto_id = if include {
+            "settings-scope-protocol-select"
+        } else {
+            "settings-scope-exclude-protocol-select"
+        };
+        let paste_url_id = if include {
+            "settings-scope-advanced-paste"
+        } else {
+            "settings-scope-exclude-advanced-paste"
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(title))
+            .child(
+                toolbar()
+                    .child("Protocol:")
+                    .child(
+                        Select::new(&proto_select_bar)
+                            .id(proto_id)
+                            .small()
+                            .w(theme::scaled_px(160.).max(px(160.)))
+                            .disabled(!enabled),
+                    )
+                    .child(
+                        settings_action_button(paste_url_id, "解析 URL 为正则", !enabled)
+                            .tooltip("将 Host 输入框中的完整 URL 自动拆分为协议、主机、端口与路径正则")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.split_settings_advanced_url(include, &adv_split, window, cx);
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -751,6 +860,8 @@ mod tests {
         acknowledge(&fixture, ws_exc, cx);
 
         cx.update_window(settings, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("settings-scope-adv-include-row", 0usize), cx);
             window.render_frame(cx);
             window.click(("settings-scope-adv-include-edit", 0usize), cx);
             window.render_frame(cx);

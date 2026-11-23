@@ -130,7 +130,7 @@ fn resource_pool_catalog_keeps_identity_and_strict_known_settings() {
     assert!(duplicated.validate().is_err());
     duplicated.pools[1].id = Uuid::new_v4();
     duplicated.validate().unwrap();
-    for limit in [None, Some(1), Some(16)] {
+    for limit in [None, Some(1), Some(16), Some(crate::MAX_INTRUDER_CONCURRENT_REQUESTS)] {
         IntruderResourcePool {
             max_concurrent_requests: limit,
             ..pool.clone()
@@ -138,7 +138,7 @@ fn resource_pool_catalog_keeps_identity_and_strict_known_settings() {
         .validate()
         .unwrap();
     }
-    for limit in [0, 17, u16::MAX] {
+    for limit in [0, crate::MAX_INTRUDER_CONCURRENT_REQUESTS + 1, u16::MAX] {
         assert!(
             IntruderResourcePool {
                 max_concurrent_requests: Some(limit),

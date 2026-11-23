@@ -275,16 +275,21 @@ pub(super) async fn run_scan(
     }
 
     if mode == AuditTaskMode::PassiveOnly || crawl_stage.targets.is_empty() {
+        let cancelled_now = cancel.is_cancelled();
         return JobDone {
             project,
             task_id,
             requests_sent,
-            state: if cancel.is_cancelled() {
+            state: if cancelled_now {
                 AuditTaskState::Cancelled
             } else {
                 AuditTaskState::Completed
             },
-            error: None,
+            error: if cancelled_now {
+                None
+            } else {
+                crawl_stage.crawl_error
+            },
         };
     }
 
@@ -525,7 +530,11 @@ pub(super) async fn run_scan(
             }
         }
     }
-    let mut error = None;
+    let mut error = if cancelled {
+        None
+    } else {
+        crawl_stage.crawl_error
+    };
     if drain_timed_out {
         probes.abort_all();
         let abort_deadline = TokioInstant::now() + Duration::from_millis(200);

@@ -263,7 +263,7 @@ impl Workbench {
         ) {
             self.collaborator_pane.onboarding_dismissed = true;
             self.collaborator_pane.error = None;
-            self.collaborator_pane.notice = Some("正在启动本地 Loopback OAST 监听器…".into());
+            self.collaborator_pane.notice = Some("正在启动 Collaborator OAST 监听器…".into());
         }
         cx.notify();
     }

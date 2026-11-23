@@ -78,13 +78,18 @@ impl TableDelegate for ClientCertTable {
         let Some(owner) = self.owner.upgrade() else {
             return div().into_any_element();
         };
-        let (rule, enabled, project, wb) = {
+        let (rule, summary, enabled, project, wb) = {
             let settings = owner.read(cx);
             let Some(rule) = settings.state.client_certificates.get(row).cloned() else {
                 return div().into_any_element();
             };
+            let summary = settings
+                .listeners_tls
+                .lookup_client_cert_summary(&rule)
+                .cloned();
             (
                 rule,
+                summary,
                 settings.state.enabled,
                 settings.state.project,
                 settings.owner.clone(),
@@ -111,7 +116,7 @@ impl TableDelegate for ClientCertTable {
             )
             .into_any_element();
         }
-        mio_table_td_text(client_cert_cell(&rule, column)).into_any_element()
+        mio_table_td_text(client_cert_cell(&rule, summary.as_ref(), column)).into_any_element()
     }
 
     fn render_empty(
@@ -134,11 +139,16 @@ impl TableDelegate for ClientCertTable {
         let owner = self.owner.upgrade()?;
         let settings = owner.read(cx);
         let rule = settings.state.client_certificates.get(row)?;
-        Some(client_cert_cell(rule, column).into())
+        let summary = settings.listeners_tls.lookup_client_cert_summary(rule);
+        Some(client_cert_cell(rule, summary, column).into())
     }
 }
 
-fn client_cert_cell(rule: &ClientCertificateRule, column: usize) -> String {
+fn client_cert_cell(
+    rule: &ClientCertificateRule,
+    summary: Option<&mio_core::ClientCertificateSummary>,
+    column: usize,
+) -> String {
     match column {
         0 => if rule.enabled { "Yes" } else { "No" }.into(),
         1 => rule.host_pattern.clone(),
@@ -147,28 +157,20 @@ fn client_cert_cell(rule: &ClientCertificateRule, column: usize) -> String {
             ClientCertificateFormat::Pkcs12 => "PKCS#12",
         }
         .into(),
-        3 | 4 => {
-            if rule.format == ClientCertificateFormat::Pem {
-                rule.parse_identity()
-                    .map(|id| id.summary().subject_hint.clone())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
-        5 => String::new(),
-        6 => {
-            if rule.format == ClientCertificateFormat::Pem {
-                rule.parse_identity()
-                    .ok()
-                    .map(|id| id.summary().cert_count.saturating_sub(1))
-                    .filter(|&count| count > 0)
-                    .map(|count| format!("{count} 个"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
+        3 => summary
+            .map(|s| s.subject_hint.clone())
+            .unwrap_or_default(),
+        4 => summary
+            .map(|s| s.subject_hint.clone())
+            .unwrap_or_default(),
+        5 => summary
+            .map(|s| s.issuer_hint.clone())
+            .unwrap_or_default(),
+        6 => summary
+            .map(|s| s.cert_count.saturating_sub(1))
+            .filter(|&count| count > 0)
+            .map(|count| format!("{count} 个"))
+            .unwrap_or_default(),
         _ => match (rule.format, rule.private_key_pem.is_empty()) {
             (ClientCertificateFormat::Pkcs12, _) => "PKCS#12".into(),
             (ClientCertificateFormat::Pem, false) => "PEM 私钥".into(),
@@ -222,6 +224,21 @@ impl Workbench {
     ) -> Result<(), String> {
         let mut next = self.workspace.client_certificates.clone();
         next.push(rule);
+        self.apply_client_certificates_change(project, next, cx)
+    }
+
+    pub(in crate::workbench) fn edit_client_certificate_rule(
+        &mut self,
+        project: Option<ProjectKey>,
+        index: usize,
+        rule: ClientCertificateRule,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let mut next = self.workspace.client_certificates.clone();
+        if index >= next.len() {
+            return Err("待编辑的客户端证书规则已不存在。".into());
+        }
+        next[index] = rule;
         self.apply_client_certificates_change(project, next, cx)
     }
 
@@ -298,35 +315,47 @@ fn mio_override_card(
         .border_color(mio_table_border())
         .bg(theme::surface())
         .child(
-            BaseSwitch::new(id)
-                .checked(checked)
-                .disabled(!enabled)
-                .accessibility_label("仅为当前项目覆盖选项")
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .cursor_pointer()
-                .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_not_allowed()))
-                .on_change(move |next, _, window, cx| on_change(&next, window, cx))
+            div()
+                .id("settings-client-certs-override-wrap")
+                .tooltip(|w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        "保存项目级覆盖标记；客户端证书列表当前随项目配置保存。",
+                    )
+                    .build(w, cx)
+                })
                 .child(
-                    div()
-                        .w(px(24.))
-                        .h(px(13.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .p(px(2.))
+                    BaseSwitch::new(id)
+                        .checked(checked)
+                        .disabled(!enabled)
+                        .accessibility_label("仅为当前项目覆盖选项")
                         .flex()
                         .items_center()
-                        .when(checked, |this| this.justify_end())
-                        .when(!checked, |this| this.justify_start())
-                        .bg(track_bg)
-                        .child(div().size(px(9.)).rounded_full().bg(thumb_bg)),
-                )
-                .child(
-                    div()
-                        .text_size(theme::ui_font_size())
-                        .text_color(theme::foreground())
-                        .child("仅为当前项目覆盖选项"),
+                        .gap(px(8.))
+                        .cursor_pointer()
+                        .styles(|styles| {
+                            styles.disabled(|style| style.opacity(0.5).cursor_not_allowed())
+                        })
+                        .on_change(move |next, _, window, cx| on_change(&next, window, cx))
+                        .child(
+                            div()
+                                .w(px(24.))
+                                .h(px(13.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .p(px(2.))
+                                .flex()
+                                .items_center()
+                                .when(checked, |this| this.justify_end())
+                                .when(!checked, |this| this.justify_start())
+                                .bg(track_bg)
+                                .child(div().size(px(9.)).rounded_full().bg(thumb_bg)),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::ui_font_size())
+                                .text_color(theme::foreground())
+                                .child("仅为当前项目覆盖选项"),
+                        ),
                 ),
         )
 }

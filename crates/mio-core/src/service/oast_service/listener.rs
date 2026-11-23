@@ -235,6 +235,22 @@ impl CollaboratorService {
         true
     }
 
+    pub(super) fn delete_interaction(&mut self, interaction_id: Uuid) -> bool {
+        let Some(pos) = self
+            .interactions
+            .iter()
+            .position(|item| item.id == interaction_id)
+        else {
+            return false;
+        };
+        if let Some(removed) = self.interactions.remove(pos) {
+            self.total_raw_bytes = self
+                .total_raw_bytes
+                .saturating_sub(removed.raw_request.len());
+        }
+        true
+    }
+
     pub(super) fn clear_interactions(&mut self) {
         self.interactions.clear();
         self.interaction_ids.clear();

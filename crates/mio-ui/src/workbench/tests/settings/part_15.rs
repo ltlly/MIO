@@ -243,13 +243,18 @@ fn match_and_replace_decoder_and_comparer_workflows_work(cx: &mut TestAppContext
         window.render_frame(cx);
         assert!(window.try_find("mr-target-select").is_none());
         window.click("mr-side-add", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let add_dialog = *cx.windows().iter().find(|&&w| w != fixture.window).unwrap();
+    cx.update_window(add_dialog, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.find("mr-target-select").visible());
+        assert!(window.find("mr-type-select").visible());
         window.click("mr-match-input", cx);
         window.input("User-Agent: old", cx);
         window.click("mr-replace-input", cx);
         window.input("User-Agent: mio", cx);
-        window.click("mr-add-button", cx);
+        window.click("mr-submit", cx);
     })
     .unwrap();
     cx.run_until_parked();

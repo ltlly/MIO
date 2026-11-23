@@ -459,10 +459,13 @@ fn new_live_task_modal_configures_and_dispatches_real_commands(cx: &mut TestAppC
     let cmds = drain(&mut f.commands);
     assert!(matches!(
         cmds.as_slice(),
-        [Command::Audit(AuditCommand::SetLivePassiveCrawl {
-            enabled: false,
-            ..
-        })]
+        [
+            Command::Audit(AuditCommand::SetLivePassiveCrawl { enabled: false, .. }),
+            Command::Audit(AuditCommand::SetLivePassiveScope {
+                suite_scope_only: true,
+                ..
+            }),
+        ]
     ));
     cx.update_window(f.window, |_, window, cx| {
         window.render_frame(cx);

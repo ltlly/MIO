@@ -126,6 +126,10 @@ impl Workbench {
             revision: self.audit_dashboard.snapshot.revision,
             live_passive_enabled: self.audit_dashboard.snapshot.live_passive_enabled,
             live_passive_crawl_enabled: self.audit_dashboard.snapshot.live_passive_crawl_enabled,
+            live_passive_suite_scope_only: self
+                .audit_dashboard
+                .snapshot
+                .live_passive_suite_scope_only,
             tasks: Vec::new(),
             findings,
         };

@@ -1576,6 +1576,9 @@ impl Workbench {
                 r.on_action(cx.listener(|this, _: &AddHttpNotes, window, cx| {
                     this.open_http_notes(window, cx)
                 }));
+                r.on_action(cx.listener(|this, _: &crate::ClearHighlight, window, cx| {
+                    this.clear_selected_tool_highlight(window, cx);
+                }));
                 r.on_action(cx.listener(|this, _: &OpenInRepeater, window, cx| {
                     this.open_in_repeater(window, cx)
                 }));
@@ -1679,6 +1682,33 @@ impl Workbench {
                     if let Some(id) = active {
                         this.close_tab(id, window, cx);
                     }
+                }));
+                r.on_action(cx.listener(|this, _: &crate::CloseOtherTabs, window, cx| {
+                    if this.tool != Tool::Repeater {
+                        return;
+                    }
+                    let Some(active_id) = this
+                        .workspace
+                        .active
+                        .or(this.workspace.active_websocket_tab)
+                    else {
+                        return;
+                    };
+                    let mut ids: Vec<TabId> = this
+                        .workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| tab.id)
+                        .filter(|id| *id != active_id)
+                        .collect();
+                    ids.extend(
+                        this.workspace
+                            .websocket_tabs
+                            .iter()
+                            .filter(|tab| !tab.closed && tab.id != active_id)
+                            .map(|tab| tab.id),
+                    );
+                    this.close_tabs(ids, window, cx);
                 }));
                 r.on_action(
                     cx.listener(|this, _: &RestoreTab, window, cx| this.restore_tab(window, cx)),
@@ -2039,6 +2069,7 @@ mod tests {
                 revision: 1,
                 live_passive_enabled: true,
                 live_passive_crawl_enabled: true,
+                live_passive_suite_scope_only: false,
                 tasks: vec![AuditTaskSummary {
                     id: Uuid::new_v4(),
                     title: "扫描".into(),
@@ -2108,6 +2139,7 @@ mod tests {
                 revision: 2,
                 live_passive_enabled: true,
                 live_passive_crawl_enabled: true,
+                live_passive_suite_scope_only: false,
                 tasks: vec![AuditTaskSummary {
                     id: running_task_id,
                     title: "主站扫描".into(),

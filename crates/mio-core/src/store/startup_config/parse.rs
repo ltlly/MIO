@@ -297,8 +297,13 @@ pub(crate) fn parse_config_bytes(bytes: &[u8]) -> Result<StartupProjectConfig> {
             None
         }
     };
-    let (proxy_ws_interception, ssl_pass_through_rules, ws_match_and_replace_rules, response_mod) =
-        parse_proxy_section(raw.proxy)?;
+    let (
+        proxy_ws_interception,
+        ssl_pass_through_auto_add_on_failure,
+        ssl_pass_through_rules,
+        ws_match_and_replace_rules,
+        response_mod,
+    ) = parse_proxy_section(raw.proxy)?;
     ensure!(
         !(raw
             .proxy_messages
@@ -316,6 +321,7 @@ pub(crate) fn parse_config_bytes(bytes: &[u8]) -> Result<StartupProjectConfig> {
         proxy_interception: raw.proxy_interception,
         proxy_messages: raw.proxy_messages,
         proxy_websocket_interception: raw.proxy_websocket_interception.or(proxy_ws_interception),
+        ssl_pass_through_auto_add_on_failure,
         ssl_pass_through_rules,
         ws_match_and_replace_rules,
         response_modification: response_mod,

@@ -128,47 +128,20 @@ impl State {
         validate_location(&config.location)?;
         let workspace = self.store.metadata().workspace()?;
         let repeater_settings = &workspace.repeater_settings;
-        let upstream_tls = self
-            .preferences
-            .effective_upstream_tls(&workspace.upstream_tls)?;
         let request = http::parse_repeater_request(
             &config.draft.raw,
             &config.draft.target,
             config.draft.version,
             repeater_settings.update_content_length,
         )?;
-        let upstream_route = workspace
-            .upstream_proxy
-            .route_for_url_with_tls(&request.url, upstream_tls.clone())?;
-        let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
-        let streaming_timeout = workspace.upstream_proxy.effective_streaming_timeout();
-        let send_config = SendConfig {
-            network: mio_proxy::SendNetworkConfig {
-                upstream_route,
-                hostname_overrides,
-            },
-            tls: mio_proxy::UpstreamTlsConfig {
-                trust: upstream_tls,
-                options: workspace.upstream_tls.to_proxy_tls_options(),
-                client_certificates: self.tls.compiled_client_certs.clone(),
-                ..Default::default()
-            },
-            limits: mio_proxy::SendLimits {
-                timeout: Duration::from_secs(repeater_settings.request_timeout_secs.clamp(1, 3600)),
-                streaming_timeout,
-                ..Default::default()
-            },
-            http: mio_proxy::SendHttpConfig {
-                version: Some(request.version),
-                update_content_length: repeater_settings.update_content_length,
-                normalize_http1_line_endings: repeater_settings.normalize_http1_line_endings,
-                raw_http1_override: (!repeater_settings.normalize_http1_line_endings
-                    && config.draft.version != HttpVersion::Http2)
-                    .then(|| Arc::<[u8]>::from(config.draft.raw.as_slice())),
-                ..Default::default()
-            },
-            ..SendConfig::default()
-        };
+        let mut send_config = self.build_tool_send_config_for_url(&workspace, &request.url)?;
+        send_config.http.version = Some(request.version);
+        send_config.http.update_content_length = repeater_settings.update_content_length;
+        send_config.http.normalize_http1_line_endings =
+            repeater_settings.normalize_http1_line_endings;
+        send_config.http.raw_http1_override = (!repeater_settings.normalize_http1_line_endings
+            && config.draft.version != HttpVersion::Http2)
+            .then(|| Arc::<[u8]>::from(config.draft.raw.as_slice()));
         let _ = prepare_send(&request, send_config.clone())?;
         Ok(CapturePlan {
             project: self.project,

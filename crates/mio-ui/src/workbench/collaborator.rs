@@ -119,6 +119,11 @@ pub(in crate::workbench) struct CollaboratorView {
     pub(super) search_input: Entity<InputState>,
     pub(super) config_open: bool,
     pub(super) self_hosted_enabled: bool,
+    pub(super) allow_public_cloud_domains: bool,
+    pub(super) bind_address_input: Entity<InputState>,
+    pub(super) http_port_input: Entity<InputState>,
+    pub(super) dns_port_input: Entity<InputState>,
+    pub(super) dns_answer_ip_input: Entity<InputState>,
     pub(super) polling_url_input: Entity<InputState>,
     pub(super) server_domain_input: Entity<InputState>,
     pub(super) auth_header_input: Entity<InputState>,
@@ -133,13 +138,22 @@ impl CollaboratorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let count_placeholder = format!("1–{MAX_COLLABORATOR_BATCH_PAYLOADS}");
         let count_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value("1")
-                .placeholder("1–32")
+                .placeholder(count_placeholder)
         });
         let label_input = cx.new(|cx| InputState::new(window, cx).placeholder("备注标签"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索交互…"));
+        let bind_address_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1 / 0.0.0.0"));
+        let http_port_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("自动 (0)"));
+        let dns_port_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("自动 (0)"));
+        let dns_answer_ip_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1 / 公网 IP"));
         let polling_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://oast.internal/poll"));
         let server_domain_input =
@@ -174,6 +188,10 @@ impl CollaboratorView {
             &count_input,
             &label_input,
             &search_input,
+            &bind_address_input,
+            &http_port_input,
+            &dns_port_input,
+            &dns_answer_ip_input,
             &polling_url_input,
             &server_domain_input,
             &auth_header_input,
@@ -208,6 +226,11 @@ impl CollaboratorView {
             search_input,
             config_open: false,
             self_hosted_enabled: false,
+            allow_public_cloud_domains: false,
+            bind_address_input,
+            http_port_input,
+            dns_port_input,
+            dns_answer_ip_input,
             polling_url_input,
             server_domain_input,
             auth_header_input,
@@ -221,6 +244,10 @@ impl CollaboratorView {
             self.count_input.clone(),
             self.label_input.clone(),
             self.search_input.clone(),
+            self.bind_address_input.clone(),
+            self.http_port_input.clone(),
+            self.dns_port_input.clone(),
+            self.dns_answer_ip_input.clone(),
             self.polling_url_input.clone(),
             self.server_domain_input.clone(),
             self.auth_header_input.clone(),
@@ -233,10 +260,15 @@ impl CollaboratorView {
         self.protocol_filter = None;
         self.config_open = false;
         self.self_hosted_enabled = false;
+        self.allow_public_cloud_domains = false;
         for (input, value) in [
             (&self.count_input, "1"),
             (&self.label_input, ""),
             (&self.search_input, ""),
+            (&self.bind_address_input, ""),
+            (&self.http_port_input, ""),
+            (&self.dns_port_input, ""),
+            (&self.dns_answer_ip_input, ""),
             (&self.polling_url_input, ""),
             (&self.server_domain_input, ""),
             (&self.auth_header_input, ""),
@@ -254,6 +286,10 @@ impl CollaboratorView {
         cx: &mut Context<Self>,
     ) {
         let any_composing = [
+            &self.bind_address_input,
+            &self.http_port_input,
+            &self.dns_port_input,
+            &self.dns_answer_ip_input,
             &self.polling_url_input,
             &self.server_domain_input,
             &self.auth_header_input,
@@ -269,7 +305,24 @@ impl CollaboratorView {
             return;
         }
         self.self_hosted_enabled = config.enabled;
+        self.allow_public_cloud_domains = config.allow_public_cloud_domains;
         for (input, val) in [
+            (
+                &self.bind_address_input,
+                config.bind_address.clone().unwrap_or_default(),
+            ),
+            (
+                &self.http_port_input,
+                config.http_port.map_or_else(String::new, |p| p.to_string()),
+            ),
+            (
+                &self.dns_port_input,
+                config.dns_port.map_or_else(String::new, |p| p.to_string()),
+            ),
+            (
+                &self.dns_answer_ip_input,
+                config.dns_answer_ip.clone().unwrap_or_default(),
+            ),
             (
                 &self.polling_url_input,
                 config.polling_url.clone().unwrap_or_default(),
@@ -297,8 +350,46 @@ impl CollaboratorView {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<SelfHostedOastConfig, String> {
+        let bind_address = editing::input_snapshot(&self.bind_address_input, window, cx)
+            .map_err(str::to_owned)?
+            .trim()
+            .to_owned();
+        let http_port_text = editing::input_snapshot(&self.http_port_input, window, cx)
+            .map_err(str::to_owned)?
+            .trim()
+            .to_owned();
+        let dns_port_text = editing::input_snapshot(&self.dns_port_input, window, cx)
+            .map_err(str::to_owned)?
+            .trim()
+            .to_owned();
+        let dns_answer_ip = editing::input_snapshot(&self.dns_answer_ip_input, window, cx)
+            .map_err(str::to_owned)?
+            .trim()
+            .to_owned();
+        let parse_opt_port = |label: &str, raw: &str| -> Result<Option<u16>, String> {
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            let port = raw
+                .parse::<u16>()
+                .map_err(|_| format!("{label}须为 0–65535 整数；输入已保留。"))?;
+            Ok((port > 0).then_some(port))
+        };
+        let http_port = parse_opt_port("HTTP 端口", &http_port_text)?;
+        let dns_port = parse_opt_port("DNS 端口", &dns_port_text)?;
+
         if !self.self_hosted_enabled {
-            return Ok(SelfHostedOastConfig::default());
+            let config = SelfHostedOastConfig {
+                bind_address: (!bind_address.is_empty()).then_some(bind_address),
+                http_port,
+                dns_port,
+                dns_answer_ip: (!dns_answer_ip.is_empty()).then_some(dns_answer_ip),
+                ..SelfHostedOastConfig::default()
+            };
+            config
+                .validate()
+                .map_err(|err| format!("OAST 监听配置无效：{err}"))?;
+            return Ok(config);
         }
         let polling_url = editing::input_snapshot(&self.polling_url_input, window, cx)
             .map_err(str::to_owned)?
@@ -342,6 +433,11 @@ impl CollaboratorView {
             server_domain: (!server_domain.is_empty()).then_some(server_domain),
             authorization_header: (!auth_header.is_empty()).then_some(auth_header),
             poll_interval_ms,
+            bind_address: (!bind_address.is_empty()).then_some(bind_address),
+            http_port,
+            dns_port,
+            dns_answer_ip: (!dns_answer_ip.is_empty()).then_some(dns_answer_ip),
+            allow_public_cloud_domains: self.allow_public_cloud_domains,
         };
         config
             .validate()

@@ -209,13 +209,15 @@ pub(super) fn tls_certificate_names(certificates: &[Vec<u8>]) -> Vec<String> {
         .collect()
 }
 
-fn read_ca_certificate(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let raw = mio_core::ui_files::read_regular_file_bounded(path, 64 * 1024, true, "CA 证书")?;
-    let der = mio_core::UpstreamTlsSettings::parse_pem_or_der_cert(&raw)
+fn read_ca_certificates(path: &std::path::Path) -> Result<Vec<Vec<u8>>, String> {
+    let raw = mio_core::ui_files::read_regular_file_bounded(path, 256 * 1024, true, "CA 证书")?;
+    let ders = mio_core::UpstreamTlsSettings::parse_pem_or_der_certs(&raw)
         .map_err(|error| error.to_string())?;
-    mio_core::UpstreamTlsSettings::certificate_display_name(&der)
-        .map_err(|error| error.to_string())?;
-    Ok(der)
+    for der in &ders {
+        mio_core::UpstreamTlsSettings::certificate_display_name(der)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(ders)
 }
 
 impl Workbench {
@@ -263,6 +265,20 @@ fn has_custom_tls_protocol(list: &[String], version: mio_core::TlsVersion) -> bo
             }
         }
     })
+}
+
+fn prune_ciphers_for_protocols(list: &mut Vec<String>, protocols: &[String]) {
+    let allow_13 = has_custom_tls_protocol(protocols, mio_core::TlsVersion::Tls13);
+    let allow_12 = has_custom_tls_protocol(protocols, mio_core::TlsVersion::Tls12);
+    list.retain(|name| {
+        mio_core::SUPPORTED_TLS_CIPHER_SUITES
+            .iter()
+            .find(|spec| spec.name == name.trim())
+            .is_some_and(|spec| match spec.protocol {
+                mio_core::TlsVersion::Tls13 => allow_13,
+                mio_core::TlsVersion::Tls12 => allow_12,
+            })
+    });
 }
 
 fn toggle_custom_tls_protocol(list: &mut Vec<String>, version: mio_core::TlsVersion) {
@@ -347,7 +363,7 @@ impl Settings {
                     if let Some(path) = paths.next().filter(|_| paths.next().is_none()) {
                         let parsed = cx
                             .background_executor()
-                            .spawn(async move { read_ca_certificate(&path) });
+                            .spawn(async move { read_ca_certificates(&path) });
                         parsed.await.map(Some)
                     } else {
                         Err("证书选择器未返回单个文件；原列表未修改。".into())
@@ -372,16 +388,37 @@ impl Settings {
                     return;
                 }
                 match result {
-                    Ok(Some(certificate)) => {
-                        if certificates.contains(&certificate) {
-                            this.tls_error = Some("该 CA 证书已在列表中；未重复添加。".into());
+                    Ok(Some(imported)) => {
+                        let mut added = 0usize;
+                        let mut skipped_dup = 0usize;
+                        let mut skipped_limit = false;
+                        for cert in imported {
+                            if certificates.contains(&cert) {
+                                skipped_dup += 1;
+                                continue;
+                            }
+                            if certificates.len() >= 32 {
+                                skipped_limit = true;
+                                break;
+                            }
+                            certificates.push(cert);
+                            added += 1;
+                        }
+                        if added == 0 {
+                            this.tls_error = Some(if skipped_limit {
+                                "自定义 CA 最多支持 32 个证书；原列表未修改。".into()
+                            } else if skipped_dup > 0 {
+                                "所选 CA 证书均已在列表中；未重复添加。".into()
+                            } else {
+                                "未导入任何 CA 证书。".into()
+                            });
                         } else {
-                            certificates.push(certificate);
                             let saved = this.owner.update(cx, |view, cx| {
                                 view.set_user_tls_certificates(certificates, revision, cx)
                             });
                             this.tls_error = match saved {
-                                Ok(Ok(_)) => None,
+                                Ok(Ok(_)) => skipped_limit
+                                    .then(|| "已导入部分证书；自定义 CA 最多支持 32 个证书。".into()),
                                 Ok(Err(error)) => Some(error),
                                 Err(_) => Some("工作台已关闭；CA 证书列表未修改。".into()),
                             };
@@ -554,6 +591,10 @@ impl Settings {
                                                     &mut s.custom_protocols,
                                                     mio_core::TlsVersion::Tls13,
                                                 );
+                                                prune_ciphers_for_protocols(
+                                                    &mut s.custom_cipher_suites,
+                                                    &s.custom_protocols,
+                                                );
                                             },
                                             cx,
                                         );
@@ -574,6 +615,10 @@ impl Settings {
                                                 toggle_custom_tls_protocol(
                                                     &mut s.custom_protocols,
                                                     mio_core::TlsVersion::Tls12,
+                                                );
+                                                prune_ciphers_for_protocols(
+                                                    &mut s.custom_cipher_suites,
+                                                    &s.custom_protocols,
                                                 );
                                             },
                                             cx,
