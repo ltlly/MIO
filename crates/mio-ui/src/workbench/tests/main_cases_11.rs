@@ -443,3 +443,131 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn multi_window_menus_hotkeys_startup_wizard_and_app_menu_bar_launch_independent_instances(
+    cx: &mut TestAppContext,
+) {
+    let fixture = fixture(cx, vec![tab("主窗口编辑保留")], 64);
+    let recorded = cx.update(crate::multi_window::WindowLauncher::install_recorder);
+
+    cx.read(|cx| {
+        let app_menus = gpui_kit::component::global_state::GlobalState::global(cx).app_menus();
+        assert_eq!(app_menus.len(), 10, "AppMenuBar must mirror all 10 top-level menus");
+        for menu_name in ["MIO", "项目", "窗口"] {
+            let menu = app_menus
+                .iter()
+                .find(|m| m.name == menu_name)
+                .unwrap_or_else(|| panic!("missing menu {menu_name}"));
+            assert!(
+                menu.items.iter().any(|item| matches!(
+                    item,
+                    gpui_kit::OwnedMenuItem::Action { name, disabled: false, .. } if name == "新建窗口"
+                )),
+                "menu {menu_name} must expose enabled 新建窗口"
+            );
+        }
+    });
+
+    // 1. Top-left MIO menu -> 新建窗口
+    settings::menu_action(fixture.window, "MIO", "新建窗口", cx);
+    assert_eq!(recorded.borrow().as_slice(), &[None]);
+    cx.read(|cx| {
+        assert!(fixture.view.read(cx).status.contains("已打开新的 MIO 窗口"));
+        assert_eq!(fixture.view.read(cx).workspace.tabs[0].title, "主窗口编辑保留");
+    });
+
+    // 2. 项目 menu -> 新建窗口 & 窗口 menu -> 新建窗口
+    settings::menu_action(fixture.window, "项目", "新建窗口", cx);
+    settings::menu_action(fixture.window, "窗口", "新建窗口", cx);
+    assert_eq!(recorded.borrow().len(), 3);
+
+    // 3. Keyboard shortcut Cmd+Shift+N / Ctrl+Shift+N
+    let new_win_key = if cfg!(target_os = "macos") {
+        "cmd-shift-n"
+    } else {
+        "ctrl-shift-n"
+    };
+    cx.simulate_keystrokes(fixture.window, new_win_key);
+    cx.run_until_parked();
+    assert_eq!(recorded.borrow().len(), 4);
+    assert_eq!(recorded.borrow()[3], None);
+
+    // 4. 项目 menu -> 在新窗口中打开项目…
+    let temp = tempfile::tempdir().unwrap();
+    let chosen_proj = temp.path().join("second-window-project.mio");
+    std::fs::write(&chosen_proj, b"placeholder").unwrap();
+    settings::menu_action(fixture.window, "项目", "在新窗口中打开项目…", cx);
+    assert!(cx.did_prompt_for_paths());
+    let expected_proj = chosen_proj.clone();
+    cx.simulate_path_prompt_response(move |_| Some(vec![expected_proj.clone()]));
+    cx.run_until_parked();
+    assert_eq!(recorded.borrow().len(), 5);
+    assert_eq!(recorded.borrow()[4], Some(chosen_proj.clone()));
+    cx.read(|cx| {
+        assert!(
+            fixture
+                .view
+                .read(cx)
+                .status
+                .contains("已在新窗口中打开项目")
+        );
+    });
+
+    // 5. Settings window also supports global 新建窗口 shortcut without closing Settings
+    let settings_win = settings::open_settings(&fixture, cx);
+    cx.simulate_keystrokes(settings_win, new_win_key);
+    cx.run_until_parked();
+    assert_eq!(recorded.borrow().len(), 6);
+    assert!(cx.read(|cx| cx.windows().contains(&settings_win)));
+    cx.simulate_keystrokes(settings_win, "escape");
+    cx.run_until_parked();
+
+    // 6. Startup wizard footer 新建窗口 button & recent project context menu "在新窗口中打开"
+    let recent_proj = temp.path().join("recent-open.mio");
+    std::fs::write(&recent_proj, b"recent").unwrap();
+    cx.update_window(fixture.window, |_, window, cx| {
+        fixture.view.update(cx, |wb, cx| {
+            wb.user_preferences.confirmed = Some(mio_core::UserPreferences {
+                recent_projects: vec![mio_core::RecentProject {
+                    name: "最近项目A".into(),
+                    path: recent_proj.clone(),
+                    last_accessed_unix_ms: 1_700_000_000_000,
+                }],
+                ..mio_core::UserPreferences::default()
+            });
+            wb.init_startup_wizard(None, window, cx);
+            wb.sync_startup_wizard_preferences(cx);
+        });
+        window.render_frame(cx);
+        assert!(window.find("wizard-new-window").visible());
+        window.click("wizard-new-window", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(recorded.borrow().len(), 7);
+    assert_eq!(recorded.borrow()[6], None);
+    cx.read(|cx| assert!(fixture.view.read(cx).startup_wizard_active()));
+
+    settings::menu_action(fixture.window, "MIO", "新建窗口", cx);
+    assert_eq!(recorded.borrow().len(), 8);
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        window.right_click(("wizard-recent-project-row", 0_usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        let item = window.find_by_label("在新窗口中打开");
+        assert!(item.visible());
+        let center = item.bounds().center();
+        window.pointer_down(center, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(center, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(recorded.borrow().len(), 9);
+    assert_eq!(recorded.borrow()[8], Some(recent_proj));
+}

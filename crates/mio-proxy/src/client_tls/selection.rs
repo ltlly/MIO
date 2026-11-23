@@ -177,7 +177,7 @@ fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'*' | b'?'))
         }) && suffix
             .split('.')
-            .last()
+            .next_back()
             .is_some_and(|last| last.bytes().any(|b| b.is_ascii_alphabetic() || b == b'*'))
             && is_valid_glob_host(raw)
         {

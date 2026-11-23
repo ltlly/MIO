@@ -790,6 +790,12 @@ fn resolve_custom_hotkey_action(action_id: &str) -> Option<CustomHotkeyActionSpe
             contexts: WORKSPACE,
             make_action: || Box::new(crate::OpenGlobalSearch),
         }),
+        "new_window" | "NewWindow" => Some(CustomHotkeyActionSpec {
+            action_name: "mio::NewWindow",
+            default_key: "cmd-shift-n",
+            contexts: GLOBAL,
+            make_action: || Box::new(crate::NewWindow),
+        }),
         _ => None,
     }
 }

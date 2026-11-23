@@ -278,36 +278,29 @@ impl ResultTable {
         if let Some(m_str) = col_key.strip_prefix("grep_match:")
             && let Ok(m_idx) = m_str.parse::<usize>()
         {
-            let cfg = self.target.workbench.upgrade().and_then(|wb| {
+            let wb_opt = self.target.workbench.upgrade();
+            let cfg = wb_opt.as_ref().and_then(|wb| {
                 let tab_id = view.summary.as_ref()?.tab_id;
-                wb.read(cx)
-                    .workspace
-                    .intruder
-                    .grep_configs
-                    .get(&tab_id)
-                    .cloned()
+                wb.read(cx).workspace.intruder.grep_configs.get(&tab_id)
             });
-            let expr = cfg.as_ref().and_then(|c| c.match_expressions.get(m_idx));
-            if let (Some(cfg), Some(expr)) = (cfg.as_ref(), expr) {
+            let expr = cfg.and_then(|c| c.match_expressions.get(m_idx));
+            if let (Some(cfg), Some(expr)) = (cfg, expr) {
+                if result.grep_matches.iter().any(|m| m == expr) {
+                    return "是".into();
+                }
                 if view.selected == Some(ordinal)
                     && let Some(raw) = view.detail_response_raw.as_deref()
                 {
-                    let single = mio_core::IntruderGrepConfig {
-                        match_expressions: vec![expr.clone()],
-                        match_case_sensitive: cfg.match_case_sensitive,
-                        extract_rules: Vec::new(),
-                        grep_payloads: false,
-                        grep_payloads_case_sensitive: false,
-                    };
-                    let (matched, _) = mio_core::intruder::evaluate_grep_config(raw, &single);
+                    let matched = mio_core::intruder::evaluate_grep_matches(
+                        raw,
+                        std::slice::from_ref(expr),
+                        cfg.match_case_sensitive,
+                    );
                     return if matched.is_empty() {
                         "否".into()
                     } else {
                         "是".into()
                     };
-                }
-                if result.grep_matches.iter().any(|m| m == expr) {
-                    return "是".into();
                 }
             } else if !result.grep_matches.is_empty() {
                 return "是".into();
@@ -320,16 +313,12 @@ impl ResultTable {
         if let Some(e_str) = col_key.strip_prefix("grep_extract:")
             && let Ok(e_idx) = e_str.parse::<usize>()
         {
-            let cfg = self.target.workbench.upgrade().and_then(|wb| {
+            let wb_opt = self.target.workbench.upgrade();
+            let cfg = wb_opt.as_ref().and_then(|wb| {
                 let tab_id = view.summary.as_ref()?.tab_id;
-                wb.read(cx)
-                    .workspace
-                    .intruder
-                    .grep_configs
-                    .get(&tab_id)
-                    .cloned()
+                wb.read(cx).workspace.intruder.grep_configs.get(&tab_id)
             });
-            let rule = cfg.as_ref().and_then(|c| c.extract_rules.get(e_idx));
+            let rule = cfg.and_then(|c| c.extract_rules.get(e_idx));
             if let Some(rule) = rule {
                 let key_label = rule.key_label();
                 if let Some((_, val)) = result

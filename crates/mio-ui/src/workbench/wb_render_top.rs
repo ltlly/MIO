@@ -1522,6 +1522,16 @@ impl Workbench {
             .key_context("MioWorkspace")
             .track_focus(&self.focus);
         let r = root.interactivity();
+        r.on_action(cx.listener(|this, _: &crate::NewWindow, _, cx| {
+                this.open_new_window(cx)
+            }));
+        if !self.file_picker_pending() {
+            r.on_action(
+                cx.listener(|this, _: &crate::OpenProjectInNewWindow, window, cx| {
+                    this.choose_open_in_new_window(window, cx)
+                }),
+            );
+        }
         r.on_action(cx.listener(|this, _: &crate::OpenSettings, window, cx| {
                 this.open_settings(window, cx)
             }));

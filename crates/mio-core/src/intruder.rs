@@ -35,8 +35,8 @@ pub use generators::{
     generate_recursive_grep_payloads, generate_runtime_file_payloads, generate_username_payloads,
 };
 pub use grep::{
-    evaluate_grep_config, evaluate_grep_extract_pairs, evaluate_grep_payload_hits,
-    evaluate_grep_row, find_echoed_inputs,
+    evaluate_grep_config, evaluate_grep_extract_pairs, evaluate_grep_matches,
+    evaluate_grep_payload_hits, evaluate_grep_row, find_echoed_inputs,
 };
 pub use payload_rules::{
     DEFAULT_PAYLOAD_ENCODING_CHARS, apply_payload_processing_rule, apply_payload_processing_rules,

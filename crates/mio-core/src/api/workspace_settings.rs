@@ -716,16 +716,57 @@ impl NetworkHttpSettings {
     }
 
     pub fn build_streaming_scope_matcher(&self) -> Option<StreamingScopeMatcher> {
-        if !self
+        let advanced = self.streaming_advanced_scope;
+        let compiled_rules: Vec<(ScopeRule, Option<regex::Regex>)> = self
             .streaming_scope_rules
             .iter()
-            .any(|r| r.enabled && !r.prefix.trim().is_empty())
-        {
+            .filter(|r| r.enabled && !r.prefix.trim().is_empty())
+            .map(|r| {
+                let regex = if advanced {
+                    regex::RegexBuilder::new(r.prefix.trim())
+                        .case_insensitive(true)
+                        .size_limit(256 * 1024)
+                        .build()
+                        .ok()
+                } else {
+                    None
+                };
+                (r.clone(), regex)
+            })
+            .collect();
+        if compiled_rules.is_empty() {
             return None;
         }
-        let clone = self.clone();
         Some(std::sync::Arc::new(move |url: &str| {
-            clone.is_url_in_streaming_scope(url)
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            let parsed_host = if advanced {
+                url::Url::parse(trimmed)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+            } else {
+                None
+            };
+            for (rule, compiled_re) in &compiled_rules {
+                if rule.matches_url(trimmed) {
+                    return true;
+                }
+                if advanced {
+                    if let Some(re) = compiled_re
+                        && re.is_match(trimmed)
+                    {
+                        return true;
+                    }
+                    if let Some(host) = parsed_host.as_deref()
+                        && mio_proxy::matches_bypass_host(rule.prefix.trim(), host)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
         }))
     }
 }

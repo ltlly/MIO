@@ -27,7 +27,7 @@ struct HotkeyRowSpec {
     default_key: &'static str,
 }
 
-const HOTKEY_TABLE: [HotkeyRowSpec; 33] = [
+const HOTKEY_TABLE: [HotkeyRowSpec; 34] = [
     HotkeyRowSpec {
         action_id: "send_request",
         icon: AssetIconName::SendHorizontal,
@@ -258,6 +258,13 @@ const HOTKEY_TABLE: [HotkeyRowSpec; 33] = [
         action: "全局搜索",
         category: "界面",
         default_key: "cmd-shift-f",
+    },
+    HotkeyRowSpec {
+        action_id: "new_window",
+        icon: AssetIconName::CirclePlus,
+        action: "新建窗口",
+        category: "窗口",
+        default_key: "cmd-shift-n",
     },
 ];
 

@@ -66,8 +66,8 @@ impl State {
                 let pause_automated_tasks =
                     options.pause_automated_tasks || !options.trust_project_file;
                 let disable_extensions = options.disable_extensions || !options.trust_project_file;
-                let next = if create_new {
-                    if let Some(path) = &path {
+                let (next, next_lock, reused_current_lock) = if create_new {
+                    let (lock, reused) = if let Some(path) = &path {
                         self.require_ext_released()?;
                         self.store.check_path_outside_temporary(path)?;
                         ensure!(
@@ -75,7 +75,10 @@ impl State {
                             "不能覆盖外部归档项目文件"
                         );
                         crate::store::check_new_project_path(path)?;
-                    }
+                        self.acquire_project_lock_for_switch(path)?
+                    } else {
+                        (None, false)
+                    };
                     let mut store = ProjectStore::create(None)?;
                     store.metadata_mut().apply_startup_options(
                         project_name,
@@ -87,15 +90,16 @@ impl State {
                     if let Some(path) = &path {
                         store.save(Some(path))?;
                     }
-                    store
+                    (store, lock, reused)
                 } else {
                     let path = path.context("打开已有项目必须提供文件路径")?;
                     self.require_ext_released()?;
                     self.store.check_path_outside_temporary(&path)?;
-                    let mut store = if crate::is_external_archive_file(&path) {
-                        ProjectStore::open_ext(&path, &self.cancel)?
+                    let (mut store, lock, reused) = if crate::is_external_archive_file(&path) {
+                        (ProjectStore::open_ext(&path, &self.cancel)?, None, false)
                     } else {
-                        ProjectStore::open(&path)?
+                        let (lock, reused) = self.acquire_project_lock_for_switch(&path)?;
+                        (ProjectStore::open(&path)?, lock, reused)
                     };
                     store.metadata_mut().apply_startup_options(
                         project_name,
@@ -103,32 +107,50 @@ impl State {
                         loaded_config.as_ref(),
                         &self.cancel,
                     )?;
-                    store
+                    (store, lock, reused)
                 };
-                self.replace_project_with(next, pause_automated_tasks, Some(disable_extensions))
-                    .await?;
+                self.replace_project_with(
+                    next,
+                    next_lock,
+                    reused_current_lock,
+                    pause_automated_tasks,
+                    Some(disable_extensions),
+                )
+                .await?;
             }
             Command::NewProject { path } => {
                 self.require_saved()?;
                 self.store.intruder().require_sessions_resolved()?;
-                if let Some(path) = &path {
+                let (next_lock, reused_current_lock) = if let Some(path) = &path {
                     self.require_ext_released()?;
                     self.store.check_path_outside_temporary(path)?;
-                }
+                    ensure!(
+                        !crate::is_external_archive_file(path),
+                        "不能覆盖外部归档项目文件"
+                    );
+                    crate::store::check_new_project_path(path)?;
+                    self.acquire_project_lock_for_switch(path)?
+                } else {
+                    (None, false)
+                };
                 let next = ProjectStore::create(path.as_deref())?;
-                self.replace_project_with(next, false, Some(false)).await?;
+                self.replace_project_with(next, next_lock, reused_current_lock, false, Some(false))
+                    .await?;
             }
             Command::OpenProject { path } => {
                 self.require_saved()?;
                 self.store.intruder().require_sessions_resolved()?;
                 self.require_ext_released()?;
                 self.store.check_path_outside_temporary(&path)?;
-                let next = if crate::is_external_archive_file(&path) {
-                    ProjectStore::open_ext(&path, &self.cancel)?
-                } else {
-                    ProjectStore::open(&path)?
-                };
-                self.replace_project_with(next, false, None).await?;
+                let (next, next_lock, reused_current_lock) =
+                    if crate::is_external_archive_file(&path) {
+                        (ProjectStore::open_ext(&path, &self.cancel)?, None, false)
+                    } else {
+                        let (lock, reused) = self.acquire_project_lock_for_switch(&path)?;
+                        (ProjectStore::open(&path)?, lock, reused)
+                    };
+                self.replace_project_with(next, next_lock, reused_current_lock, false, None)
+                    .await?;
             }
             Command::SaveProject {
                 project,
@@ -148,6 +170,21 @@ impl State {
                 let destination_changed = path
                     .as_deref()
                     .is_some_and(|target| self.store.path.as_deref() != Some(target));
+                let destination_lock = match path
+                    .as_deref()
+                    .filter(|target| self.store.path.as_deref() != Some(*target))
+                {
+                    Some(target) => {
+                        ensure!(
+                            !crate::is_external_archive_file(target),
+                            "不能覆盖外部归档项目文件"
+                        );
+                        crate::store::check_new_project_path(target)?;
+                        self.store.check_path_outside_temporary(target)?;
+                        Some(project_lock::acquire_active_project_lock(target)?)
+                    }
+                    None => None,
+                };
                 let prev_workspace = workspace
                     .is_some()
                     .then(|| self.store.metadata().workspace().ok())
@@ -166,6 +203,9 @@ impl State {
                         &self.intruder.recovery,
                         &self.cancel,
                     )?;
+                if let Some(new_lock) = destination_lock {
+                    self.project_lock = Some(new_lock);
+                }
                 self.storage.clear_recovery();
                 self.intruder.recovery.clear();
                 self.store.cancel_queries_with(self.cancel.clone());
@@ -204,6 +244,10 @@ impl State {
                 cancel,
             } => {
                 self.check_project(project)?;
+                ensure!(
+                    self.store.path.as_deref() != Some(path.as_path()),
+                    "瘦身另存为必须选择新的目标路径，不会原地覆盖当前项目"
+                );
                 let pending_prov = self.storage.provenance.snapshot_all();
                 let combined_cancel = self.cancel.child_token();
                 let cancel_watcher = cancel.clone();
@@ -212,17 +256,18 @@ impl State {
                     cancel_watcher.cancelled().await;
                     child_trigger.cancel();
                 });
-                let result = self
-                    .store
-                    .slim_save_as(
-                        &path,
-                        &options,
-                        self.storage.recovery.make_contiguous(),
-                        self.storage.websocket_recovery.make_contiguous(),
-                        &self.intruder.recovery,
-                        &pending_prov,
-                        &combined_cancel,
-                    )
+                let result = project_lock::acquire_active_project_lock(&path)
+                    .and_then(|_slim_lock| {
+                        self.store.slim_save_as(
+                            &path,
+                            &options,
+                            self.storage.recovery.make_contiguous(),
+                            self.storage.websocket_recovery.make_contiguous(),
+                            &self.intruder.recovery,
+                            &pending_prov,
+                            &combined_cancel,
+                        )
+                    })
                     .map_err(|err| err.to_string());
                 abort_guard.abort();
                 self.emit(Event::ProjectSlimSaved {

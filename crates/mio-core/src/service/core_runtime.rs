@@ -232,6 +232,7 @@ impl State {
             preferences,
             user_level_connections_cache: UserLevelConnectionsCache::default(),
             project,
+            project_lock: None,
             store,
             storage: StorageState::new(),
             events,

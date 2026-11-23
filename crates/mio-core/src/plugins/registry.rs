@@ -156,6 +156,7 @@ impl PluginRegistryStore {
         validate_segment(&package_dir, "插件包目录名")?;
 
         ensure_private_dir(root)?;
+        let _registry_lock = acquire_registry_lock(root)?;
         let packages_dir = root.join("packages");
         ensure_private_dir(&packages_dir)?;
 
@@ -374,8 +375,11 @@ impl PluginRegistryStore {
         let Some(root) = &self.root else {
             return Ok(false);
         };
+        validate_root_path(root)?;
+        ensure_private_dir(root)?;
+        let registry_lock = acquire_registry_lock(root)?;
         let mut removed_entry: Option<InstalledPluginEntry> = None;
-        write_registry_file_with(root, |current| {
+        write_registry_file_locked(root, &registry_lock, |current| {
             let mut next = current.clone();
             if let Some(pos) = next.plugins.iter().position(|item| item.id == plugin_id) {
                 removed_entry = Some(next.plugins.remove(pos));
@@ -566,7 +570,19 @@ fn write_registry_file_with(
 ) -> Result<()> {
     validate_root_path(root)?;
     ensure_private_dir(root)?;
+    let registry_lock = acquire_registry_lock(root)?;
+    write_registry_file_locked(root, &registry_lock, update)
+}
 
+struct RegistryLockGuard {
+    #[cfg(unix)]
+    directory: File,
+    #[cfg(unix)]
+    dir_meta: fs::Metadata,
+    _lock: File,
+}
+
+fn acquire_registry_lock(root: &Path) -> Result<RegistryLockGuard> {
     #[cfg(unix)]
     let directory = OpenOptions::new()
         .read(true)
@@ -602,8 +618,7 @@ fn write_registry_file_with(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let lock = lock_opts.open(&lock_path)?;
     let lock_meta = checked_regular_file(&lock)?;
-    lock.try_lock()
-        .map_err(|err| anyhow::anyhow!("持久化插件索引正由其他实例保存或锁不可用：{err}"))?;
+    crate::fs_atomic::try_lock_with_backoff(&lock, "持久化插件索引")?;
     let vis_lock = fs::symlink_metadata(&lock_path)?;
     #[cfg(unix)]
     ensure!(
@@ -615,7 +630,22 @@ fn write_registry_file_with(
         vis_lock.is_file() && vis_lock.len() == lock_meta.len(),
         "持久化插件锁文件已替换；未保存"
     );
+    Ok(RegistryLockGuard {
+        #[cfg(unix)]
+        directory,
+        #[cfg(unix)]
+        dir_meta,
+        _lock: lock,
+    })
+}
 
+fn write_registry_file_locked(
+    root: &Path,
+    guard: &RegistryLockGuard,
+    update: impl FnOnce(&InstalledPluginsFile) -> Result<InstalledPluginsFile>,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = guard;
     let current = read_registry_file(root)?;
     let next = update(&current)?;
     validate_registry_file(&next)?;
@@ -636,7 +666,7 @@ fn write_registry_file_with(
     {
         let vis_dir = fs::symlink_metadata(root)?;
         ensure!(
-            vis_dir.dev() == dir_meta.dev() && vis_dir.ino() == dir_meta.ino(),
+            vis_dir.dev() == guard.dir_meta.dev() && vis_dir.ino() == guard.dir_meta.ino(),
             "持久化插件目录已替换；未保存"
         );
     }
@@ -646,7 +676,8 @@ fn write_registry_file_with(
     );
     temporary.persist(&path).map_err(|err| err.error)?;
     #[cfg(unix)]
-    directory
+    guard
+        .directory
         .sync_all()
         .context("持久化插件索引已写入但目录同步失败")?;
     Ok(())

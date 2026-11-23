@@ -624,12 +624,13 @@ impl State {
         let spki_base64 = authority.spki_sha256_base64()?;
         let ca_der = authority.certificate_der();
         let ca_pem = authority.certificate_pem();
-        let profile_folder = match &session {
+        let profile_prefix = match &session {
             BrowserRequestSession::OriginalSession { .. } => "browser-profile-original-session",
             BrowserRequestSession::Default | BrowserRequestSession::CurrentSession => {
                 "browser-profile"
             }
         };
+        let profile_folder = browser_profile_folder_name(profile_prefix, address);
         let executable = tokio::task::spawn_blocking(move || -> Result<String> {
             let identity_dir = match identity_dir_override {
                 Some(dir) => dir,
@@ -677,6 +678,17 @@ impl State {
         })
         .await;
         Ok(())
+    }
+}
+
+pub(crate) fn browser_profile_folder_name(prefix: &str, address: SocketAddr) -> String {
+    if address.port() == 8080 && (address.ip().is_loopback() || address.ip().is_unspecified()) {
+        prefix.to_owned()
+    } else if address.is_ipv6() {
+        let sanitized_ip = address.ip().to_string().replace(':', "_");
+        format!("{prefix}-{sanitized_ip}-{}", address.port())
+    } else {
+        format!("{prefix}-{}", address.port())
     }
 }
 
@@ -947,7 +959,11 @@ mod tests {
 
         assert!(!state.proxy.intercept_requests && !state.proxy.intercept_responses);
         assert!(state.proxy.primary.is_some());
-        let profile_dir = temp.path().join("browser-profile-original-session");
+        let bound_addr = state.proxy.primary_address().unwrap();
+        let profile_dir = temp.path().join(browser_profile_folder_name(
+            "browser-profile-original-session",
+            bound_addr,
+        ));
         assert!(profile_dir.join("mio-ca.cer").is_file());
         assert!(profile_dir.join("mio-ca.pem").is_file());
         let mut probe_req = HttpRequest {

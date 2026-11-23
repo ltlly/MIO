@@ -376,3 +376,236 @@ async fn start_project_rejects_unknown_or_nonempty_listener_configs_without_side
         assert_eq!(state.project, initial_project);
     }
 }
+
+#[tokio::test]
+async fn multi_window_project_lock_rejects_concurrent_open_or_save_as_and_releases_on_switch_or_close()
+ {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let project_a = root.join("window-a.mio");
+    let project_b = root.join("window-b.mio");
+
+    let (events1, _rx1) = mpsc::channel(64);
+    let mut win1 = State::new(events1, CancellationToken::new()).unwrap();
+    win1.command(Command::StartProject {
+        path: Some(project_a.clone()),
+        create_new: true,
+        options: ProjectStartOptions {
+            name: Some("窗口A项目".into()),
+            ..ProjectStartOptions::default()
+        },
+    })
+    .await
+    .unwrap();
+
+    let mut pending_flow = completed_flow();
+    pending_flow.summary.state = FlowState::Pending;
+    pending_flow.summary.status = None;
+    pending_flow.response = None;
+    win1.store.put(&pending_flow).unwrap();
+
+    let (events2, _rx2) = mpsc::channel(64);
+    let mut win2 = State::new(events2, CancellationToken::new()).unwrap();
+    let win2_initial = win2.project;
+    let open_err = win2
+        .command(Command::OpenProject {
+            path: project_a.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        open_err.to_string().contains("已在另一个 MIO 窗口中打开"),
+        "unexpected error: {open_err}"
+    );
+    assert_eq!(win2.project, win2_initial);
+    assert_eq!(
+        win1.store.read(pending_flow.summary.id).unwrap().summary.state,
+        FlowState::Pending,
+        "rejected second-window open must not trigger crash recovery on live pending flows"
+    );
+
+    let start_err = win2
+        .command(Command::StartProject {
+            path: Some(project_a.clone()),
+            create_new: false,
+            options: ProjectStartOptions::default(),
+        })
+        .await
+        .unwrap_err();
+    assert!(start_err.to_string().contains("已在另一个 MIO 窗口中打开"));
+
+    win2.command(Command::NewProject {
+        path: Some(project_b.clone()),
+    })
+    .await
+    .unwrap();
+    assert_eq!(win2.store.path.as_deref(), Some(project_b.as_path()));
+
+    let save_conflict = win1
+        .command(Command::SaveProject {
+            project: win1.project,
+            path: Some(project_b.clone()),
+            workspace: None,
+            websocket_notes: Vec::new(),
+            ext_http_notes: Vec::new(),
+            ext_http_highlights: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        save_conflict.to_string().contains("已存在")
+            || save_conflict.to_string().contains("已在另一个 MIO 窗口中打开")
+    );
+
+    win1.store.flows_mut().finish_pending(true, false).unwrap();
+    win1.command(Command::NewProject { path: None })
+        .await
+        .unwrap();
+
+    win2.command(Command::OpenProject {
+        path: project_a.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(win2.store.path.as_deref(), Some(project_a.as_path()));
+
+    win1.command(Command::OpenProject {
+        path: project_b.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(win1.store.path.as_deref(), Some(project_b.as_path()));
+
+    // Failed same-path reopen must not lose win1's active lock on project_b.
+    let failed_reopen = win1
+        .command(Command::StartProject {
+            path: Some(project_b.clone()),
+            create_new: false,
+            options: ProjectStartOptions {
+                config_mode: StartupDefaultConfig::ConfigFile {
+                    path: root.join("missing-config.json"),
+                },
+                ..ProjectStartOptions::default()
+            },
+        })
+        .await;
+    assert!(failed_reopen.is_err());
+    let still_locked = win2
+        .command(Command::OpenProject {
+            path: project_b.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(still_locked.to_string().contains("已在另一个 MIO 窗口中打开"));
+}
+
+#[test]
+fn sidecar_lock_waits_for_transient_holder_instead_of_immediate_collision() {
+    use std::fs::OpenOptions;
+    use std::sync::{Arc, Barrier};
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let pref_path = root.join("preferences.json");
+
+    let mut store1 = crate::preferences::PreferencesStore::new(Some(pref_path.clone()));
+    let saved = store1
+        .record_recent("首个窗口", root.join("first.mio"), 100)
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+
+    let lock_path = root.join("preferences.lock");
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    held.lock().unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let b2 = barrier.clone();
+    let releaser = std::thread::spawn(move || {
+        b2.wait();
+        std::thread::sleep(Duration::from_millis(80));
+        drop(held);
+    });
+    barrier.wait();
+    let mut store2 = crate::preferences::PreferencesStore::new(Some(pref_path));
+    let merged = store2
+        .record_recent("第二个窗口", root.join("second.mio"), 200)
+        .unwrap();
+    releaser.join().unwrap();
+    assert_eq!(merged.revision, 2);
+    assert_eq!(merged.recent_projects.len(), 2);
+}
+
+#[tokio::test]
+async fn configured_browser_profiles_are_isolated_per_listener_port() {
+    let (events1, _rx1) = mpsc::channel(32);
+    let mut state1 = State::new(events1, CancellationToken::new()).unwrap();
+    let p1 = state1.project;
+    let mut ws1 = state1.store.workspace().unwrap();
+    ws1.revision += 1;
+    ws1.proxy_listeners = vec![ProxyListenerConfig {
+        id: Uuid::new_v4(),
+        enabled: true,
+        bind_address: "127.0.0.1:0".into(),
+        ..ProxyListenerConfig::default()
+    }];
+    state1.store.save_workspace(&ws1).unwrap();
+
+    let (events2, _rx2) = mpsc::channel(32);
+    let mut state2 = State::new(events2, CancellationToken::new()).unwrap();
+    let p2 = state2.project;
+    let mut ws2 = state2.store.workspace().unwrap();
+    ws2.revision += 1;
+    ws2.proxy_listeners = vec![ProxyListenerConfig {
+        id: Uuid::new_v4(),
+        enabled: true,
+        bind_address: "127.0.0.1:0".into(),
+        ..ProxyListenerConfig::default()
+    }];
+    state2.store.save_workspace(&ws2).unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let shared_identity = temp.path().join("identity");
+    let bin = std::path::PathBuf::from("/usr/bin/true");
+    if !bin.is_file() {
+        return;
+    }
+    state1
+        .open_configured_browser_with(
+            p1,
+            Some("http://127.0.0.1/".into()),
+            BrowserRequestSession::Default,
+            Some(shared_identity.clone()),
+            Some(bin.clone()),
+        )
+        .await
+        .unwrap();
+    state2
+        .open_configured_browser_with(
+            p2,
+            Some("http://127.0.0.1/".into()),
+            BrowserRequestSession::Default,
+            Some(shared_identity),
+            Some(bin),
+        )
+        .await
+        .unwrap();
+
+    let port1 = state1.proxy.primary_address().unwrap().port();
+    let port2 = state2.proxy.primary_address().unwrap().port();
+    assert_ne!(port1, port2);
+    let dir1 = temp.path().join(core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        state1.proxy.primary_address().unwrap(),
+    ));
+    let dir2 = temp.path().join(core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        state2.proxy.primary_address().unwrap(),
+    ));
+    assert_ne!(dir1, dir2);
+    assert!(dir1.join("mio-ca.cer").is_file());
+    assert!(dir2.join("mio-ca.cer").is_file());
+}

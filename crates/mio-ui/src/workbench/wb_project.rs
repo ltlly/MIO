@@ -1,6 +1,120 @@
 use super::*;
 
 impl Workbench {
+    pub(in crate::workbench) fn open_new_window(&mut self, cx: &mut Context<Self>) {
+        match crate::multi_window::WindowLauncher::launch(None, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.status = "已打开新的 MIO 窗口。".into();
+                self.record_footer_event(
+                    FooterLogSeverity::Info,
+                    "已打开新的 MIO 窗口",
+                    "新窗口已作为独立 MIO 工作台实例启动。",
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                let message = format!("无法打开新的 MIO 窗口：{error}");
+                if let Some(wizard) = &mut self.startup_wizard
+                    && wizard.active
+                {
+                    wizard.error = Some(message.clone());
+                }
+                self.fail(message, cx);
+            }
+        }
+    }
+
+    pub(in crate::workbench) fn open_project_path_in_new_window(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let display_path = path.display().to_string();
+        match crate::multi_window::WindowLauncher::launch(Some(&path), cx) {
+            Ok(()) => {
+                self.error = None;
+                self.status = format!("已在新窗口中打开项目：{display_path}");
+                self.record_footer_event(
+                    FooterLogSeverity::Info,
+                    format!("已在新窗口中打开项目：{display_path}"),
+                    display_path,
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                let message = format!("无法在新窗口中打开项目：{error}");
+                if let Some(wizard) = &mut self.startup_wizard
+                    && wizard.active
+                {
+                    wizard.error = Some(message.clone());
+                }
+                self.fail(message, cx);
+            }
+        }
+    }
+
+    pub(in crate::workbench) fn choose_open_in_new_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_picker_pending() {
+            return;
+        }
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let paths = crate::native_terminate::prompt_for_paths(
+            window,
+            cx,
+            PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("在新窗口中打开 MIO 项目".into()),
+            },
+        );
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| {
+                    if !view.finish_file_picker(picker, cx) {
+                        return;
+                    }
+                    match result {
+                        Ok(Ok(Some(selected))) => {
+                            if let Some(path) = selected.into_iter().next() {
+                                view.open_project_path_in_new_window(path, cx);
+                            }
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => {
+                            let msg = format!("无法选择要在新窗口打开的项目：{error}");
+                            if let Some(wizard) = &mut view.startup_wizard
+                                && wizard.active
+                            {
+                                wizard.error = Some(msg.clone());
+                            }
+                            view.fail(msg, cx);
+                        }
+                        Err(_) => {
+                            let msg = "文件选择器已意外关闭。".to_owned();
+                            if let Some(wizard) = &mut view.startup_wizard
+                                && wizard.active
+                            {
+                                wizard.error = Some(msg.clone());
+                            }
+                            view.fail(msg, cx);
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::workbench) fn default_directory(&self) -> PathBuf {
         self.project_path
             .as_ref()

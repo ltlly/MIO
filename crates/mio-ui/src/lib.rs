@@ -4,6 +4,7 @@ mod chrome;
 mod editing;
 mod history;
 mod local_time;
+mod multi_window;
 mod native_terminate;
 mod plugin_panel;
 mod theme;
@@ -85,8 +86,10 @@ use mio_core::Client;
 gpui_kit::actions!(
     mio,
     [
+        NewWindow,
         NewProject,
         OpenProject,
+        OpenProjectInNewWindow,
         ImportExtProject,
         ShowExtReport,
         SaveProject,
@@ -202,8 +205,15 @@ gpui_kit::actions!(
 
 fn init_actions(cx: &mut App) {
     gpui_kit::component::native_menu::NativeMenu::set_use_drawn_popup(true);
+    multi_window::WindowLauncher::install(cx);
     cx.on_action(|_: &Quit, cx| cx.global::<native_terminate::NativeTerminate>().request());
+    cx.on_action(|_: &NewWindow, cx| {
+        if let Err(error) = multi_window::WindowLauncher::launch(None, cx) {
+            eprintln!("MIO 无法打开新窗口：{error:#}");
+        }
+    });
     cx.bind_keys([
+        KeyBinding::new("cmd-shift-n", NewWindow, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, Some("MioWorkspace")),
         KeyBinding::new("cmd-shift-p", OpenCommandPalette, Some("MioWorkspace")),
@@ -275,6 +285,7 @@ fn init_actions(cx: &mut App) {
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
+        KeyBinding::new("ctrl-shift-n", NewWindow, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("ctrl-k", OpenCommandPalette, Some("MioWorkspace")),
         KeyBinding::new("ctrl-shift-p", OpenCommandPalette, Some("MioWorkspace")),
@@ -339,10 +350,12 @@ fn init_actions(cx: &mut App) {
         KeyBinding::new("ctrl-alt-up", MoveTabUp, Some("MioWorkspace")),
         KeyBinding::new("ctrl-alt-down", MoveTabDown, Some("MioWorkspace")),
     ]);
-    cx.set_menus([
+    let menus = vec![
         Menu {
             name: "MIO".into(),
             items: vec![
+                MenuItem::action("新建窗口", NewWindow),
+                MenuItem::separator(),
                 MenuItem::action("设置", OpenSettings),
                 MenuItem::action("用户设置…", OpenUserSettings),
                 MenuItem::action("搜索设置…", SearchSettings),
@@ -356,8 +369,10 @@ fn init_actions(cx: &mut App) {
         Menu {
             name: "项目".into(),
             items: vec![
+                MenuItem::action("新建窗口", NewWindow),
                 MenuItem::action("新建项目", NewProject),
                 MenuItem::action("打开项目…", OpenProject),
+                MenuItem::action("在新窗口中打开项目…", OpenProjectInNewWindow),
                 MenuItem::action("导入 外部归档项目…", ImportExtProject),
                 MenuItem::action("查看 外部导入记录", ShowExtReport),
                 MenuItem::separator(),
@@ -510,6 +525,8 @@ fn init_actions(cx: &mut App) {
         Menu {
             name: "窗口".into(),
             items: vec![
+                MenuItem::action("新建窗口", NewWindow),
+                MenuItem::separator(),
                 MenuItem::action("最小化", MinimizeWindow),
                 MenuItem::action("缩放窗口", ZoomWindow),
                 MenuItem::separator(),
@@ -529,7 +546,12 @@ fn init_actions(cx: &mut App) {
             ],
             disabled: false,
         },
-    ]);
+    ];
+    cx.set_menus(menus);
+    if let Some(owned_menus) = cx.get_menus() {
+        gpui_kit::component::global_state::GlobalState::global_mut(cx).set_app_menus(owned_menus);
+    }
+    cx.set_dock_menu(vec![MenuItem::action("新建窗口", NewWindow)]);
 }
 
 pub fn run(runtime: mio_core::Runtime, client: Client) -> anyhow::Result<()> {

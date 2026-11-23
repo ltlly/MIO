@@ -403,8 +403,7 @@ fn write_file_with(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let lock = lock_opts.open(&lock_path)?;
     let lock_meta = checked_file(&lock)?;
-    lock.try_lock()
-        .map_err(|err| anyhow::anyhow!("插件偏好正由其他实例保存或锁不可用：{err}"))?;
+    crate::fs_atomic::try_lock_with_backoff(&lock, "插件偏好")?;
     let vis_lock = fs::symlink_metadata(&lock_path)?;
     #[cfg(unix)]
     ensure!(

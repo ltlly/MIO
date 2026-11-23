@@ -328,7 +328,7 @@ mod tests {
                 OsString::from("--out"),
                 OsString::from("/tmp/r5.json"),
                 OsString::from("--intruder-concurrency"),
-                OsString::from("17"),
+                OsString::from("257"),
             ])
             .is_err()
         );

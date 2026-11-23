@@ -97,6 +97,20 @@ impl Workbench {
         .on_click(cx.listener(|this, _, _, cx| {
             this.open_wizard_cancel_confirm(cx);
         }));
+        let new_window_btn = wizard_neutral_button(
+            "wizard-new-window",
+            "新建窗口",
+            Some(if cfg!(target_os = "macos") {
+                "打开新的独立 MIO 窗口 (⌘⇧N)"
+            } else {
+                "打开新的独立 MIO 窗口 (Ctrl+Shift+N)"
+            }),
+            !cancel_confirm_open,
+            WizardButtonSize::Footer,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.open_new_window(cx);
+        }));
 
         let footer_buttons = match step {
             WizardStep::Step1 => div()
@@ -165,6 +179,28 @@ impl Workbench {
             .bg(theme::surface())
             .text_color(theme::foreground())
             .text_size(theme::ui_font_size())
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &crate::NewWindow, _, cx| {
+                this.open_new_window(cx);
+            }))
+            .when(!self.file_picker_pending(), |el| {
+                el.on_action(cx.listener(
+                    |this, _: &crate::OpenProjectInNewWindow, window, cx| {
+                        this.choose_open_in_new_window(window, cx);
+                    },
+                ))
+            })
+            .on_action(cx.listener(|_, _: &crate::MinimizeWindow, window, _| {
+                window.minimize_window();
+            }))
+            .on_action(cx.listener(|_, _: &crate::ZoomWindow, window, _| {
+                window.zoom_window();
+            }))
+            .on_action(cx.listener(|this, _: &crate::BringAllWindowsToFront, _, cx| {
+                cx.activate(true);
+                this.status = "已前置全部 MIO 窗口。".into();
+                cx.notify();
+            }))
             .on_action(|_: &crate::Quit, _, cx| {
                 cx.global::<crate::native_terminate::NativeTerminate>()
                     .request();
@@ -316,7 +352,8 @@ impl Workbench {
                     .bg(theme::surface())
                     .flex()
                     .items_center()
-                    .justify_end()
+                    .justify_between()
+                    .child(new_window_btn)
                     .child(footer_buttons),
             )
             .when(cancel_confirm_open, |this| {

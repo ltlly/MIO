@@ -199,7 +199,7 @@ impl Settings {
                         }
                     };
                     let rule = ClientCertificateRule {
-                        enabled: existing_rule.as_ref().map_or(true, |r| r.enabled),
+                        enabled: existing_rule.as_ref().is_none_or(|r| r.enabled),
                         host_pattern,
                         format,
                         certificate_bytes,

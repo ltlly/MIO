@@ -246,6 +246,28 @@ impl Drop for SidecarLock {
     }
 }
 
+const SIDECAR_LOCK_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(1200);
+const SIDECAR_LOCK_RETRY_STEP: std::time::Duration = std::time::Duration::from_millis(15);
+
+pub(crate) fn try_lock_with_backoff(file: &File, label: &str) -> Result<()> {
+    let deadline = std::time::Instant::now() + SIDECAR_LOCK_WAIT_BUDGET;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    anyhow::bail!("{label}正由其他实例保存或锁不可用：等待锁释放超时");
+                }
+                std::thread::sleep(SIDECAR_LOCK_RETRY_STEP.min(deadline - now));
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                anyhow::bail!("{label}正由其他实例保存或锁不可用：{error}");
+            }
+        }
+    }
+}
+
 pub(crate) fn acquire_sidecar_lock(
     parent: &Path,
     lock_name: &str,
@@ -271,8 +293,7 @@ pub(crate) fn acquire_sidecar_lock(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = lock_opts.open(&lock_path)?;
     let identity = check_regular_owned_file(&file, label)?;
-    file.try_lock()
-        .map_err(|error| anyhow::anyhow!("{label}正由其他实例保存或锁不可用：{error}"))?;
+    try_lock_with_backoff(&file, label)?;
     let visible = fs::symlink_metadata(&lock_path)?;
     #[cfg(unix)]
     ensure!(

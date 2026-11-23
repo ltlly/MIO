@@ -255,16 +255,32 @@ impl TableDelegate for RecentProjectsDelegate {
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         if let Some(path) = self.rows.get(row).map(|item| item.path.clone()) {
+            let is_missing = self.is_missing(&path);
             let owner = self.owner.clone();
-            return menu.item(
-                PopupMenuItem::new("从最近列表移除").on_click(move |_, window, cx| {
-                    if let Some(owner) = owner.clone() {
-                        let _ = owner.update(cx, |view, cx| {
-                            view.remove_wizard_recent_path(path.clone(), window, cx);
-                        });
-                    }
-                }),
-            );
+            let owner_open = owner.clone();
+            let path_open = path.clone();
+            return menu
+                .item(
+                    PopupMenuItem::new("在新窗口中打开")
+                        .disabled(is_missing)
+                        .on_click(move |_, _, cx| {
+                            if let Some(owner) = owner_open.clone() {
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.open_project_path_in_new_window(path_open.clone(), cx);
+                                });
+                            }
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("从最近列表移除").on_click(move |_, window, cx| {
+                        if let Some(owner) = owner.clone() {
+                            let _ = owner.update(cx, |view, cx| {
+                                view.remove_wizard_recent_path(path.clone(), window, cx);
+                            });
+                        }
+                    }),
+                );
         }
         menu
     }

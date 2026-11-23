@@ -429,10 +429,11 @@ impl Workbench {
         let rep = self.workspace.repeater_settings.clone();
         let intercept_on = self.intercept_requests || self.intercept_responses;
         let active_tool = self.tool;
+        let picker_busy = self.file_picker_pending();
         let unavailable = self.project.is_none()
             || !self.backend_available()
             || self.transition.is_some()
-            || self.file_picker_pending();
+            || picker_busy;
         Button::new("footer-top-menus")
             .small()
             .ghost()
@@ -458,6 +459,10 @@ impl Workbench {
                 };
                 menu.submenu("项目", window, cx, move |sub, _, _| {
                     sub.item(
+                        PopupMenuItem::new("新建窗口")
+                            .action(Box::new(crate::NewWindow)),
+                    )
+                    .item(
                         PopupMenuItem::new("新建项目")
                             .action(Box::new(NewProject))
                             .disabled(unavailable),
@@ -466,6 +471,11 @@ impl Workbench {
                         PopupMenuItem::new("打开项目…")
                             .action(Box::new(OpenProject))
                             .disabled(unavailable),
+                    )
+                    .item(
+                        PopupMenuItem::new("在新窗口中打开项目…")
+                            .action(Box::new(crate::OpenProjectInNewWindow))
+                            .disabled(picker_busy),
                     )
                     .item(
                         PopupMenuItem::new("导入 外部归档项目…")
@@ -837,6 +847,11 @@ impl Workbench {
                 })
                 .submenu("窗口", window, cx, move |sub, _, _| {
                     sub.item(
+                        PopupMenuItem::new("新建窗口")
+                            .action(Box::new(crate::NewWindow)),
+                    )
+                    .separator()
+                    .item(
                         PopupMenuItem::new("最小化")
                             .action(Box::new(crate::MinimizeWindow)),
                     )

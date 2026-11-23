@@ -1,6 +1,42 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
 
 const MAX_GREP_REGEX_BYTES: usize = 1 << 20;
+const GREP_REGEX_CACHE_LIMIT: usize = 256;
+type GrepRegexCache = crate::lru::BoundedLruCache<(String, bool), Option<regex::bytes::Regex>>;
+
+fn grep_regex_cache() -> &'static Mutex<GrepRegexCache> {
+    static CACHE: OnceLock<Mutex<GrepRegexCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(crate::lru::BoundedLruCache::new(GREP_REGEX_CACHE_LIMIT)))
+}
+
+fn cached_grep_regex(pattern: &str, case_insensitive: bool) -> Option<regex::bytes::Regex> {
+    if pattern.is_empty() || pattern.len() > MAX_GREP_REGEX_BYTES {
+        return None;
+    }
+    let key = (pattern.to_owned(), case_insensitive);
+    {
+        let mut guard = grep_regex_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = guard.get(&key) {
+            return cached;
+        }
+    }
+    let compiled = regex::bytes::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .size_limit(MAX_GREP_REGEX_BYTES)
+        .dfa_size_limit(MAX_GREP_REGEX_BYTES)
+        .build()
+        .ok();
+    {
+        let mut guard = grep_regex_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(key, compiled.clone());
+    }
+    compiled
+}
 
 pub fn evaluate_grep_config(
     response_raw: &[u8],
@@ -26,11 +62,7 @@ pub fn evaluate_grep_extract_pairs(
     let mut out = Vec::new();
     for rule in &config.extract_rules {
         if let Some(pattern) = rule.regex_pattern() {
-            if pattern.len() <= MAX_GREP_REGEX_BYTES
-                && let Ok(re) = regex::bytes::RegexBuilder::new(pattern)
-                    .size_limit(MAX_GREP_REGEX_BYTES)
-                    .dfa_size_limit(MAX_GREP_REGEX_BYTES)
-                    .build()
+            if let Some(re) = cached_grep_regex(pattern, false)
                 && let Some(caps) = re.captures(raw)
                 && let Some(m) = caps.get(1).or_else(|| caps.get(0))
             {
@@ -122,13 +154,7 @@ pub fn evaluate_grep_matches(
             continue;
         }
         if let Some(pattern) = expr.strip_prefix("re:") {
-            if !pattern.is_empty()
-                && pattern.len() <= MAX_GREP_REGEX_BYTES
-                && let Ok(re) = regex::bytes::RegexBuilder::new(pattern)
-                    .case_insensitive(!case_sensitive)
-                    .size_limit(MAX_GREP_REGEX_BYTES)
-                    .dfa_size_limit(MAX_GREP_REGEX_BYTES)
-                    .build()
+            if let Some(re) = cached_grep_regex(pattern, !case_sensitive)
                 && re.is_match(raw)
             {
                 matched.push(expr.clone());

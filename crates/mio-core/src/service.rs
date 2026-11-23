@@ -61,6 +61,7 @@ mod intruder_result_query;
 mod intruder_service;
 mod oast_service;
 mod plugin_service;
+mod project_lock;
 #[cfg(test)]
 mod repeater_history_tests;
 #[cfg(test)]
@@ -390,6 +391,7 @@ struct State {
     preferences: crate::preferences::PreferencesStore,
     user_level_connections_cache: UserLevelConnectionsCache,
     project: ProjectKey,
+    project_lock: Option<project_lock::ActiveProjectLock>,
     store: ProjectStore,
     storage: StorageState,
     events: mpsc::Sender<Event>,

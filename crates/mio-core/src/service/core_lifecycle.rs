@@ -169,6 +169,7 @@ impl State {
         }
         let unsaved_count = self.unsaved_count();
         let store_close = self.store.close();
+        self.project_lock = None;
         checkpoint?;
         ensure!(
             unsaved_count == 0,
@@ -248,12 +249,33 @@ impl State {
 
     #[cfg(test)]
     pub(super) async fn replace_project(&mut self, next: ProjectStore) -> Result<()> {
-        self.replace_project_with(next, false, None).await
+        let (next_lock, reused_current) = match next.path.as_deref() {
+            Some(path) => self.acquire_project_lock_for_switch(path)?,
+            None => (None, false),
+        };
+        self.replace_project_with(next, next_lock, reused_current, false, None)
+            .await
+    }
+
+    pub(super) fn acquire_project_lock_for_switch(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(Option<project_lock::ActiveProjectLock>, bool)> {
+        if self
+            .project_lock
+            .as_ref()
+            .is_some_and(|lock| lock.matches_path(path))
+        {
+            return Ok((None, true));
+        }
+        Ok((Some(project_lock::acquire_active_project_lock(path)?), false))
     }
 
     pub(super) async fn replace_project_with(
         &mut self,
         mut next: ProjectStore,
+        next_lock: Option<project_lock::ActiveProjectLock>,
+        reused_current_lock: bool,
         pause_automated_tasks: bool,
         extensions_disabled: Option<bool>,
     ) -> Result<()> {
@@ -279,6 +301,9 @@ impl State {
             generation: self.project.generation + 1,
         };
         self.store = next;
+        if !reused_current_lock {
+            self.project_lock = next_lock;
+        }
         if let Some(disabled) = extensions_disabled {
             self.extensions_disabled = disabled;
         }

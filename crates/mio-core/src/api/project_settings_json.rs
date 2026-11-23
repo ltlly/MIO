@@ -2009,25 +2009,27 @@ mod tests {
         let listener_id = Uuid::new_v4();
         let existing_rule_id = Uuid::new_v4();
         let new_scope_id = Uuid::new_v4();
-        let mut ws = Workspace::default();
-        ws.proxy_listeners = vec![ProxyListenerConfig {
-            id: listener_id,
-            enabled: true,
-            bind_address: "0.0.0.0:8080".into(),
-            ..ProxyListenerConfig::default()
-        }];
-        ws.match_and_replace_rules = vec![MatchAndReplaceRule {
-            id: existing_rule_id,
-            enabled: true,
-            item_type: MatchReplaceTarget::RequestHeader,
-            match_pattern: "User-Agent: old".into(),
-            replace_with: "User-Agent: new".into(),
-            regex: false,
-            comment: "keep me".into(),
-            script_name: String::new(),
-            filter_script: String::new(),
-        }];
-        ws.tasks_auto_start = false;
+        let mut ws = Workspace {
+            proxy_listeners: vec![ProxyListenerConfig {
+                id: listener_id,
+                enabled: true,
+                bind_address: "0.0.0.0:8080".into(),
+                ..ProxyListenerConfig::default()
+            }],
+            match_and_replace_rules: vec![MatchAndReplaceRule {
+                id: existing_rule_id,
+                enabled: true,
+                item_type: MatchReplaceTarget::RequestHeader,
+                match_pattern: "User-Agent: old".into(),
+                replace_with: "User-Agent: new".into(),
+                regex: false,
+                comment: "keep me".into(),
+                script_name: String::new(),
+                filter_script: String::new(),
+            }],
+            tasks_auto_start: false,
+            ..Workspace::default()
+        };
 
         let partial = format!(
             r#"{{
