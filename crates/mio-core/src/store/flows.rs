@@ -74,9 +74,11 @@ impl FlowsRepo<&mut ProjectStore> {
     }
 
     pub fn finish_pending(&mut self, crashed: bool, only_proxy: bool) -> Result<usize> {
+        let before_tc = query_total_changes(&self.0.connection)?;
         let tx = self.0.connection.transaction()?;
         let changed = finish_pending_records(&tx, crashed, only_proxy)?;
         tx.commit()?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(changed)
     }
 }

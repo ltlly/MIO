@@ -129,9 +129,11 @@ impl super::FlowsRepo<&mut ProjectStore> {
         provenance: &FlowProvenance,
     ) -> Result<()> {
         self.0.intruder().reject_session_flow_write(flow_id)?;
+        let before_tc = super::query_total_changes(&self.0.connection)?;
         let tx = self.0.connection.transaction()?;
         write_flow_provenance(&tx, flow_id, provenance)?;
         tx.commit()?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(())
     }
 }

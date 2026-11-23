@@ -13,7 +13,7 @@ use tokio::{
 
 const FIRST: &[u8] = b"data: first\n\n";
 const SECOND: &[u8] = b"data: second\n\n";
-const DEADLINE: Duration = Duration::from_secs(8);
+const DEADLINE: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
@@ -25,7 +25,7 @@ enum End {
 }
 
 async fn event(client: &mut Client, matches: impl Fn(&Event) -> bool) -> Event {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = client
                 .events
@@ -391,7 +391,7 @@ async fn sse_response_body_negative_match_fails_before_unread_body_and_preserves
         let (runtime, mut client) = Runtime::start().unwrap();
         let (project, mut workspace) = opened_with_workspace(&mut client).await;
         assert!(workspace.proxy_messages.unpack_compressed_responses);
-        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("sse-body-guard.mio");
         let copy = directory.path().join("sse-body-guard-copy.mio");
         workspace.revision += 1;

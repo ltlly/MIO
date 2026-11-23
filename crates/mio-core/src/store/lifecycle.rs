@@ -1,5 +1,7 @@
 use super::*;
 
+const STORE_BUSY_TIMEOUT: Duration = Duration::from_millis(1000);
+
 impl ProjectStore {
     #[cfg(test)]
     pub fn test_actual_path(&self) -> PathBuf {
@@ -106,7 +108,7 @@ impl ProjectStore {
             let ro_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
             let ro_conn =
                 Connection::open_with_flags(path, ro_flags).context("不能打开项目文件")?;
-            ro_conn.busy_timeout(Duration::from_millis(1500))?;
+            ro_conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
             ro_conn.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
             let ro_tx = ro_conn.unchecked_transaction()?;
             let app_id: i32 =
@@ -122,7 +124,7 @@ impl ProjectStore {
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = Connection::open_with_flags(path, flags).context("不能打开项目文件")?;
-        connection.busy_timeout(Duration::from_millis(1500))?;
+        connection.busy_timeout(STORE_BUSY_TIMEOUT)?;
         connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
         let id = {
             let transaction = connection.unchecked_transaction()?;
@@ -155,7 +157,7 @@ impl ProjectStore {
     }
 
     pub(super) fn configure(&self) -> Result<()> {
-        self.connection.busy_timeout(Duration::from_millis(1500))?;
+        self.connection.busy_timeout(STORE_BUSY_TIMEOUT)?;
         self.connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-4096; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=33554432; PRAGMA trusted_schema=OFF;",
         )?;
