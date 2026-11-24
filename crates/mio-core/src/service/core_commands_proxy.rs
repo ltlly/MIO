@@ -84,7 +84,7 @@ impl State {
                         "SSE 最终响应不能改为临时响应、协议升级或无效状态码；拦截仍等待决定"
                     );
                 }
-                let pending = self.proxy.pending.remove(&flow_id).unwrap();
+                let pending = self.proxy.pending.remove(&flow_id).context("拦截已结束")?;
                 let decision = match decision {
                     Decision::Drop => InterceptDecision::Drop,
                     Decision::ForwardRequest(request) => {
@@ -146,7 +146,11 @@ impl State {
                         );
                     }
                 }
-                let pending = self.proxy.pending_websockets.remove(&message_id).unwrap();
+                let pending = self
+                    .proxy
+                    .pending_websockets
+                    .remove(&message_id)
+                    .context("WebSocket 拦截已结束")?;
                 let decision = match decision {
                     WebSocketDecision::Forward(payload) => {
                         mio_proxy::WebSocketInterceptDecision::Forward(payload)
@@ -499,14 +503,17 @@ impl State {
         } else {
             self.proxy.extra.iter().position(|(id, _)| *id == listener_id)
         };
-        ensure!(is_primary || extra_pos.is_some(), "未找到正在运行的指定 Proxy 监听器");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let (stop_res, joined, terminal) = {
             let handle = if is_primary {
-                self.proxy.primary.as_mut().unwrap()
+                self.proxy
+                    .primary
+                    .as_mut()
+                    .context("主 Proxy 监听器未处于运行状态")?
             } else {
-                &mut self.proxy.extra[extra_pos.unwrap()].1
+                let pos = extra_pos.context("未找到正在运行的指定 Proxy 监听器")?;
+                &mut self.proxy.extra[pos].1
             };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
             handle.request_stop();
             let stop_res = tokio::time::timeout_at(deadline, handle.stop())
                 .await

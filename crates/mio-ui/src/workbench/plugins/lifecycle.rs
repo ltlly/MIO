@@ -384,6 +384,8 @@ impl Workbench {
                     return;
                 }
                 if matches!(answer, Ok(1)) {
+                    cx.global::<crate::native_terminate::NativeTerminate>()
+                        .extend_deadline_for_user_interaction();
                     this.extensions.allow_quit = true;
                     this.request_transition(AfterSave::Quit, window, cx);
                 } else {

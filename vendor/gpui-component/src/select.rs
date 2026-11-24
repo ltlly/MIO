@@ -633,12 +633,35 @@ where
                         ),
                 )
                 .when(self.state.open, |this| {
+                    let entity = cx.entity().downgrade();
                     this.child(
+                        deferred(
+                            gpui::anchored().position(gpui::Point::default()).child(
+                                div()
+                                    .occlude()
+                                    .w(window.bounds().size.width)
+                                    .h(window.bounds().size.height)
+                                    .on_any_mouse_down(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(entity) = entity.upgrade() {
+                                            entity.update(cx, |this, cx| {
+                                                this.escape(&Cancel, window, cx);
+                                            });
+                                        }
+                                    })
+                                    .on_scroll(|_, _, cx| cx.stop_propagation()),
+                            ),
+                        )
+                        .with_priority(gpui_base::POPUP_PRIORITY.saturating_sub(1)),
+                    )
+                    .child(
                         deferred(crate::popover::dropdown_popup(
                             ("select-popup", cx.entity_id()),
                             bounds,
                             v_flex()
                                 .occlude()
+                                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                                .on_scroll(|_, _, cx| cx.stop_propagation())
                                 .map(|this| match self.state.menu_width {
                                     Length::Auto => this.w(bounds.size.width),
                                     Length::Definite(w) => this.w(w),

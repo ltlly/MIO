@@ -518,6 +518,7 @@ impl Render for HexGridView {
             .overflow_hidden()
             .flex()
             .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
                 let mut menu = if let Some(ref builder) = caller_menu {
                     builder(NativeMenu::new(), window, cx)
                 } else {

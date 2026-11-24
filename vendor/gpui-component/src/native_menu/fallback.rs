@@ -10,8 +10,9 @@ use crate::{
     root::WindowState,
 };
 use gpui::{
-    App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
-    Point, Render, Subscription, Window, anchored, deferred, div, px,
+    App, Context, DismissEvent, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, Point, Render, Styled as _, Subscription, Window, anchored,
+    deferred, div, px,
 };
 
 use super::NativeMenuItem;
@@ -46,7 +47,16 @@ impl FallbackMenuOverlay {
         cx: &mut Context<Self>,
     ) {
         let menu = build_popup(items, action_context, window, cx);
-
+        let weak = cx.weak_entity();
+        menu.update(cx, |menu, _| {
+            menu.set_on_dismiss(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.active = None;
+                    cx.notify();
+                });
+                window.refresh();
+            });
+        });
         let subscription = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
             this.active = None;
             cx.notify();
@@ -129,18 +139,40 @@ fn build_popup(
 }
 
 impl Render for FallbackMenuOverlay {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let mut root = div();
         if let Some(active) = self.active.as_ref() {
-            root = root.child(
-                deferred(
-                    anchored()
-                        .position(active.position)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(active.menu.clone()),
+            let menu_view = active.menu.clone();
+            root = root
+                .child(
+                    deferred(
+                        anchored().position(Point::default()).child(
+                            div()
+                                .occlude()
+                                .w(window.bounds().size.width)
+                                .h(window.bounds().size.height)
+                                .on_any_mouse_down(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    menu_view.update(cx, |menu, cx| {
+                                        menu.dismiss_from_backdrop(window, cx)
+                                    });
+                                })
+                                .on_scroll(|_, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                        ),
+                    )
+                    .with_priority(gpui_base::POPUP_PRIORITY.saturating_sub(1)),
                 )
-                .with_priority(gpui_base::POPUP_PRIORITY),
-            );
+                .child(
+                    deferred(
+                        anchored()
+                            .position(active.position)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(active.menu.clone()),
+                    )
+                    .with_priority(gpui_base::POPUP_PRIORITY),
+                );
         }
         root
     }

@@ -876,10 +876,13 @@ impl HexGridView {
             return;
         }
         let typed = ks.key_char.as_deref().unwrap_or(ks.key.as_str());
-        if typed.len() != 1 {
+        let mut chars = typed.chars();
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return;
+        };
+        if !ch.is_ascii() {
             return;
         }
-        let ch = typed.chars().next().unwrap();
         self.apply_typed_char(ch, window, cx);
     }
 }

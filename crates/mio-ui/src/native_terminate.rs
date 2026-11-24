@@ -70,7 +70,7 @@ pub(crate) fn prompt_for_new_path(
     done_rx
 }
 
-const TERMINATE_TIMEOUT: f64 = 30.0;
+const TERMINATE_TIMEOUT: f64 = 120.0;
 #[cfg(target_os = "macos")]
 static HOOK_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -132,6 +132,17 @@ impl NativeTerminate {
             pending: None,
             changes,
         }))))
+    }
+
+    pub(crate) fn extend_deadline_for_user_interaction(&self) {
+        let mut state = self.0.borrow_mut();
+        if let Some(pending) = &mut state.pending
+            && pending.decision.is_none()
+            && !pending.timed_out
+            && Instant::now() < pending.deadline
+        {
+            pending.deadline = Instant::now() + Duration::from_secs_f64(TERMINATE_TIMEOUT);
+        }
     }
 
     pub(crate) fn request(&self) {

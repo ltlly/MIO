@@ -361,6 +361,9 @@ impl Workbench {
                     div()
                         .id("wizard-cancel-confirm-overlay")
                         .test_support()
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
                         .role(Role::Dialog)
                         .aria_label("取消向导")
                         .absolute()
@@ -371,6 +374,7 @@ impl Workbench {
                         .justify_center()
                         .child(
                             div()
+                                .occlude()
                                 .w(theme::scaled_px(380.).max(px(360.)))
                                 .rounded(px(6.))
                                 .border_1()

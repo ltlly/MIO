@@ -31,7 +31,10 @@ impl NativePanel {
                 frame = frame.flex_grow(layout.flex).flex_basis(px(0.));
             }
         }
-        match node.kind.as_ref().unwrap() {
+        let Some(kind) = node.kind.as_ref() else {
+            return frame.into_any_element();
+        };
+        match kind {
             node::Kind::Row(container)
             | node::Kind::Column(container)
             | node::Kind::ScrollColumn(container) => {
@@ -143,7 +146,9 @@ impl NativePanel {
                     .gap(px(2.))
                     .when(!horizontal, |bar| bar.flex_col());
                 for tab in &tabs.tabs {
-                    let child = tab.content.as_ref().unwrap();
+                    let Some(child) = tab.content.as_ref() else {
+                        continue;
+                    };
                     let selected = child.id;
                     let expected_title = tab.title.clone();
                     bar = bar.child(
@@ -189,10 +194,11 @@ impl NativePanel {
                     .flex_1()
                     .when(horizontal, |frame| frame.flex_col())
                     .child(bar);
-                if let Some(tab) = tabs
+                if let Some(content) = tabs
                     .tabs
                     .iter()
-                    .find(|tab| tab.content.as_ref().is_some_and(|node| node.id == active))
+                    .filter_map(|tab| tab.content.as_ref())
+                    .find(|node| node.id == active)
                 {
                     frame = frame.child(
                         div()
@@ -200,7 +206,7 @@ impl NativePanel {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .child(self.render_node(tab.content.as_ref().unwrap(), cx)),
+                            .child(self.render_node(content, cx)),
                     );
                 }
             }
@@ -250,7 +256,9 @@ impl NativePanel {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.render_node(split.first.as_ref().unwrap(), cx)),
+                            .when_some(split.first.as_ref(), |pane, first| {
+                                pane.child(self.render_node(first, cx))
+                            }),
                     )
                     .child(handle)
                     .child(
@@ -262,7 +270,9 @@ impl NativePanel {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.render_node(split.second.as_ref().unwrap(), cx)),
+                            .when_some(split.second.as_ref(), |pane, second| {
+                                pane.child(self.render_node(second, cx))
+                            }),
                     );
             }
             node::Kind::VirtualTable(table) => {
@@ -538,8 +548,10 @@ impl Render for NativePanel {
                         .size_full(),
                 )
                 .into_any_element()
+        } else if let Some(root) = self.snapshot.root.as_ref() {
+            self.render_node(root, cx)
         } else {
-            self.render_node(self.snapshot.root.as_ref().unwrap(), cx)
+            div().into_any_element()
         };
         let mut root = div()
             .id("native-plugin-panel")

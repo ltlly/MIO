@@ -166,62 +166,78 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let paths = paths.await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                    return;
-                }
-                match paths {
-                    Ok(Ok(Some(paths))) => {
-                        let Some(path) = paths.into_iter().next() else {
-                            return;
-                        };
-                        match mio_core::ui_files::read_file_bytes(&path) {
-                            Ok(bytes) if bytes.len() > MAX_COMPARE_FILE_BYTES => {
-                                view.fail("站点地图对比文件超过 4 MB 上限。", cx);
-                            }
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(text) => match parse_external_site_map_file(&text) {
-                                    Ok(ext_map) => {
-                                        let left_origin = view
-                                            .target_pane
-                                            .compare_modal
-                                            .as_ref()
-                                            .map(|s| s.left_origin.clone())
-                                            .unwrap_or_default();
-                                        let left_map = view.origin_path_map(&left_origin, cx);
-                                        let (rows, only_left, only_right, different, same) =
-                                            compute_site_map_diff(&left_map, &ext_map);
-                                        let name = path
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("外部站点地图")
-                                            .to_owned();
-                                        if let Some(state) =
-                                            view.target_pane.compare_modal.as_mut()
-                                        {
-                                            state.right_origin = None;
-                                            state.external_label = Some(name.clone());
-                                            state.external_map = ext_map;
-                                            state.rows = rows;
-                                            state.only_left = only_left;
-                                            state.only_right = only_right;
-                                            state.different = different;
-                                            state.same = same;
-                                        }
-                                        view.error = None;
-                                        view.status = format!("已加载对比快照：{name}");
-                                        cx.notify();
-                                    }
-                                    Err(err) => view.fail(err, cx),
-                                },
-                                Err(_) => view.fail("所选站点地图文件不是有效的 UTF-8 文本。", cx),
-                            },
-                            Err(err) => view.fail(format!("读取对比文件失败：{err}"), cx),
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match paths {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(err)) => {
+                            view.fail(format!("选择对比文件失败：{err}"), cx);
+                            None
+                        }
+                        Err(_) => {
+                            view.fail("文件选择器已关闭。", cx);
+                            None
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(err)) => view.fail(format!("选择对比文件失败：{err}"), cx),
-                    Err(_) => view.fail("文件选择器已关闭。", cx),
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let read_path = path.clone();
+            let read_result = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_file_bytes(&read_path) })
+                .await;
+            let _ = this.update_in(cx, |view, _, cx| {
+                if view.project != Some(project) {
+                    return;
+                }
+                match read_result {
+                    Ok(bytes) if bytes.len() > MAX_COMPARE_FILE_BYTES => {
+                        view.fail("站点地图对比文件超过 4 MB 上限。", cx);
+                    }
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => match parse_external_site_map_file(&text) {
+                            Ok(ext_map) => {
+                                let left_origin = view
+                                    .target_pane
+                                    .compare_modal
+                                    .as_ref()
+                                    .map(|s| s.left_origin.clone())
+                                    .unwrap_or_default();
+                                let left_map = view.origin_path_map(&left_origin, cx);
+                                let (rows, only_left, only_right, different, same) =
+                                    compute_site_map_diff(&left_map, &ext_map);
+                                let name = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("外部站点地图")
+                                    .to_owned();
+                                if let Some(state) = view.target_pane.compare_modal.as_mut() {
+                                    state.right_origin = None;
+                                    state.external_label = Some(name.clone());
+                                    state.external_map = ext_map;
+                                    state.rows = rows;
+                                    state.only_left = only_left;
+                                    state.only_right = only_right;
+                                    state.different = different;
+                                    state.same = same;
+                                }
+                                view.error = None;
+                                view.status = format!("已加载对比快照：{name}");
+                                cx.notify();
+                            }
+                            Err(err) => view.fail(err, cx),
+                        },
+                        Err(_) => view.fail("所选站点地图文件不是有效的 UTF-8 文本。", cx),
+                    },
+                    Err(err) => view.fail(format!("读取对比文件失败：{err}"), cx),
                 }
             });
         })

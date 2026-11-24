@@ -197,7 +197,8 @@ impl ConnectionsUi {
             |_, _, _: &SelectEvent<Vec<&'static str>>, _, cx| cx.notify(),
         )
         .detach();
-        let socks_bypass_input = cx.new(|icx| InputState::new(window, icx));
+        let socks_bypass_input =
+            cx.new(|icx| InputState::new(window, icx).placeholder("输入新条目"));
         cx.subscribe_in(&socks_bypass_input, window, |this, _, event, window, cx| {
             match event {
                 InputEvent::PressEnter { .. } => this.add_socks_bypass_host(window, cx),

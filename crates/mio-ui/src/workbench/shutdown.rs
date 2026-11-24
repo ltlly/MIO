@@ -129,7 +129,7 @@ impl Workbench {
                 self.transition = None;
             }
         }
-        self.fail("原生退出等待超过 30 秒，本轮已拒绝。当前编辑保留；已开始的后台回收将继续，退出需要再次确认。", cx);
+        self.fail("原生退出等待超时，本轮已拒绝。当前编辑保留；已开始的后台回收将继续，退出需要再次确认。", cx);
     }
 
     pub(in crate::workbench) fn begin_shutdown(
@@ -140,6 +140,8 @@ impl Workbench {
         if self.cancel_expired_quit(cx) {
             return;
         }
+        cx.global::<NativeTerminate>()
+            .extend_deadline_for_user_interaction();
         self.shutdown_requested = true;
         self.after_save = None;
         self.pending_project_save = None;
@@ -222,6 +224,8 @@ impl Workbench {
         if self.cancel_expired_quit(cx) {
             return;
         }
+        cx.global::<NativeTerminate>()
+            .extend_deadline_for_user_interaction();
         let (Some(result), Some(attempt)) = (&self.runtime_result, self.quit_attempt) else {
             return;
         };

@@ -215,7 +215,10 @@ impl FilterWindow {
 
     fn render_library_overlay(&self, cx: &Context<Self>) -> AnyElement {
         let overlay = self.library_overlay.as_ref().expect("脚本库覆盖层须已打开");
-        let mut panel = div().id("http-filter-library-overlay").test_support().absolute().inset_0()
+        let mut panel = div().id("http-filter-library-overlay").test_support().occlude()
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .absolute().inset_0()
             .bg(theme::background()).p(theme::scaled_px(15.)).flex().flex_col().gap(theme::scaled_px(10.));
         match overlay {
             form::LibraryOverlay::Load { library } => {
@@ -272,8 +275,8 @@ impl Render for FilterWindow {
                             .p_0()
                             .size(theme::scaled_px(22.))
                             .child(gpui_kit::component::Icon::new(IconName::Github).size(theme::scaled_px(18.)))
-                            .accessibility_label("Browse scripts on GitHub")
-                            .tooltip("Browse scripts on GitHub")
+                            .accessibility_label("在 GitHub 上浏览脚本 API 文档")
+                            .tooltip("在 GitHub 上浏览脚本 API 文档")
                             .on_click(|_, _, cx| cx.open_url("https://github.com/ltlly/MIO/blob/main/docs/scripting-api.md")),
                     )
                 })

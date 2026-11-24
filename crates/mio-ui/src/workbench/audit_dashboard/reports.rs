@@ -237,66 +237,89 @@ impl Workbench {
         let notes_snapshot = self.audit_dashboard.finding_notes.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次审计报告未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension(format.extension());
-                            }
-                            let ext = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .map(str::to_ascii_lowercase);
-                            let final_bytes = match ext.as_deref() {
-                                Some("json") if format != AuditReportFormat::Json => {
-                                    match render_audit_report_json(&snapshot) {
-                                        Ok(b) => b,
-                                        Err(err) => {
-                                            view.fail(format!("生成 JSON 报告失败：{err}"), cx);
-                                            return;
+            let pending_write = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，本次审计报告未写入磁盘。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if path.extension().is_none() {
+                                    path.set_extension(format.extension());
+                                }
+                                let ext = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(str::to_ascii_lowercase);
+                                let final_bytes = match ext.as_deref() {
+                                    Some("json") if format != AuditReportFormat::Json => {
+                                        match render_audit_report_json(&snapshot) {
+                                            Ok(b) => b,
+                                            Err(err) => {
+                                                view.fail(format!("生成 JSON 报告失败：{err}"), cx);
+                                                return None;
+                                            }
                                         }
                                     }
-                                }
-                                Some("html" | "htm") if format != AuditReportFormat::Html => {
-                                    render_audit_report_html(&snapshot).into_bytes()
-                                }
-                                Some("xml") if format != AuditReportFormat::Xml => {
-                                    render_audit_report_xml(
-                                        &snapshot,
-                                        &fp_snapshot,
-                                        &verified_snapshot,
-                                        &notes_snapshot,
-                                    )
-                                    .into_bytes()
-                                }
-                                _ => payload,
-                            };
-                            match mio_core::ui_files::write_export_file(&path, &final_bytes) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已保存审计报告到文件：{}（共 {} 条告警）",
-                                        path.display(),
-                                        finding_count
-                                    );
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("写入审计报告文件失败：{err}"), cx);
-                                }
+                                    Some("html" | "htm") if format != AuditReportFormat::Html => {
+                                        render_audit_report_html(&snapshot).into_bytes()
+                                    }
+                                    Some("xml") if format != AuditReportFormat::Xml => {
+                                        render_audit_report_xml(
+                                            &snapshot,
+                                            &fp_snapshot,
+                                            &verified_snapshot,
+                                            &notes_snapshot,
+                                        )
+                                        .into_bytes()
+                                    }
+                                    _ => payload,
+                                };
+                                Some((path, final_bytes))
+                            }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail(format!("无法选择报告保存路径：{err}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => view.fail(format!("无法选择报告保存路径：{err}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some((path, final_bytes)) = pending_write else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &final_bytes)
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!(
+                            "已保存审计报告到文件：{}（共 {} 条告警）",
+                            path.display(),
+                            finding_count
+                        );
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("写入审计报告文件失败：{err}"), cx);
                     }
                 })
             });

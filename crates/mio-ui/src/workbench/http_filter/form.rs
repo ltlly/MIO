@@ -437,27 +437,61 @@ impl FilterWindow {
     }
 
     pub(super) fn open_library(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending.is_some() || self.submitting { return; }
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         let code = match editing::snapshot(&self.filter_script_editor, window, cx) {
             Ok(code) => code.to_string(),
-            Err(error) => { self.error = Some(error.into()); cx.notify(); return; }
-        };
-        let result = (|| -> AnyResult<_> {
-            if save { mio_core::validate_filter_script(&code)?; }
-            let path = self.script_library_path()?;
-            read_library(&path)
-        })();
-        match result {
-            Ok(library) => {
-                self.error = None;
-                self.library_overlay = Some(if save {
-                    self.library_name_input.update(cx, |input, cx| input.set_value(self.script_title.clone(), window, cx));
-                    LibraryOverlay::Save { library, code, overwrite: None }
-                } else { LibraryOverlay::Load { library } });
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
             }
-            Err(error) => self.error = Some(format!("{error:#}")),
+        };
+        if save && let Err(error) = mio_core::validate_filter_script(&code) {
+            self.error = Some(format!("{error:#}"));
+            cx.notify();
+            return;
         }
+        let path = match self.script_library_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.submitting = true;
         cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { read_library(&path) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.submitting = false;
+                match result {
+                    Ok(library) => {
+                        this.error = None;
+                        this.library_overlay = Some(if save {
+                            this.library_name_input.update(cx, |input, cx| {
+                                input.set_value(this.script_title.clone(), window, cx)
+                            });
+                            LibraryOverlay::Save {
+                                library,
+                                code,
+                                overwrite: None,
+                            }
+                        } else {
+                            LibraryOverlay::Load { library }
+                        });
+                    }
+                    Err(error) => this.error = Some(format!("{error:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn close_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -485,24 +519,73 @@ impl FilterWindow {
     }
 
     pub(super) fn save_library_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         let name = match editing::input_snapshot(&self.library_name_input, window, cx) {
             Ok(name) => name.trim().to_owned(),
-            Err(error) => { self.error = Some(error.into()); cx.notify(); return; }
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
         };
-        let Some(LibraryOverlay::Save { library, code, overwrite }) = &mut self.library_overlay else { return; };
-        if library.scripts.iter().any(|script| script.name == name) && overwrite.as_deref() != Some(&name) {
+        let Some(LibraryOverlay::Save {
+            library,
+            code,
+            overwrite,
+        }) = &mut self.library_overlay
+        else {
+            return;
+        };
+        if library.scripts.iter().any(|script| script.name == name)
+            && overwrite.as_deref() != Some(&name)
+        {
             *overwrite = Some(name);
             cx.notify();
             return;
         }
         let expected = library.clone();
         let code = code.clone();
-        let result = self.script_library_path().and_then(|path| write_library(&path, &expected, LibraryScript { name: name.clone(), code }));
-        match result {
-            Ok(_) => { self.script_title = name; self.library_overlay = None; self.error = None; }
-            Err(error) => self.error = Some(format!("{error:#}")),
-        }
+        let path = match self.script_library_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.submitting = true;
         cx.notify();
+        let save_name = name.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    write_library(
+                        &path,
+                        &expected,
+                        LibraryScript {
+                            name: save_name,
+                            code,
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.submitting = false;
+                match result {
+                    Ok(_) => {
+                        this.script_title = name;
+                        this.library_overlay = None;
+                        this.error = None;
+                    }
+                    Err(error) => this.error = Some(format!("{error:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn validate_inputs_ime(

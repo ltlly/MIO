@@ -210,7 +210,10 @@ pub(in crate::plugin_panel) fn prepare_canvas(
             let image_index = next_image_index;
             next_image_index += 1;
             if let Some(clip) = maybe_clip {
-                let bounds = transform_rect_bounds(matrix, value.bounds.as_ref().unwrap())?;
+                let Some(rect) = value.bounds.as_ref() else {
+                    return Err("Canvas 图像绘制指令缺少边界矩形".into());
+                };
+                let bounds = transform_rect_bounds(matrix, rect)?;
                 prepared.push(PreparedCommand::Image {
                     bounds,
                     image_index,
@@ -225,7 +228,9 @@ pub(in crate::plugin_panel) fn prepare_canvas(
 
         match operation {
             draw_command::Op::Rect(value) => {
-                let rect = value.bounds.as_ref().unwrap();
+                let Some(rect) = value.bounds.as_ref() else {
+                    return Err("Canvas 矩形绘制指令缺少边界矩形".into());
+                };
                 if matrix[1] == 0.0 && matrix[2] == 0.0 {
                     let bounds = transform_rect_bounds(matrix, rect)?;
                     let radius_scale = matrix[0].abs().min(matrix[3].abs()) as f32;
@@ -271,7 +276,9 @@ pub(in crate::plugin_panel) fn prepare_canvas(
                 });
             }
             draw_command::Op::Text(value) => {
-                let origin = value.origin.as_ref().unwrap();
+                let Some(origin) = value.origin.as_ref() else {
+                    return Err("Canvas 文本绘制指令缺少起点坐标".into());
+                };
                 let transformed_origin = transform_point(matrix, origin.x, origin.y)?;
                 let scale = matrix[2].hypot(matrix[3]) as f32;
                 let font_size = if scale > 0.0 && scale.is_finite() {
@@ -537,7 +544,9 @@ impl NativePanel {
             );
         }
         for hit in &model.hit_regions {
-            let rect = hit.bounds.as_ref().unwrap();
+            let Some(rect) = hit.bounds.as_ref() else {
+                continue;
+            };
             let mut region = div()
                 .id(("plugin-hit", hit.id))
                 .test_support()

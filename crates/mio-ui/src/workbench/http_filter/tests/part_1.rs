@@ -459,9 +459,15 @@ fn http_filter_script_library_save_load_overwrite_and_corrupted_file_error(
     cx.read(|cx| assert!(dialog.read(cx).library_overlay.is_none()));
 
     click(handle, "http-filter-script-new", cx);
-    handle.update(cx, |_, window, cx| {
-        dialog.update(cx, |this, cx| this.clear_script(window, cx));
-    }).unwrap();
+    handle
+        .update(cx, |_, window, cx| {
+            window.render_frame(cx);
+            let pos = window.within("popup-menu").find_by_label("新建脚本").bounds().center();
+            window.pointer_down(pos, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(pos, gpui_kit::MouseButton::Left, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
     cx.read(|cx| {
         assert_eq!(dialog.read(cx).script_title, "Untitled");
         assert_eq!(dialog.read(cx).filter_script_editor.read(cx).value().as_ref(), "return true;");

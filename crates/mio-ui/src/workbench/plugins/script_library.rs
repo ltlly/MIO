@@ -512,68 +512,76 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                if !this.finish_file_picker(picker, cx) {
-                    return;
-                }
-                match result {
-                    Ok(Ok(Some(paths))) => {
-                        let Some(path) = paths.into_iter().next() else {
-                            return;
-                        };
-                        let imported = match mio_core::ui_files::read_file_bytes(&path)
-                            .map_err(anyhow::Error::from)
-                            .and_then(|bytes| parse_imported_script_json(&bytes))
-                        {
-                            Ok(items) => items,
-                            Err(err) => {
-                                this.extensions.script_library.feedback =
-                                    Some((false, format!("导入 JSON 失败：{err:#}")));
-                                cx.notify();
-                                return;
-                            }
-                        };
-                        this.ensure_script_library_loaded();
-                        let count = imported.len();
-                        let save_res = this.extensions.script_library.resolved_path().and_then(|p| {
-                            update_script_library_file(&p, |merged| {
-                                for script in imported {
-                                    if let Some(existing) =
-                                        merged.iter_mut().find(|s| s.name == script.name)
-                                    {
-                                        existing.code = script.code;
-                                    } else {
-                                        merged.push(script);
-                                    }
-                                }
-                                Ok(())
-                            })
-                        });
-                        match save_res {
-                            Ok(updated) => {
-                                this.extensions.script_library.scripts = updated;
-                                this.extensions.script_library.feedback = Some((
-                                    true,
-                                    format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),
-                                ));
-                                this.error = None;
-                                this.status = format!("已导入 {count} 个 脚本。");
-                            }
-                            Err(err) => {
-                                this.extensions.script_library.feedback =
-                                    Some((false, format!("保存导入的脚本库失败：{err:#}")));
+            let pending_path = this
+                .update_in(cx, |this, _, cx| {
+                    if !this.finish_file_picker(picker, cx) {
+                        return None;
+                    }
+                    match result {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(err)) => {
+                            this.extensions.script_library.feedback =
+                                Some((false, format!("无法打开导入文件：{err}")));
+                            cx.notify();
+                            None
+                        }
+                        Err(_) => None,
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let resolved_lib_path = this
+                .update_in(cx, |this, _, _| {
+                    this.ensure_script_library_loaded();
+                    this.extensions.script_library.resolved_path()
+                })
+                .ok();
+            let Some(resolved_lib_path) = resolved_lib_path else {
+                return;
+            };
+            let bg_result: AnyResult<(usize, Vec<ScriptLibraryItem>)> = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = mio_core::ui_files::read_file_bytes(&path)?;
+                    let imported = parse_imported_script_json(&bytes)?;
+                    let count = imported.len();
+                    let lib_path = resolved_lib_path?;
+                    let updated = update_script_library_file(&lib_path, |merged| {
+                        for script in imported {
+                            if let Some(existing) =
+                                merged.iter_mut().find(|s| s.name == script.name)
+                            {
+                                existing.code = script.code;
+                            } else {
+                                merged.push(script);
                             }
                         }
-                        cx.notify();
+                        Ok(())
+                    })?;
+                    Ok((count, updated))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                match bg_result {
+                    Ok((count, updated)) => {
+                        this.extensions.script_library.scripts = updated;
+                        this.extensions.script_library.feedback = Some((
+                            true,
+                            format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),
+                        ));
+                        this.error = None;
+                        this.status = format!("已导入 {count} 个 脚本。");
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(err)) => {
+                    Err(err) => {
                         this.extensions.script_library.feedback =
-                            Some((false, format!("无法打开导入文件：{err}")));
-                        cx.notify();
+                            Some((false, format!("导入 JSON 失败：{err:#}")));
                     }
-                    Err(_) => {}
                 }
+                cx.notify();
             });
         })
         .detach();
@@ -614,44 +622,60 @@ impl Workbench {
         let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) {
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if path.extension().is_none() {
+                                    path.set_extension("json");
+                                }
+                                Some(path)
+                            }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.extensions.script_library.feedback =
+                                    Some((false, format!("无法选择导出路径：{err}")));
+                                cx.notify();
+                                None
+                            }
+                            Err(_) => None,
+                        }
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &payload)
+                })
+                .await;
             let _ = owner.update(cx, |_, _, cx| {
                 this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) {
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension("json");
-                            }
-                            match mio_core::ui_files::write_export_file(&path, &payload) {
-                                Ok(()) => {
-                                    view.extensions.script_library.feedback = Some((
-                                        true,
-                                        format!(
-                                            "已导出 {count} 个 脚本到：{}",
-                                            path.display()
-                                        ),
-                                    ));
-                                    view.error = None;
-                                    view.status =
-                                        format!("已导出 脚本库到：{}", path.display());
-                                }
-                                Err(err) => {
-                                    view.extensions.script_library.feedback =
-                                        Some((false, format!("写入导出文件失败：{err}")));
-                                }
-                            }
-                            cx.notify();
+                    match write_result {
+                        Ok(()) => {
+                            view.extensions.script_library.feedback = Some((
+                                true,
+                                format!("已导出 {count} 个 脚本到：{}", path.display()),
+                            ));
+                            view.error = None;
+                            view.status = format!("已导出 脚本库到：{}", path.display());
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => {
+                        Err(err) => {
                             view.extensions.script_library.feedback =
-                                Some((false, format!("无法选择导出路径：{err}")));
-                            cx.notify();
+                                Some((false, format!("写入导出文件失败：{err}")));
                         }
-                        Err(_) => {}
                     }
+                    cx.notify();
                 })
             });
         })

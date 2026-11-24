@@ -1489,36 +1489,57 @@ impl Workbench {
         let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次 WebSocket 导出未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension("xml");
-                            }
-                            match mio_core::ui_files::write_export_file(&path, &xml_bytes) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已保存 WebSocket 条目到文件：{}",
-                                        path.display()
-                                    );
-                                    cx.notify();
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，本次 WebSocket 导出未写入磁盘。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if path.extension().is_none() {
+                                    path.set_extension("xml");
                                 }
-                                Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
+                                Some(path)
+                            }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail(format!("无法选择保存路径：{err}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => view.fail(format!("无法选择保存路径：{err}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &xml_bytes)
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status =
+                            format!("已保存 WebSocket 条目到文件：{}", path.display());
+                        cx.notify();
                     }
+                    Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
                 })
             });
         })

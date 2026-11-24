@@ -434,6 +434,9 @@ fn workbench_message_search_bars_handle_cmd_f_options_navigation_row_switch_raw_
             Some(editing::COMPOSITION_PENDING)
         );
         fixture.view.update(cx, |view, _| view.error = None);
+        // Close the open search options popover before clicking the editor underneath.
+        window.press("escape", cx);
+        window.render_frame(cx);
         window.click(("input", req_raw.entity_id()), cx);
         window.press(crate::kbd!("f"), cx);
         assert_eq!(

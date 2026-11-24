@@ -662,7 +662,9 @@ impl NativePanel {
 
     pub(crate) fn focused_document(&self) -> Option<u64> {
         let mut visible = Vec::new();
-        self.visible_documents(self.snapshot.root.as_ref().unwrap(), &mut visible);
+        if let Some(root) = self.snapshot.root.as_ref() {
+            self.visible_documents(root, &mut visible);
+        }
         self.focused_document
             .filter(|id| visible.contains(id))
             .or_else(|| visible.first().copied())
@@ -678,7 +680,9 @@ impl NativePanel {
 
     pub(in crate::plugin_panel) fn remember_visible_document(&mut self) {
         let mut visible = Vec::new();
-        self.visible_documents(self.snapshot.root.as_ref().unwrap(), &mut visible);
+        if let Some(root) = self.snapshot.root.as_ref() {
+            self.visible_documents(root, &mut visible);
+        }
         if !self
             .focused_document
             .is_some_and(|id| visible.contains(&id))
@@ -693,7 +697,10 @@ impl NativePanel {
         node: &Node,
         output: &mut Vec<u64>,
     ) {
-        match node.kind.as_ref().unwrap() {
+        let Some(kind) = node.kind.as_ref() else {
+            return;
+        };
+        match kind {
             node::Kind::Editor(editor) => output.push(editor.document_id),
             node::Kind::Row(container)
             | node::Kind::Column(container)
@@ -703,8 +710,12 @@ impl NativePanel {
                 }
             }
             node::Kind::Split(split) => {
-                self.visible_all_documents(split.first.as_ref().unwrap(), output);
-                self.visible_all_documents(split.second.as_ref().unwrap(), output);
+                if let Some(first) = split.first.as_ref() {
+                    self.visible_all_documents(first, output);
+                }
+                if let Some(second) = split.second.as_ref() {
+                    self.visible_all_documents(second, output);
+                }
             }
             node::Kind::Tabs(tabs) => {
                 let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);
@@ -722,7 +733,10 @@ impl NativePanel {
     }
 
     pub(in crate::plugin_panel) fn visible_documents(&self, node: &Node, output: &mut Vec<u64>) {
-        match node.kind.as_ref().unwrap() {
+        let Some(kind) = node.kind.as_ref() else {
+            return;
+        };
+        match kind {
             node::Kind::Editor(editor) if !editor.read_only => output.push(editor.document_id),
             node::Kind::Row(container)
             | node::Kind::Column(container)
@@ -732,8 +746,12 @@ impl NativePanel {
                 }
             }
             node::Kind::Split(split) => {
-                self.visible_documents(split.first.as_ref().unwrap(), output);
-                self.visible_documents(split.second.as_ref().unwrap(), output);
+                if let Some(first) = split.first.as_ref() {
+                    self.visible_documents(first, output);
+                }
+                if let Some(second) = split.second.as_ref() {
+                    self.visible_documents(second, output);
+                }
             }
             node::Kind::Tabs(tabs) => {
                 let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);
@@ -921,7 +939,10 @@ pub(in crate::plugin_panel) fn tone(value: i32) -> gpui_kit::Hsla {
 
 pub(in crate::plugin_panel) fn walk<'a>(node: &'a Node, output: &mut Vec<&'a Node>) {
     output.push(node);
-    match node.kind.as_ref().unwrap() {
+    let Some(kind) = node.kind.as_ref() else {
+        return;
+    };
+    match kind {
         node::Kind::Row(container)
         | node::Kind::Column(container)
         | node::Kind::ScrollColumn(container) => {
@@ -930,12 +951,18 @@ pub(in crate::plugin_panel) fn walk<'a>(node: &'a Node, output: &mut Vec<&'a Nod
             }
         }
         node::Kind::Split(split) => {
-            walk(split.first.as_ref().unwrap(), output);
-            walk(split.second.as_ref().unwrap(), output);
+            if let Some(first) = split.first.as_ref() {
+                walk(first, output);
+            }
+            if let Some(second) = split.second.as_ref() {
+                walk(second, output);
+            }
         }
         node::Kind::Tabs(tabs) => {
             for tab in &tabs.tabs {
-                walk(tab.content.as_ref().unwrap(), output);
+                if let Some(content) = tab.content.as_ref() {
+                    walk(content, output);
+                }
             }
         }
         _ => {}

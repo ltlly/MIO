@@ -235,7 +235,17 @@ impl Workbench {
                             },
                         )),
                     )
-                    .child(div().absolute().right(px(11.)).top(px(11.)).child(options)),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("dashboard-intruder-actions-wrap-{run_id}")))
+                            .occlude()
+                            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .absolute()
+                            .right(px(11.))
+                            .top(px(11.))
+                            .child(options),
+                    ),
             );
         }
         if pending {

@@ -562,19 +562,21 @@ impl Workbench {
                 return;
             }
         };
-        self.spawn_save_path_picker(
+        let byte_len = bytes.len();
+        self.spawn_export_file_picker(
             Some("selection.txt"),
-            false,
+            None,
             "项目已切换，本次文件保存操作已取消。",
             "无法选择保存路径",
+            bytes,
             window,
             cx,
-            move |view, dest, _, cx| match mio_core::ui_files::write_export_file(&dest, &bytes) {
+            move |view, dest, result, cx| match result {
                 Ok(()) => {
                     view.error = None;
                     view.status = format!(
                         "已将选中文本（{} 字节）保存到文件：{}",
-                        bytes.len(),
+                        byte_len,
                         dest.display()
                     );
                     cx.notify();
@@ -618,19 +620,21 @@ impl Workbench {
                 return;
             }
         };
-        self.spawn_save_path_picker(
+        let byte_len = bytes.len();
+        self.spawn_export_file_picker(
             Some(suggested_name),
-            false,
+            None,
             "项目已切换，本次文件保存操作已取消。",
             "无法选择保存路径",
+            bytes,
             window,
             cx,
-            move |view, dest, _, cx| match mio_core::ui_files::write_export_file(&dest, &bytes) {
+            move |view, dest, result, cx| match result {
                 Ok(()) => {
                     view.error = None;
                     view.status = format!(
                         "已将 {} 字节保存到文件：{}",
-                        bytes.len(),
+                        byte_len,
                         dest.display()
                     );
                     cx.notify();
@@ -800,7 +804,13 @@ impl Workbench {
         {
             return;
         }
-        self.spawn_open_path_picker(
+        let project = self.project;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let paths = crate::native_terminate::prompt_for_paths(
+            window,
+            cx,
             PathPromptOptions {
                 files: true,
                 directories: false,
@@ -814,46 +824,90 @@ impl Workbench {
                     .into(),
                 ),
             },
-            "项目已切换，本次从文件粘贴操作已取消。",
-            "无法选择文件",
-            window,
-            cx,
-            move |view, path, window, cx| {
-                const MAX_PASTE_FILE_BYTES: u64 = 8 * 1024 * 1024;
-                let file_bytes = match mio_core::ui_files::read_regular_file_bounded(
-                    &path,
-                    MAX_PASTE_FILE_BYTES,
-                    true,
-                    "插入文件",
-                ) {
-                    Ok(b) => b,
-                    Err(err) => {
-                        view.fail(err, cx);
+        );
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，本次从文件粘贴操作已取消。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                            Ok(Ok(None)) => None,
+                            Ok(Err(error)) => {
+                                view.fail(format!("无法选择文件：{error}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
+                            }
+                        }
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            const MAX_PASTE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+            let read_path = path.clone();
+            let read_result: Result<Vec<u8>, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let file_bytes = mio_core::ui_files::read_regular_file_bounded(
+                        &read_path,
+                        MAX_PASTE_FILE_BYTES,
+                        true,
+                        "插入文件",
+                    )?;
+                    if base64_encode {
+                        use base64::Engine as _;
+                        Ok(base64::engine::general_purpose::STANDARD
+                            .encode(&file_bytes)
+                            .into_bytes())
+                    } else {
+                        Ok(file_bytes)
+                    }
+                })
+                .await;
+            let _ = owner.update(cx, |_, window, cx| {
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        view.fail("项目已切换，本次从文件粘贴操作已取消。", cx);
                         return;
                     }
-                };
-                let insert_bytes = if base64_encode {
-                    use base64::Engine as _;
-                    base64::engine::general_purpose::STANDARD
-                        .encode(&file_bytes)
-                        .into_bytes()
-                } else {
-                    file_bytes
-                };
-                match view.insert_bytes_into_editable_target(&insert_bytes, window, cx) {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!(
-                            "已从文件插入 {} 字节：{}",
-                            insert_bytes.len(),
-                            path.display()
-                        );
-                        cx.notify();
+                    let insert_bytes = match read_result {
+                        Ok(b) => b,
+                        Err(err) => {
+                            view.fail(err, cx);
+                            return;
+                        }
+                    };
+                    match view.insert_bytes_into_editable_target(&insert_bytes, window, cx) {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!(
+                                "已从文件插入 {} 字节：{}",
+                                insert_bytes.len(),
+                                path.display()
+                            );
+                            cx.notify();
+                        }
+                        Err(err) => view.fail(err, cx),
                     }
-                    Err(err) => view.fail(err, cx),
-                }
-            },
-        );
+                })
+            });
+        })
+        .detach();
     }
 
     pub(in crate::workbench) fn insert_collaborator_payload(

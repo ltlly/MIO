@@ -178,25 +178,38 @@ struct DeferredMenu {
 
 impl DeferredMenu {
     fn build_menu(&self, window: &mut Window) -> AnyElement {
-        deferred(
-            anchored().child(
-                div()
-                    .w(window.bounds().size.width)
-                    .h(window.bounds().size.height)
-                    .on_scroll(|_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .child(
-                        anchored()
-                            .position(self.position)
-                            .snap_to_window_with_margin(px(8.))
-                            .anchor(self.anchor)
-                            .child(self.menu_view.clone()),
+        let menu_view = self.menu_view.clone();
+        div()
+            .child(
+                deferred(
+                    anchored().position(gpui::Point::default()).child(
+                        div()
+                            .occlude()
+                            .w(window.bounds().size.width)
+                            .h(window.bounds().size.height)
+                            .on_any_mouse_down(move |_, window, cx| {
+                                cx.stop_propagation();
+                                menu_view
+                                    .update(cx, |menu, cx| menu.dismiss_from_backdrop(window, cx));
+                            })
+                            .on_scroll(|_, _, cx| {
+                                cx.stop_propagation();
+                            }),
                     ),
-            ),
-        )
-        .with_priority(gpui_base::POPUP_PRIORITY)
-        .into_any()
+                )
+                .with_priority(gpui_base::POPUP_PRIORITY.saturating_sub(1)),
+            )
+            .child(
+                deferred(
+                    anchored()
+                        .position(self.position)
+                        .snap_to_window_with_margin(px(8.))
+                        .anchor(self.anchor)
+                        .child(self.menu_view.clone()),
+                )
+                .with_priority(gpui_base::POPUP_PRIORITY),
+            )
+            .into_any()
     }
 }
 
@@ -478,14 +491,19 @@ fn open_menu(
                 build(menu, window, cx)
             });
             let trigger_focus_handle = shared_state.borrow().trigger_focus_handle.clone();
+            let dismiss_shared = Rc::downgrade(&shared_state);
             menu.update(cx, |menu, cx| {
                 menu.set_trigger_focus(trigger_focus_handle, cx);
                 menu.set_previous_focus(previous_focus_handle, cx);
+                menu.set_on_dismiss(move |window, _cx| {
+                    if let Some(shared_state) = dismiss_shared.upgrade() {
+                        let mut state = shared_state.borrow_mut();
+                        state.open = false;
+                        state.selection_input = None;
+                        window.refresh();
+                    }
+                });
             });
-
-            // A menu on another element must not keep the last
-            // focused input highlighted. An explicit action target
-            // takes precedence over where the press landed.
             let selection_input = selection_input.filter(|input| {
                 let Some(bounds) = input.input_bounds(cx) else {
                     return false;

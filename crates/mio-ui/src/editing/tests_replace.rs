@@ -111,9 +111,11 @@ fn message_editor_replace_bar_supports_confirm_regex_case_undo_ime_and_payload_m
         window.render_frame(cx);
         window.click("test-search-replace-toggle", cx);
         window.render_frame(cx);
+        // Dismiss the open search options popover (clicking outside consumes the click to close).
+        window.click("test-search-options", cx);
+        window.render_frame(cx);
     })
     .unwrap();
-
     cx.update_window(window, |_, window, cx| {
         let before_third = harness.update(cx, |h, cx| {
             assert!(h.editor.replace_open);

@@ -3,11 +3,10 @@ use std::{cell::Cell, rc::Rc};
 use gpui::{
     Anchor, AnyElement, App, Bounds, Div, ElementId, InteractiveElement, Interactivity,
     IntoElement, ParentElement, Pixels, Point, RenderOnce, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, canvas, deferred, div, point, px,
+    StyleRefinement, Styled, Window, anchored, canvas, deferred, div, point, px,
 };
 
 use crate::{Positioner, ResolvedPosition, StyledExt as _};
-
 /// Distance kept between a popup and the window edge.
 const WINDOW_MARGIN: Pixels = px(8.);
 
@@ -34,10 +33,10 @@ pub struct Popup {
     offset: Pixels,
     margin: Pixels,
     on_position: Option<Box<dyn Fn(ResolvedPosition, Bounds<Pixels>)>>,
+    on_backdrop_press: Option<Box<dyn Fn(&mut Window, &mut App)>>,
     trigger: AnyElement,
     content: Option<AnyElement>,
 }
-
 impl Popup {
     pub fn new(id: impl Into<ElementId>, trigger: impl IntoElement) -> Self {
         let id = id.into();
@@ -49,11 +48,11 @@ impl Popup {
             offset: px(0.),
             margin: WINDOW_MARGIN,
             on_position: None,
+            on_backdrop_press: None,
             trigger: trigger.into_any_element(),
             content: None,
         }
     }
-
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
         self
@@ -79,11 +78,18 @@ impl Popup {
         self
     }
 
+    pub fn on_backdrop_press(
+        mut self,
+        callback: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_backdrop_press = Some(Box::new(callback));
+        self
+    }
+
     pub fn content(mut self, content: impl IntoElement) -> Self {
         self.content = Some(content.into_any_element());
         self
     }
-
     pub fn resolved_corner(anchor: Anchor, trigger_bounds: Bounds<Pixels>) -> Point<Pixels> {
         match anchor {
             Anchor::TopLeft => trigger_bounds.origin,
@@ -196,17 +202,33 @@ impl RenderOnce for Popup {
         } else {
             positioner
         };
-        root.child(
-            deferred(
-                positioner
-                    .margin(self.margin)
-                    // The host blocks the mouse, so no caller has to remember:
-                    // what a popup covers belongs to the popup.
-                    .occlude()
-                    .child(content),
+        let positioned = positioner
+            .margin(self.margin)
+            // The host blocks the mouse, so no caller has to remember:
+            // what a popup covers belongs to the popup.
+            .occlude()
+            .child(content);
+        if let Some(on_backdrop_press) = self.on_backdrop_press {
+            root.child(
+                deferred(
+                    anchored().position(Point::default()).child(
+                        div()
+                            .occlude()
+                            .w(window.bounds().size.width)
+                            .h(window.bounds().size.height)
+                            .on_any_mouse_down(move |_, window, cx| {
+                                cx.stop_propagation();
+                                on_backdrop_press(window, cx);
+                            })
+                            .on_scroll(|_, _, cx| cx.stop_propagation()),
+                    ),
+                )
+                .with_priority(POPUP_PRIORITY.saturating_sub(1)),
             )
-            .with_priority(POPUP_PRIORITY),
-        )
+            .child(deferred(positioned).with_priority(POPUP_PRIORITY))
+        } else {
+            root.child(deferred(positioned).with_priority(POPUP_PRIORITY))
+        }
     }
 }
 

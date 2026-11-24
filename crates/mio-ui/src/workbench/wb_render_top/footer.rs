@@ -830,6 +830,32 @@ impl Workbench {
                                 )
                             }),
                     )
+                    .when(
+                        matches!(
+                            self.transition,
+                            Some(
+                                TransitionPhase::Quiescing
+                                    | TransitionPhase::Ready
+                                    | TransitionPhase::Saving(_)
+                            )
+                        ),
+                        |this| {
+                            this.child(
+                                div()
+                                    .ml(px(12.))
+                                    .flex_shrink_0()
+                                    .child(
+                                        button("cancel-transition", "取消切换/退出")
+                                            .h(theme::scaled_px(20.).max(px(20.)))
+                                            .icon(gpui_kit::assets::IconName::Ban)
+                                            .tooltip("中止正在进行的项目切换或退出流程并留在当前项目")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.cancel_transition(cx)),
+                                            ),
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .id("project-status")
@@ -1012,33 +1038,6 @@ impl Workbench {
                                         .text_color(theme::foreground()),
                                     ),
                             ),
-                    )
-                    .when(
-                        matches!(
-                            self.transition,
-                            Some(
-                                TransitionPhase::Quiescing
-                                    | TransitionPhase::Ready
-                                    | TransitionPhase::Saving(_)
-                            )
-                        ),
-                        |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left(px(250.))
-                                    .top(px(10.))
-                                    .child(
-                                        button("cancel-transition", "取消切换/退出")
-                                            .h(theme::scaled_px(20.).max(px(20.)))
-                                            .icon(gpui_kit::assets::IconName::Ban)
-                                            .tooltip("中止正在进行的项目切换或退出流程并留在当前项目")
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.cancel_transition(cx)),
-                                            ),
-                                    ),
-                            )
-                        },
                     )
             .into_any_element();
         div().w_full().flex_shrink_0().flex().flex_col()

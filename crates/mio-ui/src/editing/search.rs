@@ -496,6 +496,7 @@ impl MessageEditor {
                                             )))
                                             .anchor(gpui_kit::Anchor::RightCenter)
                                             .default_open(true)
+                                            .overlay_closable(false)
                                             .p(px(5.))
                                             .bg(field_bg)
                                             .trigger(

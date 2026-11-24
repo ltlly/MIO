@@ -255,11 +255,12 @@ impl State {
 
     pub(super) async fn authority(&mut self) -> Result<MitmAuthority> {
         if self.preferences.is_isolated() {
-            if self.proxy.ca.is_none() {
-                let ca = tokio::task::spawn_blocking(MitmAuthority::generate).await??;
-                self.proxy.ca = Some(ca);
+            if let Some(ca) = &self.proxy.ca {
+                return Ok(ca.clone());
             }
-            return Ok(self.proxy.ca.as_ref().unwrap().clone());
+            let ca = tokio::task::spawn_blocking(MitmAuthority::generate).await??;
+            self.proxy.ca = Some(ca.clone());
+            return Ok(ca);
         }
         let identity_dir = self.identity_dir()?;
         let current_stamp = self.proxy.ca_stamp.clone();
@@ -283,7 +284,10 @@ impl State {
                 self.emit(Event::CaRegenerated { fingerprint }).await;
             }
         }
-        Ok(self.proxy.ca.as_ref().unwrap().clone())
+        self.proxy
+            .ca
+            .clone()
+            .context("MITM CA 证书尚未加载")
     }
 
     pub(super) async fn sync_shared_state_from_disk(&mut self) {

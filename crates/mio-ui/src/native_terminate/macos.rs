@@ -176,6 +176,25 @@ impl NativeTerminate {
         Ok(true)
     }
 
+    pub(crate) fn extend_deadline_for_user_interaction(&self) {
+        let timer = {
+            let mut state = self.0.borrow_mut();
+            let Some(pending) = &mut state.pending else {
+                return;
+            };
+            if pending.delivered || pending.decision.is_some() || pending.timed_out {
+                return;
+            }
+            if Instant::now() >= pending.deadline {
+                return;
+            }
+            pending.deadline = Instant::now() + Duration::from_secs_f64(TERMINATE_TIMEOUT);
+            pending.timer.clone()
+        };
+        let fire_date = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(TERMINATE_TIMEOUT);
+        timer.setFireDate(&fire_date);
+    }
+
     pub(crate) fn reject(&self) {
         let id = {
             let mut state = self.0.borrow_mut();
@@ -188,7 +207,6 @@ impl NativeTerminate {
         };
         self.schedule_reply(id);
     }
-
     pub(crate) fn acknowledge_timeout(&self, id: u64) {
         let mut state = self.0.borrow_mut();
         if let Some(pending) = &mut state.pending

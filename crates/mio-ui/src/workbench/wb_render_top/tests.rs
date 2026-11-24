@@ -1,4 +1,4 @@
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestEventExt, TestWindowExt};
 use gpui_kit::{EntityInputHandler, TestAppContext};
 use mio_core::{
     AuditCommand, AuditEvent, AuditStateSnapshot, AuditTaskMode, AuditTaskState,
@@ -462,6 +462,110 @@ fn discover_tab_and_suite_ai_button_navigate_and_copy_real_ipc_command(
         window.click("discover-card-organiser", cx);
         window.render_frame(cx);
         assert_eq!(f.view.read(cx).tool, Tool::Organiser);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn global_overlays_and_dropdown_dismiss_do_not_penetrate_underneath_controls(
+    cx: &mut TestAppContext,
+) {
+    let mut f = fixture(cx, vec![tab("1: /api")], 32);
+    drain(&mut f.commands);
+
+    // 1. Open Command Palette over Discover page; clicking its backdrop over a Discover card
+    // must dismiss the palette without activating the underlying Discover card.
+    cx.update_window(f.window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tool-discover", cx);
+        window.render_frame(cx);
+        assert_eq!(f.view.read(cx).tool, Tool::Discover);
+
+        let underlying_card_center = window.find("discover-card-organiser").bounds().center();
+        window.click("discover-card-command-palette", cx);
+        window.render_frame(cx);
+        assert!(f.view.read(cx).command_palette_open);
+        assert!(window.find("global-command-palette-overlay").visible());
+
+        window.pointer_down(underlying_card_center, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(underlying_card_center, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert!(
+            !f.view.read(cx).command_palette_open,
+            "clicking backdrop must close command palette"
+        );
+        assert_eq!(
+            f.view.read(cx).tool,
+            Tool::Discover,
+            "backdrop dismiss click must not penetrate to underlying Discover card"
+        );
+    })
+    .unwrap();
+
+    // 2. Open CSRF PoC modal over Discover page; clicking the backdrop over the underlying card
+    // must close the modal without triggering the underlying card.
+    cx.update_window(f.window, |_, window, cx| {
+        let underlying_card_center = window.find("discover-card-organiser").bounds().center();
+        f.view.update(cx, |view, cx| {
+            view.csrf_poc_modal = Some(("CSRF PoC 预览".into(), "<html><body>ok</body></html>".into()));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("csrf-poc-modal").visible());
+
+        let backdrop = window.find("csrf-poc-modal-backdrop").bounds();
+        let outside_point = gpui_kit::point(backdrop.origin.x + px(8.), backdrop.origin.y + px(8.));
+        window.pointer_down(outside_point, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(outside_point, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert!(f.view.read(cx).csrf_poc_modal.is_none());
+
+        // Reopen modal and click directly over the underlying card position if outside modal.
+        f.view.update(cx, |view, cx| {
+            view.csrf_poc_modal = Some(("CSRF PoC 预览".into(), "<html><body>ok</body></html>".into()));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.pointer_down(underlying_card_center, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(underlying_card_center, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert_eq!(
+            f.view.read(cx).tool,
+            Tool::Discover,
+            "clicking over CSRF PoC modal/backdrop must never penetrate to underlying Discover card"
+        );
+        f.view.update(cx, |view, cx| {
+            view.csrf_poc_modal = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // 3. Open a Repeater dropdown menu and dismiss it by clicking over another tool tab;
+    // the outside click must close the menu without switching tools.
+    cx.update_window(f.window, |_, window, cx| {
+        window.click("tool-repeater", cx);
+        window.render_frame(cx);
+        assert_eq!(f.view.read(cx).tool, Tool::Repeater);
+        let target_tab_center = window.find("tool-target").bounds().center();
+
+        window.click("repeater-settings-menu", cx);
+        window.render_frame(cx);
+        assert!(window.find("popup-menu").visible());
+
+        window.pointer_down(target_tab_center, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(target_tab_center, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("popup-menu").is_none(),
+            "outside click must dismiss dropdown menu"
+        );
+        assert_eq!(
+            f.view.read(cx).tool,
+            Tool::Repeater,
+            "dismissing dropdown menu must not pass click through to tool tab underneath"
+        );
     })
     .unwrap();
 }

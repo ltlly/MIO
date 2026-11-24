@@ -333,6 +333,7 @@ pub struct PopupMenu {
     /// reaches it, while the scroll offset is still baked into its anchor.
     priority: usize,
 
+    on_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -360,6 +361,7 @@ impl PopupMenu {
             flush_swatches: false,
             submenu_anchor: (Anchor::TopLeft, Pixels::ZERO),
             priority: gpui_base::POPUP_PRIORITY,
+            on_dismiss: None,
             _subscriptions: vec![],
         }
     }
@@ -895,7 +897,6 @@ impl PopupMenu {
         self.selected_index = Some(ix);
         self.activate(event, window, cx);
     }
-
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         self.activate(&ClickEvent::default(), window, cx);
     }
@@ -947,13 +948,16 @@ impl PopupMenu {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(context) = self.resolved_action_context(cx) {
+        let target = self
+            .resolved_action_context(cx)
+            .or_else(|| self.trigger_focus_handle.clone())
+            .or_else(|| self.previous_focus_handle.clone());
+        if let Some(context) = target {
             context.focus(window, cx);
         }
 
         window.dispatch_action(action.boxed_clone(), cx);
     }
-
     fn resolved_action_context(&self, cx: &App) -> Option<FocusHandle> {
         self.action_context.clone().or_else(|| {
             let parent = self.parent_menu.as_ref()?.upgrade()?;
@@ -1122,11 +1126,20 @@ impl PopupMenu {
         }
     }
 
+    pub(crate) fn set_on_dismiss(&mut self, callback: impl Fn(&mut Window, &mut App) + 'static) {
+        self.on_dismiss = Some(Rc::new(callback));
+    }
+
+    pub(crate) fn dismiss_from_backdrop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss(&Cancel, window, cx);
+    }
+
     /// Dismiss the menu and the entire parent chain.
     ///
     /// The submenu is closed together with its parent, same as macOS menus.
     fn dismiss(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_index = None;
+        let on_dismiss = self.on_dismiss.clone();
         cx.emit(DismissEvent);
 
         // Focus back to the previous focused handle, unless the item's click
@@ -1143,11 +1156,12 @@ impl PopupMenu {
                 window.focus(handle, cx);
             }
         }
-
+        if let Some(callback) = on_dismiss {
+            callback(window, cx);
+        }
         let Some(parent_menu) = self.parent_menu.clone() else {
             return;
         };
-
         // Dismiss parent menu, when this menu is dismissed
         _ = parent_menu.update(cx, |view, cx| {
             view.dismiss(&Cancel, window, cx);
@@ -1642,6 +1656,7 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
             .when(self.compact, |this| {

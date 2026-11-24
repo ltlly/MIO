@@ -29,7 +29,10 @@ impl NativePanel {
         let newer_revision = snapshot.revision > self.snapshot.revision;
         let sync_cutoff = synced_ui_seq.unwrap_or(u64::MAX);
         let mut nodes = Vec::new();
-        walk(snapshot.root.as_ref().unwrap(), &mut nodes);
+        let Some(root) = snapshot.root.as_ref() else {
+            return Err("插件面板缺少根节点。".into());
+        };
+        walk(root, &mut nodes);
         let ids: HashSet<_> = nodes.iter().map(|node| node.id).collect();
         let pending_input: HashSet<_> = self
             .documents
@@ -51,9 +54,12 @@ impl NativePanel {
             document.live = false;
         }
         for node in &nodes {
-            match node.kind.as_ref().unwrap() {
+            let Some(kind) = node.kind.as_ref() else {
+                continue;
+            };
+            match kind {
                 node::Kind::Editor(editor) => {
-                    let format = EditorFormat::try_from(editor.format).unwrap();
+                    let format = EditorFormat::try_from(editor.format).unwrap_or(EditorFormat::Utf8);
                     if let Some(document) = self.documents.get_mut(&editor.document_id) {
                         document.live = true;
                         document.node_id = node.id;
@@ -310,7 +316,9 @@ impl NativePanel {
         cx: &mut Context<Self>,
     ) {
         let mut visible = Vec::new();
-        self.visible_nodes(self.snapshot.root.as_ref().unwrap(), &mut visible);
+        if let Some(root) = self.snapshot.root.as_ref() {
+            self.visible_nodes(root, &mut visible);
+        }
         let visible: HashSet<_> = visible.into_iter().collect();
         for (id, drawing) in &mut self.drawings {
             if !visible.contains(id) {
@@ -376,7 +384,9 @@ impl NativePanel {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.image_task = None;
                 let mut visible = Vec::new();
-                this.visible_nodes(this.snapshot.root.as_ref().unwrap(), &mut visible);
+                if let Some(root) = this.snapshot.root.as_ref() {
+                    this.visible_nodes(root, &mut visible);
+                }
                 for (id, model, result) in result {
                     if let Some(drawing) = this.drawings.get_mut(&id)
                         && drawing.model == model
@@ -407,7 +417,10 @@ impl NativePanel {
 
     pub(in crate::plugin_panel) fn visible_nodes(&self, node: &Node, output: &mut Vec<u64>) {
         output.push(node.id);
-        match node.kind.as_ref().unwrap() {
+        let Some(kind) = node.kind.as_ref() else {
+            return;
+        };
+        match kind {
             node::Kind::Row(container)
             | node::Kind::Column(container)
             | node::Kind::ScrollColumn(container) => {
@@ -416,8 +429,12 @@ impl NativePanel {
                 }
             }
             node::Kind::Split(split) => {
-                self.visible_nodes(split.first.as_ref().unwrap(), output);
-                self.visible_nodes(split.second.as_ref().unwrap(), output);
+                if let Some(first) = split.first.as_ref() {
+                    self.visible_nodes(first, output);
+                }
+                if let Some(second) = split.second.as_ref() {
+                    self.visible_nodes(second, output);
+                }
             }
             node::Kind::Tabs(tabs) => {
                 let active = self.overlays.latest_tab(node.id).unwrap_or(tabs.active);

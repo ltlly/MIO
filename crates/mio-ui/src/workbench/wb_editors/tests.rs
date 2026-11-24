@@ -248,7 +248,9 @@ fn ext_message_editor_two_row_header_search_gear_menu_and_send_cancel_coplace(
         window.click("repeater-request-search-case", cx);
         window.render_frame(cx);
         assert!(f.view.read(cx).tab_editors[&tab_id].request.case_sensitive());
-
+        // Dismiss the open search options popover before clicking controls underneath it.
+        window.press("escape", cx);
+        window.render_frame(cx);
         // 5. Inspector sidebar width and 39px section headers.
         let inspector_bounds = window.find("inspector-sidebar").bounds();
         assert_eq!(inspector_bounds.size.width, px(343.));

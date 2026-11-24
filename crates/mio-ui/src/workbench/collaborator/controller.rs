@@ -569,30 +569,49 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                    return;
-                }
-                match result {
-                    Ok(Ok(Some(path))) => {
-                        match mio_core::ui_files::write_export_file(&path, json.as_bytes()) {
-                            Ok(()) => {
-                                view.collaborator_pane.error = None;
-                                let msg =
-                                    format!("已导出 {count} 条交互记录到 {}。", path.display());
-                                view.collaborator_pane.notice = Some(msg.clone());
-                                view.status = msg;
-                            }
-                            Err(err) => {
-                                view.fail_collaborator(format!("导出交互记录失败：{err}"), cx);
-                            }
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match result {
+                        Ok(Ok(Some(path))) => Some(path),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(err)) => {
+                            view.fail_collaborator(format!("无法选择导出路径：{err}"), cx);
+                            cx.notify();
+                            None
+                        }
+                        Err(_) => {
+                            view.fail_collaborator("文件选择器已关闭。", cx);
+                            cx.notify();
+                            None
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(err)) => {
-                        view.fail_collaborator(format!("无法选择导出路径：{err}"), cx);
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, json.as_bytes())
+                })
+                .await;
+            let _ = this.update_in(cx, |view, _, cx| {
+                match write_result {
+                    Ok(()) => {
+                        view.collaborator_pane.error = None;
+                        let msg = format!("已导出 {count} 条交互记录到 {}。", path.display());
+                        view.collaborator_pane.notice = Some(msg.clone());
+                        view.status = msg;
                     }
-                    Err(_) => view.fail_collaborator("文件选择器已关闭。", cx),
+                    Err(err) => {
+                        view.fail_collaborator(format!("导出交互记录失败：{err}"), cx);
+                    }
                 }
                 cx.notify();
             });

@@ -153,21 +153,21 @@ impl Workbench {
                                             .text_size(px(28.))
                                             .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_color(rgb(0xdb612f))
-                                            .child("MIO,"),
+                                            .child("MIO"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(28.))
                                             .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_color(theme::foreground())
-                                            .child("redefined."),
+                                            .child("工作台与智能体协同"),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.))
                                     .text_color(theme::foreground())
-                                    .child("MioAT brings agentic AI to human-led pentesting with MIO's proven tools, project context, and purpose-built skills."),
+                                    .child("MioAT 将代理智能体工作流与 MIO 的流量代理、项目上下文和专业安全工具结合，辅助人工安全测试与自动化验证。"),
                             )
                             .child(
                                 div()
@@ -221,8 +221,8 @@ impl Workbench {
                                             .small()
                                             .w(px(143.))
                                             .h(px(23.))
-                                            .label("Launch MioAT")
-                                            .accessibility_label("Launch MioAT")
+                                            .label("复制 CLI 接入命令")
+                                            .accessibility_label("复制 CLI 接入命令")
                                             .tooltip("复制 mio-cli Agent IPC 接入命令到剪贴板")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.write_to_clipboard(
@@ -241,8 +241,8 @@ impl Workbench {
                                             .small()
                                             .w(px(128.))
                                             .h(px(23.))
-                                            .label("Learn more")
-                                            .accessibility_label("Learn more")
+                                            .label("复制 Socket 路径")
+                                            .accessibility_label("复制 Socket 路径")
                                             .tooltip("复制当前 MIO_IPC_SOCKET 套接字路径到剪贴板")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.write_to_clipboard(
@@ -289,7 +289,7 @@ impl Workbench {
                             .text_size(px(18.))
                             .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(theme::foreground())
-                            .child("Discover more"),
+                            .child("探索更多能力"),
                     )
                     .child(
                         div()
@@ -299,16 +299,16 @@ impl Workbench {
                             .gap(px(14.))
                             .child(self.render_discover_card(
                                 "discover-card-command-palette",
-                                "Go faster with command palette",
-                                "Find and run MIO commands instantly to keep your workflow moving without digging through menus.",
+                                "命令面板快速直达",
+                                "通过命令面板即时搜索并执行 MIO 常用操作，无需在多层菜单中来回查找。",
                                 cx.listener(|this, _, window, cx| {
                                     this.open_command_palette(window, cx);
                                 }),
                             ))
                             .child(self.render_discover_card(
                                 "discover-card-custom-logic",
-                                "Customize MIO with your own logic",
-                                "Shape your workflow and surface the data that matters most using custom actions, columns, and filters.",
+                                "使用自定义逻辑扩展 MIO",
+                                "通过自定义动作、脚本列和筛选脚本定制分析工作流，快速聚焦关键请求与响应。",
                                 cx.listener(|this, _, window, cx| {
                                     this.select_tool(Tool::Proxy, window, cx);
                                     this.proxy_page = ProxyPage::History;
@@ -317,8 +317,8 @@ impl Workbench {
                             ))
                             .child(self.render_discover_card(
                                 "discover-card-scan-checks",
-                                "Extend scanning with custom scan checks",
-                                "Import or create additional checks to expand what MIO Scanner looks for during a scan.",
+                                "使用自定义检查扩展扫描",
+                                "导入或编写自定义扫描规则，扩展 MIO 审计扫描器在主动与被动检测中的覆盖能力。",
                                 cx.listener(|this, _, _, cx| {
                                     this.open_dashboard(cx);
                                     this.audit_dashboard.new_scan_open = true;
@@ -327,8 +327,8 @@ impl Workbench {
                             ))
                             .child(self.render_discover_card(
                                 "discover-card-organiser",
-                                "Share your findings securely",
-                                "Use collections to group requests and responses and share them through a single, secure link.",
+                                "整理与归档测试发现",
+                                "使用集合分组整理关键请求与响应记录，便于持续跟进、对比与导出共享。",
                                 cx.listener(|this, _, window, cx| {
                                     this.select_tool(Tool::Organiser, window, cx);
                                 }),
@@ -388,8 +388,8 @@ impl Workbench {
                             .small()
                             .w(px(145.))
                             .h(px(23.))
-                            .label("Take me there")
-                            .accessibility_label(format!("Take me there: {title}"))
+                            .label("立即前往")
+                            .accessibility_label(format!("立即前往：{title}"))
                             .on_click(on_take_me_there),
                     ),
             )

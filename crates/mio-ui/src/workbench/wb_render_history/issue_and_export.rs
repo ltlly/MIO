@@ -473,26 +473,22 @@ impl Workbench {
                 return;
             }
         };
-        self.spawn_save_path_picker(
+        self.spawn_export_file_picker(
             Some("item.xml"),
-            false,
+            Some("xml"),
             "项目已切换，本次文件导出未写入磁盘。",
             "无法选择保存路径",
+            payload,
             window,
             cx,
-            move |view, mut path, _, cx| {
-                if path.extension().is_none() {
-                    path.set_extension("xml");
+            move |view, path, result, cx| match result {
+                Ok(()) => {
+                    view.error = None;
+                    view.status = format!("已导出当前条目到文件：{}", path.display());
+                    cx.notify();
                 }
-                match mio_core::ui_files::write_export_file(&path, &payload) {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!("已导出当前条目到文件：{}", path.display());
-                        cx.notify();
-                    }
-                    Err(err) => {
-                        view.fail(format!("写入导出文件失败：{err}"), cx);
-                    }
+                Err(err) => {
+                    view.fail(format!("写入导出文件失败：{err}"), cx);
                 }
             },
         );
@@ -532,26 +528,22 @@ impl Workbench {
         } else {
             "history-item.har"
         };
-        self.spawn_save_path_picker(
+        self.spawn_export_file_picker(
             Some(suggested_name),
-            false,
+            Some(if as_xml { "xml" } else { "har" }),
             "项目已切换，本次文件导出未写入磁盘。",
             "无法选择保存路径",
+            payload,
             window,
             cx,
-            move |view, mut path, _, cx| {
-                if path.extension().is_none() {
-                    path.set_extension(if as_xml { "xml" } else { "har" });
+            move |view, path, result, cx| match result {
+                Ok(()) => {
+                    view.error = None;
+                    view.status = format!("已导出选中历史记录到文件：{}", path.display());
+                    cx.notify();
                 }
-                match mio_core::ui_files::write_export_file(&path, &payload) {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!("已导出选中历史记录到文件：{}", path.display());
-                        cx.notify();
-                    }
-                    Err(err) => {
-                        view.fail(format!("写入导出文件失败：{err}"), cx);
-                    }
+                Err(err) => {
+                    view.fail(format!("写入导出文件失败：{err}"), cx);
                 }
             },
         );

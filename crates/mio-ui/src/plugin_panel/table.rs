@@ -46,11 +46,10 @@ impl NativePanel {
             self.show_diagnostic("表格行数已更新；旧视图翻页未执行，请重试", cx);
             return;
         }
-        if !self.tables.contains_key(&id) {
-            return;
-        }
         let seq = self.next_ui_seq();
-        let table = self.tables.get_mut(&id).unwrap();
+        let Some(table) = self.tables.get_mut(&id) else {
+            return;
+        };
         let revision = table.viewport.request_page(offset, seq);
         table.selected.clear();
         table.anchor = None;
@@ -86,7 +85,9 @@ impl NativePanel {
         let Some(record) = model.rows.get(row) else {
             return;
         };
-        let table = self.tables.get_mut(&id).unwrap();
+        let Some(table) = self.tables.get_mut(&id) else {
+            return;
+        };
         table.cursor = Some(row);
         if model.multi_select && modifiers.shift {
             let anchor = table.anchor.unwrap_or(row).min(model.rows.len() - 1);
@@ -132,7 +133,9 @@ impl NativePanel {
             self.key(id, event, cx);
             return;
         }
-        let table = &self.tables[&id];
+        let Some(table) = self.tables.get(&id) else {
+            return;
+        };
         let row = match event.keystroke.key.as_str() {
             "up" => Some(table.cursor.unwrap_or(1).saturating_sub(1)),
             "down" => Some(table.cursor.map_or(0, |row| (row + 1).min(count - 1))),
@@ -140,10 +143,11 @@ impl NativePanel {
             "end" => Some(count - 1),
             "a" if event.keystroke.modifiers.secondary(cx) && model.multi_select => {
                 let row_ids: Vec<_> = model.rows.iter().map(|row| row.id.clone()).collect();
-                let table = self.tables.get_mut(&id).unwrap();
-                table.selected = row_ids.clone();
-                table.anchor = Some(0);
-                table.cursor = Some(count - 1);
+                if let Some(table) = self.tables.get_mut(&id) {
+                    table.selected = row_ids.clone();
+                    table.anchor = Some(0);
+                    table.cursor = Some(count - 1);
+                }
                 self.emit(
                     id,
                     ui_event::Event::TableSelection(TableSelection { row_ids }),
@@ -163,9 +167,9 @@ impl NativePanel {
                 },
                 cx,
             );
-            self.tables[&id]
-                .scroll
-                .scroll_to_item(row, ScrollStrategy::Top);
+            if let Some(table) = self.tables.get(&id) {
+                table.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            }
         }
         self.key(id, event, cx);
     }
@@ -210,17 +214,13 @@ impl NativePanel {
             model.rows.len(),
             move |range, _, _| {
                 let row_scale = crate::theme::ui_scale();
-                let node::Kind::VirtualTable(table) = snapshot
+                let Some(node::Kind::VirtualTable(table)) = snapshot
                     .root
                     .as_ref()
-                    .unwrap()
-                    .find(id)
-                    .unwrap()
-                    .kind
-                    .as_ref()
-                    .unwrap()
+                    .and_then(|root| root.find(id))
+                    .and_then(|node| node.kind.as_ref())
                 else {
-                    unreachable!()
+                    return Vec::new();
                 };
                 range
                     .filter_map(|index| table.rows.get(index).map(|row| (index, row)))

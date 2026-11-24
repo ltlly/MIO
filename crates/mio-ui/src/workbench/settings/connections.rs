@@ -479,12 +479,6 @@ impl Settings {
             );
         }
 
-        let bypass_empty = self
-            .connections
-            .socks_bypass_input
-            .read(cx)
-            .value()
-            .is_empty();
         div()
             .flex()
             .flex_col()
@@ -522,7 +516,6 @@ impl Settings {
                     )
                     .child(
                         div()
-                            .relative()
                             .flex_1()
                             .min_w_0()
                             .child(
@@ -532,24 +525,6 @@ impl Settings {
                                     .small()
                                     .disabled(!enabled),
                             )
-                            .when(bypass_empty, |this| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .px(px(9.))
-                                        .flex()
-                                        .items_center()
-                                        .italic()
-                                        .text_size(theme::ui_font_size())
-                                        .text_color(rgb(if theme::is_dark() {
-                                            0xc4c7ce
-                                        } else {
-                                            0x333333
-                                        }))
-                                        .child("输入新条目"),
-                                )
-                            }),
                     ),
             )
             .into_any_element()

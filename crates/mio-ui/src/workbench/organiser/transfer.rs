@@ -527,37 +527,60 @@ impl Workbench {
         let item_number = item.number;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次条目导出未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension("xml");
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，本次条目导出未写入磁盘。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if path.extension().is_none() {
+                                    path.set_extension("xml");
+                                }
+                                Some(path)
                             }
-                            match mio_core::ui_files::write_export_file(&path, &xml_payload) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已保存 Organizer #{item_number} 到文件：{}",
-                                        path.display()
-                                    );
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("写入导出文件失败：{err}"), cx);
-                                }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(error)) => {
+                                view.fail(format!("无法选择保存路径：{error}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(error)) => view.fail(format!("无法选择保存路径：{error}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &xml_payload)
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!(
+                            "已保存 Organizer #{item_number} 到文件：{}",
+                            path.display()
+                        );
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("写入导出文件失败：{err}"), cx);
                     }
                 })
             });

@@ -163,38 +163,61 @@ impl Workbench {
         let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，分支报告未写入磁盘。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut path))) => {
-                            if path.extension().is_none() {
-                                path.set_extension(if as_html { "html" } else { "json" });
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，分支报告未写入磁盘。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if path.extension().is_none() {
+                                    path.set_extension(if as_html { "html" } else { "json" });
+                                }
+                                Some(path)
                             }
-                            match mio_core::ui_files::write_export_file(&path, &payload) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status = format!(
-                                        "已保存分支漏洞报告到文件：{}（共 {} 条告警）",
-                                        path.display(),
-                                        finding_count
-                                    );
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("写入分支漏洞报告失败：{err}"), cx);
-                                }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail(format!("无法选择报告保存路径：{err}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => view.fail(format!("无法选择报告保存路径：{err}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &payload)
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!(
+                            "已保存分支漏洞报告到文件：{}（共 {} 条告警）",
+                            path.display(),
+                            finding_count
+                        );
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("写入分支漏洞报告失败：{err}"), cx);
                     }
                 })
             });

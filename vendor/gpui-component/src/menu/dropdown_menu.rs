@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, FocusHandle,
-    Focusable, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    ParentElement, RenderOnce, SharedString, Styled, Window, prelude::FluentBuilder,
+    Anchor, AnyElement, App, Context, Element, ElementId, Entity, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
+    RenderOnce, SharedString, Styled, Window, prelude::FluentBuilder,
 };
 
 use crate::{Selectable, button::Button, menu::PopupMenu, popover::Popover};
@@ -140,17 +140,29 @@ where
         let horizontal_offset = self.horizontal_offset;
         let menu_state =
             window.use_keyed_state(self.id.clone(), cx, |_, _| DropdownMenuState::default());
-
+        let parent_view_id = window.current_view();
+        let dismiss_menu_state = menu_state.clone();
         Popover::new(SharedString::from(format!("popover:{}", self.id)))
             .appearance(false)
-            .overlay_closable(false)
+            .overlay_closable(true)
             .trigger(self.trigger)
             .anchor(self.anchor)
             .when_some(self.offset, |this, offset| this.offset(offset))
             .when_some(self.margin, |this, margin| this.margin(margin))
             .when_some(self.trigger_style, |this, style| this.trigger_style(style))
-            .when_some(self.on_open_change, |this, callback| {
-                this.on_open_change(move |open, window, cx| callback(open, window, cx))
+            .on_open_change({
+                let on_open_change = self.on_open_change.clone();
+                move |open, window, cx| {
+                    if !*open {
+                        let active = dismiss_menu_state.update(cx, |state, _| state.menu.take());
+                        if let Some(menu) = active {
+                            menu.update(cx, |menu, cx| menu.dismiss_from_backdrop(window, cx));
+                        }
+                    }
+                    if let Some(callback) = on_open_change.as_ref() {
+                        callback(open, window, cx);
+                    }
+                }
             })
             .content(move |_, window, cx| {
                 // Here is special logic to only create the PopupMenu once and reuse it.
@@ -166,43 +178,29 @@ where
                         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
                             builder(menu, window, cx)
                         });
+                        let popover_state = cx.entity().downgrade();
+                        let menu_state_weak = menu_state.downgrade();
                         menu.update(cx, |menu, cx| {
-                            menu.set_trigger_focus(Some(trigger_focus.clone()), cx)
+                            menu.set_trigger_focus(Some(trigger_focus.clone()), cx);
+                            menu.set_on_dismiss(move |window, cx| {
+                                _ = menu_state_weak.update(cx, |state, _| {
+                                    state.menu = None;
+                                });
+                                if let Some(popover_state) = popover_state.upgrade() {
+                                    popover_state.update(cx, |state, cx| {
+                                        state.dismiss(window, cx);
+                                    });
+                                }
+                                cx.notify(parent_view_id);
+                            });
                         });
                         menu_state.update(cx, |state, _| {
                             state.menu = Some(menu.clone());
                         });
                         menu.focus_handle(cx).focus(window, cx);
-
-                        // Listen for dismiss events from the PopupMenu to close the popover.
-                        //
-                        // Hold Weak handles here, not strong clones: the listener
-                        // lives as long as `menu`, which `menu_state` owns, so a
-                        // strong capture would close the cycle
-                        // `menu_state -> menu -> listener -> menu_state` and leak
-                        // the `PopupMenu` and `DropdownMenuState` when the trigger
-                        // stops being rendered while the menu is open.
-                        let popover_state = cx.entity().downgrade();
-                        window
-                            .subscribe(&menu, cx, {
-                                let menu_state = menu_state.downgrade();
-                                move |_, _: &DismissEvent, window, cx| {
-                                    if let Some(popover_state) = popover_state.upgrade() {
-                                        popover_state.update(cx, |state, cx| {
-                                            state.dismiss(window, cx);
-                                        });
-                                    }
-                                    _ = menu_state.update(cx, |state, _| {
-                                        state.menu = None;
-                                    });
-                                }
-                            })
-                            .detach();
-
                         menu.clone()
                     }
                 };
-
                 if let Some(dx) = horizontal_offset {
                     gpui::div().ml(dx).child(menu.clone()).into_any_element()
                 } else {

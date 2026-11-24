@@ -308,46 +308,63 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let paths = paths.await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                    return;
-                }
-                match paths {
-                    Ok(Ok(Some(paths))) => {
-                        let Some(path) = paths.into_iter().next() else {
-                            return;
-                        };
-                        match mio_core::ui_files::read_file_bytes(&path) {
-                            Ok(bytes) if bytes.len() > MAX_SCOPE_LOAD_FILE_BYTES => {
-                                view.fail("范围文件超过 256 KB 上限，未导入。", cx);
-                            }
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(text) => {
-                                    let lines: Vec<String> = text
-                                        .lines()
-                                        .map(str::trim)
-                                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                                        .map(str::to_owned)
-                                        .collect();
-                                    if lines.is_empty() {
-                                        view.fail("所选文件中没有有效的 URL 或规则行。", cx);
-                                    } else {
-                                        view.add_scope_url_lines(
-                                            include,
-                                            &lines,
-                                            "已从文件加载",
-                                            cx,
-                                        );
-                                    }
-                                }
-                                Err(_) => view.fail("所选范围文件不是有效的 UTF-8 文本。", cx),
-                            },
-                            Err(error) => view.fail(format!("读取范围文件失败：{error}"), cx),
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match paths {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(error)) => {
+                            view.fail(format!("选择范围文件失败：{error}"), cx);
+                            None
+                        }
+                        Err(_) => {
+                            view.fail("文件选择器已关闭。", cx);
+                            None
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => view.fail(format!("选择范围文件失败：{error}"), cx),
-                    Err(_) => view.fail("文件选择器已关闭。", cx),
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let read_result = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_file_bytes(&path) })
+                .await;
+            let _ = this.update_in(cx, |view, _, cx| {
+                if view.project != Some(project) {
+                    return;
+                }
+                match read_result {
+                    Ok(bytes) if bytes.len() > MAX_SCOPE_LOAD_FILE_BYTES => {
+                        view.fail("范围文件超过 256 KB 上限，未导入。", cx);
+                    }
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => {
+                            let lines: Vec<String> = text
+                                .lines()
+                                .map(str::trim)
+                                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                                .map(str::to_owned)
+                                .collect();
+                            if lines.is_empty() {
+                                view.fail("所选文件中没有有效的 URL 或规则行。", cx);
+                            } else {
+                                view.add_scope_url_lines(
+                                    include,
+                                    &lines,
+                                    "已从文件加载",
+                                    cx,
+                                );
+                            }
+                        }
+                        Err(_) => view.fail("所选范围文件不是有效的 UTF-8 文本。", cx),
+                    },
+                    Err(error) => view.fail(format!("读取范围文件失败：{error}"), cx),
                 }
             });
         })

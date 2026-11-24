@@ -305,6 +305,10 @@ impl Workbench {
             )
             .child(
                 div()
+                    .id("dashboard-live-audit-actions-wrap")
+                    .occlude()
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .absolute()
                     .right(px(11.))
                     .top(px(10.))
@@ -532,6 +536,10 @@ impl Workbench {
             )
             .child(
                 div()
+                    .id("dashboard-live-crawl-actions-wrap")
+                    .occlude()
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .absolute()
                     .right(px(11.))
                     .top(px(10.))
@@ -927,7 +935,17 @@ impl Workbench {
                     cx.notify();
                 })),
             )
-            .child(div().absolute().right(px(11.)).top(px(11.)).child(actions))
+            .child(
+                div()
+                    .id(SharedString::from(format!("dashboard-audit-actions-wrap-{task_id}")))
+                    .occlude()
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .absolute()
+                    .right(px(11.))
+                    .top(px(11.))
+                    .child(actions),
+            )
             .into_any_element()
     }
 

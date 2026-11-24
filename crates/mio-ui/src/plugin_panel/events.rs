@@ -123,7 +123,9 @@ impl NativePanel {
                         cx.emit(PanelEvent::Edited);
                     }
                     Err(_) => {
-                        self.documents.get_mut(&id).unwrap().unsaved = true;
+                        if let Some(document) = self.documents.get_mut(&id) {
+                            document.unsaved = true;
+                        }
                         cx.emit(PanelEvent::Edited);
                         cx.notify();
                     }

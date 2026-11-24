@@ -235,6 +235,82 @@ impl Workbench {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::workbench) fn spawn_export_file_picker(
+        &mut self,
+        suggested_name: Option<&str>,
+        default_ext: Option<&'static str>,
+        project_switched_error: &'static str,
+        select_error_prefix: &'static str,
+        payload: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_written: impl FnOnce(&mut Self, PathBuf, std::io::Result<()>, &mut Context<Self>) + 'static,
+    ) {
+        let project = self.project;
+        let picker = mio_core::Uuid::new_v4();
+        self.file_picker = Some(picker);
+        cx.notify();
+        let prompt = crate::native_terminate::prompt_for_new_path(
+            window,
+            cx,
+            &self.default_directory(),
+            suggested_name,
+        );
+        let owner = self.owner_window;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = prompt.await;
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail(project_switched_error, cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut path))) => {
+                                if let Some(ext) = default_ext
+                                    && path.extension().is_none()
+                                {
+                                    path.set_extension(ext);
+                                }
+                                Some(path)
+                            }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(error)) => {
+                                view.fail(format!("{select_error_prefix}：{error}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
+                            }
+                        }
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &payload)
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| on_written(view, path, write_result, cx))
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::workbench) fn spawn_open_path_picker(
         &mut self,
         options: PathPromptOptions,
@@ -407,6 +483,10 @@ impl Workbench {
                 match result {
                     Ok(Ok(Some(path))) => match view.capture_drafts(window, cx) {
                         Ok(changed) => {
+                            if attempt.is_some() {
+                                cx.global::<crate::native_terminate::NativeTerminate>()
+                                    .extend_deadline_for_user_interaction();
+                            }
                             view.workspace_dirty |= changed;
                             view.pending_project_save = Some(Some(path));
                             view.flush_project_save(window, cx);

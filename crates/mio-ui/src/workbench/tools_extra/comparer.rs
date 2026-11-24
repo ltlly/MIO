@@ -173,23 +173,45 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let paths = paths.await;
-            let _ = this.update_in(cx, |view, window, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                    return;
-                }
-                match paths {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.into_iter().next() {
-                            let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("文件").to_owned();
-                            match mio_core::ui_files::read_file_bytes(&path) {
-                                Ok(bytes) => view.add_comparer_item(&label, bytes, window, cx),
-                                Err(error) => view.fail(format!("读取对比文件失败：{error}"), cx),
-                            }
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match paths {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(error)) => {
+                            view.fail(format!("选择对比文件失败：{error}"), cx);
+                            None
+                        }
+                        Err(_) => {
+                            view.fail("文件选择器已关闭。", cx);
+                            None
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => view.fail(format!("选择对比文件失败：{error}"), cx),
-                    Err(_) => view.fail("文件选择器已关闭。", cx),
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let label = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("文件")
+                .to_owned();
+            let read_result = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_file_bytes(&path) })
+                .await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                if view.project != Some(project) {
+                    return;
+                }
+                match read_result {
+                    Ok(bytes) => view.add_comparer_item(&label, bytes, window, cx),
+                    Err(error) => view.fail(format!("读取对比文件失败：{error}"), cx),
                 }
             });
         })

@@ -365,11 +365,45 @@ impl Workbench {
                         cx.notify();
                     });
                 });
-            overlays.push(div().id("global-command-palette-overlay").test_support()
-                .absolute().top(px(12.)).left(px(180.)).w(px(600.)).max_h(px(480.))
-                .bg(theme::surface()).border_1().border_color(theme::border()).rounded(px(6.))
-                .overflow_hidden().focus_trap("global-command-palette-overlay", &self.global_search.command_palette_focus)
-                .child(command).into_any_element());
+            overlays.push(
+                div()
+                    .id("global-command-palette-backdrop")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                        this.command_palette_open = false;
+                        this.focus.focus(window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .id("global-command-palette-overlay")
+                            .test_support()
+                            .occlude()
+                            .absolute()
+                            .top(px(12.))
+                            .left(px(180.))
+                            .w(px(600.))
+                            .max_h(px(480.))
+                            .bg(theme::surface())
+                            .border_1()
+                            .border_color(theme::border())
+                            .rounded(px(6.))
+                            .overflow_hidden()
+                            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                            .on_scroll(|_, _, cx| cx.stop_propagation())
+                            .focus_trap(
+                                "global-command-palette-overlay",
+                                &self.global_search.command_palette_focus,
+                            )
+                            .child(command),
+                    )
+                    .into_any_element(),
+            );
         }
         if self.global_search.open {
             let input = self.global_search.input.clone();
@@ -486,6 +520,9 @@ impl Workbench {
                     .into_any_element(),
             };
             overlays.push(div().id("global-search-overlay").test_support()
+                .occlude()
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .absolute().top(px(12.)).left(px(24.)).right(px(24.)).bottom(px(24.))
                 .bg(theme::background()).border_1().border_color(theme::border()).rounded(px(6.))
                 .flex().flex_col().focus_trap("global-search-overlay", &self.global_search.focus)
@@ -631,6 +668,9 @@ impl Workbench {
             .test_support()
             .role(gpui_kit::accesskit::Role::Dialog)
             .aria_label("MioAT / Agent IPC 控制中心")
+            .occlude()
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .absolute()
             .top(px(12.))
             .right(px(12.))
@@ -956,35 +996,57 @@ impl Workbench {
         let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| {
-                    if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                        return;
-                    }
-                    if view.project != project {
-                        view.fail("项目已切换，本次 CSRF PoC 保存已取消。", cx);
-                        return;
-                    }
-                    match result {
-                        Ok(Ok(Some(mut dest))) => {
-                            if dest.extension().is_none() {
-                                dest.set_extension("html");
+            let pending_dest = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
+                        }
+                        if view.project != project {
+                            view.fail("项目已切换，本次 CSRF PoC 保存已取消。", cx);
+                            return None;
+                        }
+                        match result {
+                            Ok(Ok(Some(mut dest))) => {
+                                if dest.extension().is_none() {
+                                    dest.set_extension("html");
+                                }
+                                Some(dest)
                             }
-                            match mio_core::ui_files::write_export_file(&dest, html.as_bytes()) {
-                                Ok(()) => {
-                                    view.error = None;
-                                    view.status =
-                                        format!("已保存 CSRF PoC HTML 至：{}", dest.display());
-                                    cx.notify();
-                                }
-                                Err(err) => {
-                                    view.fail(format!("保存 CSRF PoC 失败：{err}"), cx);
-                                }
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail(format!("无法选择保存路径：{err}"), cx);
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已意外关闭。", cx);
+                                None
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => view.fail(format!("无法选择保存路径：{err}"), cx),
-                        Err(_) => view.fail("文件选择器已意外关闭。", cx),
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(dest) = pending_dest else {
+                return;
+            };
+            let write_dest = dest.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_dest, html.as_bytes())
+                })
+                .await;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        view.status = format!("已保存 CSRF PoC HTML 至：{}", dest.display());
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.fail(format!("保存 CSRF PoC 失败：{err}"), cx);
                     }
                 })
             });
@@ -1010,6 +1072,7 @@ impl Workbench {
         div()
             .id("csrf-poc-modal-backdrop")
             .test_support()
+            .occlude()
             .absolute()
             .inset_0()
             .bg(gpui_kit::black().opacity(0.35))
@@ -1017,10 +1080,20 @@ impl Workbench {
             .items_center()
             .justify_center()
             .p(px(24.))
+            .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.csrf_poc_modal = None;
+                this.focus.focus(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .id("csrf-poc-modal")
                     .test_support()
+                    .occlude()
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
                     .role(gpui_kit::accesskit::Role::Dialog)
                     .aria_label(title.clone())
                     .w(px(680.))

@@ -60,6 +60,7 @@ impl Workbench {
             div()
                 .id("target-engagement-overlay")
                 .test_support()
+                .occlude()
                 .absolute()
                 .inset_0()
                 .bg(gpui_kit::hsla(0., 0., 0., 0.35))
@@ -67,10 +68,19 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .p(px(24.))
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.target_pane.engagement_report = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .id("target-engagement-dialog")
                         .test_support()
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
                         .w(px(720.))
                         .max_w_full()
                         .h(px(460.))
@@ -278,6 +288,7 @@ impl Workbench {
             div()
                 .id("target-compare-overlay")
                 .test_support()
+                .occlude()
                 .absolute()
                 .inset_0()
                 .bg(gpui_kit::hsla(0., 0., 0., 0.35))
@@ -285,10 +296,19 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .p(px(24.))
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.target_pane.compare_modal = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .id("target-compare-dialog")
                         .test_support()
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
                         .w(px(820.))
                         .max_w_full()
                         .h(px(520.))

@@ -324,3 +324,35 @@ fn modal_deadline_overrides_queued_yes_and_blocks_late_permission() {
     assert_eq!(probe.replies(), [false]);
     assert_eq!(probe.request(), Reply::TerminateCancel);
 }
+
+#[test]
+fn extend_deadline_for_user_interaction_pushes_deadline_forward_unless_expired() {
+    let guard = NativeTerminate::for_test();
+    let probe = Probe::new();
+    assert_eq!(probe.request(), Reply::TerminateLater);
+    {
+        let mut state = guard.0.borrow_mut();
+        let pending = state.pending.as_mut().unwrap();
+        pending.deadline = Instant::now() + Duration::from_secs(1);
+    }
+    let before = guard.0.borrow().pending.as_ref().unwrap().deadline;
+    guard.extend_deadline_for_user_interaction();
+    let after = guard.0.borrow().pending.as_ref().unwrap().deadline;
+    assert!(
+        after > before + Duration::from_secs(60),
+        "user interaction must extend the pending termination deadline"
+    );
+    assert!(!guard.rejected());
+
+    // Once expired, extending the deadline must not revive the request.
+    probe.expire();
+    let expired_deadline = guard.0.borrow().pending.as_ref().unwrap().deadline;
+    guard.extend_deadline_for_user_interaction();
+    assert_eq!(
+        guard.0.borrow().pending.as_ref().unwrap().deadline,
+        expired_deadline
+    );
+    assert!(guard.rejected());
+    probe.pump_modal_until_replies(1);
+    assert_eq!(probe.replies(), [false]);
+}

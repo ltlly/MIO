@@ -152,8 +152,18 @@ impl Workbench {
                         return;
                     }
                     match answer {
-                        Ok(0) if can_save => view.begin_saved_transition(action, cx),
+                        Ok(0) if can_save => {
+                            if quitting {
+                                cx.global::<crate::native_terminate::NativeTerminate>()
+                                    .extend_deadline_for_user_interaction();
+                            }
+                            view.begin_saved_transition(action, cx);
+                        }
                         Ok(choice) if can_discard && choice == usize::from(can_save) => {
+                            if quitting {
+                                cx.global::<crate::native_terminate::NativeTerminate>()
+                                    .extend_deadline_for_user_interaction();
+                            }
                             view.perform_transition(action, window, cx)
                         }
                         _ => {

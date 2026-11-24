@@ -107,7 +107,6 @@ impl PopoverState {
             self.previous_focus_handle = window.focused(cx);
         }
         self.set_open(opening, cx);
-
         if self.open {
             // Weak: the subscription is stored on this state, so a strong
             // handle would keep the state, and its deferred-popover
@@ -379,22 +378,23 @@ impl RenderOnce for Popover {
             // technology to expect.
             .role(Role::Dialog)
             .occlude()
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .tab_group()
             .track_focus(&focus_handle)
             .key_context(CONTENT_CONTEXT)
             .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
             .when_some(self.content, |this, content| {
                 this.child(state.update(cx, |state, cx| (content)(state, window, cx)))
-            })
-            .when(self.overlay_closable, |this| {
-                this.on_mouse_down_out({
-                    let state = state.clone();
-                    move |_, window, cx| {
-                        state.update(cx, |state, cx| state.dismiss(window, cx));
-                        cx.notify(parent_view_id);
-                    }
-                })
             });
+        let popup = if self.overlay_closable {
+            let state = state.clone();
+            popup.on_backdrop_press(move |window, cx| {
+                state.update(cx, |state, cx| state.dismiss(window, cx));
+                cx.notify(parent_view_id);
+            })
+        } else {
+            popup
+        };
         popup.content(content).into_any_element()
     }
 }
@@ -620,5 +620,71 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         assert!(cx.debug_bounds("keyboard-popover-content").is_some());
+    }
+
+    struct OutsideClickPassThroughHarness {
+        background_clicks: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Render for OutsideClickPassThroughHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.background_clicks.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .gap(px(140.))
+                .child(
+                    Popover::new("non-penetrating-popover")
+                        .trigger_with(|_, _, _| div().w(px(60.)).h(px(24.)).child("Open").into_any_element())
+                        .content(|_, _, _| {
+                            div()
+                                .debug_selector(|| "non-penetrating-content".into())
+                                .size(px(80.))
+                        }),
+                )
+                .child(
+                    div()
+                        .id("underneath-action")
+                        .debug_selector(|| "underneath-action".into())
+                        .w(px(120.))
+                        .h(px(40.))
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                            clicks.set(clicks.get() + 1);
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn outside_click_dismisses_popover_without_passing_through_to_underneath_control(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let background_clicks = Rc::new(std::cell::Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let background_clicks = background_clicks.clone();
+            move |_, _| OutsideClickPassThroughHarness { background_clicks }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.simulate_click(point(px(20.), px(10.)), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("non-penetrating-content").is_some());
+
+        let underneath = cx.debug_bounds("underneath-action").unwrap().center();
+        cx.simulate_click(underneath, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("non-penetrating-content").is_none());
+        assert_eq!(
+            background_clicks.get(),
+            0,
+            "dismissing an open popover must consume the outside click instead of triggering underneath controls"
+        );
+
+        // Once dismissed, clicking the control again delivers normally.
+        cx.simulate_click(underneath, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(background_clicks.get(), 1);
     }
 }

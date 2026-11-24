@@ -976,25 +976,39 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let paths = paths.await;
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match paths {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(err)) => {
+                            view.fail(format!("选择样本文件失败：{err}"), cx);
+                            None
+                        }
+                        Err(_) => {
+                            view.fail("文件选择器已关闭。", cx);
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let read_path = path.clone();
+            let read_result = cx
+                .background_executor()
+                .spawn(async move { mio_core::ui_files::read_file_to_string(&read_path) })
+                .await;
             let _ = this.update_in(cx, |view, window, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                if view.project != Some(project) {
                     return;
                 }
-                let Some(path) = (match paths {
-                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                    Ok(Ok(None)) => None,
-                    Ok(Err(err)) => {
-                        view.fail(format!("选择样本文件失败：{err}"), cx);
-                        return;
-                    }
-                    Err(_) => {
-                        view.fail("文件选择器已关闭。", cx);
-                        return;
-                    }
-                }) else {
-                    return;
-                };
-                let content = match mio_core::ui_files::read_file_to_string(&path) {
+                let content = match read_result {
                     Ok(text) => text,
                     Err(err) => {
                         view.fail(format!("读取样本文件失败：{err}"), cx);
@@ -1176,25 +1190,49 @@ impl Workbench {
             crate::native_terminate::prompt_for_new_path(window, cx, &directory, Some(default_name));
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                    return;
-                }
-                match result {
-                    Ok(Ok(Some(path))) => {
-                        match mio_core::ui_files::write_export_file(&path, &bytes) {
-                            Ok(()) => {
-                                view.error = None;
-                                let msg = format!("{done_prefix}到 {}。", path.display());
-                                view.sequencer_pane.status_text = Some(msg.clone());
-                                view.status = msg;
-                            }
-                            Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
+            let pending_path = this
+                .update_in(cx, |view, _, cx| {
+                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
+                        return None;
+                    }
+                    match result {
+                        Ok(Ok(Some(path))) => Some(path),
+                        Ok(Ok(None)) => None,
+                        Ok(Err(err)) => {
+                            view.fail(format!("选择导出路径失败：{err}"), cx);
+                            view.sequencer_view.update(cx, |_, cx| cx.notify());
+                            cx.notify();
+                            None
+                        }
+                        Err(_) => {
+                            view.fail("文件选择器已关闭。", cx);
+                            view.sequencer_view.update(cx, |_, cx| cx.notify());
+                            cx.notify();
+                            None
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(err)) => view.fail(format!("选择导出路径失败：{err}"), cx),
-                    Err(_) => view.fail("文件选择器已关闭。", cx),
+                })
+                .ok()
+                .flatten();
+            let Some(path) = pending_path else {
+                return;
+            };
+            let write_path = path.clone();
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_export_file(&write_path, &bytes)
+                })
+                .await;
+            let _ = this.update_in(cx, |view, _, cx| {
+                match write_result {
+                    Ok(()) => {
+                        view.error = None;
+                        let msg = format!("{done_prefix}到 {}。", path.display());
+                        view.sequencer_pane.status_text = Some(msg.clone());
+                        view.status = msg;
+                    }
+                    Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
                 }
                 view.sequencer_view.update(cx, |_, cx| cx.notify());
                 cx.notify();
