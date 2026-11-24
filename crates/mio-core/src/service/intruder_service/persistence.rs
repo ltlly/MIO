@@ -226,6 +226,21 @@ impl State {
                 failure = Some(error);
             }
         }
+        while !self.intruder.prep_jobs.is_empty() {
+            match tokio::time::timeout_at(deadline, self.intruder.prep_jobs.join_next_with_id())
+                .await
+            {
+                Ok(Some(result)) => {
+                    if let Err(error) = self.complete_intruder_prep(result).await {
+                        failure = Some(error);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!(
+                    "Intruder 仍在回收；保留任务句柄，未确认停止或切换项目，请稍后重试"
+                ),
+            }
+        }
         while !self.intruder.jobs.is_empty() {
             match tokio::time::timeout_at(deadline, self.intruder.jobs.join_next_with_id()).await {
                 Ok(Some(result)) => {
@@ -275,13 +290,18 @@ impl State {
         }
         self.intruder.recovery = project;
         let mut failure = None;
-        for (_, mutations) in sessions {
+        for (session_id, mutations) in sessions {
             match self
                 .store
                 .intruder_mut()
                 .retry_session_mutations(&mutations, &self.cancel)
             {
-                Ok(()) => self.intruder.capacity_released(),
+                Ok(()) => {
+                    self.intruder
+                        .recovery_reason_phrases
+                        .retain(|&(run_id, _), _| run_id != session_id);
+                    self.intruder.capacity_released();
+                }
                 Err(error) => {
                     self.intruder.recovery.extend(mutations);
                     failure.get_or_insert(error);

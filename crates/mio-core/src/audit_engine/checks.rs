@@ -340,7 +340,8 @@ fn scan_serialized_marker_in_text(text: &str) -> Option<String> {
         let rest = &text[pos + 2..];
         let digits = rest.chars().take_while(char::is_ascii_digit).count();
         if digits > 0 && rest[digits..].starts_with(":\"") {
-            let snippet_end = (pos + 2 + digits + 16).min(text.len());
+            let max_end = (pos + 2 + digits + 16).min(text.len());
+            let snippet_end = text.floor_char_boundary(max_end);
             return Some(text[pos..snippet_end].to_owned());
         }
     }

@@ -137,6 +137,9 @@ impl State {
                     workspace.active_websocket_tab = None;
                     workspace.revision = workspace.revision.saturating_add(1);
                     if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
+                        self.ai_ipc
+                            .repeater_revisions
+                            .insert((tab_id, workspace.revision));
                         self.queue_repeater_event(Event::WorkspaceChanged {
                             project: self.project,
                             workspace,
@@ -701,21 +704,27 @@ impl State {
                 false,
             )?;
             let started_unix_ms = crate::codec_util::now_unix_ms();
+            let hook_scope = workspace.scope.clone();
             Ok((
                 base_request,
                 request,
                 settings,
                 runtime_cfg,
                 started_unix_ms,
+                hook_scope,
             ))
         })();
-        let (base_request, request, settings, runtime_cfg, started_unix_ms) = match prepared {
-            Ok(val) => val,
-            Err(err) => return Err((reply, err)),
-        };
+        let (base_request, request, settings, runtime_cfg, started_unix_ms, hook_scope) =
+            match prepared {
+                Ok(val) => val,
+                Err(err) => return Err((reply, err)),
+            };
         let project = self.project;
         let sessions = self.sessions.runtime.clone();
         let provenance = self.storage.provenance.clone();
+        let session_hooks = self.strict_session_action_hook_entries();
+        let http_hooks = self.tool_http_hook_entries();
+        let plugin_events = self.events.clone();
         self.ai_ipc.refresh_cancel_if_idle(&self.cancel);
         let cancel = self.ai_ipc.job_cancel.child_token();
         self.ai_ipc.jobs.spawn(async move {
@@ -727,6 +736,10 @@ impl State {
                 started_unix_ms,
                 sessions,
                 provenance,
+                session_hooks,
+                http_hooks,
+                hook_scope,
+                plugin_events,
                 cancel,
             )
             .await;
@@ -1266,6 +1279,10 @@ async fn execute_ipc_repeater_send(
     started_unix_ms: i64,
     sessions: crate::sessions::SessionRuntime,
     provenance: crate::ProvenanceTracker,
+    session_hooks: Vec<crate::service::plugin_service::hooks::PreSendPluginHook>,
+    http_hooks: Vec<crate::service::plugin_service::hooks::PreSendPluginHook>,
+    hook_scope: crate::TargetScope,
+    plugin_events: tokio::sync::mpsc::Sender<Event>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<IpcRepeaterOutcome> {
     let run_id = crate::Uuid::new_v4();
@@ -1318,6 +1335,36 @@ async fn execute_ipc_repeater_send(
             _ => "Session 规则或宏前置请求失败，已拒绝裸发请求".into(),
         };
         bail!(msg);
+    }
+    if !session_hooks.is_empty() || !http_hooks.is_empty() {
+        let mut current = record.request.clone();
+        match crate::service::plugin_service::hooks::run_pre_send_plugin_hooks_configured(
+            &session_hooks,
+            &http_hooks,
+            Some(&hook_scope),
+            Some(&plugin_events),
+            run_id,
+            mio_plugin_api::protocol::SourceDto::Repeater,
+            &mut current,
+            Some((&provenance, &original_request)),
+            deadline,
+            &cancel,
+        )
+        .await
+        {
+            crate::service::plugin_service::hooks::PreSendHookOutcome::Proceed { .. } => {
+                settings.apply_protocol_options(&mut current, req_version);
+                crate::service::plugin_service::hooks::sync_flow_request(&mut record, current);
+            }
+            crate::service::plugin_service::hooks::PreSendHookOutcome::Dropped => {
+                provenance.remove(run_id);
+                bail!("插件请求钩子已丢弃该请求，未发送");
+            }
+            crate::service::plugin_service::hooks::PreSendHookOutcome::Failed(message) => {
+                provenance.remove(run_id);
+                bail!(message);
+            }
+        }
     }
     let remaining = deadline
         .saturating_duration_since(std::time::Instant::now())

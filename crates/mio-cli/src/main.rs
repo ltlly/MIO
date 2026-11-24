@@ -577,6 +577,11 @@ async fn execute_cli(cli: Cli) -> Result<()> {
                     .flow
                     .map(CliFlowRef::into_pair)
                     .unwrap_or((None, None));
+                ensure!(
+                    !(source.raw_file.as_deref() == Some(Path::new("-"))
+                        && body_file.as_deref() == Some(Path::new("-"))),
+                    "不能同时将 --raw-file 与 --body-file 设为标准输入 `-`"
+                );
                 let raw_request = resolve_raw_request_input(source.raw_request, source.raw_file)?;
                 let override_body_base64 = match body_file {
                     Some(path) => Some(B64_STANDARD.encode(read_cli_input_bytes(&path, "--body-file")?)),
@@ -747,15 +752,25 @@ fn format_headless_ready_json(
 }
 
 fn extract_workspace_patch_json(raw: &str) -> Result<String> {
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(payload) = map.get("payload").and_then(|v| v.as_object())
-            && let Some(ws) = payload.get("workspace").filter(|v| v.is_object())
-        {
-            return serde_json::to_string(ws).context("序列化内层工作区 JSON 失败");
-        }
-        if let Some(ws) = map.get("workspace").filter(|v| v.is_object()) {
-            return serde_json::to_string(ws).context("序列化工作区字段 JSON 失败");
-        }
+    let value: serde_json::Value =
+        serde_json::from_str(raw).context("工作区配置文件不是有效的 JSON")?;
+    let Some(map) = value.as_object() else {
+        bail!("工作区配置 JSON 顶层必须为对象");
+    };
+    if map.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        let err = map
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知错误");
+        bail!("输入文件是失败的 IPC 响应（{err}），无法作为工作区配置导入");
+    }
+    if let Some(payload) = map.get("payload").and_then(|v| v.as_object())
+        && let Some(ws) = payload.get("workspace").filter(|v| v.is_object())
+    {
+        return serde_json::to_string(ws).context("序列化内层工作区 JSON 失败");
+    }
+    if let Some(ws) = map.get("workspace").filter(|v| v.is_object()) {
+        return serde_json::to_string(ws).context("序列化工作区字段 JSON 失败");
     }
     Ok(raw.to_owned())
 }
@@ -944,6 +959,7 @@ async fn run_headless_server(
         _ = &mut drain_task => (false, true),
     };
 
+    drop(commands);
     let join_res = tokio::task::spawn_blocking(move || {
         if interrupted {
             runtime.shutdown()
@@ -953,7 +969,6 @@ async fn run_headless_server(
     })
     .await
     .context("等待后台服务退出失败")?;
-    drop(commands);
     if !drain_done {
         let _ = drain_task.await;
     }

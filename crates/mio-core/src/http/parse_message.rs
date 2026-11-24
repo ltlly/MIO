@@ -559,7 +559,7 @@ pub fn resolve_redirect_request_with_options(
                 .any(|name| header.name.eq_ignore_ascii_case(name))
         });
     }
-    if process_cookies {
+    if process_cookies && same_host {
         let mut jar_pairs: Vec<(String, String)> = Vec::new();
         for h in &next_request.headers {
             if h.name.eq_ignore_ascii_case("cookie")
@@ -582,6 +582,13 @@ pub fn resolve_redirect_request_with_options(
                 && let Some(first) = s.split(';').next()
                 && let Some((k, v)) = first.split_once('=')
             {
+                let is_secure = s
+                    .split(';')
+                    .skip(1)
+                    .any(|attr| attr.trim().eq_ignore_ascii_case("secure"));
+                if is_secure && !next.scheme().eq_ignore_ascii_case("https") {
+                    continue;
+                }
                 let k = k.trim();
                 let v = v.trim();
                 if !k.is_empty() {

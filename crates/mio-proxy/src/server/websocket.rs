@@ -92,6 +92,11 @@ pub(super) async fn handle(request: Request, mut active: ActiveFlow) -> Response
                 client::exchange_with_metrics(request, &config, cancel.clone(), state.exec.clone()),
             ) => result.map_err(|_| ProxyError::Timeout)??,
         };
+        let mut header_budget = (
+            crate::StreamedResponse::MAX_HEADERS,
+            crate::StreamedResponse::MAX_HEAD_BYTES,
+        );
+        message::consume_header_budget(upstream.headers(), &mut header_budget)?;
         let reason_phrase = message::reason_phrase(&upstream);
         let (remote_ip, received) = {
             let guard = crate::lock_unpoison(&timing);
@@ -129,7 +134,9 @@ pub(super) async fn handle(request: Request, mut active: ActiveFlow) -> Response
                 _ = state.cancel.cancelled() => return Err(ProxyError::Cancelled),
                 result = tokio::time::timeout(
                     config.limits.timeout,
-                    message::body(upstream.into_body(), config.limits.max_body_bytes),
+                    message::body_with_header_budget(
+                        upstream.into_body(), config.limits.max_body_bytes, Some(header_budget),
+                    ),
                 ) => result.map_err(|_| ProxyError::Timeout)??,
             };
             cancel.cancel();

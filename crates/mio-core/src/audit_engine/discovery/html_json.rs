@@ -305,10 +305,10 @@ pub(super) fn extract_html_endpoints(
                     }
                 }
             }
-        } else if tag_name.eq_ignore_ascii_case("textarea")
-            && !self_closing
-            && let Some(end_ta) = find_ci(&html[cursor..], "</textarea")
-        {
+        } else if tag_name.eq_ignore_ascii_case("textarea") && !self_closing {
+            let Some(end_ta) = find_ci(&html[cursor..], "</textarea") else {
+                break;
+            };
             if let Some(pf) = active_form.as_mut()
                 && pf.fields.len() < 64
             {

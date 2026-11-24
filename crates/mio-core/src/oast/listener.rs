@@ -1,5 +1,5 @@
 use super::dns::run_dns_server;
-use super::payload::{generate_unique_token, now_unix_ms, truncate_lossy, truncate_str};
+use super::payload::{generate_unique_token, now_unix_ms, truncate_str};
 use super::*;
 
 struct ParsedHttpRequest {
@@ -16,17 +16,15 @@ fn parse_bounded_http_request(raw: &[u8]) -> ParsedHttpRequest {
         .iter()
         .position(|byte| *byte == b'\n')
         .unwrap_or(raw.len());
-    let first_line = truncate_lossy(&raw[..first_line_end], SUMMARY_LIMIT);
-    let first_line = first_line.trim_end_matches('\r');
-    let mut request_line = first_line.split_whitespace();
+    let full_first_line = String::from_utf8_lossy(&raw[..first_line_end]);
+    let full_first_line = full_first_line.trim_end_matches('\r');
+    let mut request_line = full_first_line.split_whitespace();
     let method = request_line.next().map_or_else(
         || "HTTP".to_owned(),
         |part| truncate_str(part, 32).to_owned(),
     );
-    let target = request_line.next().map_or_else(
-        || "/".to_owned(),
-        |part| truncate_str(part, SUMMARY_LIMIT).to_owned(),
-    );
+    let full_target = request_line.next().unwrap_or("/").to_owned();
+    let target = truncate_str(&full_target, SUMMARY_LIMIT).to_owned();
 
     let mut host = None;
     let mut content_length = None;
@@ -34,10 +32,10 @@ fn parse_bounded_http_request(raw: &[u8]) -> ParsedHttpRequest {
     let mut body_start = None;
     let mut cursor = first_line_end.saturating_add(1);
     while cursor < raw.len() {
-        let newline = raw[cursor..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(raw.len(), |offset| cursor + offset);
+        let Some(offset) = raw[cursor..].iter().position(|byte| *byte == b'\n') else {
+            break;
+        };
+        let newline = cursor + offset;
         let line = &raw[cursor..newline];
         let next_cursor = newline.saturating_add(1).min(raw.len());
         if line == b"\r" || line.is_empty() {
@@ -69,12 +67,12 @@ fn parse_bounded_http_request(raw: &[u8]) -> ParsedHttpRequest {
         cursor = next_cursor;
     }
 
-    let absolute_url = if target.contains("://") {
-        Url::parse(&target).ok()
+    let absolute_url = if full_target.contains("://") {
+        Url::parse(&full_target).ok()
     } else {
         None
     };
-    let mut candidates = vec![target.clone()];
+    let mut candidates = vec![full_target.clone()];
     if let Some(url) = absolute_url.as_ref() {
         let path = if url.path().is_empty() {
             "/"
@@ -88,7 +86,7 @@ fn parse_bounded_http_request(raw: &[u8]) -> ParsedHttpRequest {
         if let Some(url_host) = url.host_str() {
             candidates.push(url_host.to_owned());
         }
-    } else if let Some((path, query)) = target.split_once('?') {
+    } else if let Some((path, query)) = full_target.split_once('?') {
         candidates.push(path.to_owned());
         candidates.push(query.to_owned());
     }

@@ -211,6 +211,7 @@ impl State {
                 }
                 self.storage.clear_recovery();
                 self.intruder.recovery.clear();
+                self.intruder.recovery_reason_phrases.clear();
                 self.store.cancel_queries_with(self.cancel.clone());
                 self.ai_ipc.refresh_cancel_if_idle(&self.cancel);
                 self.flush_all_provenance_to_store();
@@ -524,6 +525,9 @@ impl State {
             }
             return Err(err);
         }
+        self.ai_ipc.repeater_revisions.retain(|&(tid, rev)| {
+            rev >= workspace.revision && workspace.tabs.iter().any(|t| t.id == tid)
+        });
         Box::pin(self.publish_saved_workspace_inner(
             project,
             prev_workspace.as_ref(),

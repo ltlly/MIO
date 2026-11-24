@@ -156,9 +156,10 @@ pub(crate) fn unpack_plugin_archive(
             "插件归档条目数超过 {MAX_ARCHIVE_ENTRIES} 上限"
         );
 
-        let raw_name = next_pax_path
-            .take()
-            .or_else(|| next_long_name.take())
+        let pax_path = next_pax_path.take();
+        let long_name = next_long_name.take();
+        let raw_name = pax_path
+            .or(long_name)
             .unwrap_or_else(|| parse_ustar_path(&header));
         let is_dir = typeflag == b'5' || raw_name.ends_with('/');
         let rel_path = sanitize_archive_rel_path(&raw_name, is_dir)?;
@@ -386,16 +387,27 @@ fn parse_ustar_path(header: &[u8; 512]) -> String {
     name
 }
 
-fn parse_pax_path(data: &[u8]) -> Result<Option<String>> {
-    let text = std::str::from_utf8(data).context("PAX 扩展头非 UTF-8")?;
+fn parse_pax_path(mut data: &[u8]) -> Result<Option<String>> {
     let mut found = None;
-    for line in text.lines() {
-        if let Some((_, kv)) = line.split_once(' ')
-            && let Some((key, val)) = kv.split_once('=')
+    while !data.is_empty() {
+        let Some(space_idx) = data.iter().position(|&b| b == b' ') else {
+            bail!("PAX 扩展头记录缺少长度分隔符");
+        };
+        let len_str = std::str::from_utf8(&data[..space_idx]).context("PAX 长度字段非 UTF-8")?;
+        let record_len: usize = len_str.parse().context("PAX 长度字段无效")?;
+        ensure!(
+            record_len > space_idx + 1 && record_len <= data.len(),
+            "PAX 扩展头记录长度越界"
+        );
+        let record = &data[space_idx + 1..record_len];
+        let content = record.strip_suffix(b"\n").unwrap_or(record);
+        let text = std::str::from_utf8(content).context("PAX 扩展头非 UTF-8")?;
+        if let Some((key, val)) = text.split_once('=')
             && key == "path"
         {
             found = Some(val.to_owned());
         }
+        data = &data[record_len..];
     }
     Ok(found)
 }

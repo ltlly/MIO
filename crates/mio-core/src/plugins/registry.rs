@@ -757,6 +757,12 @@ fn copy_dir_no_symlinks(
             let mut src_file = open_src.open(&src_path).context("无法打开插件源文件")?;
             let actual_meta = src_file.metadata()?;
             ensure!(actual_meta.is_file(), "插件源条目不是普通文件");
+            #[cfg(unix)]
+            ensure!(
+                actual_meta.nlink() == 1,
+                "插件包内不得包含硬链接文件：{}",
+                src_path.display()
+            );
             let mut dst_opts = OpenOptions::new();
             dst_opts.write(true).create_new(true);
             #[cfg(unix)]

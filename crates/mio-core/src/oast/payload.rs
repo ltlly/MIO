@@ -159,11 +159,6 @@ pub(super) fn truncate_str(value: &str, max_chars: usize) -> &str {
         .map_or(value, |(boundary, _)| &value[..boundary])
 }
 
-pub(super) fn truncate_lossy(bytes: &[u8], max_chars: usize) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    truncate_str(&text, max_chars).to_owned()
-}
-
 pub(super) fn generate_unique_token(existing_tokens: &HashSet<String>) -> String {
     loop {
         let uuid_bytes = Uuid::new_v4().as_u128().to_be_bytes();

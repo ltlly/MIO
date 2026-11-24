@@ -400,6 +400,7 @@ impl Workbench {
                     self.ext_repeater_save_failed("流量尚未写入项目，未载入归档请求。", cx);
                     self.has_traffic = true;
                     self.pending_sends.clear();
+                    self.sequential_group_queue = None;
                     self.intruder_save_failed(cx);
                     self.plugins_save_failed(cx);
                     self.cancel_transition(cx);
@@ -459,6 +460,7 @@ impl Workbench {
                         self.saving_project_snapshot = false;
                         self.workspace_dirty = true;
                         self.pending_sends.clear();
+                        self.sequential_group_queue = None;
                         self.intruder_save_failed(cx);
                         self.plugins_save_failed(cx);
                     }
@@ -475,6 +477,7 @@ impl Workbench {
                     self.pending_workspace = None;
                     self.pending_proxy_interception = None;
                     self.pending_sends.clear();
+                    self.sequential_group_queue = None;
                     self.intruder_save_failed(cx);
                     self.plugins_save_failed(cx);
                     if !self.choosing_save_as

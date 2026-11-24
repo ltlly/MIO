@@ -932,7 +932,6 @@ impl Workbench {
         }
         let seq = NEXT_COLLAB_INSERT_SEQ.fetch_add(1, Ordering::Relaxed);
         let label = format!("编辑器右键插入 #{seq}");
-        let before_error = self.collaborator_pane.error.clone();
         if !self.enqueue(
             Command::Collaborator(mio_core::CollaboratorCommand::GeneratePayloads {
                 project,
@@ -1002,7 +1001,6 @@ impl Workbench {
                 return;
             }
             if view.collaborator_pane.error.is_some()
-                && view.collaborator_pane.error != before_error
                 && view
                     .collaborator_insert_sub
                     .as_ref()

@@ -414,10 +414,21 @@ impl State {
                                         continue;
                                     };
                                     counters.inc_invoked();
-                                    let res = match handle
-                                        .call_http_hook(call, cancel.clone())
-                                        .await
+                                    let call_cancel = cancel.child_token();
+                                    let _call_cancel_guard = call_cancel.clone().drop_guard();
+                                    let res = match tokio::time::timeout_at(
+                                        tokio::time::Instant::from_std(deadline),
+                                        handle.call_http_hook(call, call_cancel.clone()),
+                                    )
+                                    .await
                                     {
+                                        Ok(res) => res,
+                                        Err(_) => {
+                                            call_cancel.cancel();
+                                            Err(anyhow::anyhow!("Proxy HTTP Hook 超时"))
+                                        }
+                                    };
+                                    let res = match res {
                                         Ok(res) => res,
                                         Err(e) => {
                                             if cancel.is_cancelled() {
@@ -542,12 +553,17 @@ impl State {
                                         hook: "http_hook".into(),
                                     };
                                     if !response_stage && record.request != before_req {
+                                        let updated_req = record.request.clone();
+                                        pre_send::sync_flow_request(&mut record, updated_req);
                                         provenance.record_request(
                                             record.summary.id,
                                             &initial_req,
                                             actor,
                                             &record.request,
                                         );
+                                        if plugin_hook_depth(&record.request) > 1 {
+                                            break;
+                                        }
                                     } else if response_stage
                                         && record.response != before_resp
                                         && let (Some(orig), Some(cur)) =
@@ -589,7 +605,7 @@ impl State {
         let ws_hook =
             (!ws_handles.is_empty()).then(|| -> mio_proxy::AsyncWebSocketHook {
                 Arc::new(
-                    move |flow_id, msg_id, url, direction, kind, mut payload, cancel, _dl| {
+                    move |flow_id, msg_id, url, direction, kind, mut payload, cancel, deadline| {
                         let handles = ws_handles.clone();
                         let scope = ws_scope.clone();
                         let events = ws_events.clone();
@@ -615,7 +631,21 @@ impl State {
                                     continue;
                                 };
                                 counters.inc_invoked();
-                                let res = match handle.call_ws_hook(call, cancel.clone()).await {
+                                let call_cancel = cancel.child_token();
+                                let _call_cancel_guard = call_cancel.clone().drop_guard();
+                                let res = match tokio::time::timeout_at(
+                                    tokio::time::Instant::from_std(deadline),
+                                    handle.call_ws_hook(call, call_cancel.clone()),
+                                )
+                                .await
+                                {
+                                    Ok(res) => res,
+                                    Err(_) => {
+                                        call_cancel.cancel();
+                                        Err(anyhow::anyhow!("Proxy WebSocket Hook 超时"))
+                                    }
+                                };
+                                let res = match res {
                                     Ok(res) => res,
                                     Err(e) => {
                                         if cancel.is_cancelled() {

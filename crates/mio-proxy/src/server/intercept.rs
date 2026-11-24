@@ -168,14 +168,23 @@ impl State {
         if !accepted {
             *record = backup;
         } else if !response_stage && backup.request != record.request {
-            *transformed = transform_applied;
+            *transformed = true;
             *request_modified = true;
             *original_request = Some(backup.request);
-        } else {
-            *transformed = transform_applied;
-            if response_stage && !response_head_only && backup.response != record.response {
+            record.summary.method = record.request.method.clone();
+            record.summary.url = record.request.url.clone();
+            record.summary.request_bytes = record.request.body.len() as u64;
+        } else if response_stage && backup.response != record.response {
+            *transformed = true;
+            if !response_head_only {
                 self.emit_backup_revision(backup, record, capture_metrics)
                     .await?;
+            }
+            if let Some(response) = &record.response {
+                record.summary.status = Some(response.status);
+                if !response_head_only {
+                    record.summary.response_bytes = response.body.len() as u64;
+                }
             }
         }
         Ok(())

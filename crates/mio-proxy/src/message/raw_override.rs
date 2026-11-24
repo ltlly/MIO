@@ -264,19 +264,22 @@ pub(super) fn build_raw_h1_from_override(
         .flat_map(|value| value.split(',').map(|name| name.trim().to_owned()))
         .filter(|name| !name.is_empty())
         .collect();
+    let has_route_proxy_auth = via_http_proxy
+        && route
+            .proxy_address()
+            .is_some_and(|pa| matches!(pa.credential, Some(ProxyCredential::Basic(_))));
     let mut has_host = false;
     let mut wrote_cl = false;
     for header in &raw_headers {
         let is_nominated = nominated.iter().any(|nom| {
-            header.name.eq_ignore_ascii_case(nom)
-                && (config.http.update_content_length
-                    || !nom.eq_ignore_ascii_case("content-length"))
+            header.name.eq_ignore_ascii_case(nom) && !nom.eq_ignore_ascii_case("content-length")
         });
-        let is_proxy_header = config.http.strip_proxy_headers
+        let is_proxy_header = (config.http.strip_proxy_headers
             && header
                 .name
                 .get(..6)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-"));
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-")))
+            || (has_route_proxy_auth && header.name.eq_ignore_ascii_case("proxy-authorization"));
         let is_hop_by_hop = ["connection", "keep-alive", "upgrade"]
             .iter()
             .any(|name| header.name.eq_ignore_ascii_case(name))
@@ -353,6 +356,9 @@ pub(super) fn build_raw_h1_from_override(
     }
     if !config.http.http1_keep_alive {
         out.extend_from_slice(b"Connection: close");
+        out.extend_from_slice(blank_ending);
+    } else if config.http.set_connection_keep_alive {
+        out.extend_from_slice(b"Connection: keep-alive");
         out.extend_from_slice(blank_ending);
     }
     out.extend_from_slice(blank_ending);

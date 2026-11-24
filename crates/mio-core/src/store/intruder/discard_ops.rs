@@ -301,7 +301,9 @@ pub(in crate::store::intruder) fn shared_discard_flow(
         "SELECT EXISTS(SELECT 1 FROM main.intruder_results WHERE flow=?2 AND run!=?1)
          OR EXISTS(SELECT 1 FROM main.websocket_messages WHERE flow=?2)
          OR EXISTS(SELECT 1 FROM main.websocket_connections WHERE flow=?2)
-         OR EXISTS(SELECT 1 FROM main.repeater_history WHERE flow=?2)",
+         OR EXISTS(SELECT 1 FROM main.repeater_history WHERE flow=?2)
+         OR (EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='site_map_entries')
+             AND EXISTS(SELECT 1 FROM main.site_map_entries WHERE id=?2 OR owner=('live:' || ?2)))",
         params![run.to_string(), flow.to_string()],
         |row| row.get(0),
     )?;

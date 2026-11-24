@@ -819,9 +819,9 @@ where
         if n == 0 {
             return Ok(());
         }
-        let response = if line.len() > MAX_IPC_LINE_BYTES
-            || !line.ends_with('\n') && line.len() == MAX_IPC_LINE_BYTES
-        {
+        let over_limit = line.len() > MAX_IPC_LINE_BYTES
+            || (!line.ends_with('\n') && line.len() == MAX_IPC_LINE_BYTES);
+        let response = if over_limit {
             AiIpcEnvelope::err("IPC 请求单行超过大小上限")
         } else {
             let trimmed = line.trim();
@@ -860,6 +860,9 @@ where
         encoded.push(b'\n');
         tokio::time::timeout(IPC_IO_TIMEOUT, writer_half.write_all(&encoded)).await??;
         tokio::time::timeout(IPC_IO_TIMEOUT, writer_half.flush()).await??;
+        if over_limit {
+            return Ok(());
+        }
     }
 }
 
@@ -902,6 +905,10 @@ pub fn call_ai_ipc(
         let ep: WindowsIpcEndpoint =
             serde_json::from_str(&raw).context("解析 MIO 本地服务端点失败")?;
         let addr: std::net::SocketAddr = ep.addr.parse().context("MIO 本地服务端点地址无效")?;
+        ensure!(
+            addr.ip().is_loopback(),
+            "MIO 本地服务端点地址必须是本地回环地址"
+        );
         let mut stream =
             std::net::TcpStream::connect_timeout(&addr, timeout).with_context(|| {
                 format!(

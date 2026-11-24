@@ -574,6 +574,7 @@ impl Settings {
         if !self.state.enabled {
             return;
         }
+        let project = self.state.project;
         let paths = crate::native_terminate::prompt_for_paths(
             window,
             cx,
@@ -593,6 +594,9 @@ impl Settings {
                     .spawn(async move { read_bypass_list_file(&path) })
                     .await;
                 let _ = this.update_in(cx, |this, _, cx| {
+                    if this.state.project != project || !this.state.enabled {
+                        return;
+                    }
                     match parsed {
                         Ok(entries) => {
                             let added = this.append_socks_bypass_entries(entries);

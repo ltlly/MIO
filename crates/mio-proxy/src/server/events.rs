@@ -63,8 +63,6 @@ impl State {
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let mut records = crate::lock_unpoison(&self.terminal_records);
-        // Retaining its unique request permit bounds this mailbox by max_connections.
-        debug_assert!(records.len() < self.config.limits.max_connections);
         records.push(TerminalRecord {
             capture,
             _permit: permit,

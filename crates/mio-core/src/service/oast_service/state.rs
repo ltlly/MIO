@@ -189,9 +189,14 @@ impl State {
 
 impl CollaboratorService {
     pub(super) async fn stop_auto_poll(&mut self) {
-        if let Some((cancel, handle)) = self.auto_poll.take() {
+        if let Some((cancel, mut handle)) = self.auto_poll.take() {
             cancel.cancel();
-            let _ = timeout_at(TokioInstant::now() + POLL_JOIN_TIMEOUT, handle).await;
+            if timeout_at(TokioInstant::now() + POLL_JOIN_TIMEOUT, &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+            }
         }
     }
 
@@ -220,7 +225,12 @@ impl CollaboratorService {
                 let Some(item) = next else {
                     break;
                 };
-                if fwd_tx.send(item).await.is_err() {
+                let sent = tokio::select! {
+                    biased;
+                    _ = fwd_cancel.cancelled() => false,
+                    res = fwd_tx.send(item) => res.is_ok(),
+                };
+                if !sent {
                     break;
                 }
             }

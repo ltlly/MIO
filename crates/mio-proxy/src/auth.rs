@@ -445,25 +445,30 @@ impl DigestChallenge {
         let params = parse_auth_kv_pairs(rest);
         let realm = params.get("realm")?.clone();
         let nonce = params.get("nonce")?.clone();
-        let qop = params.get("qop").and_then(|raw_qop| {
-            let tokens: Vec<&str> = raw_qop
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            if tokens.iter().any(|t| t.eq_ignore_ascii_case("auth")) {
-                Some("auth".to_owned())
-            } else if tokens.iter().any(|t| t.eq_ignore_ascii_case("auth-int")) {
-                Some("auth-int".to_owned())
-            } else {
-                tokens.first().map(|t| (*t).to_owned())
+        let qop = match params.get("qop") {
+            None => None,
+            Some(raw_qop) => {
+                let mut tokens = raw_qop.split(',').map(str::trim);
+                if tokens.clone().any(|t| t.eq_ignore_ascii_case("auth")) {
+                    Some("auth".to_owned())
+                } else if tokens.any(|t| t.eq_ignore_ascii_case("auth-int")) {
+                    Some("auth-int".to_owned())
+                } else {
+                    return None;
+                }
             }
-        });
+        };
         let opaque = params.get("opaque").cloned();
         let algorithm = params
             .get("algorithm")
             .map(|a| a.trim().to_ascii_uppercase())
             .unwrap_or_else(|| "MD5".into());
+        if !matches!(
+            algorithm.as_str(),
+            "MD5" | "MD5-SESS" | "SHA-256" | "SHA-256-SESS"
+        ) {
+            return None;
+        }
         let stale = params
             .get("stale")
             .is_some_and(|s| s.eq_ignore_ascii_case("true"));
@@ -536,6 +541,8 @@ impl DigestChallenge {
                 ", qop={qop}, nc={nc_hex}, cnonce=\"{}\"",
                 escape_quoted(cnonce)
             );
+        } else if is_sess {
+            let _ = write!(header, ", cnonce=\"{}\"", escape_quoted(cnonce));
         }
         header
     }
@@ -562,10 +569,7 @@ fn parse_auth_kv_pairs(input: &str) -> HashMap<String, String> {
             i += 1;
         }
         if key.is_empty() || i >= bytes.len() || bytes[i] != b'=' {
-            while i < bytes.len() && bytes[i] != b',' {
-                i += 1;
-            }
-            continue;
+            break;
         }
         i += 1;
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -786,9 +790,13 @@ pub fn build_ntlm_type3_header_value(
     let lm_off = ws_off + ws_bytes.len();
     let nt_off = lm_off + lm_response.len();
     let total_len = nt_off + nt_response.len();
+    let charset_flags = if unicode {
+        NTLMSSP_NEGOTIATE_UNICODE
+    } else {
+        NTLMSSP_NEGOTIATE_OEM
+    };
     let out_flags = challenge.flags
-        & (NTLMSSP_NEGOTIATE_UNICODE
-            | NTLMSSP_NEGOTIATE_OEM
+        & (charset_flags
             | NTLMSSP_REQUEST_TARGET
             | NTLMSSP_NEGOTIATE_NTLM
             | NTLMSSP_NEGOTIATE_ALWAYS_SIGN

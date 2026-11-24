@@ -776,6 +776,9 @@ impl HexGridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.byte_input.focus_handle(cx).is_focused(window) {
+            return;
+        }
         let ks = &event.keystroke;
         let wire_len = self.shared.borrow().wire_bytes.len();
         if ks.modifiers.platform || ks.modifiers.control {

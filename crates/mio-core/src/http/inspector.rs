@@ -283,6 +283,12 @@ pub fn apply_inspector_mutation(
             {
                 return Err("Inspector 名称和值不能包含换行符或 NUL。".into());
             }
+            if *section == InspectorSection::QueryParams
+                && (name.chars().any(|c| c.is_ascii_whitespace() || c == '#')
+                    || value.chars().any(|c| c.is_ascii_whitespace() || c == '#'))
+            {
+                return Err("查询参数名称和值不能包含空白字符或 `#`。".into());
+            }
             *section
         }
         InspectorMutation::Remove { section, .. } => *section,

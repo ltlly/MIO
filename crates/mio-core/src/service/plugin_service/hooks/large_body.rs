@@ -126,14 +126,34 @@ impl HookSpillScope {
         if !canon_meta.is_file() || canon_meta.len() > protocol::MAX_SPILL_BODY_BYTES as u64 {
             return Err("插件返回的共享大报文文件超过 64 MiB 限额或类型无效".into());
         }
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = opts
+            .open(&canon_file)
+            .map_err(|e| format!("打开插件修改的大报文文件失败：{e}"))?;
+        let opened_meta = file
+            .metadata()
+            .map_err(|e| format!("读取插件大报文文件元数据失败：{e}"))?;
+        if !opened_meta.is_file() || opened_meta.len() > protocol::MAX_SPILL_BODY_BYTES as u64 {
+            return Err("插件返回的共享大报文文件不是有效常规文件或超过 64 MiB 限额".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened_meta.nlink() != 1 {
+                return Err("插件返回的共享大报文文件禁止为硬链接".into());
+            }
+        }
         let mut buf = Vec::with_capacity(
-            (canon_meta.len() as usize).min(protocol::MAX_SPILL_BODY_BYTES),
+            (opened_meta.len() as usize).min(protocol::MAX_SPILL_BODY_BYTES),
         );
-        fs::File::open(&canon_file)
-            .and_then(|f| {
-                f.take(protocol::MAX_SPILL_BODY_BYTES as u64 + 1)
-                    .read_to_end(&mut buf)
-            })
+        file.take(protocol::MAX_SPILL_BODY_BYTES as u64 + 1)
+            .read_to_end(&mut buf)
             .map_err(|e| format!("读取插件修改的大报文文件失败：{e}"))?;
         if buf.len() > protocol::MAX_SPILL_BODY_BYTES {
             return Err("插件修改的大报文正文超过 64 MiB 限额".into());

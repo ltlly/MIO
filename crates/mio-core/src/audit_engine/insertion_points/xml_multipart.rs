@@ -237,7 +237,9 @@ fn find_boundary_line(raw: &[u8], mut at: usize, marker: &[u8]) -> Result<(usize
 
 fn extract_disposition_param(line: &str, key: &str) -> Option<String> {
     for seg in line.split(';').skip(1) {
-        let (k, v) = seg.trim().split_once('=')?;
+        let Some((k, v)) = seg.trim().split_once('=') else {
+            continue;
+        };
         if k.trim().eq_ignore_ascii_case(key) {
             let v = v.trim();
             if let Some(inner) = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {

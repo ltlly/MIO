@@ -527,6 +527,7 @@ impl Workbench {
                     stored.ws_match_and_replace_rules.clone();
                 self.workspace_dirty = true;
                 self.pending_sends.clear();
+                self.sequential_group_queue = None;
                 self.plugins_save_failed(cx);
                 if !self.choosing_save_as
                     && !self

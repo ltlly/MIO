@@ -18,7 +18,7 @@ const MAX_LIVE_NOTE_BYTES: usize = 64 * 1024;
 const MAX_ENTRIES: usize = 256;
 const MAX_NAMESPACES: usize = 64;
 
-pub(super) use ops::{audit_pinned_flows, read_audit_state};
+pub(in crate::store) use ops::{audit_pinned_flows, read_audit_state};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

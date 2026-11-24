@@ -203,7 +203,7 @@ pub fn set_http_request_method_bytes(
             if trimmed.is_empty() {
                 String::new()
             } else if let Ok(text) = std::str::from_utf8(trimmed)
-                && !text.contains(['\r', '\n', ' '])
+                && !text.chars().any(|c| c.is_ascii_whitespace() || c.is_control() || c == '#')
             {
                 text.to_owned()
             } else {

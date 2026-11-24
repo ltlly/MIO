@@ -572,6 +572,7 @@ impl MitmAuthority {
             name,
             enforce_sni_match,
             config,
+            observed_sni,
         })))
     }
 
@@ -815,6 +816,7 @@ struct ConnectCertificate {
     name: String,
     enforce_sni_match: bool,
     config: Arc<ServerConfig>,
+    observed_sni: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl DynamicConfigProvider for ConnectCertificate {
@@ -822,12 +824,10 @@ impl DynamicConfigProvider for ConnectCertificate {
         &self,
         hello: rustls::server::ClientHello<'_>,
     ) -> Result<Arc<ServerConfig>, rama::error::BoxError> {
-        if self.enforce_sni_match
-            && let Some(sni) = hello.server_name()
-        {
-            let normalized_sni = sni.trim_end_matches('.');
-            let target_is_ip = self.name.parse::<std::net::IpAddr>().is_ok();
-            if !target_is_ip && !normalized_sni.eq_ignore_ascii_case(&self.name) {
+        if let Some(sni) = hello.server_name() {
+            let normalized_sni = crate::route::normalize_host(sni);
+            *crate::lock_unpoison(&self.observed_sni) = Some(normalized_sni.clone());
+            if self.enforce_sni_match && normalized_sni != self.name {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "TLS SNI does not match CONNECT authority",

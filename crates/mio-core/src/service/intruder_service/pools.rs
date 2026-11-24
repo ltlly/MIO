@@ -76,6 +76,14 @@ impl State {
                 usage.requires_confirmation.insert(pool);
             }
         }
+        for run in self.intruder.runs.values() {
+            if run.preparing
+                && let Some(pool) = run.summary.resource_pool
+                && usage.task_counts.contains_key(&pool)
+            {
+                usage.requires_confirmation.insert(pool);
+            }
+        }
         Ok(usage)
     }
 
@@ -115,7 +123,12 @@ impl State {
             .intruder
             .requests
             .values()
-            .any(|request| request.resource_pool == Some(pool_id));
+            .any(|request| request.resource_pool == Some(pool_id))
+            || self
+                .intruder
+                .runs
+                .values()
+                .any(|run| run.preparing && run.summary.resource_pool == Some(pool_id));
         let result = self.store.resource_pools_mut().delete(
             project,
             pool_id,

@@ -68,6 +68,8 @@ impl Settings {
         if !self.state.enabled || self.listeners_tls.client_cert_saving {
             return;
         }
+        let project = self.state.project;
+        let editing = self.listeners_tls.client_cert_editing;
         let paths = crate::native_terminate::prompt_for_paths(
             window,
             cx,
@@ -87,6 +89,12 @@ impl Settings {
                 && let Some(first) = selected.into_iter().next()
             {
                 let _ = this.update_in(cx, |this, window, cx| {
+                    if this.state.project != project
+                        || !this.listeners_tls.client_cert_editor_visible
+                        || this.listeners_tls.client_cert_editing != editing
+                    {
+                        return;
+                    }
                     let target = if key_file {
                         &this.listeners_tls.client_cert_key_path
                     } else {
@@ -214,7 +222,10 @@ impl Settings {
 
             let _ = this.update_in(cx, |this, window, cx| {
                 this.listeners_tls.client_cert_saving = false;
-                if this.state.project != project {
+                if this.state.project != project
+                    || !this.listeners_tls.client_cert_editor_visible
+                    || this.listeners_tls.client_cert_editing != edit_index
+                {
                     cx.notify();
                     return;
                 }

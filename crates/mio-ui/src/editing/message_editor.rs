@@ -496,7 +496,13 @@ impl MessageEditor {
             return text_len;
         }
         match self.view() {
-            MessageView::Raw => self.raw.read(cx).text().len(),
+            MessageView::Raw => {
+                let raw_state = self.raw.read(cx);
+                if self.raw_baseline_revision == Some(raw_state.document_revision()) {
+                    return self.shared.borrow().wire_bytes.len();
+                }
+                raw_state.text().len()
+            }
             MessageView::Hex => {
                 let hex_state = self.hex.read(cx);
                 let rev = hex_state.document_revision();
@@ -946,6 +952,9 @@ impl MessageEditor {
         }
         self.pending_replace_all = None;
         self.pretty_baseline_revision = None;
+        self.pretty_baseline_text = None;
+        self.raw
+            .update(cx, |state, cx| state.set_line_number_mapping(None, cx));
         {
             let mut s = self.shared.borrow_mut();
             s.pretty_active = false;

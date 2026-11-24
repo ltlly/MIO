@@ -84,7 +84,7 @@ pub(super) fn save_flow_body_if_requested(
     } else if let Some(resp) = chosen_resp {
         &resp.body
     } else {
-        &chosen_req.body
+        anyhow::bail!("该流量尚无响应报文，无法保存响应体（如需保存请求体请配合 --request-only）");
     };
     std::fs::write(path, body_bytes)
         .with_context(|| format!("写入正文到文件失败：{}", path.display()))?;

@@ -298,21 +298,29 @@ pub(crate) async fn exchange_model_with_auth(
         exec.clone(),
     )
     .await?;
+    config.group.single_packet_barrier = None;
 
+    let mut attempted_proxy = false;
+    let mut attempted_origin = false;
     for _step in 0..2 {
         let status = response.status().as_u16();
         let (is_proxy, creds) = if status == 407 {
-            if !should_send_proxy_auth_on_request(&model.url, &config) {
+            if attempted_proxy || !should_send_proxy_auth_on_request(&model.url, &config) {
                 break;
             }
             let Some(rule) = find_matching_upstream_auth(&model.url, &config) else {
                 break;
             };
+            attempted_proxy = true;
             (true, rule.credentials.clone())
         } else if status == 401 {
+            if attempted_origin {
+                break;
+            }
             let Some(rule) = find_matching_platform_auth(&model.url, &config) else {
                 break;
             };
+            attempted_origin = true;
             (false, rule.credentials.clone())
         } else {
             break;
@@ -413,7 +421,6 @@ pub(crate) async fn exchange_model_with_auth(
                     exec.clone(),
                 )
                 .await?;
-                break;
             }
             crate::HttpAuthScheme::NtlmV1 | crate::HttpAuthScheme::NtlmV2 => {
                 let is_v2 = creds.scheme == crate::HttpAuthScheme::NtlmV2;
@@ -460,7 +467,7 @@ pub(crate) async fn exchange_model_with_auth(
                         exec.clone(),
                     )
                     .await?;
-                    break;
+                    continue;
                 }
                 if !challenges.iter().any(|raw| {
                     raw.eq_ignore_ascii_case("ntlm")
@@ -484,7 +491,6 @@ pub(crate) async fn exchange_model_with_auth(
                     exec.clone(),
                 ))
                 .await?;
-                break;
             }
         }
     }

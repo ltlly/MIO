@@ -271,9 +271,28 @@ fn transform_payload(
             ensure_projected_len(stage_bytes, Some(32), limit)?;
             Ok(codec_util::hex_encode(&codec_util::md5_digest(input)).into_bytes())
         }
-        PayloadProcessingRule::HtmlEncode => Ok(codec_util::html_encode_bytes(input)),
+        PayloadProcessingRule::HtmlEncode => {
+            let projected = input.iter().try_fold(0usize, |acc, &b| {
+                let add = match b {
+                    b'&' => 5,
+                    b'<' | b'>' => 4,
+                    b'"' => 6,
+                    b'\'' => 5,
+                    _ => 1,
+                };
+                acc.checked_add(add)
+            });
+            ensure_projected_len(stage_bytes, projected, limit)?;
+            Ok(codec_util::html_encode_bytes(input))
+        }
         PayloadProcessingRule::HtmlDecode => Ok(codec_util::html_decode_bytes(input)),
         PayloadProcessingRule::Base64UrlEncode => {
+            let projected = input
+                .len()
+                .checked_mul(4)
+                .and_then(|v| v.checked_add(2))
+                .map(|v| v / 3);
+            ensure_projected_len(stage_bytes, projected, limit)?;
             Ok(codec_util::base64url_encode(input).into_bytes())
         }
         PayloadProcessingRule::Base64UrlDecode => codec_util::base64url_decode(input),

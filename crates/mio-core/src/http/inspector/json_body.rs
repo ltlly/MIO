@@ -154,7 +154,10 @@ fn parse_json_path(path: &str) -> Result<Vec<PathSeg>, String> {
                 let mut end = pos + 2;
                 while end < bytes.len() {
                     if bytes[end] == b'\\' {
-                        end += 2;
+                        end += 1;
+                        if end < bytes.len() {
+                            end += path[end..].chars().next().map_or(1, char::len_utf8);
+                        }
                         continue;
                     }
                     if bytes[end] == b'"' {

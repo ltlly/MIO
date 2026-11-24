@@ -202,6 +202,7 @@ impl CollaboratorService {
     }
 
     pub(super) async fn stop_server(&mut self) -> Result<()> {
+        self.stop_auto_poll().await;
         self.drain_local_rx();
         let result = match self.server.take() {
             Some(server) => server.stop().await,
@@ -275,6 +276,7 @@ impl CollaboratorService {
             self.total_raw_bytes = self
                 .total_raw_bytes
                 .saturating_sub(removed.raw_request.len());
+            self.interaction_ids.remove(&removed.id);
         }
         true
     }

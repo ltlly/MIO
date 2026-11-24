@@ -35,10 +35,17 @@ impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
         check_logger_cancel(cancel, Instant::now() + LOGGER_QUERY_BUDGET)?;
         let deadline = Instant::now() + LOGGER_QUERY_BUDGET;
         let interrupt = cancel.clone();
+        struct LoggerProgressGuard<'a>(&'a rusqlite::Connection);
+        impl Drop for LoggerProgressGuard<'_> {
+            fn drop(&mut self) {
+                self.0.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
         self.0.connection.progress_handler(
             1000,
             Some(move || interrupt.is_cancelled() || Instant::now() >= deadline),
         );
+        let _progress_guard = LoggerProgressGuard(&self.0.connection);
         let result = (|| -> Result<(usize, Vec<FlowSummary>)> {
             let transaction = self.0.connection.unchecked_transaction()?;
             let invalid: bool = transaction.query_row(
@@ -116,7 +123,6 @@ impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
             transaction.commit()?;
             Ok((total, page))
         })();
-        self.0.connection.progress_handler(0, None::<fn() -> bool>);
         match result {
             Err(error)
                 if cancel.is_cancelled()
@@ -150,6 +156,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
                 unique_ids.push(flow_id);
             }
         }
+        let before_tc = crate::store::query_total_changes(&self.0.connection)?;
         let tx = self
             .0
             .connection
@@ -171,6 +178,8 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
                         OR EXISTS(SELECT 1 FROM main.repeater_history WHERE flow = ?1)
                         OR EXISTS(SELECT 1 FROM main.websocket_messages WHERE flow = ?1)
                         OR EXISTS(SELECT 1 FROM main.websocket_connections WHERE flow = ?1)
+                        OR (EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='site_map_entries')
+                            AND EXISTS(SELECT 1 FROM main.site_map_entries WHERE id = ?1 OR owner = ('live:' || ?1)))
                  FROM main.flows f
                  WHERE f.id = ?1",
             )?;
@@ -227,10 +236,12 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
             }
         }
         tx.commit()?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(unique_ids)
     }
 
     pub fn clear_live_proxy_history(&mut self) -> Result<Vec<FlowId>> {
+        let before_tc = crate::store::query_total_changes(&self.0.connection)?;
         let tx = rusqlite::Transaction::new_unchecked(
             &self.0.connection,
             rusqlite::TransactionBehavior::Immediate,
@@ -260,6 +271,8 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
                    AND NOT EXISTS(SELECT 1 FROM main.repeater_history WHERE flow = f.id)
                    AND NOT EXISTS(SELECT 1 FROM main.websocket_messages WHERE flow = f.id)
                    AND NOT EXISTS(SELECT 1 FROM main.websocket_connections WHERE flow = f.id)
+                   AND NOT (EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='site_map_entries')
+                       AND EXISTS(SELECT 1 FROM main.site_map_entries WHERE id = f.id OR owner = ('live:' || f.id)))
                  ORDER BY f.started DESC, f.id",
             )?;
             let mut rows = query.query([MAX_SUMMARY_BYTES as i64])?;
@@ -306,6 +319,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
             }
         }
         tx.commit()?;
+        self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(deleted_ids)
     }
 }

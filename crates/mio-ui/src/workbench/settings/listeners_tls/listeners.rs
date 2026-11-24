@@ -1438,6 +1438,7 @@ impl Settings {
         if !self.proxy_listeners_available() {
             return;
         }
+        let project = self.state.project;
         let cert_paths = crate::native_terminate::prompt_for_paths(
             window,
             cx,
@@ -1490,6 +1491,9 @@ impl Settings {
             };
             if cert_pem.contains("PRIVATE KEY-----") {
                 let _ = this.update_in(cx, |this, _, cx| {
+                    if this.state.project != project || !this.proxy_listeners_available() {
+                        return;
+                    }
                     this.listeners_tls.listener_error = None;
                     let _ = this
                         .owner
@@ -1545,6 +1549,9 @@ impl Settings {
                 .spawn(async move { read_bounded_pem_text(&key_path, "CA 私钥 PEM 文件") })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
+                if this.state.project != project || !this.proxy_listeners_available() {
+                    return;
+                }
                 match key_res {
                     Ok(key_pem) => {
                         this.listeners_tls.listener_error = None;

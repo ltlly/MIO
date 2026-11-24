@@ -325,7 +325,7 @@ pub(super) fn xml_checked(
     ensure!(depth == 0, "Auto § XML 标签未闭合");
     check()?;
     roxmltree::Document::parse_with_options(
-        text,
+        text.strip_prefix('\u{feff}').unwrap_or(text),
         roxmltree::ParsingOptions {
             allow_dtd: false,
             nodes_limit: MAX_NODES as u32,

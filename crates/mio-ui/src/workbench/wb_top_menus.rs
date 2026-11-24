@@ -203,10 +203,13 @@ impl Workbench {
         );
         r.on_action(
             cx.listener(|this, _: &crate::DuplicateActiveTab, window, cx| {
-                if let Some(ws_id) = this.workspace.active_websocket_tab {
-                    this.duplicate_ws_repeater_tab(ws_id, cx);
-                } else if let Some(id) = this.workspace.active {
+                if let Some(id) = this.workspace.active {
                     this.duplicate_repeater_tab(id, window, cx);
+                } else if let Some(ws_id) = this.workspace.active_websocket_tab {
+                    if !this.flush_workspace(window, cx) {
+                        return;
+                    }
+                    this.duplicate_ws_repeater_tab(ws_id, cx);
                 }
             }),
         );

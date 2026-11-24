@@ -166,14 +166,15 @@ impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::Site
                 }
                 ensure!(explicit_rows.insert(row.id(), (entry_id, revision, row)).is_none(), "站点地图显式条目重复");
             }
-            if let Ok(mut d_stmt) = transaction.prepare(
+            let mut d_stmt = transaction.prepare(
                 "SELECT CASE WHEN typeof(detail)='blob' AND length(detail)<=?1 THEN detail END FROM main.site_map_entries ORDER BY id",
-            ) && let Ok(mut d_rows) = d_stmt.query([super::MAX_ENTRY_BYTES as i64])
-            {
-                while let Ok(Some(d_raw)) = d_rows.next() {
-                    if let Ok(Some(d_bytes)) = d_raw.get::<_, Option<Vec<u8>>>(0)
-                        && let Ok(detail) = serde_json::from_slice::<SiteMapEntryDetail>(&d_bytes)
-                    {
+            )?;
+            let mut d_rows = d_stmt.query([super::MAX_ENTRY_BYTES as i64])?;
+            while let Some(d_raw) = d_rows.next()? {
+                let Some(d_bytes) = d_raw.get::<_, Option<Vec<u8>>>(0)? else {
+                    continue;
+                };
+                if let Ok(detail) = serde_json::from_slice::<SiteMapEntryDetail>(&d_bytes) {
                         if let Some(ref_url) = SiteMapItem::extract_referer_from_headers(
                             &detail.record.request.url,
                             &detail.record.request.headers,
@@ -197,7 +198,6 @@ impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::Site
                                 .entry(loc_url)
                                 .or_insert_with(|| detail.record.request.url.clone());
                         }
-                    }
                 }
             }
         }

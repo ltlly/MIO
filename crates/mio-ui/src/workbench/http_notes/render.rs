@@ -46,21 +46,28 @@ fn heading_label(source: &str, cursor: usize) -> &'static str {
 
 fn heading_snippet(source: &str, level: u8) -> (String, usize, usize) {
     assert!(level <= 6, "Markdown 标题级别须在 0 至 6 范围内");
-    let parsed = to_mdast(source, &ParseOptions::gfm()).expect("Markdown 备注能够解析");
+    let Ok(parsed) = to_mdast(source, &ParseOptions::gfm()) else {
+        let len = source.len();
+        return (source.to_owned(), 0, len);
+    };
     let mut text = source.to_owned();
     if let Some(children) = parsed.children() {
         for node in children.iter().rev() {
             if let Node::Heading(heading) = node {
-                let position = heading.position.as_ref().expect("标题包含源码位置");
+                let Some(position) = heading.position.as_ref() else {
+                    continue;
+                };
                 let content = match (heading.children.first(), heading.children.last()) {
-                    (Some(first), Some(last)) => {
-                        let first = first.position().expect("标题内容包含源码位置");
-                        let last = last.position().expect("标题内容包含源码位置");
-                        &source[first.start.offset..last.end.offset]
-                    }
+                    (Some(first), Some(last)) => first
+                        .position()
+                        .zip(last.position())
+                        .and_then(|(f, l)| source.get(f.start.offset..l.end.offset))
+                        .unwrap_or(""),
                     _ => "",
                 };
-                text.replace_range(position.start.offset..position.end.offset, content);
+                if source.get(position.start.offset..position.end.offset).is_some() {
+                    text.replace_range(position.start.offset..position.end.offset, content);
+                }
             }
         }
     }

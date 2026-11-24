@@ -212,7 +212,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RawH1Io<S> {
     }
 
     fn is_write_vectored(&self) -> bool {
-        self.pending.is_none() && self.inner.is_write_vectored()
+        self.pending.is_none()
+            && self.cookie_fields.is_none()
+            && self.cookie_head.is_empty()
+            && self.inner.is_write_vectored()
     }
 }
 
@@ -882,9 +885,13 @@ fn prepare_exchange(request: &mut Request, config: &SendConfig) -> Result<Prepar
     if let Some(version) = config.http.version {
         *request.version_mut() = message::version(version);
     }
-    let force_http10 = config.http.version == Some(HttpVersion::Http10);
-    let allow_http2_alpn_override = config.http.allow_http2_alpn_override
-        && config.http.version == Some(HttpVersion::Http2);
+    let effective_version = config
+        .http
+        .version
+        .unwrap_or_else(|| message::model_version(request.version()));
+    let force_http10 = effective_version == HttpVersion::Http10;
+    let allow_http2_alpn_override =
+        config.http.allow_http2_alpn_override && effective_version == HttpVersion::Http2;
     let is_secure_scheme = request.uri().scheme_str().is_some_and(|scheme| {
         scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
     });
@@ -895,8 +902,10 @@ fn prepare_exchange(request: &mut Request, config: &SendConfig) -> Result<Prepar
         && !request.headers().contains_key("upgrade");
     let tls_alpn_version = if allow_http2_alpn_override || prefer_http2_by_default {
         None
+    } else if config.http.version.is_some() || effective_version == HttpVersion::Http2 {
+        Some(effective_version)
     } else {
-        config.http.version
+        None
     };
     let client_identity = if is_secure_scheme
         && let Some(host) = target_host.as_deref()
@@ -945,7 +954,7 @@ fn prepare_exchange(request: &mut Request, config: &SendConfig) -> Result<Prepar
     };
     let default_http_version = if force_http10 {
         Version::HTTP_10
-    } else if allow_http2_alpn_override {
+    } else if effective_version == HttpVersion::Http2 {
         Version::HTTP_2
     } else {
         Version::HTTP_11
@@ -1199,10 +1208,19 @@ pub(crate) async fn exchange_with_metrics(
     let prepared = prepare_exchange(&mut request, config)?;
     let timing = Arc::new(Mutex::new(ResponseTiming::default()));
 
-    let version_allows_reuse = match config.http.version {
-        Some(HttpVersion::Http2) => config.http.http2_reuse,
-        Some(_) => config.http.http1_keep_alive,
-        None => config.http.http1_keep_alive || config.http.http2_reuse,
+    let effective_version = config
+        .http
+        .version
+        .unwrap_or_else(|| message::model_version(request.version()));
+    let version_allows_reuse = match effective_version {
+        HttpVersion::Http2 => config.http.http2_reuse,
+        HttpVersion::Http10 | HttpVersion::Http11 => {
+            config.http.http1_keep_alive
+                || (prepared.is_secure_scheme
+                    && config.http.default_to_http2
+                    && config.http.http2_reuse
+                    && config.http.version.is_none())
+        }
     };
     let use_pool = config.http.use_connection_pool
         && version_allows_reuse

@@ -485,34 +485,13 @@ impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
                     .then_with(|| b.detected_unix_ms.cmp(&a.detected_unix_ms))
             });
             let mut audit_state = self.0.audit().read_state()?;
-            let mut existing: HashSet<(String, String, String, Option<String>)> = audit_state
-                .findings
-                .iter()
-                .map(|f| {
-                    (
-                        f.issue_id.clone(),
-                        f.host.clone(),
-                        f.url.clone(),
-                        f.parameter.clone(),
-                    )
-                })
-                .collect();
-            let mut added = false;
-            for finding in passive_findings {
-                let key = (
-                    finding.issue_id.clone(),
-                    finding.host.clone(),
-                    finding.url.clone(),
-                    finding.parameter.clone(),
-                );
-                if existing.insert(key) {
-                    audit_state.findings.push(finding);
-                    added = true;
-                }
-            }
-            if added {
+            let added = super::audit::merge_audit_findings(
+                &mut audit_state.findings,
+                passive_findings,
+            );
+            if !added.is_empty() {
                 audit_state.revision = audit_state.revision.saturating_add(1);
-                let _ = self.0.audit_mut().write_state(&audit_state, cancel);
+                self.0.audit_mut().write_state(&audit_state, cancel)?;
             }
         }
         drop(passive_dedup);

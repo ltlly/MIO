@@ -211,6 +211,9 @@ impl crate::store::ExtArchiveRepo<&mut ProjectStore> {
         }
         crate::ext_archive::import::check_cancel(cancel)?;
         transaction.commit()?;
+        if restored.restored_tabs > 0 || restored.restored_groups > 0 {
+            self.0.update_workspace_cache(&workspace);
+        }
         Ok(final_report)
     }
 }

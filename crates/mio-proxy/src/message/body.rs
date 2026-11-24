@@ -216,10 +216,11 @@ fn strip_expect_100_continue_map(headers: &mut HeaderMap) {
             let Ok(text) = value.to_str() else {
                 return Some(value.clone());
             };
-            match strip_header_token_str(text, "100-continue").1 {
-                None => None,
-                Some(remaining) => HeaderValue::from_str(&remaining).ok(),
+            let (removed, remaining) = strip_header_token_str(text, "100-continue");
+            if !removed {
+                return Some(value.clone());
             }
+            remaining.and_then(|rem| HeaderValue::from_str(&rem).ok())
         })
         .collect();
     headers.remove("expect");
@@ -236,7 +237,11 @@ pub(crate) fn strip_header_token_vec(headers: &mut Vec<Header>, header_name: &st
         let Ok(text) = std::str::from_utf8(&header.value) else {
             return true;
         };
-        match strip_header_token_str(text, token).1 {
+        let (removed, remaining) = strip_header_token_str(text, token);
+        if !removed {
+            return true;
+        }
+        match remaining {
             None => false,
             Some(remaining) => {
                 header.value = remaining.into_bytes();

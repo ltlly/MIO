@@ -25,6 +25,9 @@ impl Workbench {
             return;
         }
         if self.quitting || self.transition.is_some() || self.file_picker_pending() {
+            if matches!(action, AfterSave::Quit) && !self.quitting {
+                self.reject_quit(cx);
+            }
             return;
         }
         self.cancel_history_transfer("已请求切换项目或退出；未转送所选请求。", cx);

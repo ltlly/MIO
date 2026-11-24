@@ -305,7 +305,12 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| on_written(view, path, write_result, cx))
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        return;
+                    }
+                    on_written(view, path, write_result, cx);
+                })
             });
         })
         .detach();
@@ -417,10 +422,18 @@ impl Workbench {
             || self.http_notes_pending()
             || self.http_highlights_pending()
         {
-            self.notes_save_wait = Some(save_as);
-            self.status = "正在等待注解保存确认；随后保存最新项目。".into();
-            cx.notify();
-            return;
+            self.send_websocket_notes(false, cx);
+            self.send_http_notes(false, cx);
+            self.send_http_highlights(false, cx);
+            if self.websocket_notes_pending()
+                || self.http_notes_pending()
+                || self.http_highlights_pending()
+            {
+                self.notes_save_wait = Some(save_as);
+                self.status = "正在等待注解保存确认；随后保存最新项目。".into();
+                cx.notify();
+                return;
+            }
         }
         self.notes_save_wait = None;
         self.begin_project_save(save_as, window, cx);

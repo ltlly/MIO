@@ -104,7 +104,7 @@ impl Lab {
             .checked_add(1)
             .ok_or("选择 revision 耗尽")?;
         Self::set_editor(&mut self.raw, context.request.body.clone())?;
-        match STANDARD.decode(&context.request.body) {
+        match self.decode_b64(&context.request.body) {
             Ok(decoded) => {
                 Self::set_editor(&mut self.decoded, decoded)?;
                 self.status = "已读取实际请求；未发送。".into();
@@ -138,7 +138,7 @@ impl Lab {
             .checked_add(1)
             .ok_or("选择 revision 耗尽")?;
         Self::set_editor(&mut self.raw, context.response.body.clone())?;
-        match STANDARD.decode(&context.response.body) {
+        match self.decode_b64(&context.response.body) {
             Ok(decoded) => {
                 Self::set_editor(&mut self.decoded, decoded)?;
                 self.status = "已读取实际响应；未发送。".into();
@@ -168,11 +168,15 @@ impl Lab {
         ctx: &mut dyn HostClient,
         resource: Uuid,
     ) -> Result<bool, String> {
-        if !self
+        let matches_req = self
             .context
             .as_ref()
-            .is_some_and(|context| context.resource == resource)
-        {
+            .is_some_and(|context| context.resource == resource);
+        let matches_resp = self
+            .response_context
+            .as_ref()
+            .is_some_and(|context| context.resource == resource);
+        if !matches_req && !matches_resp {
             return Ok(false);
         }
         let previous_generation = self.context_generation;
@@ -183,7 +187,12 @@ impl Lab {
             .selection_revision
             .checked_add(1)
             .ok_or_else(|| "选择 revision 耗尽".to_owned())?;
-        self.context = None;
+        if matches_req {
+            self.context = None;
+        }
+        if matches_resp {
+            self.response_context = None;
+        }
         self.context_generation = generation;
         self.selection_revision = selection;
         self.raw.read_only = false;

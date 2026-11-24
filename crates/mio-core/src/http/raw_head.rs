@@ -316,17 +316,20 @@ fn rebuild_filtered_head(
         let name_start = slice_offset(parsed_input, header.name.as_bytes()) - added_start_line_bytes;
         let value_end = slice_offset(parsed_input, header.value) + header.value.len()
             - added_start_line_bytes;
-        let line_start = raw[..name_start]
-            .iter()
-            .rposition(|&byte| byte == b'\n')
-            .expect("httparse header must follow a complete start line")
-            + 1;
-        let line_end = value_end
-            + raw[value_end..body_offset]
-                .iter()
-                .position(|&byte| byte == b'\n')
-                .expect("httparse complete header must end with a newline")
-            + 1;
+        let Some(prev_nl) = raw[..name_start].iter().rposition(|&byte| byte == b'\n') else {
+            continue;
+        };
+        let line_start = prev_nl + 1;
+        let line_end = match raw
+            .get(value_end..body_offset)
+            .and_then(|slice| slice.iter().position(|&byte| byte == b'\n'))
+        {
+            Some(rel) => value_end + rel + 1,
+            None => body_offset.min(raw.len()),
+        };
+        if line_start < retained_start || line_end < line_start {
+            continue;
+        }
         let retained_slice = &raw[retained_start..line_start];
         let retained_lines = retained_slice.iter().filter(|&&byte| byte == b'\n').count();
         line_numbers.extend(current_line..current_line + retained_lines);

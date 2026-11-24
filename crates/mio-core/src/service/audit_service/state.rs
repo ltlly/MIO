@@ -135,6 +135,9 @@ impl AuditService {
             if let Some(signal) = self.pending_signals.pop_front() {
                 return Some(signal);
             }
+            if self.active.is_empty() && self.jobs.is_empty() {
+                return std::future::pending().await;
+            }
             tokio::select! {
                 biased;
                 Some(signal) = self.signal_rx.recv() => {
@@ -187,6 +190,7 @@ impl AuditService {
             while !self.jobs.is_empty() {
                 match timeout_at(abort_deadline, self.jobs.join_next()).await {
                     Ok(Some(output)) => {
+                        self.drain_channel(None);
                         if let Some(signal) = self.accept_job_done(output) {
                             self.pending_signals.push_back(signal);
                         }

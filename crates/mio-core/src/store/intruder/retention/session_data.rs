@@ -2256,7 +2256,19 @@ impl SessionData {
                     }
                 }
                 crate::IntruderResultSortColumn::Status => {
+                    let mut sort_error: Option<anyhow::Error> = None;
+                    let mut comparisons = 0usize;
                     candidates.sort_by(|a, b| {
+                        if sort_error.is_some() {
+                            return std::cmp::Ordering::Equal;
+                        }
+                        comparisons += 1;
+                        if comparisons.is_multiple_of(1024)
+                            && let Err(err) = check()
+                        {
+                            sort_error = Some(err);
+                            return std::cmp::Ordering::Equal;
+                        }
                         let ord = match (a.status, b.status) {
                             (None, None) => std::cmp::Ordering::Equal,
                             (None, Some(_)) => {
@@ -2280,13 +2292,31 @@ impl SessionData {
                         };
                         ord.then_with(|| a.number.cmp(&b.number))
                     });
+                    if let Some(err) = sort_error {
+                        return Err(err);
+                    }
                 }
                 crate::IntruderResultSortColumn::ResponseReceived => {
+                    let mut sort_error: Option<anyhow::Error> = None;
+                    let mut comparisons = 0usize;
                     candidates.sort_by(|a, b| {
+                        if sort_error.is_some() {
+                            return std::cmp::Ordering::Equal;
+                        }
+                        comparisons += 1;
+                        if comparisons.is_multiple_of(1024)
+                            && let Err(err) = check()
+                        {
+                            sort_error = Some(err);
+                            return std::cmp::Ordering::Equal;
+                        }
                         let o = a.response_received.cmp(&b.response_received);
                         let ord = if asc { o } else { o.reverse() };
                         ord.then_with(|| a.number.cmp(&b.number))
                     });
+                    if let Some(err) = sort_error {
+                        return Err(err);
+                    }
                 }
                 crate::IntruderResultSortColumn::GrepMatch(_)
                 | crate::IntruderResultSortColumn::GrepExtract(_)
@@ -2586,8 +2616,7 @@ impl SessionData {
                 let preview = row
                     .notes
                     .as_deref()
-                    .filter(|n| n.len() <= intruder_mod::MAX_ERROR_BYTES)
-                    .map(|n| &n[..n.len().min(256)]);
+                    .filter(|n| n.len() <= intruder_mod::MAX_ERROR_BYTES);
                 (
                     preview,
                     row.notes_revision,
@@ -2596,7 +2625,11 @@ impl SessionData {
                 )
             };
         let notes_preview = notes
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .map(|bytes| {
+                let text = String::from_utf8_lossy(bytes);
+                let cut = text.floor_char_boundary(256.min(text.len()));
+                text[..cut].to_owned()
+            })
             .unwrap_or_default();
         Ok(Some(IntruderResultViewRow {
             ordinal,

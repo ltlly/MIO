@@ -300,6 +300,9 @@ impl crate::store::MetadataRepo<&mut ProjectStore> {
         }
         ensure!(!cancel.is_cancelled(), "项目启动配置应用已取消");
         transaction.commit()?;
+        if workspace_changed {
+            self.0.update_workspace_cache(&workspace);
+        }
         Ok(())
     }
 }

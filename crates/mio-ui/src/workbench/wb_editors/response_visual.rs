@@ -840,27 +840,41 @@ impl Workbench {
                     .and_then(|p| p.parent().map(|dir| dir.join("render-previews")))
             })
             .unwrap_or_else(|| PathBuf::from(".local/render-previews"));
-        let abs_path = match mio_core::ui_files::write_response_preview_file(
-            &preview_dir,
-            ext,
-            body_bytes,
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                self.fail(format!("写入响应预览文件失败：{error}"), cx);
-                return;
-            }
-        };
-        let path_display = abs_path.to_string_lossy().replace('\\', "/");
-        let file_url = if path_display.starts_with('/') {
-            format!("file://{path_display}")
-        } else {
-            format!("file:///{path_display}")
-        };
-        cx.open_url(&file_url);
-        self.error = None;
-        self.status = format!("已在系统浏览器中打开响应预览：{}", abs_path.display());
-        cx.notify();
+        let project = self.project;
+        let ext = ext.to_owned();
+        let body = body_bytes.to_vec();
+        cx.spawn(async move |this, cx| {
+            let write_result = cx
+                .background_executor()
+                .spawn(async move {
+                    mio_core::ui_files::write_response_preview_file(&preview_dir, &ext, &body)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.project != project {
+                    return;
+                }
+                match write_result {
+                    Ok(abs_path) => {
+                        let path_display = abs_path.to_string_lossy().replace('\\', "/");
+                        let file_url = if path_display.starts_with('/') {
+                            format!("file://{path_display}")
+                        } else {
+                            format!("file:///{path_display}")
+                        };
+                        cx.open_url(&file_url);
+                        view.error = None;
+                        view.status =
+                            format!("已在系统浏览器中打开响应预览：{}", abs_path.display());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        view.fail(format!("写入响应预览文件失败：{error}"), cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
 }

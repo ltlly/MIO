@@ -145,7 +145,7 @@ pub(crate) fn to_websocket_upgrade_request(
     let mut result = Request::new(Body::empty());
     *result.method_mut() = head.method;
     *result.uri_mut() = head.uri;
-    *result.version_mut() = version(request.version);
+    *result.version_mut() = version(head.effective_version);
     *result.headers_mut() = head.headers;
     Ok(result)
 }
@@ -211,7 +211,7 @@ pub(crate) fn to_request_with_config(
     let mut result = Request::new(body);
     *result.method_mut() = head.method;
     *result.uri_mut() = head.uri;
-    *result.version_mut() = version(request.version);
+    *result.version_mut() = version(head.effective_version);
     *result.headers_mut() = head.headers;
     if let Some(raw_h1) = raw_h1 {
         result.extensions().insert(raw_h1);
@@ -248,7 +248,7 @@ pub(crate) fn to_response(
     normalize_headers(
         &mut headers,
         response.body.len(),
-        !response.trailers.is_empty(),
+        !no_body && !response.trailers.is_empty(),
         false,
     );
     if no_body {

@@ -385,7 +385,11 @@ impl State {
         next.flows_mut().finish_pending(true, false)?;
         next.intruder_mut().recover_runs_on_open(effective_pause)?;
         next.cancel_queries_with(self.cancel.clone());
+        next.audit_mut()
+            .recover_tasks_on_open(effective_pause, &self.cancel)?;
+        let workspace = next.metadata().workspace_arc()?;
         let previous_project = self.project;
+        self.collaborator.stop_project(previous_project).await?;
         self.project = ProjectKey {
             id: next.id,
             generation: self.project.generation + 1,
@@ -408,14 +412,9 @@ impl State {
         self.ws_repeater.drop_project(previous_project);
         self.sequencer.drop_project(previous_project);
         self.audit.drop_project(previous_project);
-        self.collaborator.stop_project(previous_project).await?;
-        self.store
-            .audit_mut()
-            .recover_tasks_on_open(effective_pause, &self.cancel)?;
         self.ws_repeater.set_project(self.project);
         self.ws_repeater
             .set_injectors(self.proxy.websocket_injectors());
-        let workspace = self.store.metadata().workspace_arc()?;
         self.sync_compiled_client_certs(&workspace).await;
         self.sessions.runtime.reset_project(self.project, &workspace);
         self.sync_sessions_workspace(&workspace);

@@ -162,6 +162,9 @@ impl CollaboratorService {
                 let Some((_, cancel)) = self.active_polls.remove(&job_id) else {
                     return;
                 };
+                if cancel.is_cancelled() {
+                    return;
+                }
                 if self.project != Some(project) {
                     return;
                 }
@@ -235,11 +238,15 @@ impl CollaboratorService {
         }
         if timed_out {
             self.poll_jobs.abort_all();
+            let abort_deadline = TokioInstant::now() + Duration::from_millis(500);
             while !self.poll_jobs.is_empty() {
-                match timeout_at(deadline, self.poll_jobs.join_next()).await {
+                match timeout_at(abort_deadline, self.poll_jobs.join_next()).await {
                     Ok(Some(output)) => self.accept_poll_output(output),
                     Ok(None) => break,
-                    Err(_) => bail!("Collaborator 轮询任务回收超过期限"),
+                    Err(_) => {
+                        self.active_polls.clear();
+                        bail!("Collaborator 轮询任务回收超过期限");
+                    }
                 }
             }
         }

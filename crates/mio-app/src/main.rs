@@ -22,27 +22,39 @@ fn run() -> anyhow::Result<()> {
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Option<PathBuf>> {
     let mut args = args.into_iter().peekable();
     let mut project_path: Option<PathBuf> = None;
+    let mut allow_flags = true;
     while let Some(arg) = args.next() {
         let bytes = arg.as_encoded_bytes();
         anyhow::ensure!(!bytes.is_empty(), "启动项目路径参数不能为空");
         anyhow::ensure!(!bytes.contains(&0), "启动项目路径参数不能包含空字节");
-        if arg == "-n" || arg == "--new-window" {
-            continue;
-        }
-        if arg == "--dock-action" {
-            let index = args
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("--dock-action 缺少动作序号参数"))?;
-            let index_str = index
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("--dock-action 动作序号无效"))?;
-            let _: usize = index_str
-                .parse()
-                .map_err(|_| anyhow::anyhow!("--dock-action 动作序号无效"))?;
-            continue;
-        }
-        if bytes.starts_with(b"-psn_") {
-            continue;
+        if allow_flags {
+            if arg == "--" {
+                allow_flags = false;
+                continue;
+            }
+            if arg == "-n" || arg == "--new-window" {
+                continue;
+            }
+            if arg == "--dock-action" {
+                let index = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--dock-action 缺少动作序号参数"))?;
+                let index_str = index
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("--dock-action 动作序号无效"))?;
+                let _: usize = index_str
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("--dock-action 动作序号无效"))?;
+                continue;
+            }
+            if bytes.starts_with(b"-psn_") {
+                continue;
+            }
+            anyhow::ensure!(
+                !bytes.starts_with(b"-"),
+                "未知的命令行参数：{}",
+                arg.to_string_lossy()
+            );
         }
         anyhow::ensure!(
             project_path.is_none(),

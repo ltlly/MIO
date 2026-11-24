@@ -738,10 +738,11 @@ pub(super) async fn read_tls_client_hello_prefix<R: tokio::io::AsyncRead + Unpin
                 return Ok(buf);
             }
         }
+        let max_read = chunk.len().min(MAX_CLIENT_HELLO_PREFIX - buf.len());
         let step = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
-            res = tokio::time::timeout_at(deadline, io.read(&mut chunk)) => {
+            res = tokio::time::timeout_at(deadline, io.read(&mut chunk[..max_read])) => {
                 match res {
                     Ok(read_res) => read_res,
                     Err(_) => return Err(ProxyError::Timeout),
@@ -751,8 +752,7 @@ pub(super) async fn read_tls_client_hello_prefix<R: tokio::io::AsyncRead + Unpin
         match step {
             Ok(0) => return Ok(buf),
             Ok(n) => {
-                let take = n.min(MAX_CLIENT_HELLO_PREFIX.saturating_sub(buf.len()));
-                buf.extend_from_slice(&chunk[..take]);
+                buf.extend_from_slice(&chunk[..n]);
                 if buf.len() >= MAX_CLIENT_HELLO_PREFIX {
                     return Ok(buf);
                 }
@@ -1225,12 +1225,17 @@ pub(in crate::server) async fn handle_http_with_ingress(
             let status = response.status().as_u16();
             let version = message::model_version(response.version());
             let reason_phrase = active.capture_metrics.reason_phrase.clone();
-            let headers = message::headers(response.headers());
             async {
+                let mut header_budget = (
+                    crate::StreamedResponse::MAX_HEADERS,
+                    crate::StreamedResponse::MAX_HEAD_BYTES,
+                );
+                message::consume_header_budget(response.headers(), &mut header_budget)?;
+                let headers = message::headers(response.headers());
                 let (body, trailers) = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
-                    result = tokio::time::timeout_at(deadline, message::body(response.into_body(), state.config.limits.max_body_bytes)) => result.map_err(|_| ProxyError::Timeout)??,
+                    result = tokio::time::timeout_at(deadline, message::body_with_header_budget(response.into_body(), state.config.limits.max_body_bytes, Some(header_budget))) => result.map_err(|_| ProxyError::Timeout)??,
                 };
                 cancel.cancel();
                 record.summary.status = Some(status);
@@ -1457,15 +1462,16 @@ pub(in crate::server) async fn process_http(
     let deadline = tokio::time::Instant::now() + config.limits.timeout;
     let (sender, response) = oneshot::channel();
     // Keep the driver and request budget until cancellation has actually joined the socket.
+    let task_cancel = cancel.clone();
     state.tasks.spawn(async move {
         let _permit = permit;
-        let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
+        let shutdown = Shutdown::new(task_cancel.clone().cancelled_owned());
         let exec = Executor::graceful(shutdown.guard());
         let attempt_started = Instant::now();
         let result = tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-            result = client::exchange_model_with_auth(outbound_model, &config, deadline, cancel.clone(), exec) => {
+            _ = task_cancel.cancelled() => Err(ProxyError::Cancelled),
+            result = client::exchange_model_with_auth(outbound_model, &config, deadline, task_cancel.clone(), exec) => {
                 match result {
                     Ok((resp, timing)) => {
                         let exchange_returned = Instant::now();
@@ -1497,11 +1503,21 @@ pub(in crate::server) async fn process_http(
             },
         };
         if sender.send(result).is_ok() {
-            cancel.cancelled().await;
+            task_cancel.cancelled().await;
         }
-        cancel.cancel();
+        task_cancel.cancel();
         shutdown.shutdown().await;
     });
-    let (response, metrics) = response.await.map_err(ProxyError::network)??;
+    let (response, metrics) = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
+        res = response => res.map_err(|err| {
+            if cancel.is_cancelled() {
+                ProxyError::Cancelled
+            } else {
+                ProxyError::network(err)
+            }
+        })??,
+    };
     Ok((response, deadline, metrics))
 }

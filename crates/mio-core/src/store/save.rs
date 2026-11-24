@@ -105,7 +105,7 @@ impl ProjectStore {
         }
     }
 
-    fn update_workspace_cache(&self, workspace: &Workspace) {
+    pub(in crate::store) fn update_workspace_cache(&self, workspace: &Workspace) {
         let versions = (|| -> Result<(i64, i64, i64)> {
             let dv: i64 =
                 self.connection

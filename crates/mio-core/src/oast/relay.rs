@@ -133,7 +133,7 @@ async fn read_poll_request(
                 Err(_) => return None,
             }
         }
-        if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+        if raw.windows(4).any(|w| w == b"\r\n\r\n") || raw.windows(2).any(|w| w == b"\n\n") {
             break;
         }
     }

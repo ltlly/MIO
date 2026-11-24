@@ -444,6 +444,10 @@ fn history_message_actions_support_scan_launcher_selection_copy_save_and_browser
         f.view.update(cx, |view, cx| {
             view.open_current_response_in_browser(window, cx);
         });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(f.window, |_, window, cx| {
         assert!(f.view.read(cx).error.is_none());
         assert!(f.view.read(cx).status.contains("已在系统浏览器中打开响应预览"));
 

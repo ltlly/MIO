@@ -61,7 +61,7 @@ pub(crate) fn response_body_deadline(
 ) -> Option<tokio::time::Instant> {
     match (is_streaming, streaming_timeout) {
         (true, Some(limit)) if limit.is_zero() => None,
-        (true, Some(limit)) => Some(tokio::time::Instant::now() + limit),
+        (true, Some(limit)) => tokio::time::Instant::now().checked_add(limit),
         _ => Some(default_deadline),
     }
 }

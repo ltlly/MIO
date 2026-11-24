@@ -205,21 +205,12 @@ impl Relay<'_> {
                 self.state.config.limits.max_body_bytes,
             )?,
         };
-        let (writer, source_closed, destination_closed) = match direction {
-            WebSocketDirection::ClientToServer => (
-                peers.egress_writer,
-                peers.ingress_closed,
-                peers.egress_closed,
-            ),
-            WebSocketDirection::ServerToClient => (
-                peers.ingress_writer,
-                peers.egress_closed,
-                peers.ingress_closed,
-            ),
+        let (writer, destination_closed) = match direction {
+            WebSocketDirection::ClientToServer => (peers.egress_writer, peers.egress_closed),
+            WebSocketDirection::ServerToClient => (peers.ingress_writer, peers.ingress_closed),
         };
         let is_close = kind == WebSocketKind::Close;
         if destination_closed.load(Ordering::Acquire)
-            || source_closed.load(Ordering::Acquire)
             || (self.closing.is_cancelled() && !is_close)
         {
             return Err(ProxyError::Network("WebSocket 对端已关闭".into()));
@@ -227,7 +218,7 @@ impl Relay<'_> {
         self.send_message(writer, message, is_close, destination_closed)
             .await?;
         if is_close {
-            source_closed.store(true, Ordering::Release);
+            destination_closed.store(true, Ordering::Release);
             self.closing.cancel();
         }
         let record = WebSocketMessage {

@@ -62,16 +62,34 @@ impl ScriptHeaders {
 
     pub(super) fn set(&mut self, name: &str, value: &str) -> ScriptResult<()> {
         validate_header_pair(name, value)?;
-        self.entries.retain(|h| !h.name.eq_ignore_ascii_case(name));
-        self.entries.push(Header {
+        let mut next = self.entries.clone();
+        next.retain(|h| !h.name.eq_ignore_ascii_case(name));
+        next.push(Header {
             name: name.to_owned(),
             value: value.as_bytes().to_vec(),
         });
+        if next.len() > 1024
+            || next.iter().map(|h| h.name.len() + h.value.len() + 4).sum::<usize>()
+                > crate::http::MAX_HEAD
+        {
+            return Err("请求或响应标头数量或总大小超过上限".into());
+        }
+        self.entries = next;
         Ok(())
     }
 
     pub(super) fn add(&mut self, name: &str, value: &str) -> ScriptResult<()> {
         validate_header_pair(name, value)?;
+        let total_bytes: usize = self
+            .entries
+            .iter()
+            .map(|h| h.name.len() + h.value.len() + 4)
+            .sum();
+        if self.entries.len() >= 1024
+            || total_bytes.saturating_add(name.len() + value.len() + 4) > crate::http::MAX_HEAD
+        {
+            return Err("请求或响应标头数量或总大小超过上限".into());
+        }
         self.entries.push(Header {
             name: name.to_owned(),
             value: value.as_bytes().to_vec(),

@@ -34,9 +34,13 @@ pub(crate) fn websocket_config(max_body_bytes: usize) -> WebSocketConfig {
 
 pub(super) fn prepare_websocket_send_config(config: &mut SendConfig) {
     config.http.version = Some(HttpVersion::Http11);
+    config.http.default_to_http2 = false;
+    config.http.allow_http2_alpn_override = false;
     config.http.update_content_length = true;
     config.http.normalize_http1_line_endings = true;
     config.http.raw_http1_override = None;
+    config.http.http2_reuse = false;
+    config.http.use_connection_pool = false;
 }
 
 pub(super) async fn establish_client_websocket(

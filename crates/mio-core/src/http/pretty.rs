@@ -226,7 +226,10 @@ impl<'a> JsonOffsetScanner<'a> {
         while self.pos < self.bytes.len() {
             match self.bytes[self.pos] {
                 b'\\' => {
-                    self.pos += 2;
+                    self.pos += 1;
+                    if self.pos < self.bytes.len() {
+                        self.pos += 1;
+                    }
                 }
                 b'"' => {
                     self.pos += 1;

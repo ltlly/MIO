@@ -644,7 +644,12 @@ fn trim_line_badges<'a>(
         }
         let rel_start = r.start.saturating_sub(line_offset_start);
         let rel_end = r.end.saturating_sub(line_offset_start);
-        if rel_end <= cut && line[rel_end..cut].bytes().all(|b| b == b' ') {
+        if rel_start <= rel_end
+            && rel_end <= cut
+            && line.is_char_boundary(rel_start)
+            && line.is_char_boundary(rel_end)
+            && line[rel_end..cut].bytes().all(|b| b == b' ')
+        {
             cut = rel_start;
         } else {
             break;

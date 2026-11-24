@@ -25,7 +25,8 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
     let mut name_len = 0_usize;
     let mut jumps = 0_usize;
     let mut question_end = None;
-    while cursor < packet.len() {
+    let mut bound = packet.len();
+    while cursor < bound {
         let length_byte = *packet.get(cursor)?;
         if length_byte == 0 {
             if question_end.is_none() {
@@ -38,7 +39,7 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
             let second_byte = *packet.get(cursor + 1)?;
             let pointer =
                 usize::from((u16::from(length_byte & 0x3F) << 8) | u16::from(second_byte));
-            if pointer < DNS_HEADER_LEN || pointer >= cursor || pointer >= packet.len() {
+            if pointer < DNS_HEADER_LEN || pointer >= cursor || pointer >= bound {
                 return None;
             }
             if question_end.is_none() {
@@ -48,6 +49,7 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
             if jumps > DNS_MAX_POINTER_JUMPS {
                 return None;
             }
+            bound = cursor;
             cursor = pointer;
             continue;
         }
@@ -58,6 +60,9 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
         let label_len = usize::from(length_byte);
         let label_start = cursor.checked_add(1)?;
         let label_end = label_start.checked_add(label_len)?;
+        if label_end > bound {
+            return None;
+        }
         let label = packet.get(label_start..label_end)?;
         name_len = name_len.checked_add(label_len)?.checked_add(1)?;
         if name_len > DNS_NAME_MAX {

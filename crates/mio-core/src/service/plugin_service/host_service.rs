@@ -668,9 +668,17 @@ impl State {
                 response: None,
             };
             self.persist(&record)?;
-            Ok::<_, anyhow::Error>((record, upstream_tls, upstream_route, hostname_overrides))
+            let hook_scope = workspace.scope.clone();
+            Ok::<_, anyhow::Error>((
+                record,
+                upstream_tls,
+                upstream_route,
+                hostname_overrides,
+                hook_scope,
+            ))
         })();
-        let (mut record, upstream_tls, upstream_route, hostname_overrides) = match result {
+        let (mut record, upstream_tls, upstream_route, hostname_overrides, hook_scope) =
+            match result {
             Ok(prepared) => prepared,
             Err(error) => {
                 let _ = call
@@ -705,6 +713,9 @@ impl State {
         let flow_id = record.summary.id;
         let sessions = self.sessions.runtime.clone();
         let deadline = Instant::now() + config.limits.timeout;
+        let session_hooks = self.strict_session_action_hook_entries();
+        let http_hooks = self.tool_http_hook_entries();
+        let plugin_events = self.events.clone();
         let task = tokio::spawn(async move {
             let started = Instant::now();
             if sessions
@@ -720,6 +731,47 @@ impl State {
                 .is_none()
             {
                 return record;
+            }
+            if !session_hooks.is_empty() || !http_hooks.is_empty() {
+                let mut current = record.request.clone();
+                match super::hooks::run_pre_send_plugin_hooks_configured(
+                    &session_hooks,
+                    &http_hooks,
+                    Some(&hook_scope),
+                    Some(&plugin_events),
+                    flow_id,
+                    protocol::SourceDto::Plugin,
+                    &mut current,
+                    None,
+                    deadline,
+                    &cancel,
+                )
+                .await
+                {
+                    super::hooks::PreSendHookOutcome::Proceed { .. } => {
+                        super::hooks::sync_flow_request(&mut record, current);
+                    }
+                    super::hooks::PreSendHookOutcome::Dropped => {
+                        super::hooks::sync_flow_request(&mut record, current);
+                        record.summary.state = FlowState::Dropped;
+                        record.summary.revision += 1;
+                        record.summary.elapsed_ms =
+                            started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        return record;
+                    }
+                    super::hooks::PreSendHookOutcome::Failed(message) => {
+                        super::hooks::sync_flow_request(&mut record, current);
+                        record.summary.state = if cancel.is_cancelled() {
+                            FlowState::Cancelled
+                        } else {
+                            FlowState::Failed(message)
+                        };
+                        record.summary.revision += 1;
+                        record.summary.elapsed_ms =
+                            started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        return record;
+                    }
+                }
             }
             match mio_proxy::send(record.request.clone(), config, cancel).await {
                 Ok(response) => {
@@ -771,6 +823,9 @@ impl State {
             }
         };
         let saved = self.persist(&record);
+        if saved.is_ok() {
+            self.spawn_plugin_passive_checks(&record);
+        }
         self.history_changed().await;
         let reply = match &saved {
             Err(error) => Err(Failure::new(

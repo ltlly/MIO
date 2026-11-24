@@ -1040,8 +1040,7 @@ where
                 let slice_truncated = outcome
                     .content_length
                     .is_some_and(|cl| outcome.bytes_written < cl);
-                let total_truncated = outcome.status == 206
-                    && expected_total.is_some_and(|total| received_so_far < total);
+                let total_truncated = expected_total.is_some_and(|total| received_so_far < total);
                 if !slice_truncated && !total_truncated {
                     temp_file
                         .as_file()

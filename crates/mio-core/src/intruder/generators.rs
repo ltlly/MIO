@@ -361,6 +361,7 @@ fn ensure_generator_limits(count: usize, bytes: usize, name: &str) -> Result<()>
 fn push_generated_payload(
     out: &mut Vec<Vec<u8>>,
     seen: &mut std::collections::HashSet<Vec<u8>>,
+    total_bytes: &mut usize,
     value: Vec<u8>,
     name: &str,
 ) -> Result<()> {
@@ -368,13 +369,11 @@ fn push_generated_payload(
         return Ok(());
     }
     let next_count = out.len().checked_add(1).context("payload 数量溢出")?;
-    let next_bytes = out
-        .iter()
-        .try_fold(value.len(), |sum, item: &Vec<u8>| {
-            sum.checked_add(item.len())
-        })
+    let next_bytes = total_bytes
+        .checked_add(value.len())
         .context("payload 总字节数溢出")?;
     ensure_generator_limits(next_count, next_bytes, name)?;
+    *total_bytes = next_bytes;
     out.push(value);
     Ok(())
 }
@@ -735,6 +734,7 @@ pub fn generate_character_substitution_payloads(
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     for item in &config.base_items {
         let trimmed = item.trim();
         if trimmed.is_empty() {
@@ -772,6 +772,7 @@ pub fn generate_character_substitution_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 buf.into_bytes(),
                 "Character substitution",
             )?;
@@ -790,6 +791,7 @@ pub fn generate_case_modification_payloads(
     );
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     let apply_mode = |raw: &str, mode: CaseModificationMode| -> String {
         match mode {
             CaseModificationMode::NoChange => raw.to_owned(),
@@ -830,6 +832,7 @@ pub fn generate_case_modification_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 transformed.into_bytes(),
                 "Case modification",
             )?;
@@ -845,12 +848,14 @@ pub fn generate_recursive_grep_payloads(
 ) -> Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     for seed in &config.initial_payloads {
         let trimmed = seed.trim();
         if !trimmed.is_empty() {
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 trimmed.as_bytes().to_vec(),
                 "Recursive grep",
             )?;
@@ -876,7 +881,7 @@ pub fn generate_recursive_grep_payloads(
                     if config.stop_if_duplicate && seen.contains(&candidate) {
                         continue;
                     }
-                    push_generated_payload(&mut out, &mut seen, candidate, "Recursive grep")?;
+                    push_generated_payload(&mut out, &mut seen, &mut total_bytes, candidate, "Recursive grep")?;
                 }
             }
         } else if !config.start_delimiter.is_empty() && !config.end_delimiter.is_empty() {
@@ -894,7 +899,7 @@ pub fn generate_recursive_grep_payloads(
                     if config.stop_if_duplicate && seen.contains(&candidate) {
                         continue;
                     }
-                    push_generated_payload(&mut out, &mut seen, candidate, "Recursive grep")?;
+                    push_generated_payload(&mut out, &mut seen, &mut total_bytes, candidate, "Recursive grep")?;
                 }
             }
         }
@@ -940,6 +945,7 @@ pub fn generate_illegal_unicode_payloads(config: &IllegalUnicodeConfig) -> Resul
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     let chars: Vec<char> = config.input.chars().collect();
     for (char_idx, &ch) in chars.iter().enumerate() {
         let cp = ch as u32;
@@ -979,7 +985,7 @@ pub fn generate_illegal_unicode_payloads(config: &IllegalUnicodeConfig) -> Resul
                     full.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
                 }
             }
-            push_generated_payload(&mut out, &mut seen, full, "Illegal Unicode")?;
+            push_generated_payload(&mut out, &mut seen, &mut total_bytes, full, "Illegal Unicode")?;
         }
     }
     ensure!(!out.is_empty(), "Illegal Unicode 未生成任何有效超长序列");
@@ -1171,9 +1177,15 @@ pub fn generate_dates_with_unit_payloads(
             let count = count_u64 as usize;
             let dir = if start_date <= end_date { 1i64 } else { -1i64 };
             let mut out = Vec::with_capacity(count);
+            let mut total_bytes = 0usize;
             for idx in 0..count {
                 let cur = start_date + TimeDelta::days((idx as i64) * step_days * dir);
-                out.push(format_custom(cur.year(), cur.month(), cur.day()).into_bytes());
+                let bytes = format_custom(cur.year(), cur.month(), cur.day()).into_bytes();
+                total_bytes = total_bytes
+                    .checked_add(bytes.len())
+                    .context("Dates payload 总字节数溢出")?;
+                ensure_generator_limits(idx + 1, total_bytes, "Dates")?;
+                out.push(bytes);
             }
             Ok(out)
         }
@@ -1194,12 +1206,18 @@ pub fn generate_dates_with_unit_payloads(
                 -1i64
             };
             let mut out = Vec::with_capacity(count);
+            let mut total_bytes = 0usize;
             for idx in 0..count {
                 let cur_m = start_months + (idx as i64) * step_months * dir;
                 let y = cur_m.div_euclid(12) as i32;
                 let m = (cur_m.rem_euclid(12) + 1) as u32;
                 let d = fd.min(days_in_month_chrono(y, m));
-                out.push(format_custom(y, m, d).into_bytes());
+                let bytes = format_custom(y, m, d).into_bytes();
+                total_bytes = total_bytes
+                    .checked_add(bytes.len())
+                    .context("Dates payload 总字节数溢出")?;
+                ensure_generator_limits(idx + 1, total_bytes, "Dates")?;
+                out.push(bytes);
             }
             Ok(out)
         }
@@ -1329,6 +1347,7 @@ pub fn generate_username_payloads(config: &UsernameGeneratorConfig) -> Result<Ve
     let max_per = config.max_per_name.unwrap_or(64).max(1);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     for raw in &config.names {
         let parts: Vec<String> = raw
             .split(|c: char| !c.is_alphanumeric())
@@ -1377,6 +1396,7 @@ pub fn generate_username_payloads(config: &UsernameGeneratorConfig) -> Result<Ve
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 candidate.into_bytes(),
                 "Username generator",
             )?;
@@ -1421,6 +1441,7 @@ pub fn generate_ecb_block_shuffler_payloads(
     }
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
     let serialize_blocks = |b_list: &[&[u8]]| -> Vec<u8> {
         let joined: Vec<u8> = b_list.iter().copied().flatten().copied().collect();
         if config.is_hex {
@@ -1432,6 +1453,7 @@ pub fn generate_ecb_block_shuffler_payloads(
     push_generated_payload(
         &mut out,
         &mut seen,
+        &mut total_bytes,
         serialize_blocks(&blocks),
         "ECB block shuffler",
     )?;
@@ -1442,6 +1464,7 @@ pub fn generate_ecb_block_shuffler_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 serialize_blocks(&swapped),
                 "ECB block shuffler",
             )?;
@@ -1454,6 +1477,7 @@ pub fn generate_ecb_block_shuffler_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 serialize_blocks(&dup),
                 "ECB block shuffler",
             )?;
@@ -1466,6 +1490,7 @@ pub fn generate_ecb_block_shuffler_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 serialize_blocks(&omitted),
                 "ECB block shuffler",
             )?;
@@ -1478,6 +1503,7 @@ pub fn generate_ecb_block_shuffler_payloads(
             push_generated_payload(
                 &mut out,
                 &mut seen,
+                &mut total_bytes,
                 serialize_blocks(&replaced),
                 "ECB block shuffler",
             )?;

@@ -948,6 +948,17 @@ pub fn eval_custom_scan_check_script(
         rr.insert("request".into(), Dynamic::from(req_map.clone()));
         rr.insert("response".into(), Dynamic::from(resp_map.clone()));
         rr.insert("has_response".into(), true.into());
+        rr.insert("method".into(), string_field(&req_map, "method")?.into());
+        rr.insert("url".into(), string_field(&req_map, "url")?.into());
+        rr.insert("path".into(), string_field(&req_map, "path")?.into());
+        rr.insert(
+            "path_with_query".into(),
+            string_field(&req_map, "path_with_query")?.into(),
+        );
+        rr.insert("query".into(), string_field(&req_map, "query")?.into());
+        rr.insert("host".into(), string_field(&req_map, "host")?.into());
+        rr.insert("status".into(), i64::from(response.status).into());
+        rr.insert("mime_type".into(), mio_script_mime_type(Some(response)).into());
         scope.push("requestResponse", rr);
     }
     scope.push("request", req_map);
@@ -1054,6 +1065,20 @@ pub fn eval_custom_action_with_mutation(
         rr.insert("request".into(), Dynamic::from(req_map.clone()));
         rr.insert("response".into(), Dynamic::from(resp_map.clone()));
         rr.insert("has_response".into(), response.is_some().into());
+        rr.insert("method".into(), string_field(&req_map, "method")?.into());
+        rr.insert("url".into(), string_field(&req_map, "url")?.into());
+        rr.insert("path".into(), string_field(&req_map, "path")?.into());
+        rr.insert(
+            "path_with_query".into(),
+            string_field(&req_map, "path_with_query")?.into(),
+        );
+        rr.insert("query".into(), string_field(&req_map, "query")?.into());
+        rr.insert("host".into(), string_field(&req_map, "host")?.into());
+        rr.insert(
+            "status".into(),
+            i64::from(response.map_or(0, |r| r.status)).into(),
+        );
+        rr.insert("mime_type".into(), mio_script_mime_type(response).into());
         scope.push("requestResponse", rr);
     }
     scope.push("request", req_map);

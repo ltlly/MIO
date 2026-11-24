@@ -187,18 +187,38 @@ where
                 ConnectionErrorKind::InvalidInput,
             ));
         };
+        let req_cancel = input
+            .extensions()
+            .get_ref::<PooledRequestCancelExt>()
+            .map(|ext| ext.0.clone());
         if let Host::Name(domain) = &connect_authority.host {
             let domain_str = domain.as_str();
-            let resolved_ip = if let Some(ip) = self
-                .overrides_trie
-                .as_ref()
-                .and_then(|trie| trie.get_value(domain).copied())
-            {
+            let normalized_domain: Option<Domain> =
+                crate::route::normalize_host(domain_str).parse().ok();
+            let resolved_ip = if let Some(ip) = self.overrides_trie.as_ref().and_then(|trie| {
+                normalized_domain
+                    .as_ref()
+                    .and_then(|norm| trie.get_value(norm).copied())
+                    .or_else(|| trie.get_value(domain).copied())
+            }) {
                 ip
             } else {
-                let mut addrs = tokio::net::lookup_host((domain_str, connect_authority.port))
-                    .await
-                    .map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Unavailable))?;
+                let lookup = tokio::net::lookup_host((domain_str, connect_authority.port));
+                let mut addrs = tokio::select! {
+                    biased;
+                    _ = async {
+                        match &req_cancel {
+                            Some(token) => token.cancelled().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        return Err(ConnectionError::transport(
+                            ProxyError::Cancelled,
+                            ConnectionErrorKind::Unavailable,
+                        ));
+                    }
+                    res = lookup => res.map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Unavailable))?,
+                };
                 addrs
                     .next()
                     .map(|sa| sa.ip())
@@ -235,10 +255,23 @@ where
         if let Some(ProxyCredential::Basic(basic)) = &proxy_info.credential {
             client.set_auth(basic.clone());
         }
-        client
-            .handshake_connect(&mut conn, &connect_authority)
-            .await
-            .map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Protocol))?;
+        tokio::select! {
+            biased;
+            _ = async {
+                match &req_cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                return Err(ConnectionError::transport(
+                    ProxyError::Cancelled,
+                    ConnectionErrorKind::Unavailable,
+                ));
+            }
+            res = client.handshake_connect(&mut conn, &connect_authority) => {
+                res.map_err(|err| ConnectionError::transport(err, ConnectionErrorKind::Protocol))?;
+            }
+        }
         Ok(EstablishedClientConnection {
             input,
             conn: MaybeProxiedConnection::socks(conn),

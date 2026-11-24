@@ -632,18 +632,20 @@ impl State {
             };
 
         let locks_dir = self.listener_locks_dir();
+        let mut preflight_locks = Vec::new();
         for (_, desired_bind) in &desired_listeners {
             if desired_bind.port() != 0
                 && !current_addrs
                     .iter()
                     .any(|held| crate::proxy_listener_addrs_overlap(*held, *desired_bind))
             {
-                let test_lock =
-                    listener_lock::acquire_listener_lock(locks_dir.as_deref(), *desired_bind)?;
-                drop(test_lock);
+                preflight_locks.push(listener_lock::acquire_listener_lock(
+                    locks_dir.as_deref(),
+                    *desired_bind,
+                )?);
             }
         }
-
+        drop(preflight_locks);
         self.stop_proxy().await?;
         let project = self.project;
         if let Err(error) = Box::pin(self.start_proxy_listeners(
@@ -789,17 +791,10 @@ impl State {
             .stage_browser_navigation_session(&target_url, &session)?;
         let prev_intercept = (self.proxy.intercept_requests, self.proxy.intercept_responses);
         let intercept_disabled = prev_intercept.0 || prev_intercept.1;
-        if intercept_disabled {
-            self.proxy.set_intercept(false, false);
-        }
         if self.proxy.primary.is_none() {
             let workspace = self.store.metadata().workspace()?;
-            let start_result: Result<()> = if workspace.proxy_listeners.is_empty() {
-                let default_addr: SocketAddr = DEFAULT_PROXY_LISTENER
-                    .parse()
-                    .context("Proxy 默认监听地址无效")?;
-                self.start_default_proxy_with_port_fallback(project, default_addr, 100)
-                    .await
+            let parsed_target: Result<Option<SocketAddr>> = if workspace.proxy_listeners.is_empty() {
+                Ok(None)
             } else {
                 let listeners = workspace.effective_proxy_listeners();
                 let primary_addr = listeners
@@ -808,17 +803,33 @@ impl State {
                     .or_else(|| listeners.first())
                     .map(|l| l.bind_address.trim())
                     .unwrap_or(DEFAULT_PROXY_LISTENER);
-                let listen: SocketAddr = primary_addr
+                primary_addr
                     .parse()
-                    .context("Proxy 监听地址不是合法的 IP:Port")?;
-                self.start_proxy_with_override(project, listen, None)
-                    .await
+                    .context("Proxy 监听地址不是合法的 IP:Port")
+                    .map(Some)
+            };
+            let parsed_target = parsed_target?;
+            if intercept_disabled {
+                self.proxy.set_intercept(false, false);
+            }
+            let start_result: Result<()> = match parsed_target {
+                None => {
+                    let default_addr: SocketAddr = DEFAULT_PROXY_LISTENER
+                        .parse()
+                        .context("Proxy 默认监听地址无效")?;
+                    self.start_default_proxy_with_port_fallback(project, default_addr, 100)
+                        .await
+                }
+                Some(listen) => self.start_proxy_with_override(project, listen, None).await,
             };
             if let Err(err) = start_result {
                 self.proxy.set_intercept(prev_intercept.0, prev_intercept.1);
                 return Err(err);
             }
         } else {
+            if intercept_disabled {
+                self.proxy.set_intercept(false, false);
+            }
             self.sync_proxy_plugin_hooks();
             if intercept_disabled {
                 self.proxy_state().await;

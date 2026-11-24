@@ -293,18 +293,35 @@ impl Render for AppMenu {
             )
             .on_hover(cx.listener(Self::handle_hover))
             .when(is_open, |this| {
-                this.child(deferred(
-                    anchored()
-                        .anchor(gpui::Anchor::TopLeft)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(
+                let popup_menu = self.build_popup_menu(window, cx);
+                let dismiss_menu = popup_menu.clone();
+                this.child(
+                    deferred(
+                        anchored().position(gpui::Point::default()).child(
                             div()
-                                .size_full()
                                 .occlude()
-                                .top_1()
-                                .child(self.build_popup_menu(window, cx)),
+                                .w(window.bounds().size.width)
+                                .h(window.bounds().size.height)
+                                .on_any_mouse_down(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    dismiss_menu.update(cx, |menu, cx| {
+                                        menu.dismiss_from_backdrop(window, cx);
+                                    });
+                                })
+                                .on_scroll(|_, _, cx| cx.stop_propagation()),
                         ),
-                ))
+                    )
+                    .with_priority(gpui_base::POPUP_PRIORITY.saturating_sub(1)),
+                )
+                .child(
+                    deferred(
+                        anchored()
+                            .anchor(gpui::Anchor::TopLeft)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(div().size_full().occlude().top_1().child(popup_menu)),
+                    )
+                    .with_priority(gpui_base::POPUP_PRIORITY),
+                )
             })
     }
 }

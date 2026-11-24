@@ -255,6 +255,9 @@ impl crate::store::ResourcePoolsRepo<&mut ProjectStore> {
             }
             ensure!(!cancel.is_cancelled(), "Intruder 资源池删除已取消");
             transaction.commit()?;
+            if receipt.reassigned_tabs != 0 {
+                self.0.update_workspace_cache(&receipt.workspace);
+            }
             receipt.reassigned_runs += changed_sessions;
             Ok(receipt)
         })();

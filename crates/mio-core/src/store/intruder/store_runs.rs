@@ -139,6 +139,7 @@ impl crate::store::IntruderRepo<&mut ProjectStore> {
             cancel,
         )?;
         transaction.commit()?;
+        self.0.update_workspace_cache(&receipt.workspace);
         Ok(receipt)
     }
 

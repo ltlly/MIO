@@ -56,6 +56,15 @@ fn canonical_project_key(path: &Path) -> Result<String> {
 }
 
 fn project_locks_dir() -> Result<PathBuf> {
+    if let Some(override_dir) = std::env::var_os("MIO_PROJECT_LOCKS_DIR")
+        && !override_dir.is_empty()
+    {
+        return Ok(PathBuf::from(override_dir));
+    }
+    if cfg!(test) {
+        return Ok(std::env::temp_dir()
+            .join(format!("mio-test-project-locks-{}", std::process::id())));
+    }
     if let Some(run_dir) = crate::fs_atomic::platform_runtime_dir() {
         return Ok(run_dir.join("project-locks"));
     }

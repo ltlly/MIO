@@ -133,6 +133,7 @@ impl store::IntruderRepo<&mut ProjectStore> {
                 return Err(error);
             }
         };
+        self.0.update_workspace_cache(&receipt.workspace);
         Ok(IntruderRetentionReceipt {
             run: retained,
             retention: IntruderRetention::Session,
@@ -212,6 +213,7 @@ impl store::IntruderRepo<&mut ProjectStore> {
         store::write_workspace(&transaction, &workspace)?;
         ensure!(!cancel.is_cancelled(), "Intruder 保留切换已取消；RAM 保留");
         transaction.commit()?;
+        self.0.update_workspace_cache(&workspace);
         self.0.intruder_sessions.remove(id);
         Ok(IntruderRetentionReceipt {
             run,
@@ -305,6 +307,7 @@ impl store::IntruderRepo<&mut ProjectStore> {
         ensure!(changed == 1, "Intruder retirement receipt 已改变；数据保留");
         ensure!(!cancel.is_cancelled(), "Intruder 丢弃已取消；数据保留");
         transaction.commit()?;
+        self.0.update_workspace_cache(&workspace);
         // Independently retained disk flows and other Session owners are not owned by this drop.
         self.0.intruder_sessions.remove(id);
         Ok(IntruderDiscardReceipt {

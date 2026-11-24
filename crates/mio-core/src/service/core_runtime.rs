@@ -372,10 +372,22 @@ impl State {
         if Self::coalesce_history_notification(&self.repeater.notifications, &event) {
             return;
         }
-        assert!(
-            self.repeater.notifications.len() < MAX_REPEATER_NOTIFICATIONS,
-            "Repeater notifications exceeded their admitted producer budget"
-        );
+        if self.repeater.notifications.len() >= MAX_REPEATER_NOTIFICATIONS {
+            let drop_idx = self
+                .repeater
+                .notifications
+                .iter()
+                .position(|ev| {
+                    matches!(
+                        ev,
+                        Event::HistoryChanged { .. }
+                            | Event::WebSocketHistoryChanged { .. }
+                            | Event::Audit(_)
+                    )
+                })
+                .unwrap_or(0);
+            self.repeater.notifications.remove(drop_idx);
+        }
         self.repeater.notifications.push_back(event);
     }
 

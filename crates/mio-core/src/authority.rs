@@ -302,6 +302,12 @@ fn load_at_with_stamp(directory: &Path) -> Result<(MitmAuthority, AuthorityStamp
 }
 
 pub(crate) fn export(certificate: &[u8], path: &Path) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        ensure!(
+            !meta.file_type().is_symlink() && meta.is_file(),
+            "CA 导出目标不能是符号链接或目录"
+        );
+    }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

@@ -183,15 +183,17 @@ where
                         menu.update(cx, |menu, cx| {
                             menu.set_trigger_focus(Some(trigger_focus.clone()), cx);
                             menu.set_on_dismiss(move |window, cx| {
-                                _ = menu_state_weak.update(cx, |state, _| {
-                                    state.menu = None;
-                                });
-                                if let Some(popover_state) = popover_state.upgrade() {
-                                    popover_state.update(cx, |state, cx| {
-                                        state.dismiss(window, cx);
-                                    });
+                                let had_menu = menu_state_weak
+                                    .update(cx, |state, _| state.menu.take().is_some())
+                                    .unwrap_or(false);
+                                if had_menu {
+                                    if let Some(popover_state) = popover_state.upgrade() {
+                                        popover_state.update(cx, |state, cx| {
+                                            state.dismiss(window, cx);
+                                        });
+                                    }
+                                    cx.notify(parent_view_id);
                                 }
-                                cx.notify(parent_view_id);
                             });
                         });
                         menu_state.update(cx, |state, _| {

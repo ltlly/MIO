@@ -76,6 +76,10 @@ impl State {
                     );
                     ensure!(!self.quiesced, "正在保存或切换项目；未清空 HTTP 历史");
                     self.require_saved()?;
+                    ensure!(
+                        self.proxy.pending.is_empty() && self.proxy.pending_websockets.is_empty(),
+                        "存在待处理的拦截请求或 WebSocket 消息；请先放行或丢弃后再清空 HTTP 历史"
+                    );
                     self.queries.http.cancel();
                     self.stop_http_query_until(
                         tokio::time::Instant::now() + Duration::from_secs(3),
@@ -88,6 +92,14 @@ impl State {
                     Ok(deleted_ids) => {
                         let count = deleted_ids.len();
                         if !deleted_ids.is_empty() {
+                            if let Ok(mut annotated) = self.storage.annotated_flows.write() {
+                                for id in &deleted_ids {
+                                    annotated.remove(id);
+                                }
+                            }
+                            for id in &deleted_ids {
+                                self.storage.provenance.remove(*id);
+                            }
                             self.history_changed().await;
                         }
                         self.emit(Event::HttpHistoryDeleted {

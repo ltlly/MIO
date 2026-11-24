@@ -209,8 +209,8 @@ impl State {
                         IntruderRunState::Running | IntruderRunState::Paused
                     )
                     && !active.cancel.is_cancelled()
+                    && !active.preparing
                     && active.failure.is_none(),
-                "仅健康的运行中或暂停 Session 攻击可以保存；未停止、恢复或重发请求"
             );
             ensure!(
                 active.summary.revision == expected_revision,
@@ -230,8 +230,8 @@ impl State {
                         .checked_sub(active.summary.completed)
                         == Some(active.active as u64)
                     && self.intruder.requests.len() <= MAX_REQUESTS_IN_FLIGHT
-                    && self.intruder.jobs.len() == self.intruder.requests.len(),
-                "Intruder 在途请求归属不一致；未改变保存方式"
+                    && self.intruder.jobs.len() == self.intruder.requests.len()
+                    && self.intruder.prep_jobs.len() == self.intruder.prep_requests.len(),
             );
             let mut ordinals = BTreeSet::new();
             let mut flows = BTreeSet::new();
@@ -306,8 +306,8 @@ impl State {
                     .requests
                     .values()
                     .any(|request| request.run_id == id)
-                && self.intruder.jobs.len() == self.intruder.requests.len(),
-            "Intruder 仍持有运行或发送任务；此操作不会取消运行"
+                && self.intruder.jobs.len() == self.intruder.requests.len()
+                && self.intruder.prep_jobs.len() == self.intruder.prep_requests.len(),
         );
         let summary = self.intruder_run(id)?;
         ensure!(

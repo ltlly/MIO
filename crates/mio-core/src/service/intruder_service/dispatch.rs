@@ -187,6 +187,7 @@ impl State {
             }
             return Ok(());
         }
+        let workspace_snapshot = self.store.metadata().workspace_arc()?;
         // Commit admission to the selected backing before opening its socket.
         self.persist_intruder_result(id, ordinal, Ok(Box::new(record.clone())))?;
         if self.intruder.runs[&id].cancel.is_cancelled() {
@@ -223,7 +224,6 @@ impl State {
         if let Some((pool, timing)) = timing {
             self.intruder.pool_timings.insert(pool, timing);
         }
-        let workspace_snapshot = self.store.metadata().workspace_arc()?;
         let sessions = self.sessions.runtime.clone();
         let run = self.intruder.runs.get_mut(&id).unwrap();
         let attack_settings = run.attack_settings.clone();
