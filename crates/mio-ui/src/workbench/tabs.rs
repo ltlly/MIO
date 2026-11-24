@@ -89,7 +89,10 @@ impl Workbench {
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(0) = answer.await {
                 let _ = this.update_in(cx, |view, window, cx| {
-                    if view.project == project {
+                    if view.project == project
+                        && view.transition.is_none()
+                        && view.backend_available()
+                    {
                         view.finish_close_repeater_tab(id, window, cx);
                     }
                 });

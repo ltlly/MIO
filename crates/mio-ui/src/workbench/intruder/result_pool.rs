@@ -91,13 +91,13 @@ impl Workbench {
         pool: Uuid,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.can_change_intruder_pool(view_id) {
-            return;
+            return false;
         }
         let view = &self.intruder.results.views[&view_id];
         if view.owner != window.window_handle() {
-            return;
+            return false;
         }
         let run = view.summary.clone().unwrap();
         if run.resource_pool == Some(pool)
@@ -109,9 +109,11 @@ impl Workbench {
                 .as_ref()
                 .is_some_and(|p| p.find(pool).is_some())
         {
-            return;
+            return false;
         }
-        let Some(project) = self.project else { return };
+        let Some(project) = self.project else {
+            return false;
+        };
         let operation = Uuid::new_v4();
         let cancel = self.shutdown.child_token();
         if !self.enqueue(
@@ -131,7 +133,7 @@ impl Workbench {
                 "资源池切换未入队；原绑定保留，请明确重试。".into(),
                 cx,
             );
-            return;
+            return false;
         }
         let run_id = run.id;
         self.intruder.pool_changes.insert(
@@ -180,6 +182,7 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+        true
     }
 
     pub(in crate::workbench) fn on_intruder_resource_pool_changed(

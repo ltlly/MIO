@@ -220,7 +220,7 @@ impl Workbench {
                 });
             }
             view.notes_ordinal = None;
-            view.notes_outcome = None;
+            view.notes_outcomes.clear();
             if let Some(project) = project {
                 let (view_id, owner, editor_id) =
                     (*view_id, view.owner, view.request.raw.entity_id());
@@ -270,10 +270,10 @@ impl Workbench {
         }
         for (_, pending) in self.intruder.results.pending_notes.drain() {
             if let Some(view) = self.intruder.results.views.get_mut(&pending.view_id) {
-                view.notes_outcome = Some((
+                view.record_notes_outcome(
                     pending.operation_id,
                     Err("后台服务已断开，结果备注修改未确认；草稿保留。".into()),
-                ));
+                );
             }
         }
         for view in self.intruder.results.views.values_mut() {

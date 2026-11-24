@@ -421,6 +421,22 @@ pub(crate) struct Workbench {
 }
 
 impl Workbench {
+    pub(in crate::workbench) fn close_conflicting_overlays_for_modal(&mut self) {
+        if let Some(cancel) = self.global_search.cancel.take() {
+            cancel.cancel();
+        }
+        self.global_search.loading = false;
+        self.global_search.open = false;
+        self.command_palette_open = false;
+    }
+
+    pub(in crate::workbench) fn open_mio_ai_panel(&mut self, cx: &mut Context<Self>) {
+        self.close_conflicting_overlays_for_modal();
+        self.csrf_poc_modal = None;
+        self.mio_ai_panel_open = true;
+        cx.notify();
+    }
+
     pub(in crate::workbench) fn open_mio_ai_with_context(
         &mut self,
         title: impl Into<String>,
@@ -433,6 +449,8 @@ impl Workbench {
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(trimmed.clone()));
             self.mio_ai_context = Some(trimmed);
         }
+        self.close_conflicting_overlays_for_modal();
+        self.csrf_poc_modal = None;
         self.mio_ai_panel_open = true;
         self.status = format!("已发送到 MioAT：{title}");
         cx.notify();
@@ -451,6 +469,8 @@ impl Workbench {
         } else {
             format!("CSRF PoC - {}", url.trim())
         };
+        self.close_conflicting_overlays_for_modal();
+        self.mio_ai_panel_open = false;
         self.csrf_poc_modal = Some((title, html));
         self.status = "已生成 CSRF PoC 并复制到剪贴板".into();
         cx.notify();

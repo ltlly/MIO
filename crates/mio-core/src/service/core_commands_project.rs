@@ -206,6 +206,20 @@ impl State {
                         &self.intruder.recovery,
                         &self.cancel,
                     )?;
+                let mut live_ids: Vec<FlowId> = ext_http_notes
+                    .iter()
+                    .filter(|(source_id, _, _)| source_id.is_nil())
+                    .map(|(_, item_id, _)| *item_id)
+                    .chain(
+                        ext_http_highlights
+                            .iter()
+                            .filter(|(source_id, _, _)| source_id.is_nil())
+                            .map(|(_, item_id, _)| *item_id),
+                    )
+                    .collect();
+                live_ids.sort_unstable();
+                live_ids.dedup();
+                self.sync_live_flow_annotation_flags(self.project, &live_ids);
                 if let Some(new_lock) = destination_lock {
                     self.project_lock = Some(new_lock);
                 }

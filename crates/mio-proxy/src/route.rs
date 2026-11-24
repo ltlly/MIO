@@ -1,5 +1,4 @@
-use std::fmt;
-
+use std::{fmt, net::IpAddr};
 use mio_plugin_api::HttpVersion;
 use rama::{
     net::{
@@ -104,6 +103,9 @@ pub fn matches_bypass_host(pattern: &str, host: &str) -> bool {
         return target.ends_with(&pat) && target.len() > pat.len();
     }
     if !pat.contains('*') && !pat.contains('?') {
+        if let (Ok(pat_ip), Ok(target_ip)) = (pat.parse::<IpAddr>(), target.parse::<IpAddr>()) {
+            return pat_ip == target_ip;
+        }
         return pat == target;
     }
     glob_match(pat.as_bytes(), target.as_bytes())

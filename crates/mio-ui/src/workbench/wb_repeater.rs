@@ -463,6 +463,13 @@ impl Workbench {
         if ids.is_empty() {
             return;
         }
+        let pool_group_id = (mode == mio_core::RepeaterGroupSendMode::ParallelSinglePacketAttack)
+            .then(|| mio_core::Uuid::new_v4().as_u128());
+        let plugin_group_send = Some(mio_core::RepeaterGroupSendTicket {
+            mode,
+            connection_pool_group_id: pool_group_id,
+            single_packet_barrier: None,
+        });
         let mut ready_sends: Vec<(TabId, PendingSend)> = Vec::new();
         let mut dispatched = 0usize;
         for tab_id in ids {
@@ -473,7 +480,9 @@ impl Workbench {
                 );
                 break;
             }
-            if !self.can_send(tab_id) || self.begin_plugin_send(tab_id, window, cx) {
+            if !self.can_send(tab_id)
+                || self.begin_plugin_send_with_group(tab_id, plugin_group_send.clone(), window, cx)
+            {
                 continue;
             }
             let Some(draft) = self
@@ -491,8 +500,6 @@ impl Workbench {
         let barrier = (mode == mio_core::RepeaterGroupSendMode::ParallelSinglePacketAttack
             && !ready_sends.is_empty())
         .then(|| mio_core::SinglePacketBarrier::new(ready_sends.len()));
-        let pool_group_id = (mode == mio_core::RepeaterGroupSendMode::ParallelSinglePacketAttack)
-            .then(|| mio_core::Uuid::new_v4().as_u128());
         for (tab_id, mut send) in ready_sends {
             send.group_send = Some(mio_core::RepeaterGroupSendTicket {
                 mode,
@@ -678,7 +685,12 @@ impl Workbench {
                 self.sequential_group_queue = None;
                 return;
             }
-            if self.begin_plugin_send(tab_id, window, cx) {
+            let ticket = mio_core::RepeaterGroupSendTicket {
+                mode,
+                connection_pool_group_id,
+                single_packet_barrier: None,
+            };
+            if self.begin_plugin_send_with_group(tab_id, Some(ticket.clone()), window, cx) {
                 if self.has_pending_commit(tab_id) {
                     if let Some(state) = self.sequential_group_queue.as_mut() {
                         state.active_tab = Some(tab_id);
@@ -699,11 +711,7 @@ impl Workbench {
             };
             let mut send = self.capture_send(draft);
             let step_no = completed + 1;
-            send.group_send = Some(mio_core::RepeaterGroupSendTicket {
-                mode,
-                connection_pool_group_id,
-                single_packet_barrier: None,
-            });
+            send.group_send = Some(ticket);
             if self.pending_workspace.is_some() || self.workspace_dirty {
                 self.pending_sends.insert(tab_id, send);
                 if let Some(state) = self.sequential_group_queue.as_mut() {

@@ -79,22 +79,33 @@ impl ResultNotesWindow {
                 this.expected_revision = row.notes_revision;
             }
             if let Some(operation) = this.pending
-                && let Some((actual, outcome)) = &view.notes_outcome
-                && *actual == operation
+                && let Some(outcome) = view.notes_outcomes.get(&operation).cloned()
             {
                 this.pending = None;
+                let updated_rev = view
+                    .query
+                    .view_row(this.ordinal)
+                    .map(|row| row.notes_revision);
+                let target = this.target.clone();
+                cx.defer(move |cx| {
+                    let _ = target.workbench.update(cx, |wb, _| {
+                        if let Some(view) = wb.intruder.results.views.get_mut(&target.view_id) {
+                            view.notes_outcomes.remove(&operation);
+                        }
+                    });
+                });
                 match outcome {
                     Ok(()) => {
                         window.remove_window();
                         return;
                     }
                     Err(error) => {
-                        if let Some(row) = view.query.view_row(this.ordinal)
-                            && row.notes_revision > this.expected_revision
+                        if let Some(rev) = updated_rev
+                            && rev > this.expected_revision
                         {
-                            this.expected_revision = row.notes_revision;
+                            this.expected_revision = rev;
                         }
-                        this.error = Some(error.clone());
+                        this.error = Some(error);
                     }
                 }
             }

@@ -222,8 +222,7 @@ impl IntruderResultsWindow {
             spec,
             max_positions,
             grep_cfg,
-            pool_created,
-            pool_err,
+            pool_status,
             notes_outcome,
             sync_notes,
         ) = {
@@ -270,21 +269,25 @@ impl IntruderResultsWindow {
                     .get(&tab_id)
                     .cloned()
             });
-            let (pool_created, pool_err) = match (wb_opt.as_ref(), self.pool_create_op) {
-                (Some(wb), Some((_, new_pool_id))) => {
+            let pool_status = match (wb_opt.as_ref(), self.pool_create_op) {
+                (Some(wb), Some((op_id, new_pool_id))) => {
                     let pools = &wb.read(cx).intruder.resource_pools;
                     let found = pools
                         .catalog
                         .as_ref()
                         .is_some_and(|c| c.find(new_pool_id).is_some());
-                    let err = (!pools.management.mutation_pending())
+                    let still_mine = pools.management.pending_operation() == Some(op_id);
+                    let my_outcome = pools.management.outcome_for(op_id);
+                    let fallback_err = (!still_mine && !pools.management.mutation_pending())
                         .then(|| pools.error.clone())
                         .flatten();
-                    (found, err)
+                    Some((found, still_mine, my_outcome, fallback_err))
                 }
-                _ => (false, None),
+                _ => None,
             };
-            let notes_outcome = view.notes_outcome.clone();
+            let notes_outcome = self
+                .notes_pending
+                .and_then(|op| view.notes_outcomes.get(&op).cloned().map(|res| (op, res)));
             let sync_notes = selected.and_then(|ord| {
                 let row = view.query.view_row(ord)?;
                 let wb = wb_opt.as_ref()?.read(cx);
@@ -308,35 +311,38 @@ impl IntruderResultsWindow {
                 spec,
                 max_pos,
                 grep_cfg,
-                pool_created,
-                pool_err,
+                pool_status,
                 notes_outcome,
                 sync_notes,
             )
         };
-        if let Some((_, new_pool_id)) = self.pool_create_op {
+        if let Some((_, new_pool_id)) = self.pool_create_op
+            && let Some((pool_created, still_mine, my_outcome, fallback_err)) = pool_status
+        {
             if pool_created {
                 self.pool_create_op = None;
                 self.pool_form.creating = false;
                 self.pool_form.existing = Some(new_pool_id);
-                self.pool_create_error = None;
                 let view_id = self.target.view_id;
+                let mut bound = false;
                 self.target.update(window, cx, |wb, window, cx| {
-                    wb.change_intruder_result_pool(view_id, new_pool_id, window, cx);
+                    bound = wb.change_intruder_result_pool(view_id, new_pool_id, window, cx);
                 });
-            } else if let Some(err) = pool_err {
+                self.pool_create_error = if bound {
+                    None
+                } else {
+                    Some("资源池已创建，但当前结果窗口忙碌，请手动选择该资源池。".into())
+                };
+            } else if let Some(Err(err)) = my_outcome {
                 self.pool_create_op = None;
                 self.pool_create_error = Some(err);
-            } else if self.target.workbench.upgrade().is_some_and(|wb| {
-                !wb.read(cx)
-                    .intruder
-                    .resource_pools
-                    .management
-                    .mutation_pending()
-            }) {
+            } else if !still_mine {
                 self.pool_create_op = None;
-                self.pool_create_error =
-                    Some("资源池创建未确认，请检查名称或并发设置后重试。".into());
+                self.pool_create_error = Some(
+                    fallback_err.unwrap_or_else(|| {
+                        "资源池创建未确认，请检查名称或并发设置后重试。".into()
+                    }),
+                );
             }
         }
         if let Some(pending_op) = self.notes_pending
@@ -344,6 +350,14 @@ impl IntruderResultsWindow {
             && actual_op == pending_op
         {
             self.notes_pending = None;
+            let target = self.target.clone();
+            cx.defer(move |cx| {
+                let _ = target.workbench.update(cx, |wb, _| {
+                    if let Some(view) = wb.intruder.results.views.get_mut(&target.view_id) {
+                        view.notes_outcomes.remove(&actual_op);
+                    }
+                });
+            });
             match res {
                 Ok(()) => {
                     self.notes_error = None;

@@ -252,6 +252,10 @@ fn unlink_dropped_audit_flows(
         let _ = cancel;
         state.revision = state.revision.saturating_add(1);
         let encoded = serde_json::to_vec(&state)?;
+        ensure!(
+            encoded.len() <= crate::MAX_AUDIT_STATE_BYTES,
+            "审计状态超过编码限额"
+        );
         tx.execute(
             "INSERT OR REPLACE INTO main.metadata(key, value) VALUES('audit_state', ?1)",
             [encoded],

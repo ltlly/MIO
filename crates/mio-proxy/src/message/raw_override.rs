@@ -288,7 +288,6 @@ pub(super) fn build_raw_h1_from_override(
                 && header.name.eq_ignore_ascii_case("transfer-encoding"))
             || (request.trailers.is_empty() && header.name.eq_ignore_ascii_case("trailer"))
             || ((!request.trailers.is_empty() || transfer_encoding_chunked)
-                && config.http.update_content_length
                 && header.name.eq_ignore_ascii_case("content-length"));
         if is_nominated || is_hop_by_hop {
             continue;

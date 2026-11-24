@@ -111,11 +111,7 @@ impl Workbench {
         };
         let saved_revision = saved.revision;
         let groups = saved.groups.clone();
-        let members = saved
-            .tabs
-            .iter()
-            .map(|tab| (tab.id, tab.group))
-            .collect::<Vec<_>>();
+        let members = editor::group_member_states(saved);
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, cx| {
                 let Some(editor) = group_editor(window, cx) else {

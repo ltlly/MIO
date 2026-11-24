@@ -415,8 +415,12 @@ impl Workbench {
             .disabled(self.ext_import.visible)
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.tool == Tool::Discover {
-                    this.mio_ai_panel_open = !this.mio_ai_panel_open;
-                    cx.notify();
+                    if this.mio_ai_panel_open {
+                        this.mio_ai_panel_open = false;
+                        cx.notify();
+                    } else {
+                        this.open_mio_ai_panel(cx);
+                    }
                 } else {
                     this.select_tool(Tool::Discover, window, cx);
                 }

@@ -639,6 +639,10 @@ async fn http_get_bytes(
                 .join(&loc)
                 .with_context(|| format!("无效的重定向地址：{loc}"))?;
             ensure!(
+                matches!(next.scheme(), "http" | "https"),
+                "重定向目标仅支持 http 或 https：{next}"
+            );
+            ensure!(
                 !(prev.scheme().eq_ignore_ascii_case("https")
                     && next.scheme().eq_ignore_ascii_case("http")),
                 "拒绝从 HTTPS 重定向降级至 HTTP：{next}"
@@ -745,6 +749,8 @@ struct ResumableDownloadSink<'a, F> {
     tx: tokio::sync::mpsc::Sender<WriteOp>,
     received_so_far: u64,
     expected_total: Option<u64>,
+    expected_slice_end: Option<u64>,
+    reset_on_retry: bool,
     hint_total_bytes: Option<u64>,
     max_body_bytes: usize,
     etag: Option<String>,
@@ -787,6 +793,7 @@ where
         headers: &[Header],
         content_length: Option<u64>,
     ) -> std::result::Result<(), ProxyError> {
+        self.expected_slice_end = None;
         let incoming_etag =
             header_value_from_slice(headers, "etag").filter(|s| !s.is_empty());
         if status == 206 {
@@ -798,6 +805,7 @@ where
             if let (Some(prev), Some(curr)) = (&self.etag, &incoming_etag)
                 && prev != curr
             {
+                self.reset_on_retry = true;
                 return Err(ProxyError::Network(format!(
                     "断点续传 ETag 不匹配：期望 {prev}，实际 {curr}"
                 )));
@@ -807,14 +815,16 @@ where
             }
             let raw_range = header_value_from_slice(headers, "content-range")
                 .ok_or_else(|| ProxyError::InvalidMessage("206 响应缺少 Content-Range 头".into()))?;
-            let (start, _end, range_total) = parse_content_range(&raw_range)
+            let (start, end, range_total) = parse_content_range(&raw_range)
                 .map_err(|e| ProxyError::InvalidMessage(e.to_string()))?;
             if start != self.received_so_far {
+                self.reset_on_retry = true;
                 return Err(ProxyError::Network(format!(
                     "断点续传起始偏移不匹配：期望 {}，实际 {start}",
                     self.received_so_far
                 )));
             }
+            self.expected_slice_end = Some(end);
             if let Some(total) = range_total {
                 if total > self.max_body_bytes as u64 {
                     return Err(ProxyError::BodyLimit {
@@ -822,9 +832,13 @@ where
                     });
                 }
                 self.expected_total = Some(total);
-            } else if let Some(cl) = content_length
-                && start.saturating_add(cl) > self.max_body_bytes as u64
-            {
+            } else if let Some(cl) = content_length {
+                if start.saturating_add(cl) > self.max_body_bytes as u64 {
+                    return Err(ProxyError::BodyLimit {
+                        limit: self.max_body_bytes,
+                    });
+                }
+            } else if end.saturating_add(1) > self.max_body_bytes as u64 {
                 return Err(ProxyError::BodyLimit {
                     limit: self.max_body_bytes,
                 });
@@ -1017,6 +1031,8 @@ where
             tx,
             received_so_far,
             expected_total,
+            expected_slice_end: None,
+            reset_on_retry: false,
             hint_total_bytes,
             max_body_bytes,
             etag: etag.clone(),
@@ -1040,6 +1056,8 @@ where
             tx,
             received_so_far: next_received,
             expected_total: next_total,
+            expected_slice_end,
+            reset_on_retry,
             etag: next_etag,
             ..
         } = sink;
@@ -1055,11 +1073,24 @@ where
         expected_total = next_total;
         etag = next_etag;
 
+        if reset_on_retry {
+            temp_file
+                .as_file_mut()
+                .set_len(0)
+                .and_then(|()| temp_file.as_file_mut().seek(SeekFrom::Start(0)))
+                .context("重置更新包临时文件失败")?;
+            received_so_far = 0;
+            expected_total = hint_total_bytes;
+            hasher = Sha256::new();
+            etag = None;
+        }
+
         let retry_reason: String = match download_result {
             Ok(outcome) if (200..300).contains(&outcome.status) => {
                 let slice_truncated = outcome
                     .content_length
-                    .is_some_and(|cl| outcome.bytes_written < cl);
+                    .is_some_and(|cl| outcome.bytes_written < cl)
+                    || expected_slice_end.is_some_and(|end| received_so_far <= end);
                 let total_truncated = expected_total.is_some_and(|total| received_so_far < total);
                 if !slice_truncated && !total_truncated {
                     temp_file
@@ -1185,11 +1216,26 @@ pub fn parse_release_response(
                 std::env::consts::ARCH
             )
         })?;
+    let parsed_asset_url = url::Url::parse(&asset.browser_download_url)
+        .with_context(|| format!("更新安装包 URL 无效：{}", asset.browser_download_url))?;
+    ensure!(
+        matches!(parsed_asset_url.scheme(), "http" | "https"),
+        "更新安装包 URL 仅支持 http 或 https：{}",
+        asset.browser_download_url
+    );
     let checksums_url = release
         .assets
         .iter()
         .find(|a| a.name.eq_ignore_ascii_case(CHECKSUMS_ASSET_NAME))
         .map(|a| a.browser_download_url.clone());
+    if let Some(raw_checksums_url) = &checksums_url {
+        let parsed_checksums_url = url::Url::parse(raw_checksums_url)
+            .with_context(|| format!("校验文件 URL 无效：{raw_checksums_url}"))?;
+        ensure!(
+            matches!(parsed_checksums_url.scheme(), "http" | "https"),
+            "校验文件 URL 仅支持 http 或 https：{raw_checksums_url}"
+        );
+    }
 
     Ok(UpdateStatus::Available(UpdateInfo {
         current_version: current_version.to_owned(),
@@ -1569,10 +1615,14 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
     let script = r#"
 pid="$1"; src="$2"; dst="$3"; bak="$4"; relaunch="$5"; use_open="$6"; stage="$7"
 i=0
-while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 120 ]; do
+while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 240 ]; do
   sleep 0.25
   i=$((i + 1))
 done
+if kill -0 "$pid" 2>/dev/null; then
+  rm -rf "$stage"
+  exit 1
+fi
 rm -rf "$bak"
 if [ -e "$dst" ]; then
   mv "$dst" "$bak" || exit 1
@@ -1649,10 +1699,10 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
         .context("无法执行 tar 解压更新包")?;
     ensure!(status.success(), "tar 解压更新包失败：{status}");
 
-    let new_bin = extract_dir
-        .join("bin/mio")
-        .is_file()
-        .then(|| extract_dir.join("bin/mio"))
+    let bin_candidate = extract_dir.join("bin/mio");
+    let new_bin = fs::symlink_metadata(&bin_candidate)
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
+        .then_some(bin_candidate)
         .or_else(|| find_named_entry_recursive(&extract_dir, "mio", false))
         .context("更新包中缺少 mio 可执行文件")?;
 
@@ -1694,19 +1744,27 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
     fs::create_dir_all(&extract_dir)?;
     stage_archive_file(archive, &zip_path)?;
 
+    let expand_script = staging.join("expand.ps1");
+    fs::write(
+        &expand_script,
+        "param([string]$Zip, [string]$Dest)\nExpand-Archive -LiteralPath $Zip -DestinationPath $Dest -Force\n",
+    )?;
     let status = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
         ])
+        .arg(&expand_script)
+        .arg("-Zip")
         .arg(&zip_path)
+        .arg("-Dest")
         .arg(&extract_dir)
         .status()
         .context("无法调用 PowerShell 解压更新包")?;
     ensure!(status.success(), "PowerShell 解压失败：{status}");
-
     let new_exe = find_named_entry_recursive(&extract_dir, "mio.exe", false)
         .context("更新包中缺少 mio.exe")?;
     let parent = current_exe.parent().context("无法确定更新目标所在目录")?;
@@ -1715,9 +1773,13 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
     fs::write(
         &ps_script,
         r#"param([int]$OldPid, [string]$Src, [string]$Dst, [string]$Bak, [string]$Stage)
-for ($i = 0; $i -lt 120; $i++) {
+for ($i = 0; $i -lt 240; $i++) {
     if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { break }
     Start-Sleep -Milliseconds 250
+}
+if (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) {
+    Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+    exit 1
 }
 try {
     if (Test-Path -LiteralPath $Bak) {
@@ -1747,7 +1809,15 @@ try {
     )?;
     let pid = std::process::id().to_string();
     std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&ps_script)
         .args([
             "-OldPid",

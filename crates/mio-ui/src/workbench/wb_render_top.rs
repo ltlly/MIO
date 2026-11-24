@@ -267,8 +267,7 @@ impl Workbench {
                                             .accessibility_label("MioAT 控制中心")
                                             .tooltip("打开交互式 MioAT / Agent IPC 提示词与上下文控制面板")
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.mio_ai_panel_open = true;
-                                                cx.notify();
+                                                this.open_mio_ai_panel(cx);
                                             })),
                                     ),
                             ),

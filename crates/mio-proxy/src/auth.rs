@@ -619,8 +619,10 @@ pub const NTLMSSP_NEGOTIATE_128: u32 = 0x2000_0000;
 pub const NTLMSSP_NEGOTIATE_56: u32 = 0x8000_0000;
 
 pub fn build_ntlm_type1_header_value(domain: &str, workstation: &str) -> String {
-    let dom_bytes = domain.trim().as_bytes();
-    let ws_bytes = workstation.trim().as_bytes();
+    let raw_dom = domain.trim().as_bytes();
+    let raw_ws = workstation.trim().as_bytes();
+    let dom_bytes = &raw_dom[..raw_dom.len().min(u16::MAX as usize)];
+    let ws_bytes = &raw_ws[..raw_ws.len().min(u16::MAX as usize)];
     let mut flags = NTLMSSP_NEGOTIATE_UNICODE
         | NTLMSSP_NEGOTIATE_OEM
         | NTLMSSP_REQUEST_TARGET
@@ -727,17 +729,20 @@ pub fn build_ntlm_type3_header_value(
     timestamp_100ns: u64,
 ) -> String {
     let (lm_response, nt_response) = if is_v2 {
+        // Keep NTLMv2 response within u16 security buffer length limit (16 byte NTProofStr + 32 byte blob overhead).
+        const MAX_TARGET_INFO_BYTES: usize = u16::MAX as usize - 64;
+        let target_info = &challenge.target_info[..challenge.target_info.len().min(MAX_TARGET_INFO_BYTES)];
         let response_key_nt = ntowfv2(&creds.password, &creds.username, &creds.domain);
-        let mut blob = Vec::with_capacity(32 + challenge.target_info.len());
+        let mut blob = Vec::with_capacity(32 + target_info.len());
         blob.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
         blob.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         blob.extend_from_slice(&timestamp_100ns.to_le_bytes());
         blob.extend_from_slice(&client_challenge);
         blob.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-        if challenge.target_info.is_empty() {
+        if target_info.is_empty() {
             blob.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         } else {
-            blob.extend_from_slice(&challenge.target_info);
+            blob.extend_from_slice(target_info);
         }
         blob.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         let mut proof_input = Vec::with_capacity(8 + blob.len());
@@ -774,15 +779,26 @@ pub fn build_ntlm_type3_header_value(
     };
     let unicode = (challenge.flags & NTLMSSP_NEGOTIATE_UNICODE) != 0;
     let encode_str = |s: &str| -> Vec<u8> {
-        if unicode {
+        let mut bytes = if unicode {
             utf16le_bytes(s)
         } else {
             s.as_bytes().to_vec()
+        };
+        let max_len = if unicode {
+            (u16::MAX as usize) & !1
+        } else {
+            u16::MAX as usize
+        };
+        if bytes.len() > max_len {
+            bytes.truncate(max_len);
         }
+        bytes
     };
     let dom_bytes = encode_str(&creds.domain);
     let user_bytes = encode_str(&creds.username);
     let ws_bytes = encode_str(&creds.workstation);
+    let lm_response = &lm_response[..lm_response.len().min(u16::MAX as usize)];
+    let nt_response = &nt_response[..nt_response.len().min(u16::MAX as usize)];
     let header_len = 64usize;
     let dom_off = header_len;
     let user_off = dom_off + dom_bytes.len();
@@ -823,8 +839,8 @@ pub fn build_ntlm_type3_header_value(
     msg.extend_from_slice(&dom_bytes);
     msg.extend_from_slice(&user_bytes);
     msg.extend_from_slice(&ws_bytes);
-    msg.extend_from_slice(&lm_response);
-    msg.extend_from_slice(&nt_response);
+    msg.extend_from_slice(lm_response);
+    msg.extend_from_slice(nt_response);
     format!("NTLM {}", BASE64.encode(&msg))
 }
 

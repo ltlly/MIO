@@ -64,6 +64,15 @@ impl PoolManagement {
     pub(in crate::workbench) fn mutation_pending(&self) -> bool {
         self.pending.is_some()
     }
+    pub(in crate::workbench) fn pending_operation(&self) -> Option<Uuid> {
+        self.pending.as_ref().map(|p| p.operation)
+    }
+    pub(in crate::workbench) fn outcome_for(&self, operation: Uuid) -> Option<Result<(), String>> {
+        self.outcome
+            .as_ref()
+            .filter(|(id, _)| *id == operation)
+            .map(|(_, result)| result.clone())
+    }
     pub(in crate::workbench) fn delete_pending(&self) -> bool {
         self.pending
             .as_ref()
@@ -139,7 +148,7 @@ pub(super) struct PoolPage {
     table: Entity<TableState<PoolTable>>,
     dialog: Option<AnyWindowHandle>,
     opening: bool,
-    confirming: bool,
+    pub(super) confirming: bool,
 }
 
 impl PoolPage {

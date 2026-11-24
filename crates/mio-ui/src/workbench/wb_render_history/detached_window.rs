@@ -121,6 +121,7 @@ impl DetachedHttpHistoryWindow {
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
+        let project = self.project;
         let owner_window = owner.read(cx).owner_window;
         if owner.read(cx).selected_history == Some(id) {
             self.sync_detail_from_owner(&owner, window, cx);
@@ -131,6 +132,12 @@ impl DetachedHttpHistoryWindow {
         cx.defer(move |cx| {
             let _ = owner_window.update(cx, |_, wb_window, cx| {
                 let _ = weak_owner.update(cx, |view, cx| {
+                    if view.project != project
+                        || view.transition.is_some()
+                        || !view.backend_available()
+                    {
+                        return;
+                    }
                     view.history_pointer_selection(
                         id,
                         gpui_kit::MouseButton::Left,

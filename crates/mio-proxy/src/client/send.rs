@@ -145,6 +145,7 @@ fn build_request_with_proxy_auth(
         return Ok((req, patched_cfg));
     }
     if !config.http.strip_proxy_headers
+        && should_send_proxy_auth_on_request(&model.url, config)
         && model
             .headers
             .iter()

@@ -129,13 +129,13 @@ pub(super) fn without_markers(content: &InputContent) -> (String, Vec<(String, b
 }
 
 pub(super) fn unmarked_offset(content: &InputContent, offset: usize) -> usize {
-    offset
-        - content
-            .tokens()
-            .iter()
-            .filter(|span| token_id(span.token()).is_some() && span.range().end <= offset)
-            .map(|span| span.range().len())
-            .sum::<usize>()
+    let removed: usize = content
+        .tokens()
+        .iter()
+        .filter(|span| token_id(span.token()).is_some() && span.range().start < offset)
+        .map(|span| span.range().end.min(offset) - span.range().start)
+        .sum();
+    offset.saturating_sub(removed)
 }
 
 pub(super) fn decode_text(text: String, view: MessageView) -> Result<Vec<u8>, String> {

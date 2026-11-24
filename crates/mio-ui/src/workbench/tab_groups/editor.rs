@@ -1,6 +1,6 @@
 use super::*;
 
-fn group_member_states(workspace: &Workspace) -> Vec<(TabId, Option<Uuid>)> {
+pub(super) fn group_member_states(workspace: &Workspace) -> Vec<(TabId, Option<Uuid>)> {
     workspace
         .tabs
         .iter()

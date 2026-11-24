@@ -200,6 +200,7 @@ impl Settings {
                 if let Some(dialog) = self.proxy_advanced.http_dialog.take() {
                     let _ = dialog.update(cx, |_, window, _| window.remove_window());
                 }
+                self.reset_inline_editors(cx);
                 self.project_json_feedback = Some((false, "已从剪贴板导入项目设置 JSON。".into()));
             }
             Ok(Err(err)) => {

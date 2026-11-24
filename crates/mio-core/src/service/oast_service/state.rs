@@ -22,13 +22,11 @@ impl State {
             }
             CollaboratorCommand::Start { project, config } => {
                 self.check_project(project)?;
-                let _ = config.validate()?;
+                let poll_target = self.prepare_collaborator_poll_target_for_config(&config)?;
                 self.collaborator.stop_auto_poll().await;
                 self.collaborator.start_with_config(project, config).await?;
-                if self.collaborator.config.enabled
-                    && let Some((polling_url, auth_header, send_config)) =
-                        self.prepare_collaborator_poll_target()?
-                {
+                self.flush_collaborator_events().await;
+                if let Some((polling_url, auth_header, send_config)) = poll_target {
                     self.collaborator.start_auto_poll(
                         self.collaborator.config.poll_interval_ms,
                         polling_url,
@@ -44,6 +42,7 @@ impl State {
                 self.collaborator.project = Some(project);
                 self.collaborator.stop_auto_poll().await;
                 self.collaborator.stop_server().await?;
+                self.flush_collaborator_events().await;
                 self.emit_collaborator_status(project).await;
             }
             CollaboratorCommand::GeneratePayloads {
@@ -147,10 +146,11 @@ impl State {
         .await;
     }
 
-    fn prepare_collaborator_poll_target(
+    fn prepare_collaborator_poll_target_for_config(
         &self,
+        config: &SelfHostedOastConfig,
     ) -> Result<Option<(Url, Option<String>, SendConfig)>> {
-        let Some(polling_url) = self.collaborator.config.validate()? else {
+        let Some(polling_url) = config.validate()? else {
             return Ok(None);
         };
         let workspace = self.store.metadata().workspace_arc()?;
@@ -165,11 +165,16 @@ impl State {
         send_config.http.version = Some(HttpVersion::Http11);
         Ok(Some((
             polling_url,
-            self.collaborator.config.authorization_header.clone(),
+            config.authorization_header.clone(),
             send_config,
         )))
     }
 
+    fn prepare_collaborator_poll_target(
+        &self,
+    ) -> Result<Option<(Url, Option<String>, SendConfig)>> {
+        self.prepare_collaborator_poll_target_for_config(&self.collaborator.config)
+    }
     fn prepare_collaborator_poll(&self) -> Result<Option<(HttpRequest, SendConfig)>> {
         let Some((polling_url, auth_header, send_config)) =
             self.prepare_collaborator_poll_target()?
@@ -199,9 +204,25 @@ impl CollaboratorService {
             let fwd_deadline = TokioInstant::now() + Duration::from_secs(1);
             match timeout_at(fwd_deadline, &mut fwd_handle).await {
                 Ok(Ok((unsent, local_rx))) => {
-                    let _ = self.drain_local_rx();
-                    if let Some(mut item) = unsent {
-                        let _ = self.record_interaction(&mut item);
+                    let observed = self.drain_local_rx();
+                    if let Some(project) = self.project {
+                        for item in observed {
+                            self.pending_events
+                                .push_back(CollaboratorEvent::InteractionObserved {
+                                    project,
+                                    interaction: Box::new(item),
+                                });
+                        }
+                    }
+                    if let Some(mut item) = unsent
+                        && self.record_interaction(&mut item)
+                        && let Some(project) = self.project
+                    {
+                        self.pending_events
+                            .push_back(CollaboratorEvent::InteractionObserved {
+                                project,
+                                interaction: Box::new(item),
+                            });
                     }
                     self.rx = local_rx;
                 }

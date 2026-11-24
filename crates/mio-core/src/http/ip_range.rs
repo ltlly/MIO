@@ -13,6 +13,10 @@ impl IpRangeMatcher {
                 let val = u32::from(v4);
                 val >= start && val <= end
             }
+            (Self::V4 { start, end }, IpAddr::V6(v6)) => v6.to_ipv4_mapped().is_some_and(|v4| {
+                let val = u32::from(v4);
+                val >= start && val <= end
+            }),
             (Self::V6 { start, end }, IpAddr::V6(v6)) => {
                 let val = u128::from(v6);
                 val >= start && val <= end

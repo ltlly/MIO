@@ -23,6 +23,7 @@ use super::{
 
 const DEFAULT_MAX_RELAY_BUFFER: usize = 2048;
 const MAX_RELAY_POLL_REQ_BYTES: usize = 16 * 1024;
+const MAX_POLL_RESPONSE_BUDGET: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OastRelayConfig {
@@ -78,13 +79,38 @@ impl RelayBuffer {
 
     fn query_since(&self, cursor: u64) -> (Vec<OastInteraction>, String) {
         let effective_cursor = if cursor > self.next_seq { 0 } else { cursor };
-        let items = self
+        let mut items = Vec::new();
+        let mut estimated_bytes = 0usize;
+        let mut last_included_seq = None;
+        let mut truncated = false;
+        for (seq, item) in self
             .entries
             .iter()
             .filter(|(seq, _)| *seq > effective_cursor)
-            .map(|(_, item)| item.clone())
-            .collect();
-        let next = self.next_seq;
+        {
+            let item_bytes = item
+                .raw_request
+                .len()
+                .saturating_mul(4)
+                .saturating_add(item.peer_addr.len())
+                .saturating_add(item.summary.len())
+                .saturating_add(item.token.as_deref().map_or(0, str::len))
+                .saturating_add(512);
+            if !items.is_empty()
+                && estimated_bytes.saturating_add(item_bytes) > MAX_POLL_RESPONSE_BUDGET
+            {
+                truncated = true;
+                break;
+            }
+            estimated_bytes = estimated_bytes.saturating_add(item_bytes);
+            items.push(item.clone());
+            last_included_seq = Some(*seq);
+        }
+        let next = if truncated {
+            last_included_seq.unwrap_or(self.next_seq)
+        } else {
+            self.next_seq
+        };
         (items, next.to_string())
     }
 }
@@ -226,7 +252,11 @@ async fn handle_poll_connection(
         return;
     }
 
-    let parsed_target = Url::parse(&format!("http://relay.invalid{target}")).ok();
+    let parsed_target = if target.starts_with("http://") || target.starts_with("https://") {
+        Url::parse(target).ok()
+    } else {
+        Url::parse(&format!("http://relay.invalid{target}")).ok()
+    };
     let path = parsed_target
         .as_ref()
         .map_or("/", |url| url.path());

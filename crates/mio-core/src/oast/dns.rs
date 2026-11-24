@@ -28,6 +28,7 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
     let mut name_len = 0_usize;
     let mut jumps = 0_usize;
     let mut question_end = None;
+    let mut terminated = false;
     let mut bound = packet.len();
     while cursor < bound {
         let length_byte = *packet.get(cursor)?;
@@ -35,6 +36,7 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
             if question_end.is_none() {
                 question_end = Some(cursor + 1);
             }
+            terminated = true;
             break;
         }
 
@@ -76,6 +78,9 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
         cursor = label_end;
     }
 
+    if !terminated {
+        return None;
+    }
     let question_end = question_end?;
     let type_end = question_end.checked_add(4)?;
     let type_bytes = packet.get(question_end..type_end)?;
@@ -217,7 +222,7 @@ pub(super) async fn run_dns_server(
             }
             continue;
         };
-        if length == 0 {
+        if length < DNS_HEADER_LEN || (buffer[2] & 0x80 != 0) {
             continue;
         }
 

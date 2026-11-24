@@ -82,7 +82,7 @@ pub(in crate::workbench) struct ResultView {
     pub(super) close_error: Option<String>,
     pub(super) notes_window: Option<AnyWindowHandle>,
     pub(super) notes_ordinal: Option<u64>,
-    pub(super) notes_outcome: Option<(Uuid, Result<(), String>)>,
+    pub(super) notes_outcomes: HashMap<Uuid, Result<(), String>>,
     pub(super) dirty: bool,
     pub(super) queued_query: Option<u64>,
     pub(super) queued_selection: Option<u64>,
@@ -322,13 +322,23 @@ impl ResultView {
             close_error: None,
             notes_window: None,
             notes_ordinal: None,
-            notes_outcome: None,
+            notes_outcomes: HashMap::new(),
             dirty: true,
             queued_query: None,
             queued_selection: None,
             detail_pending: None,
             _window_closed: window_closed,
         }
+    }
+
+    pub(super) fn record_notes_outcome(&mut self, operation_id: Uuid, outcome: Result<(), String>) {
+        if self.notes_outcomes.len() >= 64
+            && !self.notes_outcomes.contains_key(&operation_id)
+            && let Some(&evict) = self.notes_outcomes.keys().next()
+        {
+            self.notes_outcomes.remove(&evict);
+        }
+        self.notes_outcomes.insert(operation_id, outcome);
     }
 
     pub(super) fn row(&self, ordinal: u64) -> Option<&IntruderResultSummary> {

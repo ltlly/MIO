@@ -268,25 +268,15 @@ impl Settings {
                 this.focus.focus(window, cx);
                 this.pools.close_dialog(cx);
                 this.pools.selected = None;
+                this.pools.confirming = false;
                 this.interception_selected = [None, None];
+                this.interception_restore = None;
                 this.project_json_feedback = None;
                 this.tls_negotiation_error = None;
                 this.http_streaming_scope_selected = None;
-                this.http_streaming_scope_editing = None;
-                this.http_streaming_scope_editor_open = false;
-                this.http_streaming_scope_subdomains = false;
                 this.scheduled_tasks_selected = None;
-                this.scheduled_task_editing = None;
-                this.scheduled_task_editor_open = false;
-                this.scope_editor_open = [false, false];
-                this.scope_oos_custom_editor_open = false;
-                this.scope_oos_custom_editing = None;
-                this.scope_oos_custom_subdomains = false;
                 this.listeners_tls.selected_index = None;
                 this.listeners_tls.listener_error = None;
-                this.listeners_tls.client_cert_editor_visible = false;
-                this.listeners_tls.client_cert_editing = None;
-                this.listeners_tls.client_cert_saving = false;
                 this.listeners_tls.client_cert_selected = None;
                 this.listeners_tls.selected_server_cert = None;
                 this.listeners_tls.inspected_server_cert = None;
@@ -294,7 +284,10 @@ impl Settings {
                 if let Some(dialog) = this.listeners_tls.dialog.take() {
                     let _ = dialog.update(cx, |_, dialog_window, _| dialog_window.remove_window());
                 }
-                this.scope_ui.reset_editing(cx);
+                if let Some(dialog) = this.proxy_advanced.http_dialog.take() {
+                    let _ = dialog.update(cx, |_, dialog_window, _| dialog_window.remove_window());
+                }
+                this.reset_inline_editors(cx);
             }
             if listeners_changed {
                 if !project_changed
@@ -536,6 +529,9 @@ impl Settings {
             let _ = weak_owner.update(cx, |view, cx| {
                 view.intruder.resource_pools.management.cancel_pending();
                 if let Some(picker) = settings.tls_import {
+                    view.finish_file_picker(picker, cx);
+                }
+                if let Some(picker) = settings.active_file_picker.take() {
                     view.finish_file_picker(picker, cx);
                 }
             });
@@ -870,6 +866,7 @@ impl Settings {
             interception_restore: None,
             interception_error: None,
             _subscription: subscription,
+            active_file_picker: None,
         }
     }
 

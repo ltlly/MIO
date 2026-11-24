@@ -56,7 +56,12 @@ impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::ExtArchiveRepo<S> 
 impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
     pub(crate) fn annotated_live_flow_ids(&self) -> Result<HashSet<Uuid>> {
         let map = super::plugin_storage::read_live_http_annotations(&self.0.connection)?;
-        Ok(map.into_keys().collect())
+        Ok(map
+            .into_iter()
+            .filter_map(|(id, entry)| {
+                (!entry.notes.is_empty() || entry.highlight > 0).then_some(id)
+            })
+            .collect())
     }
 }
 

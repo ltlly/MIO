@@ -140,7 +140,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.backend_available() {
+        if self.transition.is_some() || !self.backend_available() {
             return;
         }
         if self.workspace.intruder.tabs.iter().any(|tab| tab.id == id) {
@@ -169,7 +169,10 @@ impl Workbench {
             cx.spawn_in(window, async move |this, cx| {
                 if let Ok(0) = answer.await {
                     let _ = this.update_in(cx, |view, window, cx| {
-                        if view.project != project {
+                        if view.project != project
+                            || view.transition.is_some()
+                            || !view.backend_available()
+                        {
                             return;
                         }
                         let Some(send) = view.sending.get(&id) else {
@@ -365,7 +368,11 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if ids.is_empty() || !self.flush_workspace(window, cx) {
+        if self.transition.is_some()
+            || !self.backend_available()
+            || ids.is_empty()
+            || !self.flush_workspace(window, cx)
+        {
             return;
         }
         let busy = ids
@@ -393,7 +400,10 @@ impl Workbench {
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(0) = answer.await {
                 let _ = this.update_in(cx, |view, window, cx| {
-                    if view.project != project {
+                    if view.project != project
+                        || view.transition.is_some()
+                        || !view.backend_available()
+                    {
                         return;
                     }
                     for id in ids {

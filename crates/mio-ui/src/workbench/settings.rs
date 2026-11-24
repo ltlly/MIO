@@ -334,6 +334,84 @@ struct Settings {
     interception_restore: Option<mio_core::Uuid>,
     interception_error: Option<String>,
     _subscription: Subscription,
+    active_file_picker: Option<mio_core::Uuid>,
+}
+
+impl Settings {
+    pub(super) fn begin_workbench_file_picker(&mut self, cx: &mut Context<Self>) -> Option<mio_core::Uuid> {
+        let picker = mio_core::Uuid::new_v4();
+        let admitted = self
+            .owner
+            .update(cx, |view, cx| {
+                if view.file_picker_pending()
+                    || !view.backend_available()
+                    || view.transition.is_some()
+                {
+                    return false;
+                }
+                view.file_picker = Some(picker);
+                cx.notify();
+                true
+            })
+            .unwrap_or(false);
+        if admitted {
+            self.active_file_picker = Some(picker);
+            Some(picker)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn finish_workbench_file_picker(
+        &mut self,
+        picker: mio_core::Uuid,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active_file_picker == Some(picker) {
+            self.active_file_picker = None;
+        }
+        self.owner
+            .update(cx, |view, cx| view.finish_file_picker(picker, cx))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn reset_inline_editors(&mut self, cx: &mut Context<Self>) {
+        self.http_streaming_scope_editing = None;
+        self.http_streaming_scope_editor_open = false;
+        self.http_streaming_scope_subdomains = false;
+        self.scheduled_task_editing = None;
+        self.scheduled_task_editor_open = false;
+        self.scope_editor_open = [false, false];
+        self.scope_oos_custom_editor_open = false;
+        self.scope_oos_custom_editing = None;
+        self.scope_oos_custom_subdomains = false;
+        self.listeners_tls.client_cert_editor_visible = false;
+        self.listeners_tls.client_cert_editing = None;
+        self.listeners_tls.client_cert_saving = false;
+        self.listeners_tls.client_cert_save_gen =
+            self.listeners_tls.client_cert_save_gen.wrapping_add(1);
+        self.proxy_advanced.ssl_editor_open = false;
+        self.proxy_advanced.ssl_editing = None;
+        self.proxy_advanced.ssl_error = None;
+        self.proxy_advanced.ws_editor_open = false;
+        self.proxy_advanced.ws_editing = None;
+        self.proxy_advanced.ws_error = None;
+        self.connections.rule_editor_visible = false;
+        self.connections.editing_rule = None;
+        self.connections.dns_editor_visible = false;
+        self.connections.editing_dns = None;
+        self.connections.platform_editor_visible = false;
+        self.connections.editing_platform_auth = None;
+        self.connections.socks_editor_visible = false;
+        self.connections.error = None;
+        self.sessions.rule_editor_open = false;
+        self.sessions.editing_rule_id = None;
+        self.sessions.editing_cookie_id = None;
+        self.sessions.macro_editor_open = false;
+        self.sessions.editing_macro_id = None;
+        self.sessions.local_error = None;
+        self.scope_ui.reset_editing(cx);
+    }
 }
 
 impl Workbench {

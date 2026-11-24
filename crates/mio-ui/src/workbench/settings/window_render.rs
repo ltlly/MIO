@@ -1066,6 +1066,10 @@ impl Settings {
                         if !this.state.enabled {
                             return;
                         }
+                        let Some(picker) = this.begin_workbench_file_picker(cx) else {
+                            return;
+                        };
+                        let owner = this.owner.clone();
                         let paths = crate::native_terminate::prompt_for_paths(
                             window,
                             cx,
@@ -1077,7 +1081,20 @@ impl Settings {
                             },
                         );
                         cx.spawn_in(window, async move |this, cx| {
-                            let picked = match paths.await {
+                            let result = paths.await;
+                            let admitted = this
+                                .update_in(cx, |this, _, cx| {
+                                    this.finish_workbench_file_picker(picker, cx)
+                                })
+                                .unwrap_or_else(|_| {
+                                    owner
+                                        .update(cx, |view, cx| view.finish_file_picker(picker, cx))
+                                        .unwrap_or(false)
+                                });
+                            if !admitted {
+                                return;
+                            }
+                            let picked = match result {
                                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                                 Ok(Ok(None)) => return,
                                 Ok(Err(err)) => {

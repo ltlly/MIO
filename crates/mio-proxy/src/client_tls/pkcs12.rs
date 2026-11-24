@@ -354,9 +354,9 @@ fn unpack_pkcs12_windows_native(
         fn BCryptCloseAlgorithmProvider(h_algorithm: *mut c_void, dw_flags: u32) -> i32;
     }
 
-    const IMPORT_FLAGS: u32 = 0x0000_1101; // CRYPT_EXPORTABLE | PKCS12_PREFER_CNG_KSP | CRYPT_USER_KEYSET
+    // CRYPT_EXPORTABLE (0x1) | PKCS12_PREFER_CNG_KSP (0x100) | PKCS12_NO_PERSIST_KEY (0x8000)
+    const IMPORT_FLAGS: u32 = 0x0000_8101;
     const CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG: u32 = 0x0004_0000;
-
     let mut pw_utf16: Vec<u16> = password.encode_utf16().chain(std::iter::once(0)).collect();
     let blob = CryptDataBlob {
         cb_data: u32::try_from(pkcs12_bytes.len())
@@ -397,6 +397,8 @@ fn unpack_pkcs12_windows_native(
     let _store_guard = StoreGuard(store);
 
     let mut pem_out = String::new();
+    let mut exported_key = false;
+    let mut export_err: Option<ProxyError> = None;
     let mut prev: *const CertContext = std::ptr::null();
     loop {
         let cert = unsafe { CertEnumCertificatesInStore(store, prev) };
@@ -429,6 +431,14 @@ fn unpack_pkcs12_windows_native(
             )
         };
         if acquired != 0 && h_key != 0 {
+            if exported_key || export_err.is_some() {
+                if caller_free != 0 {
+                    unsafe {
+                        let _ = NCryptDeleteKey(h_key, 0);
+                    }
+                }
+                continue;
+            }
             let export_res = (|| -> Result<ZeroizeBytes, ProxyError> {
                 // Ephemeral local wrap using pbeWithSHAAnd3-KeyTripleDES-CBC (1.2.840.113549.1.12.1.3),
                 // iterations=1, salt=1122334455667788, secret="m\0".
@@ -584,12 +594,23 @@ fn unpack_pkcs12_windows_native(
                     let _ = NCryptDeleteKey(h_key, 0);
                 }
             }
-            let pkcs8 = export_res?;
-            let mut b64 = ZeroizeBytes(STANDARD.encode(&pkcs8.0).into_bytes());
-            let b64_str = std::str::from_utf8(&b64.0).unwrap_or_default();
-            crate::tls::append_pem_block_b64(&mut pem_out, "PRIVATE KEY", b64_str);
-            b64.0.fill(0);
+            match export_res {
+                Ok(pkcs8) => {
+                    let mut b64 = ZeroizeBytes(STANDARD.encode(&pkcs8.0).into_bytes());
+                    let b64_str = std::str::from_utf8(&b64.0).unwrap_or_default();
+                    crate::tls::append_pem_block_b64(&mut pem_out, "PRIVATE KEY", b64_str);
+                    b64.0.fill(0);
+                    exported_key = true;
+                }
+                Err(err) => {
+                    export_err = Some(err);
+                }
+            }
         }
+    }
+
+    if let Some(err) = export_err {
+        return Err(err);
     }
 
     Ok(pem_out.into_bytes())

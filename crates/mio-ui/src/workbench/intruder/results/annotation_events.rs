@@ -111,7 +111,7 @@ impl Workbench {
                             });
                             view.query.error = None;
                             if pending.is_some_and(|pending| pending.view_id == view_id) {
-                                view.notes_outcome = Some((*operation_id, Ok(())));
+                                view.record_notes_outcome(*operation_id, Ok(()));
                             }
                             let (filter, sort) = view.query.requested();
                             if filter.only_with_notes || filter.only_highlighted {
@@ -132,7 +132,7 @@ impl Workbench {
                             && view.run_id == *run_id
                             && !view.discarded
                         {
-                            view.notes_outcome = Some((*operation_id, Err(error)));
+                            view.record_notes_outcome(*operation_id, Err(error));
                         } else {
                             return false;
                         }

@@ -129,6 +129,10 @@ impl Workbench {
                 self.transition = None;
             }
         }
+        if let Some(wizard) = &mut self.startup_wizard {
+            wizard.cancel_confirm_open = false;
+            wizard.error = Some("原生退出等待超时，请重试取消。".into());
+        }
         self.fail("原生退出等待超时，本轮已拒绝。当前编辑保留；已开始的后台回收将继续，退出需要再次确认。", cx);
     }
 

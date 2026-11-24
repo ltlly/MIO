@@ -516,9 +516,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.transition.is_some() || self.file_picker_pending() {
+        if self.transition.is_some() || self.file_picker_pending() || !self.backend_available() {
             return;
         }
+        let project = self.project;
         let picker = Uuid::new_v4();
         self.file_picker = Some(picker);
         cx.notify();
@@ -537,6 +538,9 @@ impl Workbench {
             let pending_path = this
                 .update_in(cx, |this, _, cx| {
                     if !this.finish_file_picker(picker, cx) {
+                        return None;
+                    }
+                    if !this.backend_available() || this.project != project {
                         return None;
                     }
                     match result {
@@ -626,8 +630,10 @@ impl Workbench {
                                 true,
                                 format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),
                             ));
-                            this.error = None;
-                            this.status = format!("已导入 {count} 个 脚本。");
+                            if this.backend_available() && this.project == project {
+                                this.error = None;
+                                this.status = format!("已导入 {count} 个 脚本。");
+                            }
                         }
                     }
                     Err(err) => {
@@ -646,9 +652,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.transition.is_some() || self.file_picker_pending() {
+        if self.transition.is_some() || self.file_picker_pending() || !self.backend_available() {
             return;
         }
+        let project = self.project;
         self.ensure_script_library_loaded();
         let lib = StoredScriptPresetLibrary {
             version: 1,
@@ -680,6 +687,9 @@ impl Workbench {
                 .update(cx, |_, _, cx| {
                     this.update(cx, |view, cx| {
                         if !view.finish_file_picker(picker, cx) {
+                            return None;
+                        }
+                        if !view.backend_available() || view.project != project {
                             return None;
                         }
                         match result {
@@ -721,8 +731,10 @@ impl Workbench {
                                 true,
                                 format!("已导出 {count} 个 脚本到：{}", path.display()),
                             ));
-                            view.error = None;
-                            view.status = format!("已导出 脚本库到：{}", path.display());
+                            if view.backend_available() && view.project == project {
+                                view.error = None;
+                                view.status = format!("已导出 脚本库到：{}", path.display());
+                            }
                         }
                         Err(err) => {
                             view.extensions.script_library.feedback =

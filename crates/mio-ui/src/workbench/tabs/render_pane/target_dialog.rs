@@ -37,8 +37,11 @@ impl RepeaterTargetDialog {
         });
         let observation = cx.observe_in(&owner, window, |this, owner, window, cx| {
             let view = owner.read(cx);
-            this.available = view.project == Some(this.project)
-                && view.backend_available()
+            if view.project != Some(this.project) {
+                window.remove_window();
+                return;
+            }
+            this.available = view.backend_available()
                 && view.transition.is_none()
                 && view.workspace.tabs.iter().any(|tab| tab.id == this.tab_id)
                 && !view.sending.contains_key(&this.tab_id)

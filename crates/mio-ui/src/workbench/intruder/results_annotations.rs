@@ -407,7 +407,6 @@ impl Workbench {
                     let view = workbench.intruder.results.views.get_mut(&view_id).unwrap();
                     view.notes_window = Some(handle);
                     view.notes_ordinal = Some(ordinal);
-                    view.notes_outcome = None;
                     cx.notify();
                 }
                 Ok((handle, _)) => {
@@ -488,8 +487,6 @@ impl Workbench {
                 .clone()
                 .unwrap_or_else(|| "结果备注保存命令未入队；草稿仍保留。".into()));
         }
-        let view = self.intruder.results.views.get_mut(&view_id).unwrap();
-        view.notes_outcome = None;
         self.intruder.results.pending_notes.insert(
             operation_id,
             PendingNotes {

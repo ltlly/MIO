@@ -124,6 +124,13 @@ impl HookSpillScope {
             .any(|p| p == &canon || fs::canonicalize(p).is_ok_and(|cp| cp == canon))
     }
 
+    fn is_other_input_spill_path(&self, slot: SpillSlot, returned_path: &str) -> bool {
+        [SpillSlot::Request, SpillSlot::Response, SpillSlot::WebSocket]
+            .into_iter()
+            .filter(|other| *other != slot)
+            .any(|other| self.is_input_spill_path(other, returned_path))
+    }
+
     pub(in crate::service) fn resolve_body(
         &self,
         slot: SpillSlot,
@@ -137,6 +144,9 @@ impl HookSpillScope {
         }
         if returned_path.is_empty() || self.is_input_spill_path(slot, returned_path) {
             return Ok(original.to_vec());
+        }
+        if self.is_other_input_spill_path(slot, returned_path) {
+            return Err("插件返回了其它报文槽位的只读共享文件路径".into());
         }
         if returned_path.contains('\0')
             || returned_path.len() > protocol::MAX_BODY_SPILL_PATH_BYTES

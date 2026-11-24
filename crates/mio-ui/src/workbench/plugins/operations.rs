@@ -44,6 +44,7 @@ impl Workbench {
             }
             (Operation::Load { replace }, PluginOutcome::Loaded { info, panel }) => {
                 if let Some(old) = replace {
+                    self.invalidate_plugin_commits(Some(old), None, cx);
                     self.retain_plugin(old, "已重载；此旧实例的编辑内容保留供复制。", cx);
                 }
                 let plugin_id = info.manifest.id.clone();
@@ -450,6 +451,7 @@ impl Workbench {
                     .instance(old_instance)
                     .is_some_and(|inst| inst.panel.read(cx).has_unsaved_edits(cx));
                 let new_id = info.identity.instance_id;
+                self.invalidate_plugin_commits(Some(old_instance), None, cx);
                 self.retain_plugin(old_instance, "已热重载；此旧实例的编辑内容保留供复制。", cx);
                 if was_persisted {
                     if let Some(old) = self.extensions.instance_mut(old_instance) {
@@ -557,6 +559,7 @@ impl Workbench {
                     !matches_target
                 });
                 for id in removed_ids {
+                    self.invalidate_plugin_commits(Some(id), None, cx);
                     self.extensions.auto_reload.remove(&id);
                     if self.extensions.active_top_suite_tab == Some(id) {
                         self.extensions.active_top_suite_tab = None;
@@ -567,17 +570,6 @@ impl Workbench {
                     self.extensions
                         .active_responses
                         .retain(|_, active| *active != id);
-                    let removed_saved: Vec<_> = self
-                        .extensions
-                        .saved_commits
-                        .iter()
-                        .filter(|(_, commit)| commit.instance == id)
-                        .map(|(tab_id, _)| *tab_id)
-                        .collect();
-                    for tab_id in removed_saved {
-                        self.extensions.saved_commits.remove(&tab_id);
-                        self.abort_sequential_group_queue_if_active_tab(tab_id);
-                    }
                     self.extensions
                         .context_viewers
                         .retain(|_, viewer| viewer.instance_id != Some(id));

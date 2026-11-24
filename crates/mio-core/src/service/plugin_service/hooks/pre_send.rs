@@ -293,10 +293,22 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_configured(
                     return PreSendHookOutcome::Dropped;
                 }
                 Ok(protocol::HookAction::Intercept) => {
-                    return PreSendHookOutcome::Failed(format!(
+                    entry.counters.inc_error_or_timeout();
+                    let msg = format!(
                         "{} 不支持挂起手动拦截动作（Intercept）；插件请求钩子已拒绝，未发送请求",
                         tool_name(source)
-                    ));
+                    );
+                    if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                        entry.counters.inc_fail_open_pass();
+                        super::emit_fail_open_diagnostic(
+                            events,
+                            entry.identity,
+                            "Pre-Send HTTP Hook",
+                            &msg,
+                        );
+                        continue;
+                    }
+                    return PreSendHookOutcome::Failed(msg);
                 }
                 Ok(protocol::HookAction::Modify) => {
                     let Some(dto) = res.request else {

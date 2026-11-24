@@ -11,10 +11,20 @@ impl Workbench {
     ) -> AnyElement {
         let disabled =
             self.project.is_none() || self.transition.is_some() || !self.backend_available();
+        let has_any_tab = !self.workspace.tabs.is_empty()
+            || self.workspace.websocket_tabs.iter().any(|tab| !tab.closed);
         let seed_tab = self
             .workspace
             .active
-            .or_else(|| self.workspace.tabs.first().map(|tab| tab.id));
+            .or_else(|| self.workspace.tabs.first().map(|tab| tab.id))
+            .or(self.workspace.active_websocket_tab)
+            .or_else(|| {
+                self.workspace
+                    .websocket_tabs
+                    .iter()
+                    .find(|tab| !tab.closed)
+                    .map(|tab| tab.id)
+            });
         let vertical_sidebar_bg: gpui_kit::Hsla =
             rgb(if theme::is_dark() { 0x1e2024 } else { 0xf6f7f9 }).into();
         div()
@@ -82,11 +92,11 @@ impl Workbench {
                             .accessibility_label("新建分组")
                             .tooltip("新建 Repeater 标签分组以便批量管理与并发发送请求")
                             .tab_stop(false)
-                            .disabled(disabled || self.workspace.tabs.is_empty())
+                            .disabled(disabled || !has_any_tab)
                             .child(
                                 gpui_kit::component::Icon::new(IconName::FolderPlus)
                                     .size(px(14.))
-                                    .text_color(if disabled || self.workspace.tabs.is_empty() {
+                                    .text_color(if disabled || !has_any_tab {
                                         theme::muted_foreground()
                                     } else {
                                         theme::foreground()

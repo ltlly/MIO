@@ -333,7 +333,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.backend_available() || !self.flush_workspace(window, cx) {
+        if self.transition.is_some()
+            || !self.backend_available()
+            || !self.flush_workspace(window, cx)
+        {
             return;
         }
         let open_ids: Vec<TabId> = self

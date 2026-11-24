@@ -150,13 +150,26 @@ impl Workbench {
         let owner = cx.entity();
         let owner_window = self.owner_window;
         cx.defer(move |cx| {
-            if !cx.windows().contains(&owner_window)
-                || !owner
-                    .read(cx)
-                    .intruder
-                    .task_name
-                    .as_ref()
-                    .is_some_and(|rename| rename.id == id && rename.project == project)
+            if !cx.windows().contains(&owner_window) {
+                owner.update(cx, |view, cx| {
+                    if view
+                        .intruder
+                        .task_name
+                        .as_ref()
+                        .is_some_and(|rename| rename.id == id && rename.project == project)
+                    {
+                        view.intruder.task_name = None;
+                        cx.notify();
+                    }
+                });
+                return;
+            }
+            if !owner
+                .read(cx)
+                .intruder
+                .task_name
+                .as_ref()
+                .is_some_and(|rename| rename.id == id && rename.project == project)
             {
                 return;
             }
@@ -319,10 +332,11 @@ impl Workbench {
     pub(in crate::workbench) fn intruder_task_name_disconnected(&mut self, cx: &mut Context<Self>) {
         if let Some(rename) = &mut self.intruder.task_name {
             rename.disconnected = true;
+            rename.opening = false;
             rename.status =
                 "后台已断开；名称写入结果未确认。输入仍保留，取消后可重开项目核对磁盘名称。".into();
             self.status = rename.status.clone();
-            if rename.dialog.is_none() && !rename.opening {
+            if rename.dialog.is_none() {
                 self.intruder.task_name = None;
             }
             cx.notify();

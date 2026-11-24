@@ -14,7 +14,31 @@ pub(crate) fn request_head_with_fallback(
     fallback_host: Option<&str>,
 ) -> Result<HttpRequest, ProxyError> {
     let uri = request.uri();
-    let url = if uri.scheme().is_some() {
+    let url = if let Some(TunnelTarget::Tls(authority)) = tunnel {
+        if request.version() == rama::http::Version::HTTP_2
+            && uri
+                .scheme_str()
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+            && uri.host_str().is_some()
+        {
+            uri.to_string()
+        } else {
+            let mut path_and_query = match uri.path() {
+                Some(path) => path.to_string(),
+                None => String::from("/"),
+            };
+            if path_and_query.is_empty() || path_and_query == "*" {
+                path_and_query = String::from("/");
+            } else if !path_and_query.starts_with('/') {
+                path_and_query.insert(0, '/');
+            }
+            if let Some(query) = uri.query() {
+                path_and_query.push('?');
+                path_and_query.push_str(&query.to_string());
+            }
+            format!("https://{authority}{path_and_query}")
+        }
+    } else if uri.scheme().is_some() {
         uri.to_string()
     } else {
         let (scheme, tunnel_authority) = match tunnel {

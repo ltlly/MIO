@@ -43,10 +43,13 @@ pub(in crate::workbench) struct FooterEventLogEntry {
 
 impl FooterEventLogEntry {
     pub(in crate::workbench) fn time_label(&self) -> String {
-        let seconds = i64::try_from(self.timestamp_unix_ms / 1000)
-            .expect("event timestamp must fit a calendar timestamp");
-        let calendar = crate::local_time::from_unix_seconds(seconds)
-            .expect("event timestamp must have a local calendar representation");
+        let seconds = self.timestamp_unix_ms / 1000;
+        let Some(calendar) = i64::try_from(seconds)
+            .ok()
+            .and_then(crate::local_time::from_unix_seconds)
+        else {
+            return format!("{seconds}s");
+        };
         format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
             calendar.year, calendar.month, calendar.day, calendar.hour, calendar.min,
@@ -113,11 +116,11 @@ impl FooterDrawerState {
         let timestamp_unix_ms = u64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time must follow the Unix epoch")
+                .unwrap_or_default()
                 .as_millis(),
-        ).expect("event timestamp must fit u64");
-        self.next_entry_id = self.next_entry_id.checked_add(1)
-            .expect("footer event identity capacity exhausted");
+        )
+        .unwrap_or(u64::MAX);
+        self.next_entry_id = self.next_entry_id.saturating_add(1);
         let entry = FooterEventLogEntry {
             id: self.next_entry_id,
             timestamp_unix_ms,

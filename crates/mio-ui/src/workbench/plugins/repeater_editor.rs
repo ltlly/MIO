@@ -218,6 +218,16 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.begin_plugin_send_with_group(tab_id, None, window, cx)
+    }
+
+    pub(in crate::workbench) fn begin_plugin_send_with_group(
+        &mut self,
+        tab_id: TabId,
+        group_send: Option<mio_core::RepeaterGroupSendTicket>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(instance_id) = self.extensions.active_messages.get(&tab_id).copied() else {
             return false;
         };
@@ -262,7 +272,8 @@ impl Workbench {
                 return true;
             }
         };
-        let send = self.capture_send(tab.draft.clone());
+        let mut send = self.capture_send(tab.draft.clone());
+        send.group_send = group_send;
         if self
             .plugin_action(
                 PluginAction::CommitEditor {

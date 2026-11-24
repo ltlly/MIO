@@ -323,7 +323,7 @@ impl State {
         Ok(())
     }
 
-    fn sync_live_flow_annotation_flags(&self, project: ProjectKey, flow_ids: &[FlowId]) {
+    pub(super) fn sync_live_flow_annotation_flags(&self, project: ProjectKey, flow_ids: &[FlowId]) {
         if flow_ids.is_empty() {
             return;
         }

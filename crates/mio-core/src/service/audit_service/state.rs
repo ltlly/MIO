@@ -234,6 +234,7 @@ impl AuditService {
         match output {
             Ok(done) => {
                 let job = self.active.remove(&done.task_id)?;
+                job.cancel.cancel();
                 if job.project != done.project {
                     return None;
                 }
@@ -254,7 +255,9 @@ impl AuditService {
                     .iter()
                     .find_map(|(id, job)| (job.tokio_id == tokio_id).then_some(*id))?;
                 let job = self.active.remove(&task_id)?;
-                let (state, msg) = if error.is_cancelled() || job.cancel.is_cancelled() {
+                let was_cancelled = error.is_cancelled() || job.cancel.is_cancelled();
+                job.cancel.cancel();
+                let (state, msg) = if was_cancelled {
                     (AuditTaskState::Cancelled, None)
                 } else {
                     (

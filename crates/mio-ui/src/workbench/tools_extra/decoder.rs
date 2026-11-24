@@ -207,6 +207,7 @@ impl Workbench {
         self.extra_tools.decoder_output.update(cx, |state, cx| state.set_value("", window, cx));
         self.extra_tools.decoder_output_bytes = None;
         self.extra_tools.decoder_output_hex_view = false;
+        self.extra_tools.decoder_chain_start = self.extra_tools.steps.len();
         self.extra_tools.decoder_chain_continuing = !self.extra_tools.steps.is_empty();
         cx.notify();
     }

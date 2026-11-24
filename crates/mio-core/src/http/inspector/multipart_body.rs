@@ -122,7 +122,7 @@ fn find_name_in_disposition(header_line_content: &[u8]) -> Option<(Range<usize>,
             let byte = header_line_content[cursor];
             if let Some(q) = quote {
                 if byte == b'\\' {
-                    cursor += 2;
+                    cursor = (cursor + 2).min(header_line_content.len());
                     continue;
                 }
                 if byte == q {

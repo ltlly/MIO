@@ -142,8 +142,7 @@ impl Workbench {
             self.open_mio_ai_with_context(title, ctx, cx);
             return;
         }
-        self.mio_ai_panel_open = true;
-        cx.notify();
+        self.open_mio_ai_panel(cx);
     }
 
     pub(in crate::workbench) fn save_repeater_entire_history(

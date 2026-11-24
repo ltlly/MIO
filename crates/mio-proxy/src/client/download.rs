@@ -278,6 +278,11 @@ where
             if !matches!(next.scheme(), "http" | "https") {
                 return Err(ProxyError::invalid("重定向目标仅支持 http 或 https"));
             }
+            if parsed_url.scheme().eq_ignore_ascii_case("https")
+                && next.scheme().eq_ignore_ascii_case("http")
+            {
+                return Err(ProxyError::invalid("拒绝从 HTTPS 重定向降级至 HTTP"));
+            }
             current_url = next.to_string();
             continue;
         }

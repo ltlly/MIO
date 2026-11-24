@@ -602,6 +602,7 @@ pub(super) struct ProxyListenerEditor {
     error: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+    active_file_picker: Option<mio_core::Uuid>,
 }
 
 impl ProxyListenerEditor {
@@ -615,8 +616,15 @@ impl ProxyListenerEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let dialog = window.window_handle();
-        cx.on_release(move |_, cx| {
+        let release_owner = owner.clone();
+        cx.on_release(move |editor, cx| {
+            let active_picker = editor.active_file_picker.take();
             cx.defer(move |cx| {
+                if let Some(picker) = active_picker {
+                    let _ = release_owner.update(cx, |view, cx| {
+                        view.finish_file_picker(picker, cx);
+                    });
+                }
                 let _ = settings.update(cx, |settings, cx| {
                     if settings.listeners_tls.dialog == Some(dialog) {
                         settings.listeners_tls.dialog = None;
@@ -744,15 +752,36 @@ impl ProxyListenerEditor {
             error: None,
             focus,
             _subscriptions: vec![select_sub, addr_sub, spec_sub],
+            active_file_picker: None,
         }
     }
 
     fn pick_pem_file(&mut self, is_key: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = mio_core::Uuid::new_v4();
+        let admitted = self
+            .owner
+            .update(cx, |view, cx| {
+                if view.file_picker_pending()
+                    || !view.backend_available()
+                    || view.transition.is_some()
+                {
+                    return false;
+                }
+                view.file_picker = Some(picker);
+                cx.notify();
+                true
+            })
+            .unwrap_or(false);
+        if !admitted {
+            return;
+        }
+        self.active_file_picker = Some(picker);
         let label = if is_key {
             "监听器自定义私钥 PEM 文件"
         } else {
             "监听器自定义证书 PEM 文件"
         };
+        let owner = self.owner.clone();
         let paths = crate::native_terminate::prompt_for_paths(
             window,
             cx,
@@ -764,7 +793,25 @@ impl ProxyListenerEditor {
             },
         );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(selected))) = paths.await
+            let result = paths.await;
+            let released = this
+                .update_in(cx, |this, _, cx| {
+                    if this.active_file_picker == Some(picker) {
+                        this.active_file_picker = None;
+                    }
+                    this.owner
+                        .update(cx, |view, cx| view.finish_file_picker(picker, cx))
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|_| {
+                    owner
+                        .update(cx, |view, cx| view.finish_file_picker(picker, cx))
+                        .unwrap_or(false)
+                });
+            if !released {
+                return;
+            }
+            if let Ok(Ok(Some(selected))) = result
                 && let Some(path) = selected.into_iter().next()
             {
                 let loaded = cx
@@ -1406,7 +1453,7 @@ impl Settings {
             let Some(entity) = settings.upgrade() else {
                 return;
             };
-            if entity.read(cx).state.project != project {
+            if entity.read(cx).state.project != project || owner.upgrade().is_none() {
                 entity.update(cx, |this, cx| {
                     this.listeners_tls.dialog_opening = false;
                     cx.notify();
@@ -1445,7 +1492,11 @@ impl Settings {
         if !self.proxy_listeners_available() {
             return;
         }
+        let Some(cert_picker) = self.begin_workbench_file_picker(cx) else {
+            return;
+        };
         let project = self.state.project;
+        let owner = self.owner.clone();
         let cert_paths = crate::native_terminate::prompt_for_paths(
             window,
             cx,
@@ -1457,7 +1508,20 @@ impl Settings {
             },
         );
         cx.spawn_in(window, async move |this, cx| {
-            let cert_path = match cert_paths.await {
+            let cert_pick = cert_paths.await;
+            let cert_admitted = this
+                .update_in(cx, |this, _, cx| {
+                    this.finish_workbench_file_picker(cert_picker, cx)
+                })
+                .unwrap_or_else(|_| {
+                    owner
+                        .update(cx, |view, cx| view.finish_file_picker(cert_picker, cx))
+                        .unwrap_or(false)
+                });
+            if !cert_admitted {
+                return;
+            }
+            let cert_path = match cert_pick {
                 Ok(Ok(Some(paths))) => {
                     let mut iter = paths.into_iter();
                     match (iter.next(), iter.next()) {
@@ -1518,12 +1582,13 @@ impl Settings {
                 });
                 return;
             }
-            let key_paths = this
+            let key_prompt = this
                 .update_in(cx, |this, window, cx| {
                     if this.state.project != project || !this.proxy_listeners_available() {
                         return None;
                     }
-                    Some(crate::native_terminate::prompt_for_paths(
+                    let key_picker = this.begin_workbench_file_picker(cx)?;
+                    let prompt = crate::native_terminate::prompt_for_paths(
                         window,
                         cx,
                         PathPromptOptions {
@@ -1532,14 +1597,28 @@ impl Settings {
                             multiple: false,
                             prompt: Some("选择 CA 私钥 PEM 文件".into()),
                         },
-                    ))
+                    );
+                    Some((key_picker, prompt))
                 })
                 .ok()
                 .flatten();
-            let Some(key_paths) = key_paths else {
+            let Some((key_picker, key_paths)) = key_prompt else {
                 return;
             };
-            let key_path = match key_paths.await {
+            let key_pick = key_paths.await;
+            let key_admitted = this
+                .update_in(cx, |this, _, cx| {
+                    this.finish_workbench_file_picker(key_picker, cx)
+                })
+                .unwrap_or_else(|_| {
+                    owner
+                        .update(cx, |view, cx| view.finish_file_picker(key_picker, cx))
+                        .unwrap_or(false)
+                });
+            if !key_admitted {
+                return;
+            }
+            let key_path = match key_pick {
                 Ok(Ok(Some(paths))) => {
                     let mut iter = paths.into_iter();
                     match (iter.next(), iter.next()) {

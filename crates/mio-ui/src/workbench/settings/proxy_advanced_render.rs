@@ -487,6 +487,7 @@ impl Settings {
                             2 => {
                                 if this.proxy_advanced.ssl_editing == Some(id) {
                                     this.proxy_advanced.ssl_editing = None;
+                                    this.proxy_advanced.ssl_editor_open = false;
                                 }
                                 let _ = this.owner.update(cx, |view, cx| {
                                     let _ = view.update_proxy_advanced(

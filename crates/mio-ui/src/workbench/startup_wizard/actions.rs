@@ -285,7 +285,11 @@ impl Workbench {
             wizard.cancel_confirm_open = false;
         }
         if confirm_exit {
-            self.quit_attempt.get_or_insert_with(Uuid::new_v4);
+            if self.quit_attempt.is_none() {
+                self.quit_attempt = Some(Uuid::new_v4());
+                cx.global::<crate::native_terminate::NativeTerminate>()
+                    .request();
+            }
             if self.runtime_result.is_some() {
                 let _ = self.finish_joined_exit(cx);
                 cx.notify();

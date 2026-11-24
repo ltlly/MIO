@@ -56,6 +56,36 @@ impl SelfHostedOastConfig {
     pub fn validate(&self) -> Result<Option<Url>> {
         let bind_ip = self.effective_bind_ip()?;
         let _ = self.effective_dns_answer_ip(bind_ip)?;
+
+        if let Some(domain) = self
+            .server_domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|domain| !domain.is_empty())
+        {
+            let normalized_domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            ensure!(
+                !normalized_domain.is_empty()
+                    && !normalized_domain.chars().any(|c| {
+                        c.is_whitespace()
+                            || c.is_control()
+                            || matches!(c, '@' | '/' | '\\' | '?' | '#' | ':')
+                    }),
+                "self-hosted server domain is invalid"
+            );
+            ensure!(
+                self.allow_public_cloud_domains || !is_blocked_cloud_domain(&normalized_domain),
+                "public third-party Collaborator domains are blocked by default"
+            );
+        }
+
+        if let Some(auth) = &self.authorization_header {
+            ensure!(
+                !auth.chars().any(|c| c.is_control() || matches!(c, '\r' | '\n')),
+                "self-hosted authorization header contains invalid control characters"
+            );
+        }
+
         if !self.enabled {
             return Ok(None);
         }
@@ -81,35 +111,6 @@ impl SelfHostedOastConfig {
             self.allow_public_cloud_domains || !is_blocked_cloud_domain(&polling_host),
             "public third-party Collaborator domains are blocked by default"
         );
-
-        if let Some(domain) = self
-            .server_domain
-            .as_deref()
-            .map(str::trim)
-            .filter(|domain| !domain.is_empty())
-        {
-            let normalized_domain = domain.trim_end_matches('.').to_ascii_lowercase();
-            ensure!(
-                !normalized_domain.is_empty()
-                    && !normalized_domain.chars().any(|c| {
-                        c.is_whitespace()
-                            || c.is_control()
-                            || matches!(c, '@' | '/' | '?' | '#' | ':')
-                    }),
-                "self-hosted server domain is invalid"
-            );
-            ensure!(
-                self.allow_public_cloud_domains || !is_blocked_cloud_domain(&normalized_domain),
-                "public third-party Collaborator domains are blocked by default"
-            );
-        }
-
-        if let Some(auth) = &self.authorization_header {
-            ensure!(
-                !auth.chars().any(|c| c.is_control() || matches!(c, '\r' | '\n')),
-                "self-hosted authorization header contains invalid control characters"
-            );
-        }
 
         Ok(Some(polling_url))
     }
