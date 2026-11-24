@@ -340,9 +340,18 @@ pub(super) struct DynamicProxyState {
     pub drop_out_of_scope: Option<DropOutOfScopeFn>,
 }
 
+#[derive(Clone)]
+pub(super) struct StaticProxyTlsConfig {
+    pub listener_protocols: crate::ListenerTlsProtocols,
+    pub cert_mode: crate::ListenerCertMode,
+    pub force_use_of_tls: bool,
+    pub upstream: UpstreamTlsConfig,
+    pub on_client_tls_failure: Option<ClientTlsFailureCallback>,
+}
+
 pub(super) struct StaticProxyConfig {
     pub network: ProxyNetworkConfig,
-    pub tls: ProxyTlsConfig,
+    pub tls: StaticProxyTlsConfig,
     pub limits: ProxyLimits,
     pub http: ProxyHttpConfig,
     pub auth: AuthConfig,

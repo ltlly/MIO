@@ -265,7 +265,8 @@ impl Relay<'_> {
         match result {
             Ok(()) => Ok(()),
             Err(ProtocolError::SendAfterClosing)
-                if close && destination_closed.load(Ordering::Acquire) =>
+                if close
+                    && (destination_closed.load(Ordering::Acquire) || self.closing.is_cancelled()) =>
             {
                 Ok(())
             }

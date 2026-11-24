@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use tokio_util::sync::CancellationToken;
 
@@ -59,6 +59,28 @@ pub(crate) fn global_search_snapshot(
     cancel: &CancellationToken,
 ) -> Result<crate::GlobalSearchResult> {
         let is_cancelled = || shutdown.is_cancelled() || cancel.is_cancelled();
+        let combined_cancel = CancellationToken::new();
+        let bridge_stop = CancellationToken::new();
+        if is_cancelled() {
+            combined_cancel.cancel();
+        }
+        let _bridge_guard = bridge_stop.clone().drop_guard();
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && !combined_cancel.is_cancelled()
+        {
+            let b_stop = bridge_stop.clone();
+            let s_tok = shutdown.clone();
+            let c_tok = cancel.clone();
+            let combined = combined_cancel.clone();
+            handle.spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = b_stop.cancelled() => {}
+                    _ = s_tok.cancelled() => combined.cancel(),
+                    _ = c_tok.cancelled() => combined.cancel(),
+                }
+            });
+        }
         ensure!(!query.term.trim().is_empty() && query.term.len() <= 4096, "搜索关键词须为 1–4096 字节");
         ensure!((1..=10_000).contains(&query.limit), "全局搜索显示上限须为 1–10000");
         ensure!(!is_cancelled(), "全局搜索已取消");
@@ -133,10 +155,10 @@ pub(crate) fn global_search_snapshot(
                 let history = proxy_row(&transaction, source, id)?;
                 let HistoryRow::ExtProxy(archive) = &history else { unreachable!() };
                 let notes = read_archive_full_notes(&transaction, archive)?;
-                let request = archive.request.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, cancel)).transpose()?.unwrap_or_default();
-                let edited_request = archive.edited_request.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, cancel)).transpose()?.unwrap_or_default();
-                let response = archive.response.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, cancel)).transpose()?.unwrap_or_default();
-                let edited_response = archive.edited_response.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, cancel)).transpose()?.unwrap_or_default();
+                let request = archive.request.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, &combined_cancel)).transpose()?.unwrap_or_default();
+                let edited_request = archive.edited_request.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, &combined_cancel)).transpose()?.unwrap_or_default();
+                let response = archive.response.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, &combined_cancel)).transpose()?.unwrap_or_default();
+                let edited_response = archive.edited_response.as_ref().map(|message| read_archive_message_bytes_cached(&transaction, message, &mut cache, &combined_cancel)).transpose()?.unwrap_or_default();
                 let message = archive.request.as_ref().or(archive.edited_request.as_ref());
                 let target = message.and_then(|message| message.request_target.as_deref()).unwrap_or("");
                 let url = if target.starts_with('/') { format!("{}{target}", archive.origin.as_deref().unwrap_or("")) } else { target.into() };
@@ -243,27 +265,50 @@ pub(crate) fn global_search_snapshot(
                       ("参数", finding.parameter.as_deref().unwrap_or_default().as_bytes()), ("证据", finding.evidence.as_bytes())])?;
             }
         }
+        let mio_base =
+            crate::service::websocket::ext_archive::snapshot_ext_ordinal_base(&transaction, &[])?;
         transaction.commit()?;
-        let websocket_query = crate::WebSocketHistoryQuery { project: query.project, query_revision: query.query_revision,
-            filter: crate::WebSocketHistoryFilter { term: query.term.clone(), regex: query.regex, case_sensitive: query.case_sensitive,
-                ..Default::default() }, flow_id: None, offset: 0, limit: query.limit, selected_message_id: None };
-        ensure!(!is_cancelled(), "全局搜索已取消");
-        let websocket = if shutdown.is_cancelled() {
-            bail!("全局搜索已取消");
-        } else {
-            crate::store::websocket_query_snapshot(path, &websocket_query, websocket_pending, cancel)?
-        };
-        for row in websocket.rows {
-            if !seen_ws.insert(row.id) { continue; }
-            if query.in_scope_only && !scope.is_url_in_scope(&row.url) { continue; }
-            collector.result.total = collector.result.total.checked_add(1).context("全局搜索计数溢出")?;
-            if collector.result.hits.len() < query.limit {
-                let mut hit = global_hit(crate::GlobalSearchTarget::ProxyWebSocket(row.id), "Proxy · WebSocket 归档",
-                    row.ordinal.to_string(), format!("{:?}", row.direction), row.url.clone(), None, &row.notes_preview);
-                hit.matched_in = "WebSocket 归档消息 / 修改后消息 / 备注".into();
-                hit.snippet = if row.notes_preview.is_empty() { row.url.clone() } else { row.notes_preview.clone() };
-                hit.websocket_summary = Some(row);
-                collector.result.hits.push(hit);
+        if let Some(base) = mio_base {
+            let websocket_query = crate::WebSocketHistoryQuery {
+                project: query.project,
+                query_revision: query.query_revision,
+                filter: crate::WebSocketHistoryFilter {
+                    term: query.term.clone(),
+                    regex: query.regex,
+                    case_sensitive: query.case_sensitive,
+                    ..Default::default()
+                },
+                flow_id: None,
+                offset: 0,
+                limit: 100_000,
+                selected_message_id: None,
+            };
+            ensure!(!is_cancelled(), "全局搜索已取消");
+            let ws_store = crate::store::ProjectStore::from_read_only(connection, query.project.id);
+            let mut websocket = crate::WebSocketHistoryResult {
+                total: 0,
+                rows: Vec::new(),
+                selected_match: None,
+            };
+            crate::service::websocket::ext_archive::merge_ext_websocket_query(
+                &ws_store,
+                base,
+                &websocket_query,
+                &mut websocket,
+                &combined_cancel,
+            )?;
+            for row in websocket.rows {
+                if !seen_ws.insert(row.id) { continue; }
+                if query.in_scope_only && !scope.is_url_in_scope(&row.url) { continue; }
+                collector.result.total = collector.result.total.checked_add(1).context("全局搜索计数溢出")?;
+                if collector.result.hits.len() < query.limit {
+                    let mut hit = global_hit(crate::GlobalSearchTarget::ProxyWebSocket(row.id), "Proxy · WebSocket 归档",
+                        row.ordinal.to_string(), format!("{:?}", row.direction), row.url.clone(), None, &row.notes_preview);
+                    hit.matched_in = "WebSocket 归档消息 / 修改后消息 / 备注".into();
+                    hit.snippet = if row.notes_preview.is_empty() { row.url.clone() } else { row.notes_preview.clone() };
+                    hit.websocket_summary = Some(row);
+                    collector.result.hits.push(hit);
+                }
             }
         }
         ensure!(!is_cancelled(), "全局搜索已取消");
@@ -373,7 +418,7 @@ pub(super) fn search_page(
         .offset
         .checked_add(query.limit)
         .context("HTTP 历史分页范围溢出")?;
-    let mut page_candidates = Vec::with_capacity(query.limit);
+    let mut page_candidates = Vec::with_capacity(query.limit.min(1024));
     let mut selected_ranks_by_id = HashMap::with_capacity(query.selected_ids.len());
     let mut selected_rows = Vec::with_capacity(query.selected_ids.len());
     let mut live_numbers = Vec::new();
@@ -585,7 +630,12 @@ pub(super) fn search_page(
                 live_numbers.push((flow_id, capture_number));
             }
             if metadata_ids.insert(entry_id) {
-                let meta = super::row_metadata_for_entry(connection, &value, &pending_by_id)?;
+                let meta = super::row_metadata_for_entry_cached(
+                    connection,
+                    &value,
+                    &pending_by_id,
+                    &mut chunk_cache,
+                )?;
                 row_metadata.push((entry_id, meta));
             }
             selected_rows.push(value.clone());
@@ -624,7 +674,12 @@ pub(super) fn search_page(
             live_numbers.push((flow_id, capture_number));
         }
         if metadata_ids.insert(candidate.entry_id) {
-            let meta = super::row_metadata_for_entry(connection, &value, &pending_by_id)?;
+            let meta = super::row_metadata_for_entry_cached(
+                connection,
+                &value,
+                &pending_by_id,
+                &mut chunk_cache,
+            )?;
             row_metadata.push((candidate.entry_id, meta));
         }
         page.push(value);

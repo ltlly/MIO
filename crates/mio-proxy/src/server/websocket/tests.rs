@@ -111,7 +111,9 @@ fn request_preserves_security_headers_but_declines_unimplemented_extensions() {
     assert!(!outgoing.headers().contains_key("proxy-authorization"));
     assert!(!outgoing.headers().contains_key("content-length"));
 
-    let (kept_outgoing, kept_handshake) = outgoing_request_with_options(&model, 64, false).unwrap();
+    let mut cfg = crate::SendConfig::default();
+    cfg.limits.max_body_bytes = 64;
+    let (kept_outgoing, kept_handshake) = outgoing_request_with_options(&model, &cfg, false).unwrap();
     assert_eq!(
         kept_outgoing.headers()["sec-websocket-extensions"],
         "permessage-deflate"

@@ -240,8 +240,14 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn reset_http_filter(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::workbench) fn reset_http_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let old = std::mem::take(&mut self.http_filter);
+        self.history_filter
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.history.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.columns = crate::history::HistoryDelegate::default().columns;

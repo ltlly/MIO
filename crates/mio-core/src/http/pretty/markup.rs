@@ -2,6 +2,7 @@ use super::{MAX_PRETTY_BYTES, PrettyLineBuilder, SourceLineMap};
 
 const MAX_MARKUP_DEPTH: usize = 256;
 const MAX_MARKUP_NODES: u32 = 65_536;
+const MAX_CSS_PRETTY_BYTES: usize = MAX_PRETTY_BYTES * 2;
 
 #[derive(Debug)]
 enum MarkupToken<'a> {
@@ -222,7 +223,7 @@ fn format_css_block_lines(
     line_map: &SourceLineMap,
     out: &mut PrettyLineBuilder,
 ) {
-    let mut depth = base_depth;
+    let mut depth = base_depth.min(MAX_MARKUP_DEPTH);
     let mut current = String::new();
     let mut current_start_offset: Option<usize> = None;
     let mut quote: Option<char> = None;
@@ -231,16 +232,31 @@ fn format_css_block_lines(
     let push_line = |buf: &mut String,
                      start_offset: &mut Option<usize>,
                      d: usize,
-                     out: &mut PrettyLineBuilder| {
+                     out: &mut PrettyLineBuilder| -> bool {
         let trimmed = buf.trim();
-        if !trimmed.is_empty() {
+        let mut exceeded = out.text.len() >= MAX_CSS_PRETTY_BYTES;
+        if !trimmed.is_empty() && !exceeded {
             let line_no = start_offset.map(|off| line_map.line_at(css_base_offset + off));
-            out.push_line(&format!("{}{trimmed}", "  ".repeat(d)), line_no);
+            let indent = "  ".repeat(d.min(MAX_MARKUP_DEPTH));
+            let normalized = trimmed.replace("\r\n", "\n");
+            for (idx, part) in normalized.split('\n').enumerate() {
+                let clean = part.trim_end_matches('\r');
+                out.push_line(&format!("{indent}{clean}"), line_no.map(|base| base + idx));
+                if out.text.len() >= MAX_CSS_PRETTY_BYTES {
+                    exceeded = true;
+                    break;
+                }
+            }
         }
         buf.clear();
         *start_offset = None;
+        exceeded
     };
     while let Some((byte_idx, ch)) = chars.next() {
+        if out.text.len() >= MAX_CSS_PRETTY_BYTES {
+            current.clear();
+            return;
+        }
         if in_comment {
             if current_start_offset.is_none() {
                 current_start_offset = Some(byte_idx);
@@ -287,21 +303,28 @@ fn format_css_block_lines(
                     current_start_offset = Some(byte_idx);
                 }
                 current.push('{');
-                push_line(&mut current, &mut current_start_offset, depth, out);
-                depth += 1;
+                if push_line(&mut current, &mut current_start_offset, depth, out) {
+                    return;
+                }
+                depth = depth.saturating_add(1).min(MAX_MARKUP_DEPTH);
             }
             ';' => {
                 if current_start_offset.is_none() {
                     current_start_offset = Some(byte_idx);
                 }
                 current.push(';');
-                push_line(&mut current, &mut current_start_offset, depth, out);
+                if push_line(&mut current, &mut current_start_offset, depth, out) {
+                    return;
+                }
             }
             '}' => {
-                push_line(&mut current, &mut current_start_offset, depth, out);
+                if push_line(&mut current, &mut current_start_offset, depth, out) {
+                    return;
+                }
                 depth = depth.saturating_sub(1);
+                let indent = "  ".repeat(depth.min(MAX_MARKUP_DEPTH));
                 out.push_line(
-                    &format!("{}}}", "  ".repeat(depth)),
+                    &format!("{indent}}}"),
                     Some(line_map.line_at(css_base_offset + byte_idx)),
                 );
             }
@@ -318,7 +341,7 @@ fn format_css_block_lines(
             }
         }
     }
-    push_line(&mut current, &mut current_start_offset, depth, out);
+    let _ = push_line(&mut current, &mut current_start_offset, depth, out);
 }
 
 fn push_prefixed_source_lines(

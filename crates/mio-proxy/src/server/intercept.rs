@@ -199,6 +199,8 @@ impl State {
             .checked_add(self.config.limits.request_timeout)
             .ok_or(ProxyError::Timeout)?;
         let tokio_deadline = tokio::time::Instant::from_std(deadline);
+        let hook_cancel = self.cancel.child_token();
+        let _hook_cancel_guard = hook_cancel.clone().drop_guard();
         let decision = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => return Err(ProxyError::Cancelled),
@@ -208,7 +210,7 @@ impl State {
                     record.clone(),
                     response_stage,
                     response_head_only,
-                    self.cancel.child_token(),
+                    hook_cancel,
                     deadline,
                 ),
             ) => res.map_err(|_| ProxyError::Timeout)??,

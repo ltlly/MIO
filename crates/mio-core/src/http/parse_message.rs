@@ -344,8 +344,19 @@ fn extract_refresh_url(value: &str) -> Option<&str> {
     None
 }
 
+fn utf8_prefix_at_most(body: &[u8], max_bytes: usize) -> Option<&str> {
+    let prefix = &body[..body.len().min(max_bytes)];
+    match std::str::from_utf8(prefix) {
+        Ok(text) => Some(text),
+        Err(err) if err.error_len().is_none() && body.len() > max_bytes => {
+            std::str::from_utf8(&prefix[..err.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
+}
+
 fn extract_meta_refresh_url(body: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(&body[..body.len().min(64 * 1024)]).ok()?;
+    let text = utf8_prefix_at_most(body, 64 * 1024)?;
     let lower = text.to_ascii_lowercase();
     let mut cursor = 0;
     while let Some(pos) = lower[cursor..].find("<meta") {
@@ -378,7 +389,7 @@ fn extract_meta_refresh_url(body: &[u8]) -> Option<String> {
 }
 
 fn extract_js_redirect_url(body: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(&body[..body.len().min(64 * 1024)]).ok()?;
+    let text = utf8_prefix_at_most(body, 64 * 1024)?;
     for needle in [
         "window.location.href",
         "window.location.replace(",
@@ -1077,5 +1088,25 @@ mod tests {
         assert_eq!(reason.as_deref(), Some(b"OK".as_slice()));
         assert_eq!(resp.body, b"pong");
         assert!(super::is_chunked(&resp.headers));
+    }
+
+    #[test]
+    fn redirect_extractors_handle_multibyte_utf8_crossing_64k_boundary() {
+        let meta_prefix =
+            b"<html><head><meta http-equiv=\"refresh\" content=\"0;url=/next\"></head>";
+        let pad_len = 65_535 - meta_prefix.len();
+        let mut meta_body = Vec::with_capacity(70_000);
+        meta_body.extend_from_slice(meta_prefix);
+        meta_body.resize(65_535, b'a');
+        meta_body.extend_from_slice("中文尾注</html>".as_bytes());
+        assert_eq!(extract_meta_refresh_url(&meta_body).as_deref(), Some("/next"));
+
+        let js_prefix = b"<html><script>window.location.href = \"/js-next\";</script>";
+        let mut js_body = Vec::with_capacity(70_000);
+        js_body.extend_from_slice(js_prefix);
+        let _ = pad_len;
+        js_body.resize(65_535, b'a');
+        js_body.extend_from_slice("中文尾注</html>".as_bytes());
+        assert_eq!(extract_js_redirect_url(&js_body).as_deref(), Some("/js-next"));
     }
 }

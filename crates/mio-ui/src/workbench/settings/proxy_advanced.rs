@@ -215,67 +215,80 @@ impl ProxyAdvancedUi {
         .detach();
 
         cx.observe_in(owner, window, move |this, owner, _, cx| {
-            let ws = &owner.read(cx).workspace;
-            this.proxy_advanced.http_rules = ws.match_and_replace_rules.clone();
-            this.proxy_advanced.ssl_rules = ws.ssl_pass_through_rules.clone();
-            this.proxy_advanced.ws_rules = ws.ws_match_and_replace_rules.clone();
-
-            let http_sel = this.proxy_advanced.http_selected.and_then(|id| {
-                this.proxy_advanced
-                    .http_rules
-                    .iter()
-                    .position(|rule| rule.id == id)
-            });
-            if http_sel.is_none() {
-                this.proxy_advanced.http_selected = None;
+            let (http_changed, ssl_changed, ws_changed) = {
+                let ws = &owner.read(cx).workspace;
+                (
+                    this.proxy_advanced.http_rules != ws.match_and_replace_rules,
+                    this.proxy_advanced.ssl_rules != ws.ssl_pass_through_rules,
+                    this.proxy_advanced.ws_rules != ws.ws_match_and_replace_rules,
+                )
+            };
+            if !http_changed && !ssl_changed && !ws_changed {
+                return;
             }
-            this.proxy_advanced.http_table.update(cx, |table, cx| {
-                if let Some(row) = http_sel {
-                    table.set_selected_row(row, cx);
-                } else {
-                    table.clear_selection(cx);
+            if http_changed {
+                this.proxy_advanced.http_rules = owner.read(cx).workspace.match_and_replace_rules.clone();
+                let http_sel = this.proxy_advanced.http_selected.and_then(|id| {
+                    this.proxy_advanced
+                        .http_rules
+                        .iter()
+                        .position(|rule| rule.id == id)
+                });
+                if http_sel.is_none() {
+                    this.proxy_advanced.http_selected = None;
                 }
-                table.refresh(cx);
-                cx.notify();
-            });
-
-            let ssl_sel = this.proxy_advanced.ssl_selected.and_then(|id| {
-                this.proxy_advanced
-                    .ssl_rules
-                    .iter()
-                    .position(|rule| rule.id == id)
-            });
-            if ssl_sel.is_none() {
-                this.proxy_advanced.ssl_selected = None;
+                this.proxy_advanced.http_table.update(cx, |table, cx| {
+                    if let Some(row) = http_sel {
+                        table.set_selected_row(row, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.refresh(cx);
+                    cx.notify();
+                });
             }
-            this.proxy_advanced.ssl_table.update(cx, |table, cx| {
-                if let Some(row) = ssl_sel {
-                    table.set_selected_row(row, cx);
-                } else {
-                    table.clear_selection(cx);
+            if ssl_changed {
+                this.proxy_advanced.ssl_rules = owner.read(cx).workspace.ssl_pass_through_rules.clone();
+                let ssl_sel = this.proxy_advanced.ssl_selected.and_then(|id| {
+                    this.proxy_advanced
+                        .ssl_rules
+                        .iter()
+                        .position(|rule| rule.id == id)
+                });
+                if ssl_sel.is_none() {
+                    this.proxy_advanced.ssl_selected = None;
                 }
-                table.refresh(cx);
-                cx.notify();
-            });
-
-            let ws_sel = this.proxy_advanced.ws_selected.and_then(|id| {
-                this.proxy_advanced
-                    .ws_rules
-                    .iter()
-                    .position(|rule| rule.id == id)
-            });
-            if ws_sel.is_none() {
-                this.proxy_advanced.ws_selected = None;
+                this.proxy_advanced.ssl_table.update(cx, |table, cx| {
+                    if let Some(row) = ssl_sel {
+                        table.set_selected_row(row, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.refresh(cx);
+                    cx.notify();
+                });
             }
-            this.proxy_advanced.ws_table.update(cx, |table, cx| {
-                if let Some(row) = ws_sel {
-                    table.set_selected_row(row, cx);
-                } else {
-                    table.clear_selection(cx);
+            if ws_changed {
+                this.proxy_advanced.ws_rules = owner.read(cx).workspace.ws_match_and_replace_rules.clone();
+                let ws_sel = this.proxy_advanced.ws_selected.and_then(|id| {
+                    this.proxy_advanced
+                        .ws_rules
+                        .iter()
+                        .position(|rule| rule.id == id)
+                });
+                if ws_sel.is_none() {
+                    this.proxy_advanced.ws_selected = None;
                 }
-                table.refresh(cx);
-                cx.notify();
-            });
+                this.proxy_advanced.ws_table.update(cx, |table, cx| {
+                    if let Some(row) = ws_sel {
+                        table.set_selected_row(row, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.refresh(cx);
+                    cx.notify();
+                });
+            }
 
             let _ = &weak;
             cx.notify();

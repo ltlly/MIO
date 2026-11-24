@@ -161,7 +161,7 @@ fn headers_wire_bytes(headers: &[Header]) -> usize {
         .sum()
 }
 
-pub(super) fn valid_header_value_bytes(value: &[u8]) -> bool {
+pub(crate) fn valid_header_value_bytes(value: &[u8]) -> bool {
     value
         .iter()
         .all(|byte| (*byte >= 32 && *byte != 127) || *byte == b'\t')

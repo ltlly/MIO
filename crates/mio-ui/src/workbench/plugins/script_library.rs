@@ -371,14 +371,24 @@ impl Workbench {
                 return;
             }
         };
-        let code = self
+        let code = match self
             .extensions
             .script_library
             .code_editor
-            .read(cx)
-            .content()
-            .text()
-            .to_string();
+            .update(cx, |ed, cx| {
+                if ed.marked_text_range(window, cx).is_some() {
+                    Err(editing::COMPOSITION_PENDING.to_owned())
+                } else {
+                    Ok(ed.content().text().to_string())
+                }
+            }) {
+            Ok(v) => v,
+            Err(err) => {
+                self.extensions.script_library.feedback = Some((false, err));
+                cx.notify();
+                return;
+            }
+        };
         if let Err(err) = mio_core::validate_filter_script(&code) {
             self.extensions.script_library.feedback = Some((false, format!("未保存，编译失败：{err}")));
             cx.notify();

@@ -68,7 +68,6 @@ pub(super) fn filter_summary(filter: &HttpHistoryFilter) -> String {
     if matches!(
         filter.mime_types,
         [true, true, true, false, true, false, true, true]
-            | [true, true, true, true, false, true, false, true]
     ) {
         parts.push("隐藏 CSS 与图像内容".into());
     } else if filter.mime_types != [true; 8] {

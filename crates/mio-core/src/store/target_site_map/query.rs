@@ -476,14 +476,25 @@ impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::Site
             .page_rows
             .iter()
             .map(|row| {
+                let full_ext_url;
                 let url = match row {
                     crate::HistoryRow::Live(s) => s.url.as_str(),
-                    crate::HistoryRow::ExtProxy(b) => b
-                        .edited_request
-                        .as_ref()
-                        .or(b.request.as_ref())
-                        .and_then(|r| r.request_target.as_deref())
-                        .unwrap_or(""),
+                    crate::HistoryRow::ExtProxy(b) => {
+                        let target = b
+                            .edited_request
+                            .as_ref()
+                            .or(b.request.as_ref())
+                            .and_then(|r| r.request_target.as_deref())
+                            .unwrap_or("");
+                        if target.starts_with('/')
+                            && let Some(origin) = b.origin.as_deref()
+                        {
+                            full_ext_url = format!("{origin}{target}");
+                            full_ext_url.as_str()
+                        } else {
+                            target
+                        }
+                    }
                 };
                 let referer_url = resolve_referer(row.id(), url);
                 SiteMapItem {

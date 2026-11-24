@@ -177,6 +177,7 @@ impl Settings {
                 network_http_changed,
                 scheduled_tasks_changed,
                 observed_certs_changed,
+                listeners_changed,
                 upstream_changed,
                 legacy_changed,
                 certificates_changed,
@@ -212,6 +213,12 @@ impl Settings {
                     project_changed || this.state.scheduled_tasks != view.workspace.scheduled_tasks;
                 let observed_certs_changed = project_changed
                     || this.state.observed_server_certs != view.observed_server_certs;
+                let listeners_changed = project_changed
+                    || this.state.proxy_listeners != view.workspace.effective_proxy_listeners()
+                    || this.state.active_proxy_address != view.proxy_address
+                    || this.state.active_proxy_listeners != view.proxy_listeners_bound
+                    || this.state.proxy_busy != view.proxy_busy
+                    || this.state.last_ca_fingerprint != view.last_ca_fingerprint;
                 let upstream_changed =
                     project_changed || this.state.upstream_proxy != view.workspace.upstream_proxy;
                 let legacy_changed = this.state.upstream_tls != view.workspace.upstream_tls;
@@ -243,6 +250,7 @@ impl Settings {
                     network_http_changed,
                     scheduled_tasks_changed,
                     observed_certs_changed,
+                    listeners_changed,
                     upstream_changed,
                     legacy_changed,
                     certificates_changed,
@@ -253,6 +261,9 @@ impl Settings {
                     user_prefs_changed,
                 )
             };
+            if this.state.active_proxy_address.is_some() {
+                this.listeners_tls.listener_error = None;
+            }
             if project_changed {
                 this.focus.focus(window, cx);
                 this.pools.close_dialog(cx);
@@ -271,8 +282,65 @@ impl Settings {
                 this.scope_oos_custom_editor_open = false;
                 this.scope_oos_custom_editing = None;
                 this.scope_oos_custom_subdomains = false;
+                this.listeners_tls.selected_index = None;
+                this.listeners_tls.listener_error = None;
+                this.listeners_tls.client_cert_editor_visible = false;
+                this.listeners_tls.client_cert_editing = None;
+                this.listeners_tls.client_cert_saving = false;
                 this.listeners_tls.client_cert_selected = None;
+                this.listeners_tls.selected_server_cert = None;
+                this.listeners_tls.inspected_server_cert = None;
+                this.listeners_tls.server_cert_copied = None;
+                if let Some(dialog) = this.listeners_tls.dialog.take() {
+                    let _ = dialog.update(cx, |_, dialog_window, _| dialog_window.remove_window());
+                }
                 this.scope_ui.reset_editing(cx);
+            }
+            if listeners_changed {
+                if !project_changed
+                    && let Some(idx) = this.listeners_tls.selected_index
+                    && idx >= this.state.proxy_listeners.len()
+                {
+                    this.listeners_tls.selected_index =
+                        this.state.proxy_listeners.len().checked_sub(1);
+                }
+                let sel = this.listeners_tls.selected_index;
+                this.listeners_tls.table.update(cx, |table, cx| {
+                    if let Some(row) = sel {
+                        table.set_selected_row(row, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.refresh(cx);
+                    cx.notify();
+                });
+            }
+            if observed_certs_changed {
+                let cert_len = this.state.observed_server_certs.len();
+                if this
+                    .listeners_tls
+                    .selected_server_cert
+                    .is_some_and(|idx| idx >= cert_len)
+                {
+                    this.listeners_tls.selected_server_cert = cert_len.checked_sub(1);
+                }
+                if this
+                    .listeners_tls
+                    .inspected_server_cert
+                    .is_some_and(|idx| idx >= cert_len)
+                {
+                    this.listeners_tls.inspected_server_cert = None;
+                }
+                let cert_sel = this.listeners_tls.selected_server_cert;
+                this.listeners_tls.server_cert_table.update(cx, |table, cx| {
+                    if let Some(row) = cert_sel {
+                        table.set_selected_row(row, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.refresh(cx);
+                    cx.notify();
+                });
             }
             if legacy_changed && !project_changed {
                 this.tls_negotiation_error = None;

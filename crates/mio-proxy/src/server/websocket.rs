@@ -80,12 +80,9 @@ pub(super) async fn handle(request: Request, mut active: ActiveFlow) -> Response
                 false,
             )
             .await?;
-        let (request, egress_handshake) = outgoing_request_with_options(
-            &record.request,
-            state.config.limits.max_body_bytes,
-            strip_ws_extensions,
-        )?;
         let config = state.send_config(&record.request.url, record.request.version, true);
+        let (request, egress_handshake) =
+            outgoing_request_with_options(&record.request, &config, strip_ws_extensions)?;
         let attempt_started = std::time::Instant::now();
         let (mut upstream, timing) = tokio::select! {
             biased;
@@ -127,14 +124,16 @@ pub(super) async fn handle(request: Request, mut active: ActiveFlow) -> Response
         let (body, trailers) = if upgraded {
             (Vec::new(), Vec::new())
         } else {
-            tokio::select! {
+            let body_res = tokio::select! {
                 biased;
                 _ = state.cancel.cancelled() => return Err(ProxyError::Cancelled),
                 result = tokio::time::timeout(
                     config.limits.timeout,
                     message::body(upstream.into_body(), config.limits.max_body_bytes),
                 ) => result.map_err(|_| ProxyError::Timeout)??,
-            }
+            };
+            cancel.cancel();
+            body_res
         };
         record.summary.status = Some(status);
         record.summary.response_bytes = body.len() as u64;

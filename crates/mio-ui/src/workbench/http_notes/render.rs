@@ -176,8 +176,8 @@ impl Workbench {
             }
             if let Some(handle) = owner.read(cx).http_notes.detached_window
                 && cx.windows().contains(&handle)
+                && crate::chrome::activate_popup_window(handle, cx)
             {
-                assert!(crate::chrome::activate_popup_window(handle, cx), "备注窗口能够激活");
                 return;
             }
             let opened = crate::chrome::open_popup_window(
@@ -188,13 +188,21 @@ impl Workbench {
                         DetachedHttpNotesWindow::new(owner.clone(), window, cx)
                     })
                 },
-            )
-            .expect("独立备注窗口能够打开");
-            owner.update(cx, |view, cx| {
-                view.http_notes.detached_window = Some(opened.0);
-                view.http_notes.detached_owner_window = Some(owner_window);
-                cx.notify();
-            });
+            );
+            match opened {
+                Ok((handle, _)) => {
+                    owner.update(cx, |view, cx| {
+                        view.http_notes.detached_window = Some(handle);
+                        view.http_notes.detached_owner_window = Some(owner_window);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    owner.update(cx, |view, cx| {
+                        view.fail(format!("无法打开独立备注窗口：{error}"), cx);
+                    });
+                }
+            }
         });
     }
 
@@ -621,15 +629,13 @@ impl Workbench {
                                         .child(label)
                                 })
                                 .on_click(move |_, window, cx| {
-                                    owner
-                                        .update(cx, |view, cx| {
-                                            view.apply_http_notes_markdown(
-                                                NoteMarkdownAction::HeadingLevel(level as u8),
-                                                window,
-                                                cx,
-                                            );
-                                        })
-                                        .expect("备注标题控件宿主有效");
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.apply_http_notes_markdown(
+                                            NoteMarkdownAction::HeadingLevel(level as u8),
+                                            window,
+                                            cx,
+                                        );
+                                    });
                                 }),
                             );
                         }
@@ -1046,15 +1052,17 @@ impl DetachedHttpNotesWindow {
         });
         let closing_owner = owner.downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            closing_owner.update(cx, |view, cx| {
-                if let Err(error) = view.capture_http_notes_app(cx) {
-                    view.http_notes.error = Some(error);
-                    cx.notify();
-                    return false;
-                }
-                view.send_http_notes(false, cx);
-                true
-            }).expect("独立备注窗口宿主有效")
+            closing_owner
+                .update(cx, |view, cx| {
+                    if let Err(error) = view.capture_http_notes_app(cx) {
+                        view.http_notes.error = Some(error);
+                        cx.notify();
+                        return false;
+                    }
+                    view.send_http_notes(false, cx);
+                    true
+                })
+                .unwrap_or(true)
         });
         let released_owner = owner.downgrade();
         cx.on_release(move |_, cx| {
@@ -1079,22 +1087,30 @@ impl DetachedHttpNotesWindow {
 
 impl Render for DetachedHttpNotesWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let owner = self.owner.upgrade().expect("独立备注窗口宿主有效");
+        let Some(owner) = self.owner.upgrade() else {
+            window.remove_window();
+            return div()
+                .id("http-notes-detached-window")
+                .size_full()
+                .into_any_element();
+        };
         let close_owner = owner.downgrade();
         let title_bar = crate::chrome::render_title_bar(
             "http-notes-detached",
             "Notes",
             crate::chrome::TitleBarControls::DIALOG,
             move |window, cx| {
-                let can_close = close_owner.update(cx, |view, cx| {
-                    if let Err(error) = view.capture_http_notes_app(cx) {
-                        view.http_notes.error = Some(error);
-                        cx.notify();
-                        return false;
-                    }
-                    view.send_http_notes(false, cx);
-                    true
-                }).expect("独立备注窗口宿主有效");
+                let can_close = close_owner
+                    .update(cx, |view, cx| {
+                        if let Err(error) = view.capture_http_notes_app(cx) {
+                            view.http_notes.error = Some(error);
+                            cx.notify();
+                            return false;
+                        }
+                        view.send_http_notes(false, cx);
+                        true
+                    })
+                    .unwrap_or(true);
                 if can_close {
                     window.remove_window();
                 }
@@ -1116,6 +1132,7 @@ impl Render for DetachedHttpNotesWindow {
             .bg(theme::background())
             .child(title_bar)
             .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
     }
 }
 

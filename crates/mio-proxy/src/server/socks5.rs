@@ -133,30 +133,25 @@ pub(super) async fn serve_socks5(
             }
             return;
         }
+        let mut initial_prefix = Vec::new();
         if target_is_ip && state.dynamic.borrow().ssl_pass_through.is_some() {
-            let mut peek_buf = [0u8; 4096];
-            let peeked = tokio::select! {
-                biased;
-                _ = state.cancel.cancelled() => return,
-                res = tokio::time::timeout(
-                    state.config.limits.request_timeout,
-                    stream.peek(&mut peek_buf),
-                ) => res,
-            };
-            let peeked_len = match peeked {
-                Ok(Ok(n)) if n > 0 => n,
-                Ok(Ok(_)) => return,
-                Ok(Err(err)) if is_benign_pre_handshake_io(&err) => return,
-                Ok(Err(err)) => {
-                    state.failure(failed_request, &ProxyError::network(err)).await;
-                    return;
-                }
-                Err(_) => {
-                    state.failure(failed_request, &ProxyError::Timeout).await;
+            let prefix = match listener::read_tls_client_hello_prefix(
+                &mut stream,
+                Vec::new(),
+                state.config.limits.request_timeout,
+                &state.cancel,
+            )
+            .await
+            {
+                Ok(bytes) if bytes.is_empty() => return,
+                Ok(bytes) => bytes,
+                Err(ProxyError::Cancelled) => return,
+                Err(error) => {
+                    state.failure(failed_request, &error).await;
                     return;
                 }
             };
-            if let Some(sni) = listener::parse_client_hello_sni(&peek_buf[..peeked_len])
+            if let Some(sni) = listener::parse_client_hello_sni(&prefix)
                 && ssl_passthrough::should_pass_through(&state, &sni, port)
             {
                 let (pt_host, pt_port) = state.effective_passthrough_target(&sni, port);
@@ -164,14 +159,19 @@ pub(super) async fn serve_socks5(
                     "{}:{pt_port}",
                     crate::route::format_host_for_authority(&pt_host)
                 );
+                let rewound = rama::io::PrefixedIo::new(
+                    std::io::Cursor::new(prefix),
+                    TcpStream::new(stream),
+                );
                 if let Err(error) =
-                    ssl_passthrough::relay_stream(stream, &pt_host, pt_port, &state).await
+                    ssl_passthrough::relay_stream(rewound, &pt_host, pt_port, &state).await
                     && !matches!(error, ProxyError::Cancelled)
                 {
                     state.failure(failed_request, &error).await;
                 }
                 return;
             }
+            initial_prefix = prefix;
         }
 
         let ca = state.dynamic.borrow().ca.clone();
@@ -194,9 +194,13 @@ pub(super) async fn serve_socks5(
             }
         };
 
+        let rewound = rama::io::PrefixedIo::new(
+            std::io::Cursor::new(initial_prefix),
+            TcpStream::new(stream),
+        );
         let io = GracefulIo::new(
             Box::pin(state.cancel.clone().cancelled_owned()),
-            TcpStream::new(stream),
+            rewound,
         );
         let served_any = Arc::new(AtomicBool::new(false));
         let served_flag = served_any.clone();
@@ -367,9 +371,20 @@ async fn accept_connect(
                 .read_exact(&mut domain_bytes)
                 .await
                 .map_err(ProxyError::network)?;
-            let domain = String::from_utf8(domain_bytes)
-                .map_err(|_| ProxyError::invalid("SOCKS5 域名不是有效 UTF-8"))?;
-            (domain.clone(), domain)
+            let domain = match String::from_utf8(domain_bytes) {
+                Ok(domain) if !domain.trim().is_empty() => domain,
+                _ => {
+                    let _ = send_socks5_reply(stream, REP_GENERAL_FAILURE).await;
+                    return Err(ProxyError::invalid("SOCKS5 域名无效或不是有效 UTF-8"));
+                }
+            };
+            let clean_host = crate::route::strip_host_brackets(&domain);
+            if clean_host.parse::<rama::net::address::Host>().is_err() {
+                let _ = send_socks5_reply(stream, REP_GENERAL_FAILURE).await;
+                return Err(ProxyError::invalid("SOCKS5 域名格式无效"));
+            }
+            let formatted = crate::route::format_host_for_authority(&domain);
+            (clean_host.to_owned(), formatted)
         }
         ATYP_IPV6 => {
             let mut octets = [0u8; 16];

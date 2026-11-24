@@ -451,6 +451,7 @@ fn bind_unix_socket(path: &Path, strict_parent: bool) -> Result<(UnixListener, O
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     ensure_private_parent_dir(parent, strict_parent)?;
+    let _sock_lock = crate::fs_atomic::acquire_sidecar_lock(parent, "mio.sock.lock", "IPC socket")?;
 
     let euid = current_euid();
     if let Ok(existing) = fs::symlink_metadata(path) {

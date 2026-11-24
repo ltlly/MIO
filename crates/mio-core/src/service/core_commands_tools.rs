@@ -123,6 +123,7 @@ impl State {
                     ) {
                         self.ws_repeater.set_connect_config(config);
                     }
+                    self.sync_sessions_workspace(&workspace);
                     if self.proxy.is_running()
                         && let Err(error) =
                             self.reload_running_proxy_from_workspace(Some(&workspace), &workspace).await

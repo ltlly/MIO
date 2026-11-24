@@ -261,15 +261,6 @@ pub(in crate::store) fn live_row_metadata_with_stored(
     })
 }
 
-pub(in crate::store::ext_archive::http_query) fn row_metadata_for_entry(
-    connection: &Connection,
-    row: &HistoryRow,
-    pending_by_id: &HashMap<Uuid, &HttpHistoryPending>,
-) -> Result<HttpHistoryRowMetadata> {
-    let mut chunk_cache = search::ChunkCache::default();
-    row_metadata_for_entry_cached(connection, row, pending_by_id, &mut chunk_cache)
-}
-
 pub(in crate::store::ext_archive::http_query) fn row_metadata_for_entry_cached(
     connection: &Connection,
     row: &HistoryRow,
@@ -734,7 +725,7 @@ fn query_connection(
         "{sql} SELECT kind,id,summary,method,url,status,number FROM filtered ORDER BY {order} LIMIT ?11 OFFSET ?12"
     ))?;
     let mut rows = statement.query(params_from_iter(page_values.iter()))?;
-    let mut page = Vec::with_capacity(query.limit);
+    let mut page = Vec::with_capacity(query.limit.min(total).min(1024));
     while let Some(row) = rows.next()? {
         ensure!(!cancel.is_cancelled(), "HTTP 历史查询已取消");
         let id = Uuid::parse_str(row.get_ref(1)?.as_str()?)?;

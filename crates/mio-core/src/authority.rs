@@ -141,7 +141,10 @@ fn ensure_identity_dir(directory: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(directory)?;
     #[cfg(unix)]
     ensure!(
-        metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0,
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0,
         "CA 目录必须是仅当前用户可访问的真实目录"
     );
     #[cfg(not(unix))]
@@ -183,21 +186,43 @@ pub fn default_identity_dir() -> Result<PathBuf> {
 }
 
 fn read_existing_at(path: &Path) -> Result<(MitmAuthority, AuthorityStamp)> {
-    let metadata = fs::symlink_metadata(path)?;
+    use std::io::Read as _;
+
+    #[cfg(not(unix))]
+    if let Ok(pre_meta) = fs::symlink_metadata(path) {
+        ensure!(
+            pre_meta.is_file() && !pre_meta.file_type().is_symlink() && pre_meta.len() <= 64 * 1024,
+            "CA 密钥文件权限或大小异常；未覆盖原密钥"
+        );
+    }
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = open_opts.open(path)?;
+    let metadata = file.metadata()?;
     #[cfg(unix)]
     ensure!(
         metadata.is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 == 0
             && metadata.len() <= 64 * 1024,
         "CA 密钥文件权限或大小异常；未覆盖原密钥"
     );
     #[cfg(not(unix))]
     ensure!(
-        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 64 * 1024,
+        metadata.is_file() && metadata.len() <= 64 * 1024,
         "CA 密钥文件权限或大小异常；未覆盖原密钥"
     );
+    let mut bytes = Vec::new();
+    (&mut file).take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 64 * 1024, "CA 密钥文件权限或大小异常；未覆盖原密钥");
     let stored: StoredAuthority =
-        serde_json::from_slice(&fs::read(path)?).context("CA 文件损坏；未生成替代密钥")?;
+        serde_json::from_slice(&bytes).context("CA 文件损坏；未生成替代密钥")?;
     let cert_der = stored.certificate.clone();
     let authority = MitmAuthority::from_der(stored.certificate, stored.private_key)?;
     Ok((authority, AuthorityStamp::from_metadata(&metadata, &cert_der)))

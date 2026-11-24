@@ -194,7 +194,7 @@ impl crate::store::WebSocketRepo<&mut ProjectStore> {
 }
 
 impl ProjectStore {
-    pub(super) fn from_read_only(connection: Connection, id: Uuid) -> Self {
+    pub(crate) fn from_read_only(connection: Connection, id: Uuid) -> Self {
         Self {
             connection,
             id,

@@ -126,12 +126,14 @@ pub(in crate::server) fn outgoing_request(
     request: &HttpRequest,
     max: usize,
 ) -> Result<(Request, Handshake), ProxyError> {
-    outgoing_request_with_options(request, max, true)
+    let mut cfg = SendConfig::default();
+    cfg.limits.max_body_bytes = max;
+    outgoing_request_with_options(request, &cfg, true)
 }
 
 pub(in crate::server) fn outgoing_request_with_options(
     request: &HttpRequest,
-    max: usize,
+    config: &SendConfig,
     strip_extensions: bool,
 ) -> Result<(Request, Handshake), ProxyError> {
     let (_, handshake) = request_handshake_with_options(request, strip_extensions)?;
@@ -143,8 +145,6 @@ pub(in crate::server) fn outgoing_request_with_options(
         body: Vec::new(),
         trailers: Vec::new(),
     };
-    let mut cfg = SendConfig::default();
-    cfg.limits.max_body_bytes = max;
-    let outgoing = message::to_websocket_upgrade_request(&normalized, &cfg, strip_extensions)?;
+    let outgoing = message::to_websocket_upgrade_request(&normalized, config, strip_extensions)?;
     Ok((outgoing, handshake))
 }

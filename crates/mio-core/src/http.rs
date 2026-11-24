@@ -64,7 +64,8 @@ use match_replace::compile_rule_regex;
 use match_replace::replace_text_with_rule;
 #[cfg(test)]
 use match_replace::{append_replacement, apply_header_rule};
-use match_replace::{apply_single_rule, valid_header_value_bytes};
+pub(crate) use match_replace::valid_header_value_bytes;
+use match_replace::apply_single_rule;
 pub(crate) use parse::{body, head, is_chunked, token};
 pub(crate) use parse_message::{parse_imported_request, parse_imported_response};
 pub use parse_message::{

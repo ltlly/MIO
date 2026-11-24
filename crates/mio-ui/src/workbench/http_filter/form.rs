@@ -391,7 +391,12 @@ impl FilterWindow {
             )
         });
         self.filter_script_editor.update(cx, |editor, cx| {
-            editor.set_value(self.applied.filter_script.clone(), window, cx)
+            let script = if self.applied.filter_script.is_empty() {
+                "return true;".into()
+            } else {
+                self.applied.filter_script.clone()
+            };
+            editor.set_value(script, window, cx)
         });
         self.error = None;
         cx.notify();
@@ -419,6 +424,13 @@ impl FilterWindow {
 
     fn script_library_path(&mut self) -> AnyResult<PathBuf> {
         if let Some(path) = &self.library_path { return Ok(path.clone()); }
+        #[cfg(test)]
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("mio-ui-test-filter-scripts-{}", mio_core::Uuid::new_v4()))
+            .join("http-filter-scripts.json");
+        #[cfg(not(test))]
         let path = mio_core::default_user_preferences_path()?.with_file_name("http-filter-scripts.json");
         self.library_path = Some(path.clone());
         Ok(path)

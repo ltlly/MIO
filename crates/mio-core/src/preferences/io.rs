@@ -149,34 +149,59 @@ pub(super) fn validate_encoded_budget(
     Ok(())
 }
 
-fn read_preferences_inner(path: &Path, validate_parent: bool) -> Result<UserPreferences> {
-    let Some(bytes) =
-        fs_atomic::read_bounded_owned_file(path, MAX_FILE_BYTES, validate_parent, "用户偏好")?
+fn stamp_from_metadata(meta: &std::fs::Metadata) -> PreferencesFileStamp {
+    let modified = meta.modified().ok();
+    #[cfg(unix)]
+    let dev_ino = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let dev_ino = None;
+    (meta.len(), modified, dev_ino)
+}
+
+fn read_preferences_inner(
+    path: &Path,
+    validate_parent: bool,
+) -> Result<(UserPreferences, Option<PreferencesFileStamp>)> {
+    let Some((bytes, meta)) =
+        fs_atomic::read_bounded_owned_file_with_meta(path, MAX_FILE_BYTES, validate_parent, "用户偏好")?
     else {
-        return Ok(UserPreferences::default());
+        return Ok((UserPreferences::default(), None));
     };
     let preferences: UserPreferences = serde_json::from_slice(&bytes)
         .context("用户偏好文件损坏或含未知字段/选项；原文件未修改")?;
     validate_loaded_preferences(&preferences)?;
     validate_encoded_budget(&preferences, bytes.len())?;
-    Ok(preferences)
+    Ok((preferences, Some(stamp_from_metadata(&meta))))
 }
 
-pub(super) fn read_preferences(path: &Path) -> Result<UserPreferences> {
+pub(super) fn read_preferences_with_stamp(
+    path: &Path,
+) -> Result<(UserPreferences, Option<PreferencesFileStamp>)> {
     read_preferences_inner(path, true)
+}
+
+#[cfg(test)]
+pub(super) fn read_preferences(path: &Path) -> Result<UserPreferences> {
+    read_preferences_with_stamp(path).map(|(preferences, _)| preferences)
 }
 
 pub(super) fn write_preferences_with(
     path: &Path,
     update: impl FnOnce(&UserPreferences) -> Result<UserPreferences>,
-) -> Result<UserPreferences> {
+) -> Result<(UserPreferences, Option<PreferencesFileStamp>)> {
     let (parent, dir) = fs_atomic::ensure_owned_parent_dir(path, "用户偏好")?;
     let _lock = fs_atomic::acquire_sidecar_lock(&parent, "preferences.lock", "用户偏好")?;
-    let current = read_preferences_inner(path, false)?;
+    let (current, _) = read_preferences_inner(path, false)?;
     let next = update(&current)?;
     validate_loaded_preferences(&next)?;
     let encoded = serde_json::to_vec(&next)?;
     validate_encoded_budget(&next, encoded.len())?;
     fs_atomic::atomic_write_bytes(&parent, path, &encoded, &dir, "用户偏好")?;
-    Ok(next)
+    let stamp = std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| stamp_from_metadata(&meta));
+    Ok((next, stamp))
 }

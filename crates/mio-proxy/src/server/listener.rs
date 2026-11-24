@@ -343,8 +343,30 @@ pub async fn start(
                     _ = state.events.closed() => break,
                     result = listener.accept() => result,
                 };
-                let (stream, _) = accepted.map_err(ProxyError::network)?;
-                stream.set_nodelay(true).map_err(ProxyError::network)?;
+                let (stream, _) = match accepted {
+                    Ok(pair) => pair,
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::Interrupted
+                                | std::io::ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => {
+                        drop(permit);
+                        tokio::select! {
+                            biased;
+                            _ = state.cancel.cancelled() => break,
+                            _ = state.events.closed() => break,
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                        }
+                    }
+                };
+                let _ = stream.set_nodelay(true);
                 let state = state.clone();
                 tasks.spawn(async move {
                     let permit = Arc::new(permit);
@@ -487,7 +509,7 @@ pub(super) fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
 }
 
 async fn serve_invisible_tls(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     state: Arc<State>,
     permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) {
@@ -508,24 +530,25 @@ async fn serve_invisible_tls(
         .unwrap_or("localhost")
         .to_owned();
     let has_passthrough = state.dynamic.borrow().ssl_pass_through.is_some();
+    let mut initial_prefix = Vec::new();
     if has_passthrough {
-        let mut peek_buf = [0u8; 4096];
-        let peeked = tokio::select! {
-            biased;
-            _ = state.cancel.cancelled() => return,
-            res = tokio::time::timeout(state.config.limits.request_timeout, stream.peek(&mut peek_buf)) => res,
-        };
-        let peeked_len = match peeked {
-            Ok(Ok(n)) if n > 0 => n,
-            Ok(Ok(_)) => return,
-            Ok(Err(err)) => {
-                if is_benign_tunnel_disconnect(&err) {
-                    return;
-                }
+        let prefix = match read_tls_client_hello_prefix(
+            &mut stream,
+            Vec::new(),
+            state.config.limits.request_timeout,
+            &state.cancel,
+        )
+        .await
+        {
+            Ok(bytes) if bytes.is_empty() => return,
+            Ok(bytes) => bytes,
+            Err(ProxyError::Cancelled) => return,
+            Err(error) => {
+                let failed_host = crate::route::format_host_for_authority(&fallback_host);
                 let failed = HttpRequest {
                     method: "CONNECT".into(),
                     url: format!(
-                        "{fallback_host}:{}",
+                        "{failed_host}:{}",
                         state.config.network.redirect_to_port.unwrap_or(443)
                     ),
                     version: HttpVersion::Http11,
@@ -533,47 +556,36 @@ async fn serve_invisible_tls(
                     body: Vec::new(),
                     trailers: Vec::new(),
                 };
-                state.failure(failed, &ProxyError::network(err)).await;
-                return;
-            }
-            Err(_) => {
-                let failed = HttpRequest {
-                    method: "CONNECT".into(),
-                    url: format!(
-                        "{fallback_host}:{}",
-                        state.config.network.redirect_to_port.unwrap_or(443)
-                    ),
-                    version: HttpVersion::Http11,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                    trailers: Vec::new(),
-                };
-                state.failure(failed, &ProxyError::Timeout).await;
+                state.failure(failed, &error).await;
                 return;
             }
         };
-        let sni = parse_client_hello_sni(&peek_buf[..peeked_len]);
+        let sni = parse_client_hello_sni(&prefix);
         let candidate_host = sni.as_deref().unwrap_or(&fallback_host);
         let candidate_port = state.config.network.redirect_to_port.unwrap_or(443);
         if ssl_passthrough::should_pass_through(&state, candidate_host, candidate_port) {
             let (pt_host, pt_port) =
                 state.effective_passthrough_target(candidate_host, candidate_port);
+            let formatted_pt = crate::route::format_host_for_authority(&pt_host);
             let failed_request = HttpRequest {
                 method: "CONNECT".into(),
-                url: format!("{pt_host}:{pt_port}"),
+                url: format!("{formatted_pt}:{pt_port}"),
                 version: HttpVersion::Http11,
                 headers: Vec::new(),
                 body: Vec::new(),
                 trailers: Vec::new(),
             };
+            let rewound =
+                rama::io::PrefixedIo::new(std::io::Cursor::new(prefix), TcpStream::new(stream));
             if let Err(error) =
-                ssl_passthrough::relay_stream(stream, &pt_host, pt_port, &state).await
+                ssl_passthrough::relay_stream(rewound, &pt_host, pt_port, &state).await
                 && !matches!(error, ProxyError::Cancelled)
             {
                 state.failure(failed_request, &error).await;
             }
             return;
         }
+        initial_prefix = prefix;
     }
     let observed_sni = Arc::new(std::sync::Mutex::new(None::<String>));
     let ca = state.dynamic.borrow().ca.clone();
@@ -582,9 +594,13 @@ async fn serve_invisible_tls(
         fallback_host.clone(),
         observed_sni.clone(),
     );
+    let rewound = rama::io::PrefixedIo::new(
+        std::io::Cursor::new(initial_prefix),
+        TcpStream::new(stream),
+    );
     let io = GracefulIo::new(
         Box::pin(state.cancel.clone().cancelled_owned()),
-        TcpStream::new(stream),
+        rewound,
     );
     let served_any = Arc::new(AtomicBool::new(false));
     let served_flag = served_any.clone();
@@ -601,8 +617,12 @@ async fn serve_invisible_tls(
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .map(str::to_owned)
-            .or_else(|| crate::lock_unpoison(&sni_for_req).clone())
-            .unwrap_or_else(|| fallback_for_req.clone());
+            .or_else(|| {
+                crate::lock_unpoison(&sni_for_req)
+                    .as_deref()
+                    .map(crate::route::format_host_for_authority)
+            })
+            .unwrap_or_else(|| crate::route::format_host_for_authority(&fallback_for_req));
         async move {
             Ok::<_, Infallible>(
                 handle_http_with_ingress(
@@ -644,9 +664,10 @@ async fn serve_invisible_tls(
                 let sni_host = crate::lock_unpoison(&observed_sni)
                     .clone()
                     .unwrap_or_else(|| fallback_host.clone());
+                let formatted_sni = crate::route::format_host_for_authority(&sni_host);
                 let failed_request = HttpRequest {
                     method: "CONNECT".into(),
-                    url: format!("{sni_host}:{}", state.config.network.redirect_to_port.unwrap_or(443)),
+                    url: format!("{formatted_sni}:{}", state.config.network.redirect_to_port.unwrap_or(443)),
                     version: HttpVersion::Http11,
                     headers: Vec::new(),
                     body: Vec::new(),
@@ -689,19 +710,74 @@ pub(super) fn looks_like_plain_http_prefix(bytes: &[u8]) -> bool {
     bytes.len() <= 16 && bytes.iter().all(|b| b.is_ascii_uppercase() || *b == b'-')
 }
 
+pub(super) async fn read_tls_client_hello_prefix<R: tokio::io::AsyncRead + Unpin>(
+    io: &mut R,
+    mut buf: Vec<u8>,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, ProxyError> {
+    const MAX_CLIENT_HELLO_PREFIX: usize = 16 * 1024 + 5;
+    if !buf.is_empty() && buf[0] != socks5::TLS_CLIENT_HELLO_LEAD_BYTE {
+        return Ok(buf);
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut chunk = [0u8; 4096];
+    loop {
+        if !buf.is_empty() && buf[0] != socks5::TLS_CLIENT_HELLO_LEAD_BYTE {
+            return Ok(buf);
+        }
+        if buf.len() >= 5 {
+            if buf[0] != 0x16 || buf[1] != 0x03 {
+                return Ok(buf);
+            }
+            let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+            let target = 5usize
+                .saturating_add(record_len)
+                .min(MAX_CLIENT_HELLO_PREFIX);
+            if parse_client_hello_sni(&buf).is_some() || buf.len() >= target {
+                return Ok(buf);
+            }
+        }
+        let step = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProxyError::Cancelled),
+            res = tokio::time::timeout_at(deadline, io.read(&mut chunk)) => {
+                match res {
+                    Ok(read_res) => read_res,
+                    Err(_) => return Err(ProxyError::Timeout),
+                }
+            }
+        };
+        match step {
+            Ok(0) => return Ok(buf),
+            Ok(n) => {
+                let take = n.min(MAX_CLIENT_HELLO_PREFIX.saturating_sub(buf.len()));
+                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() >= MAX_CLIENT_HELLO_PREFIX {
+                    return Ok(buf);
+                }
+            }
+            Err(err) if is_benign_tunnel_disconnect(&err) => return Ok(buf),
+            Err(err) => return Err(ProxyError::network(err)),
+        }
+    }
+}
+
 async fn read_tunnel_prefix(
     io: &mut rama::http::io::upgrade::Upgraded,
+    timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Option<Vec<u8>>, ProxyError> {
     let mut buf = [0u8; 4096];
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(ProxyError::Cancelled),
-        res = io.read(&mut buf) => match res {
-            Ok(0) => Ok(None),
-            Ok(n) => Ok(Some(buf[..n].to_vec())),
-            Err(err) if is_benign_tunnel_disconnect(&err) => Ok(None),
-            Err(err) => Err(ProxyError::network(err)),
+        res = tokio::time::timeout(timeout, io.read(&mut buf)) => match res {
+            Ok(Ok(0)) => Ok(None),
+            Ok(Ok(n)) => Ok(Some(buf[..n].to_vec())),
+            Ok(Err(err)) if is_benign_tunnel_disconnect(&err) => Ok(None),
+            Ok(Err(err)) => Err(ProxyError::network(err)),
+            Err(_) => Err(ProxyError::Timeout),
         },
     }
 }
@@ -715,9 +791,16 @@ async fn handle_entry(
         return handle_http(request, state, None).await;
     }
     let failed_request = message::invalid_request_head(&request);
-    let authority = request.uri().to_string();
+    let raw_authority = request.uri().to_string();
     let result = async {
-        let uri: Uri = format!("https://{authority}/")
+        if raw_authority.is_empty()
+            || raw_authority
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
+        {
+            return Err(ProxyError::invalid("CONNECT 目标 authority 格式无效"));
+        }
+        let uri: Uri = format!("https://{raw_authority}/")
             .parse()
             .map_err(ProxyError::invalid)?;
         let host = uri
@@ -725,10 +808,12 @@ async fn handle_entry(
             .ok_or_else(|| ProxyError::invalid("CONNECT 目标缺少主机"))?;
         let port = uri
             .port_u16()
+            .filter(|&p| p != 0)
             .ok_or_else(|| ProxyError::invalid("CONNECT 目标缺少端口"))?;
         let _: rama::net::address::Host = crate::route::strip_host_brackets(&host)
             .parse()
             .map_err(|_| ProxyError::invalid("CONNECT 目标主机无效"))?;
+        let authority = format!("{}:{port}", crate::route::format_host_for_authority(&host));
         if ssl_passthrough::should_pass_through(&state, &host, port) {
             let (pt_host, pt_port) = state.effective_passthrough_target(&host, port);
             return ssl_passthrough::spawn_passthrough(
@@ -753,8 +838,19 @@ async fn handle_entry(
             let _permit = permit;
             let run = async {
                 let outcome: Result<(), ProxyError> = async {
-                    let mut upgraded = upgrade.await.map_err(ProxyError::network)?;
-                    let Some(prefix) = read_tunnel_prefix(&mut upgraded, &task_state.cancel).await?
+                    let mut upgraded = tokio::select! {
+                        biased;
+                        _ = task_state.cancel.cancelled() => return Err(ProxyError::Cancelled),
+                        res = tokio::time::timeout(task_state.config.limits.request_timeout, upgrade) => {
+                            res.map_err(|_| ProxyError::Timeout)?.map_err(ProxyError::network)?
+                        }
+                    };
+                    let Some(mut prefix) = read_tunnel_prefix(
+                        &mut upgraded,
+                        task_state.config.limits.request_timeout,
+                        &task_state.cancel,
+                    )
+                    .await?
                     else {
                         return Ok(());
                     };
@@ -765,6 +861,13 @@ async fn handle_entry(
                         && lead_byte == socks5::TLS_CLIENT_HELLO_LEAD_BYTE
                         && task_state.dynamic.borrow().ssl_pass_through.is_some()
                     {
+                        prefix = read_tls_client_hello_prefix(
+                            &mut upgraded,
+                            prefix,
+                            task_state.config.limits.request_timeout,
+                            &task_state.cancel,
+                        )
+                        .await?;
                         parse_client_hello_sni(&prefix)
                     } else {
                         None

@@ -297,8 +297,33 @@ impl State {
             let _ = self.authority().await;
         }
         if self.preferences.file_changed_on_disk() {
+            let prev_cas = self.preferences.current().preferences.custom_ca_ders.clone();
             let state = self.preferences.query();
             if state.load_error.is_none() {
+                if state.preferences.custom_ca_ders != prev_cas
+                    && let Ok(workspace) = self.store.metadata().workspace()
+                {
+                    if let Ok(config) = Self::ws_repeater_send_config(
+                        &self.preferences,
+                        &workspace,
+                        self.tls.compiled_client_certs.clone(),
+                    ) {
+                        self.ws_repeater.set_connect_config(config);
+                    }
+                    self.sync_sessions_workspace(&workspace);
+                    if self.proxy.is_running()
+                        && let Err(error) = self
+                            .reload_running_proxy_from_workspace(Some(&workspace), &workspace)
+                            .await
+                    {
+                        self.emit(Event::Error {
+                            project: Some(self.project),
+                            operation: "sync_shared_state",
+                            message: format!("同步其他窗口 TLS 根证书后重载代理失败：{error:#}"),
+                        })
+                        .await;
+                    }
+                }
                 self.emit(Event::UserPreferences {
                     operation_id: Uuid::nil(),
                     state,

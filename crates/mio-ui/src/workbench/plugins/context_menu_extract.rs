@@ -326,7 +326,7 @@ impl Workbench {
         }
     }
 
-    fn extract_context_menu_selection(
+    pub(in crate::workbench) fn extract_context_menu_selection(
         &self,
         window: &mut Window,
         cx: &mut App,
@@ -356,9 +356,9 @@ impl Workbench {
                     selected.into_bytes(),
                 )),
                 MessageView::Hex => {
-                    let start_digits = text[..range.start - before_markers]
-                        .bytes()
-                        .filter(|b| !b.is_ascii_whitespace())
+                    let start_digits = text[..range.start]
+                        .chars()
+                        .filter(|&ch| ch != '§' && !ch.is_ascii_whitespace())
                         .count();
                     let bytes = editing::hex_decode(&selected)?;
                     let start = (start_digits / 2) as u64;
@@ -469,7 +469,10 @@ fn read_message_editor_selection(
     if selected.is_empty() {
         return Ok((0, 0, vec![]));
     }
-    if editor.view() == MessageView::Hex && !editor.pretty_active() {
+    if editor.view() == MessageView::Hex
+        && !editor.pretty_active()
+        && !editor.is_readonly_preview()
+    {
         let full = state.read(cx).value();
         let before_digits = full[..range.start]
             .bytes()

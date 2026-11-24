@@ -196,21 +196,17 @@ impl Workbench {
                         return Ok(None);
                     }
                     let content = state.content();
-                    let start = content.text()[..range.start].matches('§').count() * '§'.len_utf8();
-                    let end = content.text()[..range.end].matches('§').count() * '§'.len_utf8();
                     let selected = content.text()[range.clone()].replace('§', "");
                     match request.view {
                         MessageView::Raw => Ok(Some(selected)),
                         MessageView::Hex => {
-                            let digits = |offset: usize, markers: usize| {
-                                content.text()[..offset - markers]
-                                    .bytes()
-                                    .filter(|byte| !byte.is_ascii_whitespace())
+                            let digits = |offset: usize| {
+                                content.text()[..offset]
+                                    .chars()
+                                    .filter(|&ch| ch != '§' && !ch.is_ascii_whitespace())
                                     .count()
                             };
-                            if (digits(range.start, start) % 2 != 0)
-                                || (digits(range.end, end) % 2 != 0)
-                            {
+                            if (digits(range.start) % 2 != 0) || (digits(range.end) % 2 != 0) {
                                 return Err("Hex 选区必须位于完整字节边界。".into());
                             }
                             let bytes = editing::hex_decode(&selected)?;
@@ -296,7 +292,10 @@ impl Workbench {
             editing::snapshot(&editor.state(), window, cx).map_err(str::to_owned)?;
             let selected = editor.state().read(cx).selected_value();
             if !selected.is_empty() {
-                if editor.view() == MessageView::Hex && !editor.pretty_active() {
+                if editor.view() == MessageView::Hex
+                    && !editor.pretty_active()
+                    && !editor.is_readonly_preview()
+                {
                     let bytes = editing::hex_decode(&selected)?;
                     return Ok(Some(
                         String::from_utf8(bytes.clone())

@@ -735,3 +735,63 @@ async fn macos_proxy_bind_rejects_wildcard_specific_overlap_and_allows_time_wait
     let mut rebind_handle = start(rebind_cfg, project, tx5).await.unwrap();
     rebind_handle.stop().await.unwrap();
 }
+
+#[test]
+fn synthesized_host_header_omits_userinfo_in_to_request() {
+    let request = HttpRequest {
+        method: "GET".into(),
+        url: "https://alice:secret@example.invalid:8443/path".into(),
+        version: HttpVersion::Http11,
+        headers: Vec::new(),
+        body: Vec::new(),
+        trailers: Vec::new(),
+    };
+    let cfg = SendConfig::default();
+    let built = message::to_request_with_config(&request, &cfg).unwrap();
+    let host = built
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_eq!(host, "example.invalid:8443");
+    assert!(!host.contains("alice") && !host.contains("secret"));
+}
+
+#[tokio::test]
+async fn connect_rejects_path_userinfo_and_zero_port() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    cfg.network.listen = "127.0.0.1:0".parse().unwrap();
+    let (tx, _rx) = mpsc::channel(8);
+    let mut proxy = start(
+        cfg,
+        ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+        tx,
+    )
+    .await
+    .unwrap();
+
+    for target in [
+        "example.invalid:443/injected",
+        "user:pass@example.invalid:443",
+        "example.invalid:0",
+    ] {
+        let mut sock = tokio::net::TcpStream::connect(proxy.address()).await.unwrap();
+        sock.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let n = sock.read(&mut buf).await.unwrap();
+        let reply = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            !reply.starts_with("HTTP/1.1 200") && !reply.starts_with("HTTP/1.0 200"),
+            "CONNECT {target} must be rejected, got: {reply}"
+        );
+    }
+
+    proxy.stop().await.unwrap();
+}

@@ -383,3 +383,158 @@ async fn socks5_ipv4_uses_sni_for_tls_and_preserves_host_on_plaintext_http() {
     proxy_tls.stop().await.unwrap();
     origin_tls.stop().await;
 }
+
+#[tokio::test]
+async fn fragmented_client_hello_over_ip_connect_still_matches_ssl_passthrough_by_sni() {
+    use tokio_rustls::TlsAcceptor;
+
+    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+    let ca_key = KeyPair::generate().unwrap();
+    let origin_ca_der = ca.self_signed(&ca_key).unwrap().der().to_vec();
+    let issuer = Issuer::new(ca, ca_key);
+
+    let leaf_params = CertificateParams::new(vec!["frag-pinned.example.invalid".into()]).unwrap();
+    let leaf_key = KeyPair::generate().unwrap();
+    let expected_leaf_der = leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .unwrap()
+        .der()
+        .to_vec();
+
+    let mut server_cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(expected_leaf_der)],
+        PrivateKeyDer::try_from(leaf_key.serialize_der()).unwrap(),
+    )
+    .unwrap();
+    server_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let origin_port = listener.local_addr().unwrap().port();
+    let origin_task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(tcp).await.unwrap();
+        let mut req_buf = Vec::new();
+        while !req_buf.ends_with(b"\r\n\r\n") {
+            assert!(req_buf.len() < 4096);
+            req_buf.push(tls.read_u8().await.unwrap());
+        }
+        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfrag-ok")
+            .await
+            .unwrap();
+        let _ = tls.shutdown().await;
+    });
+
+    let mitm_ca = MitmAuthority::generate().unwrap();
+    let mut config = ProxyConfig::new(mitm_ca);
+    config.limits.request_timeout = DEADLINE;
+    config.network.hostname_overrides = Arc::from([(
+        String::from("frag-pinned.example.invalid"),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+    )]);
+    config.hooks.ssl_pass_through = Some(Arc::new(move |host, port| {
+        host.eq_ignore_ascii_case("frag-pinned.example.invalid") && port == origin_port
+    }));
+    let (events_tx, mut events_rx) = mpsc::channel(16);
+    let mut proxy = mio_proxy::start(
+        config,
+        ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+        events_tx,
+    )
+    .await
+    .unwrap();
+
+    // Build ClientHello first and split it into two delayed writes before SNI bytes arrive.
+    let client_cfg = {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(origin_ca_der))
+            .unwrap();
+        let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Arc::new(cfg)
+    };
+    let mut client_conn = rustls::ClientConnection::new(
+        client_cfg,
+        ServerName::try_from("frag-pinned.example.invalid").unwrap(),
+    )
+    .unwrap();
+    let mut hello = Vec::new();
+    while client_conn.wants_write() {
+        client_conn.write_tls(&mut hello).unwrap();
+    }
+    assert!(hello.len() > 20);
+
+    let mut tunnel =
+        connect_http10_tunnel(proxy.address(), &format!("127.0.0.1:{origin_port}")).await;
+    tunnel.write_all(&hello[..12]).await.unwrap();
+    tunnel.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tunnel.write_all(&hello[12..]).await.unwrap();
+    tunnel.flush().await.unwrap();
+
+    let mut tls_buf = [0u8; 8192];
+    let mut app_done = false;
+    while !app_done {
+        let n = tokio::time::timeout(DEADLINE, tunnel.read(&mut tls_buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0, "EOF before TLS handshake/response");
+        let mut rd = std::io::Cursor::new(&tls_buf[..n]);
+        client_conn.read_tls(&mut rd).unwrap();
+        let state = client_conn.process_new_packets().unwrap();
+        if !client_conn.is_handshaking() && client_conn.wants_write() {
+            let mut out = Vec::new();
+            client_conn.write_tls(&mut out).unwrap();
+            tunnel.write_all(&out).await.unwrap();
+        }
+        if !client_conn.is_handshaking() {
+            use std::io::{Read as _, Write as _};
+            client_conn
+                .writer()
+                .write_all(
+                    b"GET /frag HTTP/1.1\r\nHost: frag-pinned.example.invalid\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut out = Vec::new();
+            while client_conn.wants_write() {
+                client_conn.write_tls(&mut out).unwrap();
+            }
+            if !out.is_empty() {
+                tunnel.write_all(&out).await.unwrap();
+            }
+            if state.plaintext_bytes_to_read() > 0 {
+                let mut plain = vec![0u8; state.plaintext_bytes_to_read()];
+                client_conn.reader().read_exact(&mut plain).unwrap();
+                if String::from_utf8_lossy(&plain).contains("frag-ok") {
+                    app_done = true;
+                }
+            }
+        }
+    }
+    assert!(events_rx.try_recv().is_err());
+
+    proxy.stop().await.unwrap();
+    tokio::time::timeout(DEADLINE, origin_task)
+        .await
+        .unwrap()
+        .unwrap();
+}

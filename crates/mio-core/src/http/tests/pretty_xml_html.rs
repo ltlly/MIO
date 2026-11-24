@@ -258,3 +258,29 @@ fn pretty_html_and_xml_handle_multibyte_utf8_across_prefix_boundaries() {
         .expect("multibyte UTF-8 crossing byte 32 must not panic in looks_like_html_document");
     assert!(formatted_boundary.text.contains("中文边界测试"));
 }
+
+#[test]
+fn pretty_html_style_handles_multiline_comments_and_deep_braces_without_panic_or_oom() {
+    let multiline_css_html = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n\r\n",
+        "<!DOCTYPE html><html><head><style>\n",
+        "/* first comment line\nsecond comment line */\n",
+        "body { content: \"a\nb\"; color: red; }\n",
+        "</style></head><body>ok</body></html>"
+    );
+    let res = format_pretty_message_with_line_map(multiline_css_html.as_bytes()).unwrap();
+    if let Some(map) = res.line_numbers {
+        assert_eq!(map.len(), res.text.split('\n').count());
+    }
+    assert!(res.text.contains("first comment line"));
+    assert!(res.text.contains("second comment line"));
+
+    let deep_braces = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE html><html><head><style>{}{}</style></head><body>ok</body></html>",
+        "{".repeat(20_000),
+        "}".repeat(20_000),
+    );
+    let bounded = format_pretty_message_with_line_map(deep_braces.as_bytes()).unwrap();
+    assert!(bounded.text.len() <= crate::http::pretty::MAX_PRETTY_BYTES * 3);
+}

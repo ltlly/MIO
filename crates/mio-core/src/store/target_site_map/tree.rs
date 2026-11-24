@@ -356,6 +356,9 @@ impl SnapshotBuilder<'_> {
         status: Option<u16>,
         build_row: impl FnOnce() -> Result<crate::HistoryRow>,
     ) -> Result<()> {
+        if method.eq_ignore_ascii_case("CONNECT") {
+            return Ok(());
+        }
         let Some(parsed) = parse_site_map_url(url) else {
             return Ok(());
         };

@@ -176,24 +176,54 @@ pub(in crate::service) fn acquire_listener_lock(
         let port_path = dir.join(format!("{fam}-port-{}.lock", addr.port()));
         let port_file = open_lock_file(&port_path)?;
         if addr.ip().is_unspecified() {
-            port_file
-                .try_lock()
-                .map_err(|_| anyhow::Error::new(ListenerConflictError(listener_conflict_message(addr))))?;
+            match port_file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(anyhow::Error::new(ListenerConflictError(
+                        listener_conflict_message(addr),
+                    )));
+                }
+                Err(std::fs::TryLockError::Error(err)) => {
+                    return Err(err).with_context(|| {
+                        format!("锁定 Proxy 端口锁失败 {}", port_path.display())
+                    });
+                }
+            }
             return Ok(Some(ActiveListenerLock {
                 id,
                 _port_lock: Some(port_file),
                 _addr_lock: None,
             }));
         }
-        port_file
-            .try_lock_shared()
-            .map_err(|_| anyhow::Error::new(ListenerConflictError(listener_conflict_message(addr))))?;
+        match port_file.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(anyhow::Error::new(ListenerConflictError(
+                    listener_conflict_message(addr),
+                )));
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                return Err(err).with_context(|| {
+                    format!("共享锁定 Proxy 端口锁失败 {}", port_path.display())
+                });
+            }
+        }
         let ip_tag = sanitize_ip_filename_component(addr);
         let addr_path = dir.join(format!("{fam}-{ip_tag}-{}.lock", addr.port()));
         let addr_file = open_lock_file(&addr_path)?;
-        addr_file
-            .try_lock()
-            .map_err(|_| anyhow::Error::new(ListenerConflictError(listener_conflict_message(addr))))?;
+        match addr_file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(anyhow::Error::new(ListenerConflictError(
+                    listener_conflict_message(addr),
+                )));
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                return Err(err).with_context(|| {
+                    format!("锁定 Proxy 地址锁失败 {}", addr_path.display())
+                });
+            }
+        }
         Ok(Some(ActiveListenerLock {
             id,
             _port_lock: Some(port_file),

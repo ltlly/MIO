@@ -576,8 +576,11 @@ fn parse_auth_kv_pairs(input: &str) -> HashMap<String, String> {
             i += 1;
             while i < bytes.len() {
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    val.push(bytes[i + 1] as char);
-                    i += 2;
+                    let Some(ch) = input[i + 1..].chars().next() else {
+                        break;
+                    };
+                    val.push(ch);
+                    i += 1 + ch.len_utf8();
                 } else if bytes[i] == b'"' {
                     i += 1;
                     break;
@@ -970,6 +973,10 @@ mod tests {
     #[test]
     fn digest_and_ntlm_challenge_parsers_do_not_panic_on_multibyte_utf8() {
         assert!(DigestChallenge::parse_from_header("认证头中文测试").is_none());
+        let parsed = DigestChallenge::parse_from_header(r#"Digest realm="\é", nonce="abc""#)
+            .expect("escaped multibyte char in quoted digest parameter must not panic");
+        assert_eq!(parsed.realm, "é");
+        assert_eq!(parsed.nonce, "abc");
         assert!(NtlmType2Challenge::parse_from_header("认证头中文测试").is_err());
     }
 }

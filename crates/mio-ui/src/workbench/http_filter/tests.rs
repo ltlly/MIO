@@ -421,3 +421,99 @@ fn http_filter_cancelled_query_keeps_rows_without_error_while_real_backend_error
         assert_eq!(view.history.read(cx).delegate().rows, rows);
     });
 }
+
+#[gpui_kit::test]
+fn http_filter_summary_project_reset_and_detached_selection_stay_consistent(
+    cx: &mut TestAppContext,
+) {
+    let (mut f, rows) = boot(cx);
+    let (handle, _) = open(&f, cx);
+    for id in [
+        "http-filter-mime-css",
+        "http-filter-mime-images",
+        "http-filter-mime-other-text",
+        "http-filter-mime-flash",
+    ] {
+        click(handle, id, cx);
+    }
+    click(handle, "http-filter-apply-close", cx);
+    let applied = query(&mut f);
+    assert_eq!(
+        applied.filter.mime_types,
+        [true, true, true, true, false, true, false, true]
+    );
+    reply(&f, &applied, rows, cx);
+    f.window
+        .update(cx, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("http-history-filter").label(),
+                Some("筛选设置：隐藏 CONNECT；按 MIME 类型筛选；隐藏指定扩展名")
+            );
+        })
+        .unwrap();
+
+    // Quick search input clears on ProjectOpened.
+    let history_filter = cx.read(|cx| f.view.read(cx).history_filter.clone());
+    type_in(f.window, &history_filter, "old-project-filter", cx);
+    let new_project = mio_core::ProjectKey {
+        id: Uuid::new_v4(),
+        generation: f.project.generation + 1,
+    };
+    f.project = new_project;
+    f.events
+        .try_send(Event::ProjectOpened {
+            project: new_project,
+            path: None,
+            workspace: mio_core::Workspace::default(),
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(
+            f.view.read(cx).history_filter.read(cx).value().as_ref(),
+            ""
+        );
+    });
+
+    // Detached HTTP history row click synchronizes main table selection_ids/anchor.
+    let next_query = query(&mut f);
+    assert_eq!(next_query.url_filter, "");
+    let mut row0 = record("http://127.0.0.1:9001/first", "first body");
+    row0.summary.source = TrafficSource::Proxy;
+    let mut row1 = record("http://127.0.0.1:9001/second", "second body");
+    row1.summary.source = TrafficSource::Proxy;
+    let r0 = HistoryRow::Live(row0.summary);
+    let r1 = HistoryRow::Live(row1.summary);
+    let r0_id = r0.id();
+    let r1_id = r1.id();
+    reply(&f, &next_query, vec![r0, r1], cx);
+
+    click(f.window, "table-cell-0:0", cx);
+    drain(&mut f.commands);
+    f.window
+        .update(cx, |_, window, cx| {
+            f.view.update(cx, |view, cx| {
+                view.open_detached_history_window(window, cx);
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let detached = cx.read(|cx| {
+        f.view
+            .read(cx)
+            .http_filter
+            .detached_history_window
+            .expect("detached history window opened")
+    });
+    click(detached, ("detached-history-row", 1usize), cx);
+    cx.read(|cx| {
+        let view = f.view.read(cx);
+        let delegate = view.history.read(cx).delegate();
+        assert_eq!(view.selected_history, Some(r1_id));
+        assert!(delegate.selected_ids.contains(&r1_id));
+        assert!(!delegate.selected_ids.contains(&r0_id));
+    });
+    let _ = detached.update(cx, |_, window, _| window.remove_window());
+    cx.run_until_parked();
+}

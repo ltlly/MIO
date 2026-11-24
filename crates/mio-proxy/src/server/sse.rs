@@ -8,7 +8,10 @@ use rama::http::{
 use std::{
     fmt::Write as _,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -175,6 +178,7 @@ struct Capture {
     handle: CaptureHandle,
     failure: Arc<Mutex<Option<String>>>,
     chunked_body: Option<Arc<Mutex<Vec<u8>>>>,
+    chunked_truncated: Arc<AtomicBool>,
     limit: usize,
 }
 
@@ -190,12 +194,14 @@ fn capture_with_options(
 ) -> (Body, Capture) {
     let failure = Arc::new(Mutex::new(None));
     let chunked_body = preserve_chunked_framing.then(|| Arc::new(Mutex::new(Vec::new())));
+    let chunked_truncated = Arc::new(AtomicBool::new(false));
     // Rama bounds captured DATA only; trailers need their own cumulative budget.
     let trailer_limit = limit.min(64 * 1024);
     let body = Body::new(ObservedBody {
         body,
         failure: failure.clone(),
         chunked_body: chunked_body.clone(),
+        chunked_truncated: chunked_truncated.clone(),
         chunked_limit: limit,
         trailer_limit,
         trailer_remaining: trailer_limit,
@@ -208,6 +214,7 @@ fn capture_with_options(
             handle,
             failure,
             chunked_body,
+            chunked_truncated,
             limit,
         },
     )
@@ -218,6 +225,7 @@ impl Capture {
         let captured = self.handle.wait().await.map_err(ProxyError::network)?;
         let record = active.record.as_mut().expect("active flow owns its record");
         let response = record.response.as_mut().expect("SSE response is present");
+        let is_chunked = self.chunked_body.is_some();
         response.body = if let Some(chunked) = self.chunked_body {
             std::mem::take(&mut *crate::lock_unpoison(&chunked))
         } else {
@@ -227,8 +235,12 @@ impl Capture {
             .trailers()
             .map(message::headers)
             .unwrap_or_default();
-        record.summary.response_bytes = captured.total_bytes();
-        if captured.is_truncated() {
+        record.summary.response_bytes = if is_chunked {
+            response.body.len() as u64
+        } else {
+            captured.total_bytes()
+        };
+        if captured.is_truncated() || self.chunked_truncated.load(Ordering::Acquire) {
             return Err(ProxyError::Network(format!(
                 "SSE 正文超过配置的 {} 字节上限；已观察 {} 字节并保留前 {} 字节，流式转发已中止",
                 self.limit,
@@ -271,14 +283,18 @@ struct ObservedBody {
     body: Body,
     failure: Arc<Mutex<Option<String>>>,
     chunked_body: Option<Arc<Mutex<Vec<u8>>>>,
+    chunked_truncated: Arc<AtomicBool>,
     chunked_limit: usize,
     trailer_limit: usize,
     trailer_remaining: usize,
     ended: bool,
 }
 
-fn push_capped(buf: &mut Vec<u8>, bytes: &[u8], limit: usize) {
+fn push_capped(buf: &mut Vec<u8>, bytes: &[u8], limit: usize, truncated: &AtomicBool) {
     let remaining = limit.saturating_sub(buf.len());
+    if bytes.len() > remaining {
+        truncated.store(true, Ordering::Release);
+    }
     if remaining > 0 {
         buf.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
     }
@@ -300,7 +316,12 @@ impl StreamingBody for ObservedBody {
             this.ended = true;
             if let Some(chunked) = &this.chunked_body {
                 let mut guard = crate::lock_unpoison(chunked);
-                push_capped(&mut guard, b"0\r\n\r\n", this.chunked_limit);
+                push_capped(
+                    &mut guard,
+                    b"0\r\n\r\n",
+                    this.chunked_limit,
+                    &this.chunked_truncated,
+                );
             }
             return Poll::Ready(None);
         };
@@ -312,9 +333,19 @@ impl StreamingBody for ObservedBody {
                 let mut prefix = String::new();
                 let _ = write!(prefix, "{:x}\r\n", data.len());
                 let mut guard = crate::lock_unpoison(chunked);
-                push_capped(&mut guard, prefix.as_bytes(), this.chunked_limit);
-                push_capped(&mut guard, data, this.chunked_limit);
-                push_capped(&mut guard, b"\r\n", this.chunked_limit);
+                push_capped(
+                    &mut guard,
+                    prefix.as_bytes(),
+                    this.chunked_limit,
+                    &this.chunked_truncated,
+                );
+                push_capped(&mut guard, data, this.chunked_limit, &this.chunked_truncated);
+                push_capped(
+                    &mut guard,
+                    b"\r\n",
+                    this.chunked_limit,
+                    &this.chunked_truncated,
+                );
             }
             if let Some(trailers) = frame.trailers_ref() {
                 for (name, value) in trailers.ordered_iter() {

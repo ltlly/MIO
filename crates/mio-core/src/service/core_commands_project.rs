@@ -248,7 +248,11 @@ impl State {
             } => {
                 self.check_project(project)?;
                 ensure!(
-                    self.store.path.as_deref() != Some(path.as_path()),
+                    self.store.path.as_deref() != Some(path.as_path())
+                        && !self
+                            .project_lock
+                            .as_ref()
+                            .is_some_and(|lock| lock.matches_path(&path)),
                     "瘦身另存为必须选择新的目标路径，不会原地覆盖当前项目"
                 );
                 let pending_prov = self.storage.provenance.snapshot_all();
@@ -433,6 +437,7 @@ impl State {
         let needs_rebind = self.proxy.is_running()
             && workspace_requires_proxy_rebind(prev_workspace.as_ref(), &workspace);
         let mut prev_certs_backup = None;
+        let mut prev_cache_backup = None;
         let mut reloaded_proxy_first = false;
         if needs_rebind {
             workspace.validate()?;
@@ -449,6 +454,15 @@ impl State {
             if revision_matches {
                 prev_certs_backup = Some(self.tls.compiled_client_certs.clone());
                 self.sync_compiled_client_certs(&workspace).await;
+                if prev_workspace
+                    .as_ref()
+                    .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)
+                {
+                    prev_cache_backup = Some(self.user_level_connections_cache.clone());
+                    workspace
+                        .upstream_proxy
+                        .sync_user_level_cache(&mut self.user_level_connections_cache);
+                }
                 if let Err(err) = Box::pin(
                     self.reload_running_proxy_from_workspace(prev_workspace.as_ref(), &workspace),
                 )
@@ -456,6 +470,9 @@ impl State {
                 {
                     if let Some(prev_certs) = prev_certs_backup.take() {
                         self.tls.compiled_client_certs = prev_certs;
+                    }
+                    if let Some(prev_cache) = prev_cache_backup.take() {
+                        self.user_level_connections_cache = prev_cache;
                     }
                     return Err(err);
                 }
@@ -494,6 +511,9 @@ impl State {
             if reloaded_proxy_first {
                 if let Some(prev_certs) = prev_certs_backup.take() {
                     self.tls.compiled_client_certs = prev_certs;
+                }
+                if let Some(prev_cache) = prev_cache_backup.take() {
+                    self.user_level_connections_cache = prev_cache;
                 }
                 if let Some(prev_ws) = prev_workspace.as_ref() {
                     let _ = Box::pin(
@@ -542,7 +562,7 @@ impl State {
         let has_running_proxy = self.proxy.is_running();
         if rebind_proxy && has_running_proxy && workspace_requires_proxy_rebind(prev_workspace, &workspace) {
             self.reload_running_proxy_from_workspace(prev_workspace, &workspace).await?;
-        } else if has_running_proxy {
+        } else if rebind_proxy && has_running_proxy {
             self.apply_proxy_processing_from_workspace(&workspace)?;
         }
         self.plugin_workspace_changed(&workspace).await;

@@ -1346,7 +1346,7 @@ impl Workbench {
     }
 }
 
-struct DetachedHttpHistoryWindow {
+pub(super) struct DetachedHttpHistoryWindow {
     owner: gpui_kit::WeakEntity<Workbench>,
     project: Option<ProjectKey>,
     selected: Option<HistoryEntryId>,
@@ -1452,8 +1452,13 @@ impl DetachedHttpHistoryWindow {
         }
     }
 
+    pub(super) fn apply_editor_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_editor.apply_editor_preferences(window, cx);
+        self.response_editor.apply_editor_preferences(window, cx);
+        cx.notify();
+    }
+
     fn select_row(&mut self, id: HistoryEntryId, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
@@ -1467,7 +1472,13 @@ impl DetachedHttpHistoryWindow {
         cx.defer(move |cx| {
             let _ = owner_window.update(cx, |_, wb_window, cx| {
                 let _ = weak_owner.update(cx, |view, cx| {
-                    view.select_history_entry(id, wb_window, cx);
+                    view.history_pointer_selection(
+                        id,
+                        gpui_kit::MouseButton::Left,
+                        gpui_kit::Modifiers::default(),
+                        wb_window,
+                        cx,
+                    );
                 });
             });
         });
@@ -1621,12 +1632,21 @@ impl Render for DetachedHttpHistoryWindow {
                             .or(archive.edited_request.as_ref())
                             .and_then(|r| r.method.clone())
                             .unwrap_or_default();
-                        let url = archive
+                        let raw_target = archive
                             .request
                             .as_ref()
                             .or(archive.edited_request.as_ref())
                             .and_then(|r| r.request_target.clone())
                             .unwrap_or_default();
+                        let url = if raw_target.starts_with('/') {
+                            archive
+                                .origin
+                                .as_deref()
+                                .map(|origin| format!("{origin}{raw_target}"))
+                                .unwrap_or(raw_target)
+                        } else {
+                            raw_target
+                        };
                         let status = archive
                             .response
                             .as_ref()

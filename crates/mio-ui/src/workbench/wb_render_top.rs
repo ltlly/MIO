@@ -1609,6 +1609,9 @@ impl Workbench {
                 r.on_action(cx.listener(|this, _: &crate::SendToOrganiser, window, cx| {
                     this.send_selected_to_organiser(window, cx)
                 }));
+                r.on_action(cx.listener(|this, _: &crate::SendToMioAt, _, cx| {
+                    this.send_selected_to_mio_at(cx)
+                }));
                 r.on_action(cx.listener(|this, _: &crate::AddToSiteMap, window, cx| {
                     this.add_to_site_map(window, cx)
                 }));

@@ -243,6 +243,7 @@ impl TableDelegate for ProxyListenersTable {
             }
             6 => {
                 let item_toggle = item.clone();
+                let entity = self.owner.clone();
                 settings_table_checkbox_cell(
                     indexed_checkbox(
                         ("settings-listener-http2", row),
@@ -257,11 +258,27 @@ impl TableDelegate for ProxyListenersTable {
                     .on_change(move |state, _, window, cx| {
                         let mut updated = item_toggle.clone();
                         updated.enable_http2 = state == CheckboxState::Checked;
-                        let _ = owner_wb.update(cx, |view, cx| {
-                            let _ = view.edit_proxy_listener_config(
-                                project, row, updated, window, cx,
-                            );
+                        let result = owner_wb.update(cx, |view, cx| {
+                            view.edit_proxy_listener_config(project, row, updated, window, cx)
                         });
+                        if let Some(settings) = entity.upgrade() {
+                            let wb_snap = owner_wb.upgrade();
+                            settings.update(cx, |this, cx| {
+                                if let Some(wb) = wb_snap {
+                                    this.state.refresh(wb.read(cx));
+                                }
+                                this.listeners_tls.table.update(cx, |table, cx| {
+                                    table.refresh(cx);
+                                    cx.notify();
+                                });
+                                this.listeners_tls.listener_error = match result {
+                                    Ok(Ok(())) => None,
+                                    Ok(Err(error)) => Some(error),
+                                    Err(_) => Some("主工作台已关闭；监听器未修改。".into()),
+                                };
+                                cx.notify();
+                            });
+                        }
                     }),
                 )
                 .into_any_element()
@@ -464,9 +481,7 @@ impl Workbench {
             }
             self.proxy_busy = true;
             self.status = "正在停止 Proxy；等待后台确认。".into();
-            if self.enqueue(Command::StopProxy { project: project_key }, cx) {
-                self.proxy_busy = true;
-            }
+            let _ = self.enqueue(Command::StopProxy { project: project_key }, cx);
             cx.notify();
             return Ok(());
         }

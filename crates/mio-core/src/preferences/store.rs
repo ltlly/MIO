@@ -4,7 +4,7 @@ use anyhow::{Result, ensure};
 
 use super::{
     io::{
-        read_preferences, validate_encoded_budget, validate_loaded_preferences,
+        read_preferences_with_stamp, validate_encoded_budget, validate_loaded_preferences,
         validate_startup_config, validate_tls_certificates, validated_recent_project,
         write_preferences_with,
     },
@@ -53,6 +53,10 @@ impl PreferencesStore {
         self.path.is_none()
     }
 
+    pub(crate) fn current(&self) -> &UserPreferencesState {
+        &self.state
+    }
+
     pub(crate) fn file_changed_on_disk(&self) -> bool {
         let Some(path) = &self.path else {
             return false;
@@ -80,17 +84,22 @@ impl PreferencesStore {
 
     pub(crate) fn query(&mut self) -> UserPreferencesState {
         if let Some(path) = &self.path {
-            self.state = match read_preferences(path) {
-                Ok(preferences) => UserPreferencesState {
-                    preferences,
-                    load_error: None,
-                },
-                Err(error) => UserPreferencesState {
-                    preferences: UserPreferences::default(),
-                    load_error: Some(format!("用户偏好未载入，使用询问策略：{error:#}")),
-                },
-            };
-            self.file_stamp = read_file_stamp(path);
+            match read_preferences_with_stamp(path) {
+                Ok((preferences, stamp)) => {
+                    self.state = UserPreferencesState {
+                        preferences,
+                        load_error: None,
+                    };
+                    self.file_stamp = stamp;
+                }
+                Err(error) => {
+                    self.state = UserPreferencesState {
+                        preferences: UserPreferences::default(),
+                        load_error: Some(format!("用户偏好未载入，使用询问策略：{error:#}")),
+                    };
+                    self.file_stamp = read_file_stamp(path);
+                }
+            }
         }
         self.state.clone()
     }
@@ -211,7 +220,7 @@ impl PreferencesStore {
         &mut self,
         update: impl FnOnce(&UserPreferences) -> Result<UserPreferences>,
     ) -> Result<UserPreferences> {
-        let preferences = if let Some(path) = &self.path {
+        let (preferences, stamp) = if let Some(path) = &self.path {
             write_preferences_with(path, update)?
         } else {
             ensure!(
@@ -222,14 +231,14 @@ impl PreferencesStore {
             validate_loaded_preferences(&preferences)?;
             let encoded = serde_json::to_vec(&preferences)?;
             validate_encoded_budget(&preferences, encoded.len())?;
-            preferences
+            (preferences, None)
         };
         self.state = UserPreferencesState {
             preferences: preferences.clone(),
             load_error: None,
         };
-        if let Some(path) = &self.path {
-            self.file_stamp = read_file_stamp(path);
+        if self.path.is_some() {
+            self.file_stamp = stamp;
         }
         Ok(preferences)
     }

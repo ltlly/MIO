@@ -202,6 +202,16 @@ pub(crate) fn read_bounded_owned_file(
     validate_parent: bool,
     label: &str,
 ) -> Result<Option<Vec<u8>>> {
+    Ok(read_bounded_owned_file_with_meta(path, max_bytes, validate_parent, label)?
+        .map(|(bytes, _)| bytes))
+}
+
+pub(crate) fn read_bounded_owned_file_with_meta(
+    path: &Path,
+    max_bytes: u64,
+    validate_parent: bool,
+    label: &str,
+) -> Result<Option<(Vec<u8>, fs::Metadata)>> {
     if validate_parent {
         validate_parent_dir(path, label)?;
     }
@@ -221,10 +231,8 @@ pub(crate) fn read_bounded_owned_file(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("无法安全打开{label}文件")),
     };
-    ensure!(
-        check_regular_owned_file(&file, label)?.len() <= max_bytes,
-        "{label}文件超过有界读取限额"
-    );
+    let metadata = check_regular_owned_file(&file, label)?;
+    ensure!(metadata.len() <= max_bytes, "{label}文件超过有界读取限额");
     let mut bytes = Vec::new();
     (&mut file)
         .take(max_bytes + 1)
@@ -233,7 +241,7 @@ pub(crate) fn read_bounded_owned_file(
         bytes.len() as u64 <= max_bytes,
         "{label}文件在读取时超过有界读取限额"
     );
-    Ok(Some(bytes))
+    Ok(Some((bytes, metadata)))
 }
 
 pub(crate) struct SidecarLock {

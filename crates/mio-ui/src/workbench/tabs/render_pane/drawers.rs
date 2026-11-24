@@ -2042,13 +2042,15 @@ impl Workbench {
                             .tooltip("从我的自定义脚本中删除")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let name = entry_name_del.clone();
-                                let lib_path = custom_actions_library_path().ok().flatten();
                                 let current = st_del.read(cx).saved_scripts.clone();
-                                match delete_custom_action_from_path(
-                                    lib_path.as_deref(),
-                                    &current,
-                                    &name,
-                                ) {
+                                let res = custom_actions_library_path().and_then(|lib_path| {
+                                    delete_custom_action_from_path(
+                                        lib_path.as_deref(),
+                                        &current,
+                                        &name,
+                                    )
+                                });
+                                match res {
                                     Ok(next) => {
                                         st_del.update(cx, |st, _| {
                                             st.saved_scripts = next;
@@ -2119,11 +2121,11 @@ impl Workbench {
                             editing::input_snapshot(&name_entity, window, cx).map(|s| s.to_string());
                         let code_res =
                             editing::snapshot(&editor_entity, window, cx).map(|s| s.to_string());
-                        let lib_path = custom_actions_library_path().ok().flatten();
                         let result = name_res
                             .map_err(|e| anyhow::anyhow!(e))
                             .and_then(|name| {
                                 let code = code_res.map_err(|e| anyhow::anyhow!(e))?;
+                                let lib_path = custom_actions_library_path()?;
                                 save_custom_action_to_path(
                                     lib_path.as_deref(),
                                     &current_scripts,
@@ -2517,6 +2519,9 @@ impl Workbench {
         .map_err(|err| format!("{err:#}"))?;
         let mutated = outcome.updated_request.is_some();
         if let Some(updated) = outcome.updated_request {
+            if !self.can_send(tab_id) || self.extensions.active_messages.contains_key(&tab_id) {
+                return Err("当前标签正在发送请求或由扩展消息编辑器接管，无法修改请求报文。".into());
+            }
             let next_raw = mio_core::request_to_raw(&updated);
             if let Some(editors) = self.tab_editors.get_mut(&tab_id) {
                 let was_pretty = editors.request.pretty_active();

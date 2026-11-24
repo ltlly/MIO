@@ -40,7 +40,14 @@ pub(crate) fn request_head_with_fallback(
                     .map(crate::route::format_host_for_authority)
             })
             .ok_or_else(|| ProxyError::invalid("缺少请求目标 authority"))?;
-        format!("{scheme}://{authority}{uri}")
+        let raw_target = uri.to_string();
+        if raw_target == "*" {
+            format!("{scheme}://{authority}/")
+        } else if raw_target.starts_with('/') || raw_target.is_empty() {
+            format!("{scheme}://{authority}{raw_target}")
+        } else {
+            format!("{scheme}://{authority}/{raw_target}")
+        }
     };
     Ok(HttpRequest {
         method: request.method().to_string(),

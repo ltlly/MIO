@@ -247,7 +247,7 @@ pub(super) fn metadata_page(
         let mut query =
             connection.prepare(&format!("{select} ORDER BY ordinal ASC LIMIT ? OFFSET ?"))?;
         let mut query_rows = query.query(params_from_iter(values.iter()))?;
-        let mut rows = Vec::with_capacity(usize::try_from(limit)?);
+        let mut rows = Vec::with_capacity(usize::try_from(limit.min(total))?.min(1024));
         while let Some(row) = query_rows.next()? {
             rows.push(read_summary(row)?);
         }
@@ -312,7 +312,7 @@ pub(super) fn search_page(
     ))?;
     let mut result = WebSocketHistoryResult {
         total: 0,
-        rows: Vec::with_capacity(query.limit),
+        rows: Vec::with_capacity(query.limit.min(1024)),
         selected_match: query.selected_message_id.map(|id| (id, false)),
     };
     let mut rows = statement.query(params_from_iter(values.iter()))?;

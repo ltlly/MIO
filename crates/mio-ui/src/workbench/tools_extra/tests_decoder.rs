@@ -457,3 +457,119 @@ fn decoder_deflate_digests_hex_views_and_chain_auto_recompute_work(cx: &mut Test
         );
     });
 }
+
+#[gpui_kit::test]
+fn intruder_hex_selection_with_multiple_markers_decodes_cleanly_without_utf8_panic(
+    cx: &mut TestAppContext,
+) {
+    let mut f = fixture(cx, vec![tab("IntruderHex")], 64);
+    drain(&mut f.commands);
+
+    let intr_id = Uuid::new_v4();
+    let mut workspace = cx.read(|cx| (*f.view.read(cx).workspace).clone());
+    workspace.intruder = mio_core::IntruderWorkspace {
+        active: Some(intr_id),
+        tabs: vec![mio_core::IntruderTab {
+            id: intr_id,
+            title: "1".into(),
+            group: None,
+            last_run: None,
+            spec: mio_core::IntruderSpec {
+                resource_pool: None,
+                baseline_request: false,
+                revision: 1,
+                draft: Draft {
+                    revision: 1,
+                    target: "http://127.0.0.1:1".into(),
+                    version: mio_core::HttpVersion::Http11,
+                    raw: b"GET /".to_vec(),
+                },
+                attack_type: mio_core::intruder::AttackType::Sniper,
+                positions: vec![
+                    mio_core::intruder::Position { start: 0, end: 1 },
+                    mio_core::intruder::Position { start: 1, end: 2 },
+                    mio_core::intruder::Position { start: 2, end: 3 },
+                ],
+                payload_sets: vec![vec![b"a".to_vec()]],
+                max_concurrent_requests: 1,
+                request_timeout_ms: 500,
+                update_host_header: true,
+                save_to_project: false,
+            },
+        }],
+        ..Default::default()
+    };
+    f.events
+        .try_send(Event::ProjectOpened {
+            project: f.project,
+            path: None,
+            workspace,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    drain(&mut f.commands);
+
+    click_btn(&f, "tool-intruder", cx);
+
+    // 1. Multiple two-byte UTF-8 '§' markers before selection ("§47§ §45§ §54§ 20 2f", selecting "2f").
+    click_btn(&f, "intruder-view-hex", cx);
+    cx.update_window(f.window, |_, window, cx| {
+        f.view.update(cx, |view, cx| {
+            let state = view.intruder.editors[&intr_id].request.state();
+            assert_eq!(state.read(cx).content().text(), "§47§ §45§ §54§ 20 2f");
+            state.update(cx, |st, cx| {
+                st.focus(window, cx);
+                st.set_selected_range(24..26, cx);
+            });
+        });
+        window.render_frame(cx);
+        let extracted = f
+            .view
+            .update(cx, |view, cx| view.extract_context_menu_selection(window, cx))
+            .expect("extract_context_menu_selection must not panic or error");
+        assert_eq!(extracted, (4, 5, vec![0x2f]));
+
+        f.view.update(cx, |view, cx| view.send_to_decoder(window, cx));
+        let view = f.view.read(cx);
+        assert!(view.tool == Tool::Decoder);
+        assert_eq!(
+            view.extra_tools.decoder_input.read(cx).value().as_ref(),
+            "/"
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    // 2. Single marker pair before selection ("47 §45§ 54 20 2f", selecting "54" at 10..12).
+    cx.update_window(f.window, |_, window, cx| {
+        f.view.update(cx, |view, cx| {
+            view.tool = Tool::Intruder;
+            let state = view.intruder.editors[&intr_id].request.state();
+            state.update(cx, |st, cx| {
+                st.set_value("47 §45§ 54 20 2f", window, cx);
+                st.focus(window, cx);
+                st.set_selected_range(10..12, cx);
+            });
+        });
+        window.render_frame(cx);
+        let extracted = f
+            .view
+            .update(cx, |view, cx| view.extract_context_menu_selection(window, cx))
+            .expect("single-marker hex extract must compute exact offset");
+        assert_eq!(extracted, (2, 3, vec![0x54]));
+
+        f.view.update(cx, |view, cx| view.send_to_decoder(window, cx));
+        assert_eq!(
+            f.view
+                .read(cx)
+                .extra_tools
+                .decoder_input
+                .read(cx)
+                .value()
+                .as_ref(),
+            "T"
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+}

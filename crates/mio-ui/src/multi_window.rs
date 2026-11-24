@@ -118,8 +118,26 @@ pub(crate) fn spawn_mio_instance(project_path: Option<&Path>) -> Result<()> {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
-    cmd.spawn()
+    if cfg!(target_os = "macos") && program == Path::new("/usr/bin/open") {
+        let status = cmd
+            .status()
+            .with_context(|| format!("无法启动新的 MIO 窗口进程（{}）", program.display()))?;
+        anyhow::ensure!(status.success(), "通过 open 启动新的 MIO 窗口失败：{status}");
+        return Ok(());
+    }
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("无法启动新的 MIO 窗口进程（{}）", program.display()))?;
+    #[cfg(unix)]
+    {
+        let _ = std::thread::Builder::new()
+            .name("mio-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+    #[cfg(not(unix))]
+    let _ = &mut child;
     Ok(())
 }
 

@@ -850,9 +850,19 @@ async fn browser_profile_and_default_port_fallback_isolate_windows_and_rotated_c
         "browser-profile",
         "192.0.2.10:8080".parse().unwrap(),
     );
+    let p_v6_loopback = core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        "[::1]:8080".parse().unwrap(),
+    );
+    let p_v4_alt_loopback = core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        "127.0.0.2:8080".parse().unwrap(),
+    );
     assert_eq!(p_default, "browser-profile");
     assert_eq!(p_other_port, "browser-profile-8081");
     assert_eq!(p_lan_ip, "browser-profile-192_0_2_10-8080");
+    assert_eq!(p_v6_loopback, "browser-profile-__1-8080");
+    assert_eq!(p_v4_alt_loopback, "browser-profile-127_0_0_2-8080");
 
     // Same listener port + rotated CA must switch away from stale SPKI profile dir.
     let first_dir = core_commands_proxy::resolve_ca_scoped_profile_dir(
@@ -999,4 +1009,103 @@ fn multi_window_ipc_falls_back_to_pid_socket_when_primary_is_occupied() {
         panic!("expected Status payload from instance 2");
     };
     assert_ne!(pid1, pid2);
+}
+
+#[tokio::test]
+async fn apply_save_workspace_clearing_upstream_proxy_syncs_cache_before_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let project_path = root.join("upstream-clear.mio");
+    let (events, _rx) = mpsc::channel(32);
+    let mut state = State::new(events, CancellationToken::new()).unwrap();
+    state
+        .command(Command::StartProject {
+            path: Some(project_path),
+            create_new: true,
+            options: ProjectStartOptions::default(),
+        })
+        .await
+        .unwrap();
+
+    // Configure an upstream proxy rule pointing to a closed local port and start proxy.
+    let closed_port = free_loopback_port();
+    let mut ws1 = state.store.workspace().unwrap();
+    ws1.revision += 1;
+    ws1.upstream_proxy.rules.push(crate::UpstreamProxyRule {
+        host: "127.0.0.1".into(),
+        port: closed_port,
+        ..crate::UpstreamProxyRule::default()
+    });
+    state
+        .command(Command::SaveWorkspace {
+            project: state.project,
+            workspace: ws1,
+        })
+        .await
+        .unwrap();
+    state
+        .command(Command::StartProxy {
+            project: state.project,
+            listen: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        })
+        .await
+        .unwrap();
+
+    // Clear upstream_proxy rules with rebind: live proxy must use cleared rules, not stale cache.
+    let mut ws2 = state.store.workspace().unwrap();
+    ws2.revision += 1;
+    ws2.upstream_proxy.rules.clear();
+    state
+        .command(Command::SaveWorkspace {
+            project: state.project,
+            workspace: ws2,
+        })
+        .await
+        .unwrap();
+    let ws_after = state.store.workspace().unwrap();
+    assert!(
+        ws_after.upstream_proxy
+            .effective_for_runtime(&state.user_level_connections_cache)
+            .rules
+            .is_empty(),
+        "user_level_connections_cache must clear before proxy reload"
+    );
+
+    // Start a real origin and verify live proxy reaches it directly (not routed to closed_port).
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let origin_port = listener.local_addr().unwrap().port();
+    let origin_task = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut req = [0u8; 1024];
+        let _ = s.read(&mut req).await;
+        s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .unwrap();
+    });
+
+    let proxy_addr = state.proxy.primary_address().unwrap();
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut cli = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    cli.write_all(
+        format!("GET http://127.0.0.1:{origin_port}/direct HTTP/1.1\r\nHost: 127.0.0.1:{origin_port}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut resp = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), cli.read_to_end(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200 OK"),
+        "expected direct 200 OK after clearing upstream rule, got: {}",
+        String::from_utf8_lossy(&resp)
+    );
+
+    origin_task.await.unwrap();
+    state.stop_proxy().await.unwrap();
 }

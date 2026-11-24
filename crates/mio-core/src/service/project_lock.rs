@@ -13,12 +13,7 @@ static PROCESS_HELD_PROJECT_LOCKS: LazyLock<Mutex<HashSet<String>>> =
 
 pub(in crate::service) struct ActiveProjectLock {
     key: String,
-    lock_path: PathBuf,
     file: File,
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
 }
 
 impl ActiveProjectLock {
@@ -29,24 +24,9 @@ impl ActiveProjectLock {
 
 impl Drop for ActiveProjectLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            if let Ok(meta) = fs::symlink_metadata(&self.lock_path)
-                && meta.is_file()
-                && meta.dev() == self.dev
-                && meta.ino() == self.ino
-            {
-                let _ = fs::remove_file(&self.lock_path);
-            }
-        }
         let _ = self.file.unlock();
         if let Ok(mut held) = PROCESS_HELD_PROJECT_LOCKS.lock() {
             held.remove(&self.key);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = fs::remove_file(&self.lock_path);
         }
     }
 }
@@ -126,58 +106,35 @@ pub(in crate::service) fn acquire_active_project_lock(path: &Path) -> Result<Act
             );
         }
         let lock_path = dir.join(format!("{key}.lock"));
-        let mut attempts = 0usize;
-        loop {
-            let mut opts = OpenOptions::new();
-            opts.read(true).write(true).create(true).truncate(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                opts.mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-            }
-            let file = opts
-                .open(&lock_path)
-                .with_context(|| format!("无法打开项目锁文件 {}", lock_path.display()))?;
-            file.try_lock().map_err(|_| {
-                anyhow::anyhow!(
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = opts
+            .open(&lock_path)
+            .with_context(|| format!("无法打开项目锁文件 {}", lock_path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::bail!(
                     "项目文件已在另一个 MIO 窗口中打开：{}；为避免数据损坏，请切换到对应窗口或另存为新项目",
                     path.display()
-                )
-            })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt as _;
-                let meta = file.metadata()?;
-                let same_inode = fs::symlink_metadata(&lock_path).is_ok_and(|visible| {
-                    visible.is_file()
-                        && visible.dev() == meta.dev()
-                        && visible.ino() == meta.ino()
-                });
-                if !same_inode {
-                    let _ = file.unlock();
-                    attempts += 1;
-                    ensure!(attempts < 4, "项目锁文件在获取期间被替换；请重试打开项目");
-                    continue;
-                }
-                return Ok(ActiveProjectLock {
-                    key: key.clone(),
-                    lock_path,
-                    file,
-                    dev: meta.dev(),
-                    ino: meta.ino(),
-                });
+                );
             }
-            #[cfg(not(unix))]
-            {
-                let _ = &mut attempts;
-                return Ok(ActiveProjectLock {
-                    key: key.clone(),
-                    lock_path,
-                    file,
+            Err(std::fs::TryLockError::Error(err)) => {
+                return Err(err).with_context(|| {
+                    format!("锁定项目锁文件失败 {}", lock_path.display())
                 });
             }
         }
+        Ok(ActiveProjectLock {
+            key: key.clone(),
+            file,
+        })
     })();
     if acquired.is_err()
         && let Ok(mut held) = PROCESS_HELD_PROJECT_LOCKS.lock()

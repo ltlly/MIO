@@ -276,6 +276,23 @@ impl Workbench {
         }
         self.history_request.apply_editor_preferences(window, cx);
         self.history_response.apply_editor_preferences(window, cx);
+        if let Some(detached_history) = self.http_filter.detached_history_window {
+            cx.defer(move |cx| {
+                let _ = detached_history.update(cx, |root_view, det_window, cx| {
+                    if let Ok(root) = root_view.downcast::<gpui_kit::base::Root>()
+                        && let Ok(view) = root
+                            .read(cx)
+                            .view()
+                            .clone()
+                            .downcast::<crate::workbench::wb_render_history::DetachedHttpHistoryWindow>()
+                    {
+                        view.update(cx, |detached, cx| {
+                            detached.apply_editor_preferences(det_window, cx);
+                        });
+                    }
+                });
+            });
+        }
         for pending in &mut self.intercepts {
             pending.editor.apply_editor_preferences(window, cx);
         }

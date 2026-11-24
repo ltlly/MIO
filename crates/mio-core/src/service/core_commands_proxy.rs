@@ -311,6 +311,20 @@ impl State {
             workspace.proxy_messages.ws_match_replace_in_scope_only,
             workspace.scope.clone(),
         )?;
+        let intercept_filter = Some(crate::http::build_intercept_filter(
+            workspace.proxy_interception.clone(),
+            workspace.scope.clone(),
+        )?);
+        let websocket_intercept_filter = Some(crate::http::build_websocket_intercept_filter(
+            workspace.proxy_websocket_interception,
+            workspace.scope.clone(),
+        )?);
+        let flow_transform = crate::http::build_flow_transform_with_scope_and_provenance(
+            workspace.match_and_replace_rules.clone(),
+            workspace.proxy_messages,
+            workspace.scope.clone(),
+            Some(self.storage.provenance.clone()),
+        )?;
         let mut handles: Vec<(Uuid, ProxyHandle)> = Vec::new();
         let mut locks: Vec<(Uuid, listener_lock::ActiveListenerLock)> = Vec::new();
         for (listener_cfg, bind) in desired_listeners {
@@ -354,22 +368,9 @@ impl State {
             config.hooks.drop_out_of_scope_fn = drop_scope_fn.clone();
             config.tls.on_client_tls_failure = Some(tls_fail_callback.clone());
             config.tls.upstream.on_server_cert_observed = Some(cert_callback.clone());
-            config.hooks.intercept_filter = Some(crate::http::build_intercept_filter(
-                workspace.proxy_interception.clone(),
-                workspace.scope.clone(),
-            )?);
-            config.hooks.websocket_intercept_filter =
-                Some(crate::http::build_websocket_intercept_filter(
-                    workspace.proxy_websocket_interception,
-                    workspace.scope.clone(),
-                )?);
-            config.hooks.flow_transform =
-                crate::http::build_flow_transform_with_scope_and_provenance(
-                    workspace.match_and_replace_rules.clone(),
-                    workspace.proxy_messages,
-                    workspace.scope.clone(),
-                    Some(self.storage.provenance.clone()),
-                )?;
+            config.hooks.intercept_filter = intercept_filter.clone();
+            config.hooks.websocket_intercept_filter = websocket_intercept_filter.clone();
+            config.hooks.flow_transform = flow_transform.clone();
             config.hooks.ssl_pass_through = ssl_matcher.clone();
             config.hooks.websocket_transform = ws_transform.clone();
             config.tls.upstream.client_certificates = self.tls.compiled_client_certs.clone();
@@ -482,37 +483,73 @@ impl State {
     }
 
     pub(super) async fn stop_single_proxy_listener(&mut self, listener_id: Uuid) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        let mut stopped_any = false;
-        if self.proxy.primary.is_some()
-            && self.proxy.primary_id.unwrap_or(Uuid::from_u128(1)) == listener_id
-        {
-            if let Some(mut primary) = self.proxy.primary.take() {
-                primary.request_stop();
-                let _ = tokio::time::timeout_at(deadline, primary.stop()).await;
-                stopped_any = true;
-            }
-            self.proxy.listener_locks.remove(&listener_id);
-            if !self.proxy.extra.is_empty() {
-                let (next_id, next_handle) = self.proxy.extra.remove(0);
-                self.proxy.primary = Some(next_handle);
-                self.proxy.primary_id = Some(next_id);
-            } else {
-                self.proxy.primary_id = None;
-            }
-        } else if let Some(pos) = self
-            .proxy
-            .extra
-            .iter()
-            .position(|(id, _)| *id == listener_id)
-        {
-            let (_, mut handle) = self.proxy.extra.remove(pos);
-            handle.request_stop();
-            let _ = tokio::time::timeout_at(deadline, handle.stop()).await;
-            self.proxy.listener_locks.remove(&listener_id);
-            stopped_any = true;
+        let is_primary = self.proxy.primary.is_some()
+            && self.proxy.primary_id.unwrap_or(Uuid::from_u128(1)) == listener_id;
+        if is_primary && self.proxy.extra.is_empty() {
+            let res = self.stop_proxy().await;
+            self.emit(Event::ProxyListeners {
+                project: self.project,
+                listeners: Vec::new(),
+            })
+            .await;
+            return res;
         }
-        ensure!(stopped_any, "未找到正在运行的指定 Proxy 监听器");
+        let extra_pos = if is_primary {
+            None
+        } else {
+            self.proxy.extra.iter().position(|(id, _)| *id == listener_id)
+        };
+        ensure!(is_primary || extra_pos.is_some(), "未找到正在运行的指定 Proxy 监听器");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let (stop_res, joined, terminal) = {
+            let handle = if is_primary {
+                self.proxy.primary.as_mut().unwrap()
+            } else {
+                &mut self.proxy.extra[extra_pos.unwrap()].1
+            };
+            handle.request_stop();
+            let stop_res = tokio::time::timeout_at(deadline, handle.stop())
+                .await
+                .unwrap_or(Err(mio_proxy::ProxyError::StopDeadline));
+            let joined = handle.is_joined();
+            let terminal = handle.drain_terminal_records();
+            (stop_res, joined, terminal)
+        };
+        for capture in terminal {
+            if let Err(error) = self.capture_without_waiting_for_ui(
+                ProxyEvent::Captured {
+                    project: self.project,
+                    record: capture.record,
+                    response_stream: capture.response_stream,
+                    listener_port: capture.listener_port,
+                    capture_metrics: capture.capture_metrics,
+                },
+                true,
+            ) {
+                self.emit(Event::Error {
+                    project: Some(self.project),
+                    operation: "capture",
+                    message: error.to_string(),
+                })
+                .await;
+            }
+        }
+        if !joined {
+            return Err(stop_res
+                .err()
+                .unwrap_or(mio_proxy::ProxyError::StopDeadline)
+                .into());
+        }
+        if is_primary {
+            self.proxy.primary.take();
+            self.proxy.listener_locks.remove(&listener_id);
+            let (next_id, next_handle) = self.proxy.extra.remove(0);
+            self.proxy.primary = Some(next_handle);
+            self.proxy.primary_id = Some(next_id);
+        } else if let Some(pos) = extra_pos {
+            self.proxy.extra.remove(pos);
+            self.proxy.listener_locks.remove(&listener_id);
+        }
         self.ws_repeater
             .set_injectors(self.proxy.websocket_injectors());
         self.proxy_state().await;
@@ -522,7 +559,7 @@ impl State {
             listeners,
         })
         .await;
-        Ok(())
+        stop_res.map_err(anyhow::Error::from)
     }
 
     pub(super) async fn reload_running_proxy_from_workspace(
@@ -570,10 +607,11 @@ impl State {
                     .map(|l| {
                         let mut addr: SocketAddr = l.bind_address.trim().parse()?;
                         if addr.port() == 0
-                            && let Some(first_cur) = current_addrs.first()
-                            && first_cur.ip() == addr.ip()
+                            && let Some((_, cur)) = active_listeners
+                                .iter()
+                                .find(|(id, cur)| *id == l.id && cur.ip() == addr.ip())
                         {
-                            addr.set_port(first_cur.port());
+                            addr.set_port(cur.port());
                         }
                         Ok((l.clone(), addr))
                     })
@@ -770,8 +808,7 @@ impl State {
                     .await
             };
             if let Err(err) = start_result {
-                self.proxy.intercept_requests = prev_intercept.0;
-                self.proxy.intercept_responses = prev_intercept.1;
+                self.proxy.set_intercept(prev_intercept.0, prev_intercept.1);
                 return Err(err);
             }
         } else {
@@ -796,16 +833,25 @@ impl State {
         };
         let profile_folder = browser_profile_folder_name(profile_prefix, address);
         let prefs_path = self.preferences_path.clone();
-        let executable = tokio::task::spawn_blocking(move || -> Result<String> {
-            let identity_dir = match identity_dir_override {
-                Some(dir) => dir,
-                None => authority::resolved_identity_dir(prefs_path.as_deref())?,
+        let is_isolated = self.preferences.is_isolated();
+        let launch_result = tokio::task::spawn_blocking(move || -> Result<String> {
+            let base_dir_buf = if let Some(dir) = identity_dir_override {
+                dir.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(dir)
+            } else if is_isolated {
+                std::env::temp_dir().join(format!("mio-isolated-browser-{}", std::process::id()))
+            } else {
+                let identity_dir = authority::resolved_identity_dir(prefs_path.as_deref())?;
+                identity_dir
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(identity_dir)
             };
-            let base_dir = identity_dir
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(&identity_dir);
-            let profile_dir = resolve_ca_scoped_profile_dir(base_dir, &profile_folder, &spki_base64);
+            let profile_dir =
+                resolve_ca_scoped_profile_dir(&base_dir_buf, &profile_folder, &spki_base64);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt as _;
@@ -836,7 +882,19 @@ impl State {
                 .with_context(|| format!("启动配置浏览器失败（{}）", bin.display()))?;
             Ok(bin.to_string_lossy().into_owned())
         })
-        .await??;
+        .await?;
+        let executable = match launch_result {
+            Ok(exe) => exe,
+            Err(err) => {
+                if intercept_disabled {
+                    self.proxy.set_intercept(prev_intercept.0, prev_intercept.1);
+                    if self.proxy.is_running() {
+                        self.proxy_state().await;
+                    }
+                }
+                return Err(err);
+            }
+        };
         self.emit(Event::BrowserLaunched {
             project,
             address,
@@ -886,12 +944,13 @@ pub(crate) fn resolve_ca_scoped_profile_dir(
 }
 
 pub(crate) fn browser_profile_folder_name(prefix: &str, address: SocketAddr) -> String {
-    if address.port() == 8080 && (address.ip().is_loopback() || address.ip().is_unspecified()) {
-        prefix.to_owned()
-    } else if address.ip().is_loopback() || address.ip().is_unspecified() {
-        if address.is_ipv6() {
-            let sanitized_ip = address.ip().to_string().replace(':', "_");
-            format!("{prefix}-{sanitized_ip}-{}", address.port())
+    let is_standard_v4 = matches!(
+        address.ip(),
+        std::net::IpAddr::V4(v4) if v4 == std::net::Ipv4Addr::LOCALHOST || v4.is_unspecified()
+    );
+    if is_standard_v4 {
+        if address.port() == 8080 {
+            prefix.to_owned()
         } else {
             format!("{prefix}-{}", address.port())
         }

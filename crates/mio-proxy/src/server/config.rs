@@ -215,7 +215,7 @@ impl ProxyConfig {
         let route = resolve_upstream_route_for_url(&self.network, url);
         build_send_config(
             &self.network,
-            &self.tls,
+            &self.tls.upstream,
             &self.limits,
             &self.http,
             &self.auth,
@@ -227,10 +227,23 @@ impl ProxyConfig {
     }
 
     pub(super) fn into_parts(self) -> (StaticProxyConfig, DynamicProxyState, ProxySharedResources) {
-        let ca = self.tls.ca.clone();
+        let ProxyTlsConfig {
+            ca,
+            listener_protocols,
+            cert_mode,
+            force_use_of_tls,
+            upstream,
+            on_client_tls_failure,
+        } = self.tls;
         let static_cfg = StaticProxyConfig {
             network: self.network,
-            tls: self.tls,
+            tls: StaticProxyTlsConfig {
+                listener_protocols,
+                cert_mode,
+                force_use_of_tls,
+                upstream,
+                on_client_tls_failure,
+            },
             limits: self.limits,
             http: self.http,
             auth: self.auth,
@@ -276,7 +289,7 @@ fn resolve_upstream_route_for_url(network: &ProxyNetworkConfig, url: &str) -> Up
 #[allow(clippy::too_many_arguments)]
 fn build_send_config(
     network: &ProxyNetworkConfig,
-    tls: &ProxyTlsConfig,
+    upstream_tls: &UpstreamTlsConfig,
     limits: &ProxyLimits,
     http: &ProxyHttpConfig,
     auth: &AuthConfig,
@@ -342,7 +355,7 @@ fn build_send_config(
             upstream_route,
             hostname_overrides: network.hostname_overrides.clone(),
         },
-        tls: tls.upstream.clone(),
+        tls: upstream_tls.clone(),
         limits: SendLimits {
             max_body_bytes: limits.max_body_bytes,
             timeout: limits.request_timeout,
@@ -372,7 +385,7 @@ impl State {
         let route = self.resolve_upstream_route_for_url(url);
         build_send_config(
             &self.config.network,
-            &self.config.tls,
+            &self.config.tls.upstream,
             &self.config.limits,
             &self.config.http,
             &self.config.auth,

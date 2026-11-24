@@ -406,7 +406,7 @@ impl State {
                 remove_headers,
                 add_headers,
                 override_body,
-            );
+            )?;
             let workspace = self.store.metadata().workspace_arc()?;
             let settings = workspace.repeater_settings.clone();
             let runtime_cfg = self.build_repeater_send_runtime_config(
@@ -522,6 +522,9 @@ impl State {
     }
 
     async fn ipc_proxy_start(&mut self, bind_address: Option<String>) -> Result<AiIpcPayload> {
+        self.check_project(self.project)?;
+        self.require_saved()?;
+        ensure!(!self.quiesced, "正在保存并切换项目；监听未启动");
         let explicit_override: Option<std::net::SocketAddr> =
             match bind_address.as_deref().map(str::trim) {
                 Some(addr) if !addr.is_empty() => Some(
@@ -532,11 +535,38 @@ impl State {
             };
         let listen = explicit_override
             .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default loopback"));
+        let prev_listeners = self.proxy.active_listeners();
+        if let Some(addr) = explicit_override
+            && addr.port() != 0
+            && !prev_listeners
+                .iter()
+                .any(|(_, held)| crate::proxy_listener_addrs_overlap(*held, addr))
+        {
+            let locks_dir = crate::service::listener_lock::resolve_listener_locks_dir(
+                self.preferences_path.as_deref(),
+            );
+            let test_lock = crate::service::listener_lock::acquire_listener_lock(
+                locks_dir.as_deref(),
+                addr,
+            )?;
+            drop(test_lock);
+        }
         if self.proxy.is_running() {
             self.stop_proxy().await?;
         }
-        self.start_proxy_with_override(self.project, listen, explicit_override)
-            .await?;
+        if let Err(err) = self
+            .start_proxy_with_override(self.project, listen, explicit_override)
+            .await
+        {
+            if let Some((_, prev_addr)) = prev_listeners.first().copied() {
+                let rollback_override = (prev_listeners.len() == 1).then_some(prev_addr);
+                let _ = self
+                    .start_proxy_with_override(self.project, prev_addr, rollback_override)
+                    .await;
+                self.proxy_state().await;
+            }
+            return Err(err);
+        }
         Ok(AiIpcPayload::ProxyControl {
             proxy_running: self.proxy.primary.is_some(),
             proxy_address: self.proxy.primary_address().map(|addr| addr.to_string()),
@@ -634,15 +664,29 @@ impl State {
                         remove_headers,
                         add_headers,
                         override_body,
-                    );
+                    )?;
                     Decision::ForwardRequest(req)
                 }
                 InterceptStage::Response => {
+                    if pending.response_head_only && override_body.is_some() {
+                        bail!("SSE 响应尚在流式接收，不能修改响应正文");
+                    }
                     let mut resp = pending
                         .intercepted_response
                         .clone()
                         .context("响应阶段缺少被拦截响应报文")?;
                     if let Some(code) = override_status {
+                        if pending.response_head_only {
+                            ensure!(
+                                (200..=599).contains(&code),
+                                "SSE 响应状态码必须在 200..=599 之间"
+                            );
+                        } else {
+                            ensure!(
+                                (100..=599).contains(&code),
+                                "HTTP 响应状态码必须在 100..=599 之间"
+                            );
+                        }
                         resp.status = code;
                     }
                     apply_header_and_body_overrides(
@@ -650,8 +694,8 @@ impl State {
                         &mut resp.body,
                         remove_headers,
                         add_headers,
-                        override_body.filter(|_| !pending.response_head_only),
-                    );
+                        override_body,
+                    )?;
                     Decision::ForwardResponse(resp)
                 }
             }
@@ -794,7 +838,23 @@ fn apply_header_and_body_overrides(
     remove_headers: Vec<String>,
     add_headers: Vec<(String, String)>,
     override_body: Option<String>,
-) {
+) -> Result<()> {
+    for name in &remove_headers {
+        ensure!(
+            crate::http::token(name.as_bytes()),
+            "HTTP 头部名称格式无效：{name}"
+        );
+    }
+    for (name, value) in &add_headers {
+        ensure!(
+            crate::http::token(name.as_bytes()),
+            "HTTP 头部名称格式无效：{name}"
+        );
+        ensure!(
+            crate::http::valid_header_value_bytes(value.as_bytes()),
+            "HTTP 头部值包含非法控制字符：{name}"
+        );
+    }
     for name in remove_headers {
         headers.retain(|h| !h.name.eq_ignore_ascii_case(&name));
     }
@@ -807,13 +867,21 @@ fn apply_header_and_body_overrides(
     }
     if let Some(new_body) = override_body {
         let bytes = new_body.into_bytes();
-        headers.retain(|h| !h.name.eq_ignore_ascii_case("content-length"));
+        ensure!(
+            bytes.len() <= crate::http::MAX_BODY,
+            "覆盖报文正文超过 16 MiB 上限"
+        );
+        headers.retain(|h| {
+            !h.name.eq_ignore_ascii_case("content-length")
+                && !h.name.eq_ignore_ascii_case("transfer-encoding")
+        });
         headers.push(Header {
             name: "Content-Length".into(),
             value: bytes.len().to_string().into_bytes(),
         });
         *body = bytes;
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

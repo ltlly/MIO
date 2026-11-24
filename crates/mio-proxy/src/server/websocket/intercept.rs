@@ -34,6 +34,8 @@ impl RelayLeg<'_> {
             let deadline = Instant::now()
                 .checked_add(self.relay.state.config.limits.request_timeout)
                 .ok_or(ProxyError::Timeout)?;
+            let hook_cancel = self.relay.state.cancel.child_token();
+            let _hook_cancel_guard = hook_cancel.clone().drop_guard();
             let decision = tokio::select! {
                 biased;
                 _ = self.relay.state.cancel.cancelled() => return Err(ProxyError::Cancelled),
@@ -46,7 +48,7 @@ impl RelayLeg<'_> {
                         self.direction,
                         kind,
                         working_bytes.clone(),
-                        self.relay.state.cancel.child_token(),
+                        hook_cancel,
                         deadline,
                     ),
                 ) => res.map_err(|_| ProxyError::Timeout)??,

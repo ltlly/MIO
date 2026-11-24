@@ -63,12 +63,16 @@ fn validate_and_build_request_head(
         },
     );
     if !headers.contains_key("host") {
-        let authority = uri
-            .authority()
-            .ok_or_else(|| ProxyError::invalid("URL 缺少 authority"))?;
+        let host_str = uri
+            .host_str()
+            .ok_or_else(|| ProxyError::invalid("URL 缺少主机名"))?;
+        let host_authority = match uri.port_u16() {
+            Some(port) => format!("{}:{port}", crate::route::format_host_for_authority(&host_str)),
+            None => crate::route::format_host_for_authority(&host_str),
+        };
         headers.insert(
             "host",
-            HeaderValue::from_str(&authority.to_string()).map_err(ProxyError::invalid)?,
+            HeaderValue::from_str(&host_authority).map_err(ProxyError::invalid)?,
         );
     }
     let effective_version = config.http.version.unwrap_or(request.version);

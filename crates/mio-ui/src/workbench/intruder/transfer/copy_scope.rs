@@ -67,20 +67,6 @@ fn ensure_editor_context_actions_registered(
             });
         });
     });
-    cx.on_action(|_: &SendToMioAt, cx: &mut App| {
-        let Some(reg) = cx.try_global::<EditorContextActionRegistry>() else {
-            return;
-        };
-        let owner = reg.owner.clone();
-        let win = reg.window;
-        cx.defer(move |cx| {
-            let _ = win.update(cx, |_, _, cx| {
-                let _ = owner.update(cx, |view, cx| {
-                    view.send_selected_to_mio_at(cx);
-                });
-            });
-        });
-    });
 }
 
 impl Workbench {

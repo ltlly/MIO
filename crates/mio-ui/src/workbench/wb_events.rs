@@ -242,7 +242,7 @@ impl Workbench {
                 self.reset_global_search(window, cx);
                 self.reset_organiser(window, cx);
                 self.reset_http_highlights(cx);
-                self.reset_http_filter(cx);
+                self.reset_http_filter(window, cx);
                 self.reset_history_transfer();
                 self.inspector.clear_cache();
                 self.observed_server_certs.clear();
