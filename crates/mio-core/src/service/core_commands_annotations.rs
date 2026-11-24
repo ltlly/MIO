@@ -92,6 +92,9 @@ impl State {
                 let changed = result
                     .as_ref()
                     .is_ok_and(|notes| notes.revision != change.expected_notes_revision);
+                if result.is_ok() && change.source_id.is_nil() {
+                    self.sync_live_flow_annotation_flags(project, &[change.item_id]);
+                }
                 self.emit(Event::ExtHttpNotesChanged {
                     project,
                     operation_id,
@@ -176,6 +179,14 @@ impl State {
                         .zip(&changes)
                         .any(|((_, _, revision), (_, _, expected))| revision != expected)
                 });
+                if result.is_ok() {
+                    let live_ids: Vec<FlowId> = changes
+                        .iter()
+                        .filter(|(source_id, _, _)| source_id.is_nil())
+                        .map(|(_, item_id, _)| *item_id)
+                        .collect();
+                    self.sync_live_flow_annotation_flags(project, &live_ids);
+                }
                 self.emit(Event::ExtHttpNotesBatchChanged {
                     project,
                     operation_id,
@@ -223,6 +234,14 @@ impl State {
                         value.revision != change.expected_highlight_revision
                     })
                 });
+                if result.is_ok() {
+                    let live_ids: Vec<FlowId> = changes
+                        .iter()
+                        .filter(|change| change.source_id.is_nil())
+                        .map(|change| change.item_id)
+                        .collect();
+                    self.sync_live_flow_annotation_flags(project, &live_ids);
+                }
                 self.emit(Event::ExtHttpHighlightsChanged {
                     project,
                     operation_id,
@@ -302,5 +321,41 @@ impl State {
             _ => unreachable!("routed by State::command"),
         }
         Ok(())
+    }
+
+    fn sync_live_flow_annotation_flags(&self, project: ProjectKey, flow_ids: &[FlowId]) {
+        if flow_ids.is_empty() {
+            return;
+        }
+        let mut annotated = self
+            .storage
+            .annotated_flows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for &flow_id in flow_ids {
+            let has_notes = self
+                .store
+                .ext_archive()
+                .http_notes(project, Uuid::nil(), flow_id)
+                .is_ok_and(|notes| !notes.text.is_empty());
+            let has_highlight = self
+                .store
+                .ext_archive()
+                .http_highlights(
+                    project,
+                    &[ExtHttpHighlightChange {
+                        source_id: Uuid::nil(),
+                        item_id: flow_id,
+                        expected_highlight_revision: 0,
+                        color: 0,
+                    }],
+                )
+                .is_ok_and(|saved| saved.first().is_some_and(|(_, _, hl)| hl.color != 0));
+            if has_notes || has_highlight {
+                annotated.insert(flow_id);
+            } else {
+                annotated.remove(&flow_id);
+            }
+        }
     }
 }

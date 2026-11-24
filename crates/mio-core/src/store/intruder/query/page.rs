@@ -467,5 +467,7 @@ pub(in crate::store::intruder) fn view_row_bytes(row: &IntruderResultViewRow) ->
         })?;
     bytes
         .checked_add(row.grep_payload_hits.len())
-        .context("Intruder 页面 grep payload 长度溢出")
+        .context("Intruder 页面 grep payload 长度溢出")?
+        .checked_add(row.notes_preview.len())
+        .context("Intruder 页面备注预览长度溢出")
 }

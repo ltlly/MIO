@@ -77,17 +77,14 @@ impl RelayBuffer {
     }
 
     fn query_since(&self, cursor: u64) -> (Vec<OastInteraction>, String) {
+        let effective_cursor = if cursor > self.next_seq { 0 } else { cursor };
         let items = self
             .entries
             .iter()
-            .filter(|(seq, _)| *seq > cursor)
+            .filter(|(seq, _)| *seq > effective_cursor)
             .map(|(_, item)| item.clone())
             .collect();
-        let next = if self.next_seq > cursor {
-            self.next_seq
-        } else {
-            cursor
-        };
+        let next = self.next_seq;
         (items, next.to_string())
     }
 }
@@ -120,6 +117,7 @@ async fn read_poll_request(
 ) -> Option<String> {
     let mut raw = Vec::with_capacity(1024);
     let mut buf = [0u8; 1024];
+    let mut has_terminator = false;
     while raw.len() < MAX_RELAY_POLL_REQ_BYTES {
         let to_read = buf.len().min(MAX_RELAY_POLL_REQ_BYTES - raw.len());
         let read = stream.read(&mut buf[..to_read]);
@@ -134,10 +132,11 @@ async fn read_poll_request(
             }
         }
         if raw.windows(4).any(|w| w == b"\r\n\r\n") || raw.windows(2).any(|w| w == b"\n\n") {
+            has_terminator = true;
             break;
         }
     }
-    (!raw.is_empty()).then(|| String::from_utf8_lossy(&raw).into_owned())
+    (has_terminator && !raw.is_empty()).then(|| String::from_utf8_lossy(&raw).into_owned())
 }
 
 async fn write_poll_json_response(

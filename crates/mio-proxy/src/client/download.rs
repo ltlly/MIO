@@ -184,6 +184,7 @@ where
     let initial_parsed = url::Url::parse(&current_url)
         .map_err(|err| ProxyError::invalid(format!("无效的下载 URL：{err}")))?;
     let initial_origin = initial_parsed.origin().ascii_serialization();
+    let mut crossed_origin = false;
     let deadline = tokio::time::Instant::now() + config.timeout;
 
     for _hop in 0..=config.max_redirects {
@@ -200,8 +201,8 @@ where
 
         let parsed_url = url::Url::parse(&current_url)
             .map_err(|err| ProxyError::invalid(format!("无效的下载 URL：{err}")))?;
-        let strip_sensitive_auth = parsed_url.origin().ascii_serialization() != initial_origin;
-        let request = build_download_request(&parsed_url, &config.headers, strip_sensitive_auth)?;
+        crossed_origin |= parsed_url.origin().ascii_serialization() != initial_origin;
+        let request = build_download_request(&parsed_url, &config.headers, crossed_origin)?;
         let upstream_route = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),

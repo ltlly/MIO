@@ -156,8 +156,6 @@ impl Workbench {
             self.close_websocket_repeater_tab(id, window, cx);
             return;
         }
-        self.pending_sends.remove(&id);
-        self.abort_sequential_group_queue_if_active_tab(id);
         if let Some(send) = self.sending.get(&id) {
             let project = self.project;
             let run_id = send.run_id;
@@ -226,6 +224,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_sends.remove(&id);
+        self.abort_sequential_group_queue_if_active_tab(id);
         if let Some(index) = self.workspace.tabs.iter().position(|tab| tab.id == id) {
             // The focused close control or editor must not outlive its tab's dispatch scope.
             self.focus.focus(window, cx);

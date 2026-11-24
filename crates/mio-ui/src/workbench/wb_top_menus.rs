@@ -91,11 +91,15 @@ impl Workbench {
                 if this.tool != Tool::Intruder {
                     this.select_tool(Tool::Intruder, window, cx);
                 }
+                this.sync_intruder_editors(window, cx);
                 this.start_intruder(window, cx);
             }),
         );
         r.on_action(
             cx.listener(|this, _: &crate::OpenSavedIntruderAttacks, window, cx| {
+                if this.project.is_none() || !this.backend_available() || this.transition.is_some() {
+                    return;
+                }
                 if this.tool != Tool::Intruder {
                     this.select_tool(Tool::Intruder, window, cx);
                 }

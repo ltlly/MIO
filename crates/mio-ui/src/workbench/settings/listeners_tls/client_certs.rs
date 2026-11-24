@@ -90,7 +90,7 @@ impl TableDelegate for ClientCertTable {
             (
                 rule,
                 summary,
-                settings.state.enabled,
+                settings.state.enabled && !settings.listeners_tls.client_cert_saving,
                 settings.state.project,
                 settings.owner.clone(),
             )
@@ -100,6 +100,11 @@ impl TableDelegate for ClientCertTable {
                 indexed_checkbox(("settings-client-cert-toggle", row), "", rule.enabled, enabled)
                     .accessibility_label(format!("启用客户端证书 {}", rule.host_pattern))
                     .on_change(move |state, _, _, cx| {
+                        if !owner.read(cx).state.enabled
+                            || owner.read(cx).listeners_tls.client_cert_saving
+                        {
+                            return;
+                        }
                         let checked = state == CheckboxState::Checked;
                         let res = wb.update(cx, |view, cx| {
                             view.toggle_client_certificate_rule(project, row, checked, cx)

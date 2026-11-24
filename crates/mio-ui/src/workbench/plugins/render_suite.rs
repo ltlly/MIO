@@ -237,6 +237,7 @@ impl Workbench {
             &self.default_directory(),
             Some(&suggested),
         );
+        let project = self.project;
         let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
@@ -285,21 +286,26 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!(
-                            "已导出 MIO 插件接口定义文件：{}",
-                            path.display()
-                        );
-                        view.extensions.push_log(format!(
-                            "已导出 MIO Extensions API 接口定义到：{}",
-                            path.display()
-                        ));
-                        cx.notify();
+                this.update(cx, |view, cx| {
+                    if view.project != project || !view.backend_available() {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail(format!("写入接口定义文件失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!(
+                                "已导出 MIO 插件接口定义文件：{}",
+                                path.display()
+                            );
+                            view.extensions.push_log(format!(
+                                "已导出 MIO Extensions API 接口定义到：{}",
+                                path.display()
+                            ));
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            view.fail(format!("写入接口定义文件失败：{err}"), cx);
+                        }
                     }
                 })
             });

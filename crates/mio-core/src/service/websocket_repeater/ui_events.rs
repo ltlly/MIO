@@ -159,18 +159,39 @@ impl State {
             )],
         >,
     ) -> Result<SendConfig> {
+        Self::ws_repeater_send_config_with_cache(
+            preferences,
+            workspace,
+            client_certificates,
+            None,
+        )
+    }
+
+    pub(crate) fn ws_repeater_send_config_with_cache(
+        preferences: &PreferencesStore,
+        workspace: &Workspace,
+        client_certificates: Arc<
+            [(
+                crate::ClientCertificateRule,
+                mio_proxy::ParsedClientIdentity,
+            )],
+        >,
+        user_level_cache: Option<&crate::UserLevelConnectionsCache>,
+    ) -> Result<SendConfig> {
         let upstream_tls = preferences.effective_upstream_tls(&workspace.upstream_tls)?;
-        let upstream_route = workspace
-            .upstream_proxy
-            .to_route_with_tls(upstream_tls.clone())?;
-        let hostname_overrides = workspace.upstream_proxy.compiled_hostname_overrides()?;
+        let eff_upstream = match user_level_cache {
+            Some(cache) => workspace.upstream_proxy.effective_for_runtime(cache),
+            None => workspace.upstream_proxy.clone(),
+        };
+        let upstream_route = eff_upstream.to_route_with_tls(upstream_tls.clone())?;
+        let hostname_overrides = eff_upstream.compiled_hostname_overrides()?;
         let timeout = Duration::from_secs(
             workspace
                 .repeater_settings
                 .request_timeout_secs
                 .clamp(1, 3600),
         );
-        Ok(SendConfig {
+        let mut config = SendConfig {
             network: mio_proxy::SendNetworkConfig {
                 upstream_route,
                 hostname_overrides,
@@ -186,16 +207,21 @@ impl State {
                 ..Default::default()
             },
             ..SendConfig::default()
-        })
+        };
+        config.auth.platform_enabled = eff_upstream.platform_auth.enabled;
+        config.auth.platform_rules = eff_upstream.compiled_platform_auth_rules();
+        config.auth.upstream_rules = eff_upstream.compiled_upstream_auth_rules();
+        Ok(config)
     }
 
     pub(crate) fn sync_ws_repeater_workspace(&mut self, workspace: &Workspace) {
         self.ws_repeater
             .sync_workspace_tabs(self.project, &workspace.websocket_tabs);
-        if let Ok(config) = Self::ws_repeater_send_config(
+        if let Ok(config) = Self::ws_repeater_send_config_with_cache(
             &self.preferences,
             workspace,
             self.tls.compiled_client_certs.clone(),
+            Some(&self.user_level_connections_cache),
         ) {
             self.ws_repeater.set_connect_config(config);
         }
@@ -249,10 +275,11 @@ impl State {
 
     fn refresh_ws_repeater_runtime_config(&mut self) -> Result<()> {
         let workspace = self.store.metadata().workspace()?;
-        let config = Self::ws_repeater_send_config(
+        let config = Self::ws_repeater_send_config_with_cache(
             &self.preferences,
             &workspace,
             self.tls.compiled_client_certs.clone(),
+            Some(&self.user_level_connections_cache),
         )?;
         self.ws_repeater.set_connect_config(config);
         self.ws_repeater

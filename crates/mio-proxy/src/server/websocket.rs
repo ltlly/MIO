@@ -80,6 +80,9 @@ pub(super) async fn handle(request: Request, mut active: ActiveFlow) -> Response
                 false,
             )
             .await?;
+        if state.should_drop_out_of_scope(&record.request.url) {
+            return Err(ProxyError::Dropped);
+        }
         let config = state.send_config(&record.request.url, record.request.version, true);
         let (request, egress_handshake) =
             outgoing_request_with_options(&record.request, &config, strip_ws_extensions)?;

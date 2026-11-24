@@ -142,7 +142,10 @@ impl<S: std::ops::Deref<Target = ProjectStore>> crate::store::FlowsRepo<S> {
 }
 
 impl crate::store::FlowsRepo<&mut ProjectStore> {
-    pub fn delete_live_proxy_flows(&mut self, flow_ids: &[FlowId]) -> Result<Vec<FlowId>> {
+    pub fn delete_live_proxy_flows_with_audit_changed(
+        &mut self,
+        flow_ids: &[FlowId],
+    ) -> Result<(Vec<FlowId>, bool)> {
         ensure!(
             !flow_ids.is_empty() && flow_ids.len() <= 500,
             "单次删除 HTTP 历史记录数量须在 1..=500 之间"
@@ -225,7 +228,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         crate::store::plugin_storage::remove_live_http_annotations(&tx, &unique_ids)?;
         crate::store::provenance::remove_flow_provenance(&tx, &unique_ids)?;
-        unlink_deleted_audit_flows(&tx, &unique_ids)?;
+        let audit_changed = unlink_deleted_audit_flows(&tx, &unique_ids)?;
         {
             let mut delete_meta =
                 tx.prepare("DELETE FROM main.metadata WHERE key = ?1 COLLATE BINARY")?;
@@ -238,10 +241,16 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         tx.commit()?;
         self.0.advance_workspace_cache_changes(before_tc)?;
-        Ok(unique_ids)
+        Ok((unique_ids, audit_changed))
     }
 
-    pub fn clear_live_proxy_history(&mut self) -> Result<Vec<FlowId>> {
+    #[cfg(test)]
+    pub fn delete_live_proxy_flows(&mut self, flow_ids: &[FlowId]) -> Result<Vec<FlowId>> {
+        self.delete_live_proxy_flows_with_audit_changed(flow_ids)
+            .map(|(deleted, _)| deleted)
+    }
+
+    pub fn clear_live_proxy_history_with_audit_changed(&mut self) -> Result<(Vec<FlowId>, bool)> {
         let before_tc = crate::store::query_total_changes(&self.0.connection)?;
         let tx = rusqlite::Transaction::new_unchecked(
             &self.0.connection,
@@ -309,7 +318,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         crate::store::plugin_storage::remove_live_http_annotations(&tx, &deleted_ids)?;
         crate::store::provenance::remove_flow_provenance(&tx, &deleted_ids)?;
-        unlink_deleted_audit_flows(&tx, &deleted_ids)?;
+        let audit_changed = unlink_deleted_audit_flows(&tx, &deleted_ids)?;
         {
             let mut delete_meta =
                 tx.prepare("DELETE FROM main.metadata WHERE key = ?1 COLLATE BINARY")?;
@@ -322,13 +331,19 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         tx.commit()?;
         self.0.advance_workspace_cache_changes(before_tc)?;
-        Ok(deleted_ids)
+        Ok((deleted_ids, audit_changed))
+    }
+
+    #[cfg(test)]
+    pub fn clear_live_proxy_history(&mut self) -> Result<Vec<FlowId>> {
+        self.clear_live_proxy_history_with_audit_changed()
+            .map(|(deleted, _)| deleted)
     }
 }
 
-fn unlink_deleted_audit_flows(tx: &rusqlite::Transaction<'_>, deleted: &[FlowId]) -> Result<()> {
+fn unlink_deleted_audit_flows(tx: &rusqlite::Transaction<'_>, deleted: &[FlowId]) -> Result<bool> {
     if deleted.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let deleted_set: std::collections::HashSet<FlowId> = deleted.iter().copied().collect();
     let mut state = crate::store::plugin_storage::read_audit_state(tx)?;
@@ -342,12 +357,16 @@ fn unlink_deleted_audit_flows(tx: &rusqlite::Transaction<'_>, deleted: &[FlowId]
     if changed {
         state.revision = state.revision.saturating_add(1);
         let encoded = serde_json::to_vec(&state)?;
+        ensure!(
+            encoded.len() <= crate::MAX_AUDIT_STATE_BYTES,
+            "审计状态超过编码限额"
+        );
         tx.execute(
             "INSERT OR REPLACE INTO main.metadata(key, value) VALUES('audit_state', ?1)",
             [encoded],
         )?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 #[derive(serde::Deserialize)]

@@ -1357,6 +1357,13 @@ impl Settings {
                 .w_full()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = selected_for_remove {
+                        let was_editing = this
+                            .owner
+                            .upgrade()
+                            .is_some_and(|wb| wb.read(cx).target_pane.settings_editing_scope[side] == Some(id));
+                        if was_editing {
+                            this.scope_editor_open[side] = false;
+                        }
                         let _ = this
                             .owner
                             .update(cx, |view, cx| view.remove_scope_rule(project, id, cx));

@@ -165,6 +165,9 @@ impl Settings {
 
         let project = self.state.project;
         self.listeners_tls.client_cert_saving = true;
+        self.listeners_tls.client_cert_save_gen =
+            self.listeners_tls.client_cert_save_gen.wrapping_add(1);
+        let save_gen = self.listeners_tls.client_cert_save_gen;
         self.listeners_tls.client_cert_error = None;
         cx.notify();
 
@@ -221,6 +224,9 @@ impl Settings {
                 .await;
 
             let _ = this.update_in(cx, |this, window, cx| {
+                if this.listeners_tls.client_cert_save_gen != save_gen {
+                    return;
+                }
                 this.listeners_tls.client_cert_saving = false;
                 if this.state.project != project
                     || !this.listeners_tls.client_cert_editor_visible

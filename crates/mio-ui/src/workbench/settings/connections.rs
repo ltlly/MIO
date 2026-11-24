@@ -198,6 +198,10 @@ impl Settings {
                             return;
                         }
                         let selected = this.connections.selected_rule;
+                        if action == 2 && selected.is_some() && this.connections.editing_rule == selected {
+                            this.connections.rule_editor_visible = false;
+                            this.connections.editing_rule = None;
+                        }
                         this.change_upstream_rules(
                             |rules| {
                                 let Some(index) =
@@ -698,9 +702,14 @@ impl Settings {
                     if action < 2 {
                         this.open_hostname_editor(action == 0, window, cx);
                     } else {
+                        let selected = this.connections.selected_dns;
+                        if selected.is_some() && this.connections.editing_dns == selected {
+                            this.connections.dns_editor_visible = false;
+                            this.connections.editing_dns = None;
+                        }
                         let mut next = this.state.upstream_proxy.clone();
                         next.hostname_resolutions
-                            .retain(|entry| Some(entry.id) != this.connections.selected_dns);
+                            .retain(|entry| Some(entry.id) != selected);
                         this.commit_connections(next, cx);
                     }
                 })),
@@ -938,6 +947,13 @@ impl Settings {
                             return;
                         }
                         let selected = this.connections.selected_platform_auth;
+                        if action == 2
+                            && selected.is_some()
+                            && this.connections.editing_platform_auth == selected
+                        {
+                            this.connections.platform_editor_visible = false;
+                            this.connections.editing_platform_auth = None;
+                        }
                         let mut next = this.state.upstream_proxy.clone();
                         let rules = &mut next.platform_auth.rules;
                         let Some(index) = rules.iter().position(|r| Some(r.id) == selected) else {

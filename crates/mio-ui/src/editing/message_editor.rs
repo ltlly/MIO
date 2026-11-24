@@ -497,7 +497,12 @@ impl MessageEditor {
         match self.view() {
             MessageView::Raw => {
                 let raw_state = self.raw.read(cx);
-                if self.raw_baseline_revision == Some(raw_state.document_revision()) {
+                if self.raw_baseline_revision == Some(raw_state.document_revision())
+                    || self
+                        .raw_baseline_text
+                        .as_deref()
+                        .is_some_and(|baseline| raw_state.value().as_ref() == baseline)
+                {
                     return self.shared.borrow().wire_bytes.len();
                 }
                 raw_state.text().len()

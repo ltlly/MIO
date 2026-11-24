@@ -127,8 +127,10 @@ pub(crate) fn validate_request_with_config(
         )?;
         return Ok(());
     }
+    let has_req_trailers =
+        head.effective_version != HttpVersion::Http10 && !request.trailers.is_empty();
     if !config.http.update_content_length
-        && request.trailers.is_empty()
+        && !has_req_trailers
         && head.effective_version != HttpVersion::Http2
     {
         let _ = head.effective_route.rama()?;

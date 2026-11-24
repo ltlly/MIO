@@ -59,8 +59,14 @@ impl State {
             } => {
                 self.check_project(project)?;
                 let pending = self.proxy.pending.get(&flow_id).context("拦截已结束")?;
+                if pending.reply.is_closed() {
+                    self.proxy.pending.remove(&flow_id);
+                    self.emit(Event::InterceptResolved { project, flow_id })
+                        .await;
+                    anyhow::bail!("拦截决定已过期；未发送旧修改");
+                }
                 ensure!(
-                    pending.revision == revision && !pending.reply.is_closed(),
+                    pending.revision == revision,
                     "拦截决定已过期；未发送旧修改"
                 );
                 ensure!(
@@ -130,10 +136,15 @@ impl State {
                     .pending_websockets
                     .get(&message_id)
                     .context("WebSocket 拦截已结束")?;
-                ensure!(
-                    !pending.reply.is_closed(),
-                    "WebSocket 拦截决定已过期；未发送旧修改"
-                );
+                if pending.reply.is_closed() {
+                    self.proxy.pending_websockets.remove(&message_id);
+                    self.emit(Event::WebSocketInterceptResolved {
+                        project,
+                        message_id,
+                    })
+                    .await;
+                    anyhow::bail!("WebSocket 拦截决定已过期；未发送旧修改");
+                }
                 if let WebSocketDecision::Forward(payload) = &decision {
                     ensure!(
                         payload.len() <= crate::http::MAX_BODY,
@@ -556,6 +567,36 @@ impl State {
         } else if let Some(pos) = extra_pos {
             self.proxy.extra.remove(pos);
             self.proxy.listener_locks.remove(&listener_id);
+        }
+        let closed_flows: Vec<FlowId> = self
+            .proxy
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.reply.is_closed())
+            .map(|(flow_id, _)| *flow_id)
+            .collect();
+        for flow_id in closed_flows {
+            self.proxy.pending.remove(&flow_id);
+            self.emit(Event::InterceptResolved {
+                project: self.project,
+                flow_id,
+            })
+            .await;
+        }
+        let closed_ws: Vec<Uuid> = self
+            .proxy
+            .pending_websockets
+            .iter()
+            .filter(|(_, pending)| pending.reply.is_closed())
+            .map(|(message_id, _)| *message_id)
+            .collect();
+        for message_id in closed_ws {
+            self.proxy.pending_websockets.remove(&message_id);
+            self.emit(Event::WebSocketInterceptResolved {
+                project: self.project,
+                message_id,
+            })
+            .await;
         }
         self.ws_repeater
             .set_injectors(self.proxy.websocket_injectors());

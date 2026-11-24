@@ -532,8 +532,16 @@ impl State {
                         if mutated {
                             request_mutated = true;
                         }
-                        effective_proto_settings
-                            .apply_protocol_options(&mut current, draft.version);
+                        if apply_repeater_protocol_options(
+                            flow_id,
+                            &parsed_draft_request,
+                            &mut current,
+                            &effective_proto_settings,
+                            draft.version,
+                            &provenance,
+                        ) {
+                            request_mutated = true;
+                        }
                         current_request = current;
                         plugin_service::hooks::sync_flow_request(
                             &mut record,

@@ -42,6 +42,9 @@ struct PollJobOutput {
     result: std::result::Result<(Vec<OastInteraction>, Option<String>), String>,
 }
 
+type AutoPollForwardOutput = (Option<OastInteraction>, Option<mpsc::Receiver<OastInteraction>>);
+type AutoPollHandles = (CancellationToken, JoinHandle<AutoPollForwardOutput>, JoinHandle<()>);
+
 #[derive(Default)]
 pub(super) struct CollaboratorService {
     project: Option<ProjectKey>,
@@ -54,7 +57,7 @@ pub(super) struct CollaboratorService {
     pending_events: VecDeque<CollaboratorEvent>,
     poll_jobs: JoinSet<PollJobOutput>,
     active_polls: HashMap<Uuid, (ProjectKey, CancellationToken)>,
-    auto_poll: Option<(CancellationToken, JoinHandle<()>, JoinHandle<()>)>,
+    auto_poll: Option<AutoPollHandles>,
     poll_telemetry: Arc<Mutex<RelayPollTelemetry>>,
 }
 

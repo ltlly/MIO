@@ -113,6 +113,9 @@ impl ProxyAdvancedUi {
                 cx.notify();
             }
             TableEvent::DoubleClickedRow(row) => {
+                if !this.state.enabled {
+                    return;
+                }
                 if let Some(rule) = this.proxy_advanced.http_rules.get(*row).cloned() {
                     this.proxy_advanced.http_selected = Some(rule.id);
                     if let Some(project) = this.state.project {
@@ -158,6 +161,9 @@ impl ProxyAdvancedUi {
                 cx.notify();
             }
             TableEvent::DoubleClickedRow(row) => {
+                if !this.state.enabled {
+                    return;
+                }
                 if let Some(rule) = this.proxy_advanced.ssl_rules.get(*row).cloned() {
                     this.proxy_advanced.ssl_selected = Some(rule.id);
                     this.load_ssl_rule_into_editor(&rule, window, cx);
@@ -188,6 +194,9 @@ impl ProxyAdvancedUi {
                 cx.notify();
             }
             TableEvent::DoubleClickedRow(row) => {
+                if !this.state.enabled {
+                    return;
+                }
                 if let Some(rule) = this.proxy_advanced.ws_rules.get(*row).cloned() {
                     this.proxy_advanced.ws_selected = Some(rule.id);
                     this.load_ws_rule_into_editor(&rule, window, cx);

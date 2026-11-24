@@ -405,13 +405,17 @@ impl Workbench {
     ) -> Result<(), String> {
         let listen = parse_listener_address(&config.bind_address)?;
         let mut next = self.workspace.effective_proxy_listeners();
-        if index >= next.len() {
+        let target_index = if next.get(index).is_some_and(|item| item.id == config.id) {
+            index
+        } else if let Some(pos) = next.iter().position(|item| item.id == config.id) {
+            pos
+        } else {
             return Err("待编辑的监听器已不存在。".into());
-        }
+        };
         if config.enabled
             && listen.port() != 0
             && next.iter().enumerate().any(|(other_idx, item)| {
-                other_idx != index
+                other_idx != target_index
                     && item.enabled
                     && item
                         .bind_address
@@ -421,7 +425,7 @@ impl Workbench {
         {
             return Err(format!("监听地址 {listen} 与已启用监听器存在端口冲突。"));
         }
-        next[index] = config;
+        next[target_index] = config;
         self.apply_proxy_listeners_change(project, next, window, cx)
     }
 
@@ -1682,6 +1686,9 @@ impl Settings {
                         0 => this.open_proxy_listener_editor(true, window, cx),
                         1 => this.open_proxy_listener_editor(false, window, cx),
                         _ => {
+                            if !this.proxy_listeners_available() {
+                                return;
+                            }
                             let Some(index) = this.listeners_tls.selected_index else {
                                 return;
                             };
@@ -1706,6 +1713,9 @@ impl Settings {
         )
         .tab_stop(false)
         .on_click(cx.listener(|this, _, window, cx| {
+            if !this.proxy_listeners_available() {
+                return;
+            }
             let project = this.state.project;
             let result = this
                 .owner

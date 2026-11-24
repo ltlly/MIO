@@ -339,6 +339,9 @@ impl FilterWindow {
     }
 
     pub(super) fn show_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         if let Err(error) = self.validate_inputs_ime(window, cx) {
             self.error = Some(error.into());
             cx.notify();
@@ -352,6 +355,9 @@ impl FilterWindow {
     }
 
     pub(super) fn hide_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         if let Err(error) = self.validate_inputs_ime(window, cx) {
             self.error = Some(error.into());
             cx.notify();
@@ -363,6 +369,9 @@ impl FilterWindow {
     }
 
     pub(super) fn revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         if let Err(error) = self.validate_inputs_ime(window, cx) {
             self.error = Some(error.into());
             cx.notify();
@@ -498,7 +507,9 @@ impl FilterWindow {
         if self.submitting {
             return;
         }
-        if let Err(error) = editing::input_snapshot(&self.library_name_input, window, cx) {
+        if matches!(self.library_overlay, Some(LibraryOverlay::Save { .. }))
+            && let Err(error) = editing::input_snapshot(&self.library_name_input, window, cx)
+        {
             self.error = Some(error.into());
         } else {
             self.library_overlay = None;
@@ -508,6 +519,9 @@ impl FilterWindow {
     }
 
     pub(super) fn load_library_script(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.submitting {
+            return;
+        }
         if let Err(error) = editing::snapshot(&self.filter_script_editor, window, cx) {
             self.error = Some(error.into()); cx.notify(); return;
         }
@@ -599,7 +613,13 @@ impl FilterWindow {
             .and_then(|_| editing::input_snapshot(&self.hide, window, cx))
             .and_then(|_| editing::input_snapshot(&self.search_term, window, cx))
             .and_then(|_| editing::input_snapshot(&self.listener_port, window, cx))
-            .and_then(|_| editing::input_snapshot(&self.library_name_input, window, cx))
+            .and_then(|_| {
+                if matches!(self.library_overlay, Some(LibraryOverlay::Save { .. })) {
+                    editing::input_snapshot(&self.library_name_input, window, cx).map(|_| ())
+                } else {
+                    Ok(())
+                }
+            })
             .and_then(|_| editing::snapshot(&self.filter_script_editor, window, cx))
             .map(|_| ())
     }

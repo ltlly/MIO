@@ -354,7 +354,9 @@ impl Workbench {
             }
             let (initial_text, expected_revision, request_number, truncated_preview) = {
                 let workbench = owner.read(cx);
-                let view = &workbench.intruder.results.views[&view_id];
+                let Some(view) = workbench.intruder.results.views.get(&view_id) else {
+                    return;
+                };
                 let Some(row) = view.query.view_row(ordinal) else {
                     return;
                 };

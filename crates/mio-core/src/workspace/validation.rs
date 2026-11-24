@@ -291,7 +291,7 @@ impl SocksProxySettings {
         }
         self.bypass_hosts.iter().any(|pattern| {
             let pat = pattern.trim();
-            !pat.is_empty() && (pat == "*" || mio_proxy::matches_host(pat, clean))
+            !pat.is_empty() && (pat == "*" || mio_proxy::matches_bypass_host(pat, clean))
         })
     }
 

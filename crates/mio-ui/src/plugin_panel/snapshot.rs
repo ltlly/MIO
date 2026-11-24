@@ -38,12 +38,13 @@ impl NativePanel {
             .documents
             .iter()
             .filter_map(|(id, document)| {
-                (document.pending_rebase
-                    || document.state.update(cx, |state, cx| {
+                document
+                    .state
+                    .update(cx, |state, cx| {
                         state.marked_text_range(window, cx).is_some()
                             || state.value().as_ref()
                                 != display_bytes(&document.snapshot.contents, document.format)
-                    }))
+                    })
                 .then_some(*id)
             })
             .collect();
@@ -77,8 +78,13 @@ impl NativePanel {
                                 let value = display_bytes(&editor.contents, format);
                                 document.state.update(cx, |state, cx| {
                                     let selection = state.selected_range();
+                                    let start = value
+                                        .floor_char_boundary(selection.start.min(value.len()));
+                                    let end = value
+                                        .floor_char_boundary(selection.end.min(value.len()))
+                                        .max(start);
                                     state.set_value(value, window, cx);
-                                    state.set_selected_range(selection, cx);
+                                    state.set_selected_range(start..end, cx);
                                 });
                             }
                             document.format = format;
@@ -95,6 +101,7 @@ impl NativePanel {
                                     .checked_add(1)
                                     .ok_or("编辑器 revision 已溢出。")?;
                                 rebased.push((node.id, document.snapshot.clone()));
+                                document.pending_rebase = false;
                             }
                         }
                     } else {
@@ -160,6 +167,17 @@ impl NativePanel {
                         state
                             .selected
                             .retain(|id| table.rows.iter().any(|row| &row.id == id));
+                        if table.rows.is_empty() {
+                            state.cursor = None;
+                            state.anchor = None;
+                        } else {
+                            if state.cursor.is_some_and(|idx| idx >= table.rows.len()) {
+                                state.cursor = None;
+                            }
+                            if state.anchor.is_some_and(|idx| idx >= table.rows.len()) {
+                                state.anchor = None;
+                            }
+                        }
                     } else {
                         let filter =
                             cx.new(|cx| InputState::new(window, cx).placeholder("筛选此表格"));

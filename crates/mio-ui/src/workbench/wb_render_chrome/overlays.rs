@@ -49,7 +49,13 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.global_search.cancel.take() {
+            cancel.cancel();
+        }
+        self.global_search.loading = false;
         self.global_search.open = false;
+        self.mio_ai_panel_open = false;
+        self.csrf_poc_modal = None;
         self.command_palette_open = true;
         self.command_palette.update(cx, |state, cx| {
             state.set_query("", window, cx);
@@ -60,6 +66,8 @@ impl Workbench {
 
     pub(in crate::workbench) fn open_global_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_palette_open = false;
+        self.mio_ai_panel_open = false;
+        self.csrf_poc_modal = None;
         self.global_search.open = true;
         self.global_search.input.update(cx, |input, cx| {
             input.focus(window, cx);

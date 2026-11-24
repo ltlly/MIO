@@ -144,6 +144,19 @@ fn build_request_with_proxy_auth(
         let req = message::to_request_with_config(&patched, &patched_cfg)?;
         return Ok((req, patched_cfg));
     }
+    if !config.http.strip_proxy_headers
+        && model
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("proxy-authorization"))
+    {
+        let mut patched_cfg = config.clone();
+        strip_http_proxy_route_credentials(&mut patched_cfg.network.upstream_route);
+        return Ok((
+            message::to_request_with_config(model, &patched_cfg)?,
+            patched_cfg,
+        ));
+    }
     Ok((message::to_request_with_config(model, config)?, config.clone()))
 }
 

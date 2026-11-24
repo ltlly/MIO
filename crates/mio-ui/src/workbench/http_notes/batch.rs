@@ -189,10 +189,13 @@ impl Workbench {
             );
             owner.update(cx, |view, cx| match opened {
                 Ok((handle, _)) => {
-                    let batch = view.http_notes.batch.as_mut().unwrap();
-                    batch.window = Some(handle);
-                    let ids = batch.ids.clone();
-                    view.read_http_notes_batch(ids, cx);
+                    if let Some(batch) = view.http_notes.batch.as_mut().filter(|b| b.id == id) {
+                        batch.window = Some(handle);
+                        let ids = batch.ids.clone();
+                        view.read_http_notes_batch(ids, cx);
+                    } else {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    }
                 }
                 Err(error) => {
                     view.http_notes.batch = None;

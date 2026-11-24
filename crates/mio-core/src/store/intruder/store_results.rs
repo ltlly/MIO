@@ -63,6 +63,10 @@ impl crate::store::IntruderRepo<&mut ProjectStore> {
     ) -> Result<(u64, Vec<u8>)> {
         self.0.intruder().check_session_owner(project, id)?;
         ensure!(
+            expected_notes_revision <= i64::MAX as u64,
+            "Intruder 结果备注版本越界"
+        );
+        ensure!(
             !cancel.is_cancelled(),
             "Intruder 结果备注修改已取消；数据保留"
         );

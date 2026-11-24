@@ -64,7 +64,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.transition.is_some() {
+        if self.transition.is_some() || self.backend_disconnected {
             return;
         }
         let Some(editors) = self.intruder.editors.get_mut(&id) else {

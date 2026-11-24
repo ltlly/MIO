@@ -257,6 +257,7 @@ struct PendingViewport {
     revision: u64,
     offset: u64,
     seq: u64,
+    saturated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,8 +308,10 @@ impl TableViewportTracker {
     }
 
     pub(in crate::plugin_panel) fn request_page(&mut self, offset: u64, seq: u64) -> u64 {
+        let prev = self.next_revision;
         self.next_revision = self.next_revision.saturating_add(1);
         let revision = self.next_revision;
+        let saturated = revision == prev;
         if self.pending.len() >= MAX_UI_OVERLAY_HISTORY {
             self.pending.pop_front();
         }
@@ -316,6 +319,7 @@ impl TableViewportTracker {
             revision,
             offset,
             seq,
+            saturated,
         });
         self.loading = None;
         revision
@@ -354,8 +358,12 @@ impl TableViewportTracker {
             .pending
             .back()
             .copied()
-            .map(|p| (p.revision, p.offset, p.seq, false))
-            .or_else(|| self.loading.map(|l| (l.revision, l.offset, l.seq, true)));
+            .map(|p| (p.revision, p.offset, p.seq, false, p.saturated))
+            .or_else(|| {
+                self.loading
+                    .map(|l| (l.revision, l.offset, l.seq, true, false))
+            });
+        let prev_confirmed = self.confirmed_revision;
         self.next_revision = self.next_revision.max(table.viewport_revision);
         self.confirmed_revision = table.viewport_revision;
         self.pending.retain(|p| {
@@ -366,12 +374,17 @@ impl TableViewportTracker {
         });
         if !self.pending.is_empty() {
             self.loading = None;
-        } else if let Some((req_rev, req_offset, req_seq, already_loading)) = prev_target {
+        } else if let Some((req_rev, req_offset, req_seq, already_loading, saturated)) =
+            prev_target
+        {
             let target_arrived = table.offset == req_offset;
             let out_of_range = req_offset > 0 && req_offset >= table.total_rows;
             let rejected = req_seq != 0 && rejected_ui_seqs.contains(&req_seq);
             let worker_published_loading = already_loading || newer_revision;
+            let revision_advanced = already_loading || (!saturated && req_rev > prev_confirmed);
             if worker_published_loading
+                && revision_advanced
+                && table.viewport_revision != u64::MAX
                 && table.viewport_revision == req_rev
                 && !target_arrived
                 && !out_of_range

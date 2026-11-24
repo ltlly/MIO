@@ -15,6 +15,9 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
     if packet.len() < DNS_HEADER_LEN {
         return None;
     }
+    if packet[2] & 0x80 != 0 {
+        return None;
+    }
     let question_count = u16::from_be_bytes([packet[4], packet[5]]);
     if question_count == 0 {
         return None;
@@ -64,7 +67,8 @@ fn parse_dns_question(packet: &[u8]) -> Option<ParsedDnsQuestion> {
             return None;
         }
         let label = packet.get(label_start..label_end)?;
-        name_len = name_len.checked_add(label_len)?.checked_add(1)?;
+        let sep = usize::from(!labels.is_empty());
+        name_len = name_len.checked_add(label_len)?.checked_add(sep)?;
         if name_len > DNS_NAME_MAX {
             return None;
         }

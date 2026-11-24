@@ -93,6 +93,7 @@ pub(crate) fn unpack_plugin_archive(
     let mut seen_files = BTreeSet::new();
     let mut next_long_name: Option<String> = None;
     let mut next_pax_path: Option<String> = None;
+    let mut pending_pax_header = false;
     let mut header = [0u8; 512];
 
     while read_tar_header(&mut reader, &mut header)? {
@@ -113,16 +114,21 @@ pub(crate) fn unpack_plugin_archive(
         match typeflag {
             b'x' => {
                 ensure!(
-                    next_pax_path.is_none() && next_long_name.is_none(),
+                    !pending_pax_header && next_pax_path.is_none() && next_long_name.is_none(),
                     "插件归档包含连续未关联目标条目的扩展头"
                 );
                 ensure!(size <= MAX_PAX_RECORD_BYTES as u64, "PAX 扩展头超过 64 KiB 限额");
                 let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
+                pending_pax_header = true;
                 next_pax_path = parse_pax_path(&data)?;
                 continue;
             }
             b'g' => {
+                ensure!(
+                    !pending_pax_header && next_pax_path.is_none() && next_long_name.is_none(),
+                    "插件归档包含连续未关联目标条目的扩展头"
+                );
                 ensure!(size <= MAX_PAX_RECORD_BYTES as u64, "PAX 全局头超过 64 KiB 限额");
                 let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
@@ -134,7 +140,7 @@ pub(crate) fn unpack_plugin_archive(
             }
             b'L' => {
                 ensure!(
-                    next_pax_path.is_none() && next_long_name.is_none(),
+                    !pending_pax_header && next_pax_path.is_none() && next_long_name.is_none(),
                     "插件归档包含连续未关联目标条目的扩展头"
                 );
                 ensure!(size <= MAX_LONGNAME_BYTES as u64, "GNU 长路径名超过 4 KiB 限额");
@@ -174,6 +180,7 @@ pub(crate) fn unpack_plugin_archive(
 
         let pax_path = next_pax_path.take();
         let long_name = next_long_name.take();
+        pending_pax_header = false;
         let raw_name = pax_path
             .or(long_name)
             .unwrap_or_else(|| parse_ustar_path(&header));
@@ -223,7 +230,7 @@ pub(crate) fn unpack_plugin_archive(
     }
 
     ensure!(
-        next_pax_path.is_none() && next_long_name.is_none(),
+        !pending_pax_header && next_pax_path.is_none() && next_long_name.is_none(),
         "插件归档包含未关联目标条目的扩展头"
     );
     verify_optional_sha256_manifest(&work_dir)?;

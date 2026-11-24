@@ -1466,6 +1466,9 @@ pub(in crate::server) async fn process_http(
             false,
         )
         .await?;
+    if state.should_drop_out_of_scope(&record.request.url) {
+        return Err(ProxyError::Dropped);
+    }
     let config = state.send_config(&record.request.url, record.request.version, false);
     message::validate_request_with_config(&record.request, &config)?;
     let outbound_model = record.request.clone();

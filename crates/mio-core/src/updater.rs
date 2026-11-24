@@ -633,10 +633,16 @@ async fn http_get_bytes(
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             let loc = header_value(&resp, "location")
                 .context("更新服务器返回重定向响应，但缺少 Location 响应头")?;
-            let next = url::Url::parse(&current_url)
-                .with_context(|| format!("无效的请求 URL：{current_url}"))?
+            let prev = url::Url::parse(&current_url)
+                .with_context(|| format!("无效的请求 URL：{current_url}"))?;
+            let next = prev
                 .join(&loc)
                 .with_context(|| format!("无效的重定向地址：{loc}"))?;
+            ensure!(
+                !(prev.scheme().eq_ignore_ascii_case("https")
+                    && next.scheme().eq_ignore_ascii_case("http")),
+                "拒绝从 HTTPS 重定向降级至 HTTP：{next}"
+            );
             current_url = next.to_string();
             continue;
         }
@@ -781,14 +787,23 @@ where
         headers: &[Header],
         content_length: Option<u64>,
     ) -> std::result::Result<(), ProxyError> {
-        if let Some(etag) = header_value_from_slice(headers, "etag").filter(|s| !s.is_empty()) {
-            self.etag = Some(etag);
-        }
+        let incoming_etag =
+            header_value_from_slice(headers, "etag").filter(|s| !s.is_empty());
         if status == 206 {
             if self.received_so_far == 0 {
                 return Err(ProxyError::InvalidMessage(
                     "未发送 Range 请求但收到 206 Partial Content".into(),
                 ));
+            }
+            if let (Some(prev), Some(curr)) = (&self.etag, &incoming_etag)
+                && prev != curr
+            {
+                return Err(ProxyError::Network(format!(
+                    "断点续传 ETag 不匹配：期望 {prev}，实际 {curr}"
+                )));
+            }
+            if let Some(etag) = incoming_etag {
+                self.etag = Some(etag);
             }
             let raw_range = header_value_from_slice(headers, "content-range")
                 .ok_or_else(|| ProxyError::InvalidMessage("206 响应缺少 Content-Range 头".into()))?;
@@ -817,6 +832,9 @@ where
             return Ok(());
         }
 
+        if let Some(etag) = incoming_etag {
+            self.etag = Some(etag);
+        }
         if let Some(cl) = content_length {
             if cl > self.max_body_bytes as u64 {
                 return Err(ProxyError::BodyLimit {
@@ -824,6 +842,8 @@ where
                 });
             }
             self.expected_total = Some(cl);
+        } else if self.received_so_far > 0 {
+            self.expected_total = None;
         }
         if self.received_so_far > 0 {
             self.tx
@@ -1387,8 +1407,14 @@ fn find_named_entry_recursive(root: &Path, name: &str, want_dir: bool) -> Option
     let entries = fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
         let file_name = entry.file_name();
-        let is_dir = path.is_dir();
+        let is_dir = meta.is_dir();
         if file_name.to_str().is_some_and(|s| s == name) && is_dir == want_dir {
             return Some(path);
         }

@@ -367,7 +367,7 @@ impl Settings {
             let Some(entity) = settings.upgrade() else {
                 return;
             };
-            if entity.read(cx).state.project != Some(project) {
+            if entity.read(cx).state.project != Some(project) || owner.upgrade().is_none() {
                 entity.update(cx, |this, cx| {
                     this.interception_opening = false;
                     cx.notify();

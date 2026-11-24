@@ -6,16 +6,30 @@ use std::{
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::service) enum SpillSlot {
+    Request,
+    Response,
+    WebSocket,
+}
+
 #[derive(Default)]
 pub(in crate::service) struct HookSpillScope {
     dir: Option<tempfile::TempDir>,
-    input_paths: Vec<PathBuf>,
+    req_input_paths: Vec<PathBuf>,
+    resp_input_paths: Vec<PathBuf>,
+    ws_input_paths: Vec<PathBuf>,
 }
 
 #[cfg(windows)]
 impl Drop for HookSpillScope {
     fn drop(&mut self) {
-        for path in &self.input_paths {
+        for path in self
+            .req_input_paths
+            .iter()
+            .chain(&self.resp_input_paths)
+            .chain(&self.ws_input_paths)
+        {
             if let Ok(meta) = fs::metadata(path) {
                 let mut perms = meta.permissions();
                 perms.set_readonly(false);
@@ -41,7 +55,23 @@ impl HookSpillScope {
         Ok(self.dir.as_ref().expect("dir initialized").path())
     }
 
-    fn write_read_only_spill(&mut self, name: &str, bytes: &[u8]) -> Result<String> {
+    fn slot_paths(&self, slot: SpillSlot) -> &[PathBuf] {
+        match slot {
+            SpillSlot::Request => &self.req_input_paths,
+            SpillSlot::Response => &self.resp_input_paths,
+            SpillSlot::WebSocket => &self.ws_input_paths,
+        }
+    }
+
+    fn slot_paths_mut(&mut self, slot: SpillSlot) -> &mut Vec<PathBuf> {
+        match slot {
+            SpillSlot::Request => &mut self.req_input_paths,
+            SpillSlot::Response => &mut self.resp_input_paths,
+            SpillSlot::WebSocket => &mut self.ws_input_paths,
+        }
+    }
+
+    fn write_read_only_spill(&mut self, slot: SpillSlot, name: &str, bytes: &[u8]) -> Result<String> {
         ensure!(
             bytes.len() <= protocol::MAX_SPILL_BODY_BYTES,
             "大报文正文超过 64 MiB 共享上限"
@@ -56,7 +86,7 @@ impl HookSpillScope {
             path_str.len() <= protocol::MAX_BODY_SPILL_PATH_BYTES && !path_str.contains('\0'),
             "共享大报文文件路径超出协议限额"
         );
-        if self.input_paths.iter().any(|p| p == &file_path) && file_path.is_file() {
+        if self.slot_paths(slot).iter().any(|p| p == &file_path) && file_path.is_file() {
             return Ok(path_str);
         }
         fs::write(&file_path, bytes)?;
@@ -71,28 +101,32 @@ impl HookSpillScope {
             perms.set_readonly(true);
             fs::set_permissions(&file_path, perms)?;
         }
-        if let Ok(canon) = fs::canonicalize(&file_path) {
-            self.input_paths.push(canon);
+        let canon = fs::canonicalize(&file_path).ok();
+        let paths = self.slot_paths_mut(slot);
+        if let Some(canon) = canon {
+            paths.push(canon);
         }
-        self.input_paths.push(file_path);
+        paths.push(file_path);
         Ok(path_str)
     }
 
-    fn is_input_spill_path(&self, returned_path: &str) -> bool {
+    fn is_input_spill_path(&self, slot: SpillSlot, returned_path: &str) -> bool {
+        let paths = self.slot_paths(slot);
         let candidate = Path::new(returned_path);
-        if self.input_paths.iter().any(|p| p == candidate) {
+        if paths.iter().any(|p| p == candidate) {
             return true;
         }
         let Ok(canon) = fs::canonicalize(candidate) else {
             return false;
         };
-        self.input_paths
+        paths
             .iter()
             .any(|p| p == &canon || fs::canonicalize(p).is_ok_and(|cp| cp == canon))
     }
 
     pub(in crate::service) fn resolve_body(
         &self,
+        slot: SpillSlot,
         original: &[u8],
         omitted: bool,
         returned_path: &str,
@@ -101,7 +135,7 @@ impl HookSpillScope {
         if !omitted {
             return Ok(inline_body);
         }
-        if returned_path.is_empty() || self.is_input_spill_path(returned_path) {
+        if returned_path.is_empty() || self.is_input_spill_path(slot, returned_path) {
             return Ok(original.to_vec());
         }
         if returned_path.contains('\0')
@@ -195,7 +229,7 @@ fn build_request_dto(
     if !force_spill && request.body.len() <= protocol::MAX_INLINE_BODY {
         return Some(request.clone().into());
     }
-    let path = spill.write_read_only_spill(name, &request.body).ok()?;
+    let path = spill.write_read_only_spill(SpillSlot::Request, name, &request.body).ok()?;
     let mut dto: protocol::RequestDto = HttpRequest {
         method: request.method.clone(),
         url: request.url.clone(),
@@ -220,7 +254,7 @@ fn build_response_dto(
     if !force_spill && response.body.len() <= protocol::MAX_INLINE_BODY {
         return Some(response.clone().into());
     }
-    let path = spill.write_read_only_spill(name, &response.body).ok()?;
+    let path = spill.write_read_only_spill(SpillSlot::Response, name, &response.body).ok()?;
     let mut dto: protocol::ResponseDto = HttpResponse {
         status: response.status,
         version: response.version,
@@ -384,7 +418,7 @@ pub(in crate::service) fn prepare_ws_hook_call(
     let mut force_spill = can_spill && payload.len() > protocol::MAX_INLINE_BODY;
     for _ in 0..2 {
         let call = if force_spill {
-            let path = spill.write_read_only_spill("ws-payload.bin", payload).ok()?;
+            let path = spill.write_read_only_spill(SpillSlot::WebSocket, "ws-payload.bin", payload).ok()?;
             protocol::WebSocketHookCall {
                 flow_id: flow_id.as_bytes().to_vec(),
                 message_id: msg_id.as_bytes().to_vec(),
@@ -505,7 +539,7 @@ pub(in crate::service) fn resolve_request_dto(
 ) -> std::result::Result<HttpRequest, String> {
     dto.validate()?;
     if dto.body_omitted {
-        let resolved = spill.resolve_body(original_body, true, &dto.body_file_path, Vec::new())?;
+        let resolved = spill.resolve_body(SpillSlot::Request, original_body, true, &dto.body_file_path, Vec::new())?;
         dto.try_into_with_resolved_body(Some(resolved))
     } else {
         dto.try_into_with_resolved_body(None)
@@ -519,7 +553,7 @@ pub(in crate::service) fn resolve_response_dto(
 ) -> std::result::Result<HttpResponse, String> {
     dto.validate()?;
     if dto.body_omitted {
-        let resolved = spill.resolve_body(original_body, true, &dto.body_file_path, Vec::new())?;
+        let resolved = spill.resolve_body(SpillSlot::Response, original_body, true, &dto.body_file_path, Vec::new())?;
         dto.try_into_with_resolved_body(Some(resolved))
     } else {
         dto.try_into_with_resolved_body(None)
@@ -541,6 +575,7 @@ pub(in crate::service) fn resolve_ws_result(
         return Err("未设置 payload_omitted 时不能携带共享文件路径".into());
     }
     spill.resolve_body(
+        SpillSlot::WebSocket,
         original_payload,
         res.payload_omitted,
         &res.payload_file_path,

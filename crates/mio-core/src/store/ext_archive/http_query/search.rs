@@ -242,16 +242,17 @@ pub(crate) fn global_search_snapshot(
             let url: String = row.get(8)?;
             let ordinal: u64 = row.get(9)?;
             let payload: Vec<u8> = row.get::<_, Option<Vec<u8>>>(12)?.unwrap_or_default();
-            let original: Vec<u8> = row.get::<_, Option<Vec<u8>>>(13)?.unwrap_or_default();
+            let original_opt: Option<Vec<u8>> = row.get(13)?;
             let notes: String = row.get(14)?;
             let mut hit = global_hit(crate::GlobalSearchTarget::ProxyWebSocket(id), "Proxy · WebSocket",
                 ordinal.to_string(), format!("{direction:?}"), url.clone(), None, &notes);
             hit.websocket_summary = Some(crate::WebSocketSummary { id, ordinal, connection_id: row.get(10)?,
                 listener_port: row.get(11)?, revision: row.get(1)?, flow_id: Uuid::parse_str(row.get_ref(2)?.as_str()?)?,
                 sequence: row.get(3)?, direction, kind, payload_bytes: row.get(6)?, observed_unix_ms: row.get(7)?,
-                url: url.clone(), edited: !original.is_empty(), notes_revision: row.get(15)?, notes_preview: hit.notes_preview.clone() });
+                url: url.clone(), edited: original_opt.is_some(), notes_revision: row.get(15)?, notes_preview: hit.notes_preview.clone() });
+            let original = original_opt.as_deref().unwrap_or_default();
             collector.add(hit, &[("URL", url.as_bytes()), ("WebSocket 消息", &payload),
-                ("WebSocket 原始消息", &original), ("备注", notes.as_bytes())])?;
+                ("WebSocket 原始消息", original), ("备注", notes.as_bytes())])?;
         }
         drop(ws_rows);
         drop(ws_stmt);

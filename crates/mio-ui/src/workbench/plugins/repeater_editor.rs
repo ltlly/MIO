@@ -416,10 +416,11 @@ impl Workbench {
         stopped: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .extensions
-            .instance(identity.instance_id)
-            .is_some_and(|instance| instance.info.identity == identity)
+        if self.project != Some(identity.project)
+            || !self
+                .extensions
+                .instance(identity.instance_id)
+                .is_some_and(|instance| instance.info.identity == identity)
         {
             return;
         }

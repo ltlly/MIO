@@ -91,12 +91,23 @@ impl SelfHostedOastConfig {
             let normalized_domain = domain.trim_end_matches('.').to_ascii_lowercase();
             ensure!(
                 !normalized_domain.is_empty()
-                    && !normalized_domain.chars().any(char::is_whitespace),
+                    && !normalized_domain.chars().any(|c| {
+                        c.is_whitespace()
+                            || c.is_control()
+                            || matches!(c, '@' | '/' | '?' | '#' | ':')
+                    }),
                 "self-hosted server domain is invalid"
             );
             ensure!(
                 self.allow_public_cloud_domains || !is_blocked_cloud_domain(&normalized_domain),
                 "public third-party Collaborator domains are blocked by default"
+            );
+        }
+
+        if let Some(auth) = &self.authorization_header {
+            ensure!(
+                !auth.chars().any(|c| c.is_control() || matches!(c, '\r' | '\n')),
+                "self-hosted authorization header contains invalid control characters"
             );
         }
 

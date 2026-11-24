@@ -248,6 +248,7 @@ impl Workbench {
                 self.observed_server_certs.clear();
                 self.session_traces.clear();
                 self.mio_ai_context = None;
+                self.mio_ai_panel_open = false;
                 self.csrf_poc_modal = None;
                 self.reset_history_version_view();
                 self.clear_history_detail(window, cx);

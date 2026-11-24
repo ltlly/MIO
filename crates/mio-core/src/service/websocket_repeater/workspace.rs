@@ -10,6 +10,7 @@ impl WebSocketRepeaterService {
             tabs: HashMap::new(),
             jobs: JoinSet::new(),
             job_cancels: HashMap::new(),
+            job_tasks: HashMap::new(),
             peers_tx,
             peers_rx,
             pending_events: VecDeque::new(),

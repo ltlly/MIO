@@ -100,6 +100,9 @@ impl Workbench {
                     v.committing = false;
                 }
             }
+            Operation::Commit { tab_id, .. } => {
+                self.abort_sequential_group_queue_if_active_tab(tab_id);
+            }
             _ => {}
         }
         self.fail(format!("插件操作失败：{error}；当前编辑内容保留。"), cx);
@@ -506,6 +509,7 @@ impl Workbench {
             match self.extensions.operations.remove(&operation_id) {
                 Some(Operation::Commit { tab_id, .. }) => {
                     self.pending_sends.remove(&tab_id);
+                    self.abort_sequential_group_queue_if_active_tab(tab_id);
                 }
                 Some(Operation::Rebind { instance, .. }) => {
                     if let Some(view) = self.extensions.instance_mut(instance) {
@@ -531,6 +535,7 @@ impl Workbench {
         for id in saved {
             self.extensions.saved_commits.remove(&id);
             self.pending_sends.remove(&id);
+            self.abort_sequential_group_queue_if_active_tab(id);
         }
     }
 
@@ -542,6 +547,14 @@ impl Workbench {
         self.extensions.operations.values().any(
             |operation| matches!(operation, Operation::Commit { tab_id: id, .. } | Operation::Rebind { tab_id: id, .. } if *id == tab_id),
         ) || self.extensions.saved_commits.contains_key(&tab_id)
+    }
+
+    pub(in crate::workbench) fn has_pending_commit(&self, tab_id: TabId) -> bool {
+        self.extensions
+            .operations
+            .values()
+            .any(|operation| matches!(operation, Operation::Commit { tab_id: id, .. } if *id == tab_id))
+            || self.extensions.saved_commits.contains_key(&tab_id)
     }
 
     pub(in crate::workbench) fn discard_pending_sends(&mut self, cx: &mut Context<Self>) -> bool {

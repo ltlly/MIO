@@ -116,10 +116,11 @@ impl State {
                 if result.is_ok()
                     && let Ok(workspace) = self.store.metadata().workspace()
                 {
-                    if let Ok(config) = Self::ws_repeater_send_config(
+                    if let Ok(config) = Self::ws_repeater_send_config_with_cache(
                         &self.preferences,
                         &workspace,
                         self.tls.compiled_client_certs.clone(),
+                        Some(&self.user_level_connections_cache),
                     ) {
                         self.ws_repeater.set_connect_config(config);
                     }

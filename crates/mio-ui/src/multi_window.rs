@@ -91,12 +91,14 @@ pub(crate) fn build_spawn_command_spec(
         let mut args = vec![OsString::from("-n"), OsString::from("-a"), bundle.into_os_string()];
         if let Some(project) = project_path {
             args.push(OsString::from("--args"));
+            args.push(OsString::from("--"));
             args.push(project.as_os_str().to_os_string());
         }
         return (PathBuf::from("/usr/bin/open"), args);
     }
     let mut args = Vec::new();
     if let Some(project) = project_path {
+        args.push(OsString::from("--"));
         args.push(project.as_os_str().to_os_string());
     }
     (current_exe.to_path_buf(), args)
@@ -175,6 +177,7 @@ mod tests {
                 OsString::from("-a"),
                 bundle.into_os_string(),
                 OsString::from("--args"),
+                OsString::from("--"),
                 sample_proj.clone().into_os_string(),
             ]
         );
@@ -185,11 +188,17 @@ mod tests {
         let (prog_bin, args_bin) =
             build_spawn_command_spec(&standalone, Some(&sample_proj), true);
         assert_eq!(prog_bin, standalone);
-        assert_eq!(args_bin, vec![sample_proj.clone().into_os_string()]);
+        assert_eq!(
+            args_bin,
+            vec![OsString::from("--"), sample_proj.clone().into_os_string()]
+        );
 
         let (prog_other, args_other) =
             build_spawn_command_spec(&bundled_exe, Some(&sample_proj), false);
         assert_eq!(prog_other, bundled_exe);
-        assert_eq!(args_other, vec![sample_proj.into_os_string()]);
+        assert_eq!(
+            args_other,
+            vec![OsString::from("--"), sample_proj.into_os_string()]
+        );
     }
 }

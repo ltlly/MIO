@@ -155,10 +155,14 @@ impl Settings {
         );
         self.pools.opening = true;
         cx.defer(move |cx| {
-            if settings
-                .upgrade()
-                .is_none_or(|settings| settings.read(cx).state.project != Some(project))
-            {
+            let Some(entity) = settings.upgrade() else {
+                return;
+            };
+            if entity.read(cx).state.project != Some(project) || owner.upgrade().is_none() {
+                entity.update(cx, |settings, cx| {
+                    settings.pools.opening = false;
+                    cx.notify();
+                });
                 return;
             }
             let opened = crate::chrome::open_popup_window(options, cx, |window, cx| {

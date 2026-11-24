@@ -150,7 +150,7 @@ fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
             return Ok(ParsedHostPattern::ExactIp(IpAddr::V6(ipv6)));
         }
         if (inner.contains('*') || inner.contains('?'))
-            && inner.contains(':')
+            && inner.bytes().filter(|&b| b == b':').count() >= 2
             && inner
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'*' | b'?'))

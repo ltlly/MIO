@@ -156,6 +156,7 @@ impl Workbench {
             ) => {
                 let draft = &send.draft;
                 let Some(view) = self.extensions.instance(instance) else {
+                    self.abort_sequential_group_queue_if_active_tab(tab_id);
                     return;
                 };
                 let panel = view.panel.clone();
@@ -566,9 +567,17 @@ impl Workbench {
                     self.extensions
                         .active_responses
                         .retain(|_, active| *active != id);
-                    self.extensions
+                    let removed_saved: Vec<_> = self
+                        .extensions
                         .saved_commits
-                        .retain(|_, commit| commit.instance != id);
+                        .iter()
+                        .filter(|(_, commit)| commit.instance == id)
+                        .map(|(tab_id, _)| *tab_id)
+                        .collect();
+                    for tab_id in removed_saved {
+                        self.extensions.saved_commits.remove(&tab_id);
+                        self.abort_sequential_group_queue_if_active_tab(tab_id);
+                    }
                     self.extensions
                         .context_viewers
                         .retain(|_, viewer| viewer.instance_id != Some(id));
@@ -661,12 +670,18 @@ impl Workbench {
                 | PluginOutcome::WorkspaceRejected,
             ) => {}
             (operation, _) => {
-                if let Operation::Rebind { instance, .. } = operation
-                    && let Some(view) = self.extensions.instance_mut(instance)
-                {
-                    view.bound = None;
-                    view.panel
-                        .update(cx, |panel, cx| panel.set_enabled(view.live, cx));
+                match operation {
+                    Operation::Rebind { instance, .. } => {
+                        if let Some(view) = self.extensions.instance_mut(instance) {
+                            view.bound = None;
+                            view.panel
+                                .update(cx, |panel, cx| panel.set_enabled(view.live, cx));
+                        }
+                    }
+                    Operation::Commit { tab_id, .. } => {
+                        self.abort_sequential_group_queue_if_active_tab(tab_id);
+                    }
+                    _ => {}
                 }
                 self.fail("插件返回了与当前操作不匹配的结果；未应用。", cx);
             }

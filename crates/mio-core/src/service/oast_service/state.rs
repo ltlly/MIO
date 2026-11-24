@@ -22,6 +22,7 @@ impl State {
             }
             CollaboratorCommand::Start { project, config } => {
                 self.check_project(project)?;
+                let _ = config.validate()?;
                 self.collaborator.stop_auto_poll().await;
                 self.collaborator.start_with_config(project, config).await?;
                 if self.collaborator.config.enabled
@@ -191,12 +192,23 @@ impl CollaboratorService {
     pub(super) async fn stop_auto_poll(&mut self) {
         if let Some((cancel, mut fwd_handle, mut poll_handle)) = self.auto_poll.take() {
             cancel.cancel();
-            let deadline = TokioInstant::now() + POLL_JOIN_TIMEOUT;
-            if timeout_at(deadline, &mut poll_handle).await.is_err() {
+            let poll_deadline = TokioInstant::now() + POLL_JOIN_TIMEOUT;
+            if timeout_at(poll_deadline, &mut poll_handle).await.is_err() {
                 poll_handle.abort();
             }
-            if timeout_at(deadline, &mut fwd_handle).await.is_err() {
-                fwd_handle.abort();
+            let fwd_deadline = TokioInstant::now() + Duration::from_secs(1);
+            match timeout_at(fwd_deadline, &mut fwd_handle).await {
+                Ok(Ok((unsent, local_rx))) => {
+                    let _ = self.drain_local_rx();
+                    if let Some(mut item) = unsent {
+                        let _ = self.record_interaction(&mut item);
+                    }
+                    self.rx = local_rx;
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    fwd_handle.abort();
+                }
             }
         }
     }
@@ -217,36 +229,41 @@ impl CollaboratorService {
         let fwd_tx = merged_tx.clone();
         let fwd_cancel = cancel.clone();
         let fwd_handle = tokio::spawn(async move {
+            let mut disconnected = false;
+            let mut unsent = None;
             loop {
                 let next = tokio::select! {
                     biased;
                     _ = fwd_cancel.cancelled() => {
-                        while let Ok(item) = local_rx.try_recv() {
-                            let _ = fwd_tx.try_send(item);
-                        }
-                        None
+                        break;
                     }
                     item = local_rx.recv() => item,
                 };
                 let Some(item) = next else {
+                    disconnected = true;
                     break;
                 };
                 let permit = tokio::select! {
                     biased;
                     _ = fwd_cancel.cancelled() => {
-                        let _ = fwd_tx.try_send(item);
-                        while let Ok(pending) = local_rx.try_recv() {
-                            let _ = fwd_tx.try_send(pending);
+                        if let Err(mpsc::error::TrySendError::Full(item) | mpsc::error::TrySendError::Closed(item)) =
+                            fwd_tx.try_send(item)
+                        {
+                            unsent = Some(item);
                         }
                         break;
                     }
                     permit = fwd_tx.reserve() => match permit {
                         Ok(permit) => permit,
-                        Err(_) => break,
+                        Err(_) => {
+                            unsent = Some(item);
+                            break;
+                        }
                     },
                 };
                 permit.send(item);
             }
+            (unsent, if disconnected { None } else { Some(local_rx) })
         });
         let period = Duration::from_millis(poll_interval_ms.max(250));
         let loop_cancel = cancel.clone();

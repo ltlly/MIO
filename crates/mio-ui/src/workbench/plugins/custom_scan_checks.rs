@@ -495,30 +495,59 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn test_custom_scan_check(&mut self, cx: &mut Context<Self>) {
-        let script = self
+    pub(in crate::workbench) fn test_custom_scan_check(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let script = match self
             .extensions
             .custom_checks
             .script_editor
-            .read(cx)
-            .content()
-            .text()
-            .to_string();
-        let sample_url = self
-            .extensions
-            .custom_checks
-            .sample_url_input
-            .read(cx)
-            .value()
-            .to_string();
-        let sample_resp_raw = self
+            .update(cx, |ed, cx| {
+                if ed.marked_text_range(window, cx).is_some() {
+                    Err(editing::COMPOSITION_PENDING.to_owned())
+                } else {
+                    Ok(ed.content().text().to_string())
+                }
+            }) {
+            Ok(v) => v,
+            Err(err) => {
+                self.extensions.custom_checks.test_output = Some((false, err));
+                cx.notify();
+                return;
+            }
+        };
+        let sample_url = match editing::input_snapshot(
+            &self.extensions.custom_checks.sample_url_input,
+            window,
+            cx,
+        ) {
+            Ok(v) => v.to_string(),
+            Err(err) => {
+                self.extensions.custom_checks.test_output = Some((false, err.to_owned()));
+                cx.notify();
+                return;
+            }
+        };
+        let sample_resp_raw = match self
             .extensions
             .custom_checks
             .sample_response_editor
-            .read(cx)
-            .content()
-            .text()
-            .to_string();
+            .update(cx, |ed, cx| {
+                if ed.marked_text_range(window, cx).is_some() {
+                    Err(editing::COMPOSITION_PENDING.to_owned())
+                } else {
+                    Ok(ed.content().text().to_string())
+                }
+            }) {
+            Ok(v) => v,
+            Err(err) => {
+                self.extensions.custom_checks.test_output = Some((false, err));
+                cx.notify();
+                return;
+            }
+        };
         let (req, resp) = build_sample_http_pair(&sample_url, &sample_resp_raw);
         let outcome = match mio_core::eval_custom_scan_check_script(&script, &req, &resp) {
             Ok(Some(evidence)) => {
@@ -1118,8 +1147,8 @@ impl Workbench {
                         button("extensions-custom-check-test", "实时测试 (Test)")
                             .icon(IconName::Play)
                             .tooltip("针对样本 HTTP 请求与响应实时执行当前 Rhai 扫描检查脚本")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.test_custom_scan_check(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.test_custom_scan_check(window, cx);
                             })),
                     )
                     .child(

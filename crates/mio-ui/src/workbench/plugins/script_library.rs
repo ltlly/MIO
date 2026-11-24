@@ -325,15 +325,29 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn validate_script_library_editor(&mut self, cx: &mut Context<Self>) {
-        let code = self
+    pub(in crate::workbench) fn validate_script_library_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let code = match self
             .extensions
             .script_library
             .code_editor
-            .read(cx)
-            .content()
-            .text()
-            .to_string();
+            .update(cx, |ed, cx| {
+                if ed.marked_text_range(window, cx).is_some() {
+                    Err(editing::COMPOSITION_PENDING.to_owned())
+                } else {
+                    Ok(ed.content().text().to_string())
+                }
+            }) {
+            Ok(v) => v,
+            Err(err) => {
+                self.extensions.script_library.feedback = Some((false, err));
+                cx.notify();
+                return;
+            }
+        };
         match mio_core::validate_filter_script(&code) {
             Ok(()) => {
                 self.extensions.script_library.feedback =
@@ -583,20 +597,38 @@ impl Workbench {
             let _ = this.update_in(cx, |this, _, cx| {
                 match bg_result {
                     Ok((count, updated)) => {
-                        if this.extensions.script_library.generation == import_gen {
+                        let reload_ok = if this.extensions.script_library.generation == import_gen {
                             this.extensions.script_library.generation =
                                 this.extensions.script_library.generation.saturating_add(1);
                             this.extensions.script_library.scripts = updated;
+                            true
                         } else {
                             this.extensions.script_library.loaded = false;
                             this.ensure_script_library_loaded();
+                            this.extensions
+                                .script_library
+                                .feedback
+                                .as_ref()
+                                .is_none_or(|(ok, _)| *ok)
+                        };
+                        if let Some(sel) = this.extensions.script_library.selected_name.as_deref()
+                            && !this
+                                .extensions
+                                .script_library
+                                .scripts
+                                .iter()
+                                .any(|item| item.name == sel)
+                        {
+                            this.extensions.script_library.selected_name = None;
                         }
-                        this.extensions.script_library.feedback = Some((
-                            true,
-                            format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),
-                        ));
-                        this.error = None;
-                        this.status = format!("已导入 {count} 个 脚本。");
+                        if reload_ok {
+                            this.extensions.script_library.feedback = Some((
+                                true,
+                                format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),
+                            ));
+                            this.error = None;
+                            this.status = format!("已导入 {count} 个 脚本。");
+                        }
                     }
                     Err(err) => {
                         this.extensions.script_library.feedback =
@@ -1018,8 +1050,8 @@ impl Workbench {
                         button("extensions-script-validate", "测试编译")
                             .icon(IconName::ShieldCheck)
                             .tooltip("使用 MIO MioScript/Rhai 编译器验证当前脚本语法")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.validate_script_library_editor(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.validate_script_library_editor(window, cx);
                             })),
                     )
                     .child(

@@ -350,9 +350,13 @@ impl State {
         };
         state.revision = next_audit_revision(state.revision);
         let updated_task = state.tasks[task_idx].clone();
-        if self.unsaved_count() == 0
-            && let Err(error) = self.write_audit_snapshot(&state)
-        {
+        if self.unsaved_count() != 0 {
+            if history_changed {
+                self.history_changed().await;
+            }
+            return;
+        }
+        if let Err(error) = self.write_audit_snapshot(&state) {
             self.error("audit", error).await;
             return;
         }
@@ -565,7 +569,8 @@ impl State {
             }
             forward.cancel();
         });
-        if let Err(err) = self.audit.start_scan(plan, combined_cancel) {
+        if let Err(err) = self.audit.start_scan(plan, combined_cancel.clone()) {
+            combined_cancel.cancel();
             if let Some(t) = state.tasks.iter_mut().find(|t| t.id == task_id) {
                 t.state = AuditTaskState::Failed;
                 t.error = Some(err.to_string());

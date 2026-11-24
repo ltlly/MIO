@@ -164,7 +164,7 @@ impl IntruderResultsWindow {
                 Some("intruder-results.csv"),
             );
             let owner_window = wb.owner_window;
-            cx.spawn_in(window, async move |this, cx| {
+            cx.spawn(async move |this, cx| {
                 let result = prompt.await;
                 let pending_write = owner_window
                     .update(cx, |_, _, cx| {

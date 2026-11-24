@@ -115,6 +115,9 @@ impl Settings {
                     .w_full()
                     .tooltip("打开或关闭客户端 TLS 证书添加表单")
                     .on_click(cx.listener(|this, _, window, cx| {
+                        if !this.state.enabled || this.listeners_tls.client_cert_saving {
+                            return;
+                        }
                         if this.listeners_tls.client_cert_editor_visible
                             && this.listeners_tls.client_cert_editing.is_none()
                         {
@@ -400,15 +403,23 @@ impl Settings {
                         })),
                     )
                     .child(
-                        mio_action_button("settings-client-cert-cancel", "取消", false).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.listeners_tls.client_cert_editor_visible = false;
-                                this.listeners_tls.client_cert_editing = None;
-                                this.listeners_tls.client_cert_saving = false;
-                                this.listeners_tls.client_cert_error = None;
-                                cx.notify();
-                            }),
-                        ),
+                        mio_action_button(
+                            "settings-client-cert-cancel",
+                            "取消",
+                            self.listeners_tls.client_cert_saving,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.listeners_tls.client_cert_saving {
+                                return;
+                            }
+                            this.listeners_tls.client_cert_editor_visible = false;
+                            this.listeners_tls.client_cert_editing = None;
+                            this.listeners_tls.client_cert_saving = false;
+                            this.listeners_tls.client_cert_save_gen =
+                                this.listeners_tls.client_cert_save_gen.wrapping_add(1);
+                            this.listeners_tls.client_cert_error = None;
+                            cx.notify();
+                        })),
                     ),
             )
     }

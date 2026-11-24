@@ -679,7 +679,7 @@ impl Workbench {
                 return;
             }
             if self.begin_plugin_send(tab_id, window, cx) {
-                if self.plugin_waiting(tab_id) {
+                if self.has_pending_commit(tab_id) {
                     if let Some(state) = self.sequential_group_queue.as_mut() {
                         state.active_tab = Some(tab_id);
                     }

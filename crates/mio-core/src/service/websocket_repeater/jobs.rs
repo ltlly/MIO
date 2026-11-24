@@ -36,12 +36,23 @@ impl WebSocketRepeaterService {
         context: JobContext,
         job: impl Future<Output = JobOutput> + Send + 'static,
     ) {
+        self.spawn_job_with_session(context, None, job);
+    }
+
+    pub(super) fn spawn_job_with_session(
+        &mut self,
+        context: JobContext,
+        pending_session_id: Option<Uuid>,
+        job: impl Future<Output = JobOutput> + Send + 'static,
+    ) {
         let cancel = context.cancel.clone();
         let project = context.project;
         let id = context.id;
+        let tab_id = context.tab_id;
         let handle = self.jobs.spawn(job);
+        self.job_tasks
+            .insert(handle.id(), (id, project, tab_id, pending_session_id));
         self.job_cancels.insert(id, (project, cancel));
-        drop(handle);
     }
 
     pub(super) fn spawn_disconnect_job(
@@ -92,10 +103,28 @@ impl WebSocketRepeaterService {
         &mut self,
         output: std::result::Result<JobOutput, tokio::task::JoinError>,
     ) -> Vec<WebSocketRepeaterEvent> {
-        let Ok(output) = output else {
-            return Vec::new();
+        let output = match output {
+            Ok(output) => {
+                let context_id = output.context_id();
+                self.job_tasks.retain(|_, (id, _, _, _)| *id != context_id);
+                self.job_cancels.remove(&context_id);
+                output
+            }
+            Err(join_err) => {
+                if let Some((context_id, project, tab_id, pending_session_id)) =
+                    self.job_tasks.remove(&join_err.id())
+                {
+                    self.job_cancels.remove(&context_id);
+                    if let Some(session_id) = pending_session_id
+                        && let Some(tab) = self.tab_mut(project, tab_id)
+                        && tab.pending_session_id == Some(session_id)
+                    {
+                        tab.pending_session_id = None;
+                    }
+                }
+                return Vec::new();
+            }
         };
-        self.job_cancels.remove(&output.context_id());
         match output {
             JobOutput::Connected {
                 context,
@@ -315,14 +344,25 @@ impl WebSocketRepeaterService {
                 }
             }
         }
+        let jobs_deadline = tokio::time::Instant::now() + JOB_WAIT_TIMEOUT;
         while !self.jobs.is_empty() {
-            match timeout_at(deadline, self.jobs.join_next()).await {
+            match timeout_at(jobs_deadline, self.jobs.join_next()).await {
                 Ok(Some(output)) => {
                     let _ = self.accept_job(output);
                 }
                 Ok(None) => break,
                 Err(_) => {
                     self.jobs.abort_all();
+                    let abort_deadline =
+                        tokio::time::Instant::now() + Duration::from_millis(500);
+                    while !self.jobs.is_empty() {
+                        match timeout_at(abort_deadline, self.jobs.join_next()).await {
+                            Ok(Some(output)) => {
+                                let _ = self.accept_job(output);
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
                     failures.push("WebSocket Repeater 后台任务回收超过期限".into());
                     break;
                 }

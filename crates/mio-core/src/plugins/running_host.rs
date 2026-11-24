@@ -196,7 +196,7 @@ impl Running {
                             },
                             Some(outgoing),
                             true,
-                            !is_main_resync,
+                            true,
                         );
                         self.flush_pending_revokes(outgoing)?;
                         self.flush_pending_resyncs(outgoing)?;

@@ -204,7 +204,7 @@ impl WebSocketRepeaterService {
         let peers = self.peers_tx.clone();
         let job_context = context.clone();
         let job_cancel = context.cancel.clone();
-        self.spawn_job(context, async move {
+        self.spawn_job_with_session(context, Some(session_id), async move {
             match mio_proxy::connect_websocket_session(
                 &request.url,
                 &request.handshake_headers,

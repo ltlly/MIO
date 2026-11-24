@@ -307,10 +307,11 @@ impl State {
                 if state.preferences.custom_ca_ders != prev_cas
                     && let Ok(workspace) = self.store.metadata().workspace()
                 {
-                    if let Ok(config) = Self::ws_repeater_send_config(
+                    if let Ok(config) = Self::ws_repeater_send_config_with_cache(
                         &self.preferences,
                         &workspace,
                         self.tls.compiled_client_certs.clone(),
+                        Some(&self.user_level_connections_cache),
                     ) {
                         self.ws_repeater.set_connect_config(config);
                     }
@@ -420,10 +421,11 @@ impl State {
         self.sync_sessions_workspace(&workspace);
         self.ws_repeater
             .restore_workspace_tabs(self.project, workspace.websocket_tabs.clone());
-        if let Ok(config) = Self::ws_repeater_send_config(
+        if let Ok(config) = Self::ws_repeater_send_config_with_cache(
             &self.preferences,
             &workspace,
             self.tls.compiled_client_certs.clone(),
+            Some(&self.user_level_connections_cache),
         ) {
             self.ws_repeater.set_connect_config(config);
         }

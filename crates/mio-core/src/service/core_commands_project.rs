@@ -454,7 +454,10 @@ impl State {
             });
             if revision_matches {
                 prev_certs_backup = Some(self.tls.compiled_client_certs.clone());
-                self.sync_compiled_client_certs(&workspace).await;
+                let compiled_certs = self
+                    .compile_client_certificates(&workspace.client_certificates)
+                    .await?;
+                self.tls.compiled_client_certs = compiled_certs;
                 if prev_workspace
                     .as_ref()
                     .is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy)

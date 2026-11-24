@@ -36,6 +36,18 @@ impl AuditService {
         }
     }
 
+    pub(in crate::service) fn unlink_deleted_probe_flows(&mut self, deleted: &[FlowId]) {
+        if deleted.is_empty() || self.oast_probes.is_empty() {
+            return;
+        }
+        let deleted_set: std::collections::HashSet<FlowId> = deleted.iter().copied().collect();
+        for probe in &mut self.oast_probes {
+            if probe.seed_flow_id.is_some_and(|id| deleted_set.contains(&id)) {
+                probe.seed_flow_id = None;
+            }
+        }
+    }
+
     pub(super) fn has_oast_probe_for_task(&self, project: ProjectKey, task_id: Uuid) -> bool {
         self.oast_probes
             .iter()

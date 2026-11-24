@@ -36,11 +36,13 @@ impl State {
                         tokio::time::Instant::now() + Duration::from_secs(3),
                     )
                     .await?;
-                    self.store.flows_mut().delete_live_proxy_flows(&flow_ids)
+                    self.store
+                        .flows_mut()
+                        .delete_live_proxy_flows_with_audit_changed(&flow_ids)
                 }
                 .await;
                 match outcome {
-                    Ok(deleted_ids) => {
+                    Ok((deleted_ids, audit_changed)) => {
                         let count = deleted_ids.len();
                         if !deleted_ids.is_empty() {
                             if let Ok(mut annotated) = self.storage.annotated_flows.write() {
@@ -51,7 +53,16 @@ impl State {
                             for id in &deleted_ids {
                                 self.storage.provenance.remove(*id);
                             }
+                            self.audit.unlink_deleted_probe_flows(&deleted_ids);
                             self.history_changed().await;
+                            if audit_changed && let Ok(state) = self.store.audit().read_state() {
+                                self.emit(Event::Audit(AuditEvent::State {
+                                    project,
+                                    query_revision: 0,
+                                    result: Ok(Box::new(state)),
+                                }))
+                                .await;
+                            }
                         }
                         self.emit(Event::HttpHistoryDeleted {
                             project,
@@ -93,11 +104,13 @@ impl State {
                         tokio::time::Instant::now() + Duration::from_secs(3),
                     )
                     .await?;
-                    self.store.flows_mut().clear_live_proxy_history()
+                    self.store
+                        .flows_mut()
+                        .clear_live_proxy_history_with_audit_changed()
                 }
                 .await;
                 match outcome {
-                    Ok(deleted_ids) => {
+                    Ok((deleted_ids, audit_changed)) => {
                         let count = deleted_ids.len();
                         if !deleted_ids.is_empty() {
                             if let Ok(mut annotated) = self.storage.annotated_flows.write() {
@@ -108,7 +121,16 @@ impl State {
                             for id in &deleted_ids {
                                 self.storage.provenance.remove(*id);
                             }
+                            self.audit.unlink_deleted_probe_flows(&deleted_ids);
                             self.history_changed().await;
+                            if audit_changed && let Ok(state) = self.store.audit().read_state() {
+                                self.emit(Event::Audit(AuditEvent::State {
+                                    project,
+                                    query_revision: 0,
+                                    result: Ok(Box::new(state)),
+                                }))
+                                .await;
+                            }
                         }
                         self.emit(Event::HttpHistoryDeleted {
                             project,

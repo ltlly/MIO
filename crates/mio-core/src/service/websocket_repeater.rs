@@ -11,7 +11,7 @@ use mio_plugin_api::{WebSocketDirection, WebSocketKind};
 use mio_proxy::{SendConfig, WebSocketInjectorRegistry};
 use tokio::{
     sync::{Mutex as AsyncMutex, mpsc},
-    task::{JoinHandle, JoinSet},
+    task::{Id as TaskId, JoinHandle, JoinSet},
     time::timeout_at,
 };
 use tokio_util::sync::CancellationToken;
@@ -118,6 +118,7 @@ pub(super) struct WebSocketRepeaterService {
     tabs: HashMap<ProjectKey, Vec<TabState>>,
     jobs: JoinSet<JobOutput>,
     job_cancels: HashMap<Uuid, (ProjectKey, CancellationToken)>,
+    job_tasks: HashMap<TaskId, (Uuid, ProjectKey, TabId, Option<Uuid>)>,
     peers_tx: mpsc::Sender<PeerUpdate>,
     peers_rx: mpsc::Receiver<PeerUpdate>,
     pending_events: VecDeque<WebSocketRepeaterEvent>,

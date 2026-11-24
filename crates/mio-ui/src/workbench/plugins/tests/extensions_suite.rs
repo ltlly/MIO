@@ -548,7 +548,7 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
                 .script_library
                 .code_editor
                 .update(cx, |ed, cx| ed.set_value("response.status >= 400", window, cx));
-            view.validate_script_library_editor(cx);
+            view.validate_script_library_editor(window, cx);
             assert!(
                 view.extensions
                     .script_library
@@ -580,7 +580,7 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
                 .custom_checks
                 .description_input
                 .update(cx, |inp, cx| inp.set_value("检测响应泄露调试令牌", window, cx));
-            view.test_custom_scan_check(cx);
+            view.test_custom_scan_check(window, cx);
             let test_out = view
                 .extensions
                 .custom_checks
