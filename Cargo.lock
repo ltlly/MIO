@@ -4944,6 +4944,7 @@ dependencies = [
  "anyhow",
  "clap",
  "mio-core",
+ "mio-proxy",
  "serde_json",
  "tokio",
 ]

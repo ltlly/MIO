@@ -1693,7 +1693,7 @@ impl Settings {
                             )),
                     )
                     .child(
-                        "访问 HTTPS 站点需要浏览器信任 MIO Root CA 证书；监听器为每个目标主机动态签发证书。",
+                        "访问 HTTPS 站点需要浏览器信任 MIO Root CA 证书；监听器为每个目标主机动态签发证书。内置 CA 预置面向信任库已包含该 CA、且不做吊销校验的客户端（例如未升级的旧安卓设备）。",
                     )
                     .child(
                         div()
@@ -1769,7 +1769,41 @@ impl Settings {
                                     })
                                     .detach();
                                 })),
-                            ),
+                            )
+                            .child({
+                                let preset_owner = self.owner.clone();
+                                let preset_window = self.owner_window;
+                                settings_action_button(
+                                    "settings-proxy-builtin-ca",
+                                    "内置 CA 预置",
+                                    !enabled,
+                                )
+                                .tooltip(
+                                    "选择内置签发 CA：适用于信任库已包含该 CA、且不做吊销校验的客户端",
+                                )
+                                .tab_stop(false)
+                                .dropdown_menu(move |mut menu, _, _| {
+                                    for preset in mio_core::BUILTIN_CA_PRESETS {
+                                        let preset = *preset;
+                                        let owner = preset_owner.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(preset.display_name)
+                                                .disabled(!enabled)
+                                                .on_click(move |_, _, cx| {
+                                                    let owner = owner.clone();
+                                                    cx.defer(move |cx| {
+                                                        let _ = preset_window.update(cx, |_, _window, cx| {
+                                                            let _ = owner.update(cx, |wb, cx| {
+                                                                wb.use_builtin_ca_preset(preset, cx)
+                                                            });
+                                                        });
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                })
+                            }),
                     )
                     .when_some(self.state.last_ca_fingerprint.clone(), |this, fp| {
                         this.child(

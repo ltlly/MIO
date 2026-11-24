@@ -119,6 +119,23 @@ pub(super) fn render_human(payload: &AiIpcPayload, show_original: bool) {
         } => {
             println!("已导出 Proxy CA ({ca_format}, CN={ca_subject}) -> {ca_path}");
         }
+        AiIpcPayload::CaPresets { presets } => {
+            for preset in presets {
+                println!(
+                    "{}  {} — {}",
+                    preset.id, preset.display_name, preset.description
+                );
+            }
+        }
+        AiIpcPayload::CaPresetApplied {
+            preset_id,
+            ca_fingerprint,
+            ca_subject,
+        } => {
+            println!(
+                "已切换 Proxy CA 为内置预置 {preset_id}（CN={ca_subject}，SHA-256={ca_fingerprint}）"
+            );
+        }
         AiIpcPayload::ProxyControl {
             proxy_running,
             proxy_address,

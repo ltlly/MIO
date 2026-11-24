@@ -76,6 +76,9 @@ enum CliCommand {
         /// 启动后导出 CA 证书到指定路径
         #[arg(long = "export-ca")]
         export_ca: Option<String>,
+        /// 启动后切换为内置 CA 预置（见 ca presets）
+        #[arg(long = "ca-preset")]
+        ca_preset: Option<String>,
     },
 }
 
@@ -181,6 +184,13 @@ enum CaCommand {
         /// 强制导出 DER 格式
         #[arg(long, conflicts_with = "pem")]
         der: bool,
+    },
+    /// 列出内置 CA 预置
+    Presets,
+    /// 将 Proxy CA 切换为内置 CA 预置
+    Use {
+        /// 预置 ID（见 ca presets）
+        preset_id: String,
     },
 }
 
@@ -360,8 +370,12 @@ async fn execute_cli(cli: Cli) -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(default_ipc_socket_path);
     let json = cli.json;
     let (req, show_original) = match cli.command {
-        CliCommand::Serve { listen, export_ca } => {
-            return run_headless_server(socket_path, listen, export_ca, json).await;
+        CliCommand::Serve {
+            listen,
+            export_ca,
+            ca_preset,
+        } => {
+            return run_headless_server(socket_path, listen, export_ca, ca_preset, json).await;
         }
         CliCommand::Status => (AiIpcRequest::Status, false),
         CliCommand::Flows { command } => match command {
@@ -442,6 +456,11 @@ async fn execute_cli(cli: Cli) -> Result<()> {
                         None
                     },
                 },
+                false,
+            ),
+            CaCommand::Presets => (AiIpcRequest::CaPresets, false),
+            CaCommand::Use { preset_id } => (
+                AiIpcRequest::CaPresetUse { preset_id },
                 false,
             ),
         },
@@ -573,8 +592,20 @@ async fn run_headless_server(
     socket_path: PathBuf,
     listen: Option<String>,
     export_ca: Option<String>,
+    ca_preset: Option<String>,
     json: bool,
 ) -> Result<()> {
+    let preset = match ca_preset {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            ensure!(!trimmed.is_empty(), "--ca-preset 不能为空");
+            Some(
+                mio_core::ca_preset(trimmed)
+                    .ok_or_else(|| anyhow::anyhow!("未知 CA 预置：{trimmed}"))?,
+            )
+        }
+        None => None,
+    };
     let ca_dest = match export_ca {
         Some(raw) => {
             let trimmed = raw.trim();
@@ -615,6 +646,21 @@ async fn run_headless_server(
             _ => None,
         })
         .await?;
+
+        if let Some(preset) = preset {
+            commands
+                .send(Command::ImportCa {
+                    cert_pem: preset.pem.to_string(),
+                    key_pem: String::new(),
+                })
+                .await
+                .context("发送内置 CA 预置命令失败")?;
+            await_headless_event(&mut events, "import_ca", |ev| match ev {
+                Event::CaRegenerated { .. } => Some(()),
+                _ => None,
+            })
+            .await?;
+        }
 
         if let Some(ca_path) = ca_dest {
             commands
@@ -881,6 +927,36 @@ mod tests {
             }
         );
 
+        assert_eq!(
+            parse_cli(&s(&["ca", "presets"])).unwrap().command,
+            CliCommand::Ca {
+                command: CaCommand::Presets
+            }
+        );
+        assert_eq!(
+            parse_cli(&s(&["ca", "use", "emudhra-emsign-dv-g3b"]))
+                .unwrap()
+                .command,
+            CliCommand::Ca {
+                command: CaCommand::Use {
+                    preset_id: "emudhra-emsign-dv-g3b".into()
+                }
+            }
+        );
+        assert!(matches!(
+            parse_cli(&s(&[
+                "serve",
+                "--ca-preset",
+                "emudhra-aaa-dv-g3b"
+            ]))
+            .unwrap()
+            .command,
+            CliCommand::Serve {
+                ca_preset: Some(ref id),
+                ..
+            } if id == "emudhra-aaa-dv-g3b"
+        ));
+
         // Option value named "--json" must not be swallowed as global --json flag.
         let cli = parse_cli(&s(&["flows", "list", "--filter", "--json"])).unwrap();
         assert!(!cli.json);
@@ -1010,6 +1086,7 @@ mod tests {
             CliCommand::Serve {
                 listen: Some("127.0.0.1:8080".into()),
                 export_ca: Some("/tmp/ca.der".into()),
+                ca_preset: None,
             }
         );
     }
@@ -1209,6 +1286,7 @@ mod tests {
                 server_sock,
                 Some("127.0.0.1:0".into()),
                 Some(server_ca),
+                None,
                 true,
             )
             .await
@@ -1256,15 +1334,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_server_applies_builtin_ca_preset_and_exports_it() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = TempDirGuard::new("mio-preset");
+        let identity_dir = dir.path.join("identity");
+        let _id_guard = EnvVarGuard::set("MIO_IDENTITY_DIR", &identity_dir);
+
+        let sock = dir.path.join("preset.sock");
+        let ca_pem = dir.path.join("preset-ca.pem");
+        let preset = mio_core::ca_preset("emudhra-emsign-dv-g3b").unwrap();
+        let expected = mio_proxy::MitmAuthority::from_pem_pair(preset.pem, "").unwrap();
+
+        let server_sock = sock.clone();
+        let server_ca = ca_pem.to_string_lossy().into_owned();
+        let server_task = tokio::spawn(async move {
+            run_headless_server(
+                server_sock,
+                None,
+                Some(server_ca),
+                Some("emudhra-emsign-dv-g3b".into()),
+                true,
+            )
+            .await
+        });
+
+        let mut ready = false;
+        for _ in 0..200 {
+            if sock.exists() && ca_pem.exists() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ready, "headless preset startup did not export CA");
+
+        let exported = std::fs::read_to_string(&ca_pem).unwrap();
+        assert_eq!(exported, expected.certificate_pem());
+
+        let s_down = sock.clone();
+        let (down_env, _) = tokio::task::spawn_blocking(move || {
+            call_ai_ipc(&s_down, &AiIpcRequest::Shutdown, Duration::from_secs(5))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(down_env.ok);
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn headless_server_rejects_invalid_listen_address_cleanly() {
         let dir = TempDirGuard::new("mio-bad");
         let sock = dir.path.join("bad.sock");
-        let err = run_headless_server(sock.clone(), Some("not-a-socket-addr".into()), None, true)
-            .await
-            .unwrap_err();
+        let err =
+            run_headless_server(sock.clone(), Some("not-a-socket-addr".into()), None, None, true)
+                .await
+                .unwrap_err();
         assert!(err.to_string().contains("SocketAddr"));
 
-        let blank_err = run_headless_server(sock, Some("   ".into()), None, true)
+        let blank_err = run_headless_server(sock, Some("   ".into()), None, None, true)
             .await
             .unwrap_err();
         assert!(blank_err.to_string().contains("--listen"));

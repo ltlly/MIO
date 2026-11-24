@@ -436,6 +436,25 @@ impl Workbench {
         cx.notify();
     }
 
+    pub(in crate::workbench) fn use_builtin_ca_preset(
+        &mut self,
+        preset: mio_core::CaPreset,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.backend_available() {
+            return;
+        }
+        self.enqueue(
+            Command::ImportCa {
+                cert_pem: preset.pem.to_string(),
+                key_pem: String::new(),
+            },
+            cx,
+        );
+        self.status = format!("正在切换内置 CA 预置：{}…", preset.display_name).into();
+        cx.notify();
+    }
+
     pub(in crate::workbench) fn stop_proxy_listener(
         &mut self,
         listener_id: mio_core::Uuid,

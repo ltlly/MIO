@@ -10,3 +10,4 @@ vendor/*/target/
 *.mio-shm
 *.pem
 *.key
+!crates/mio-core/assets/ca-presets/*.pem

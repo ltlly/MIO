@@ -41,6 +41,7 @@ Vendored workspace patches in `vendor/` (detailed in [vendor/README.md](../vendo
 
 - **Listener**: Default `127.0.0.1:8080`. Single port multiplexes HTTP/1.1 forward proxy, HTTPS `CONNECT` MITM (TLS 1.2/1.3), dual-leg HTTP/2 (`h2`), inbound/outbound SOCKS5 & SOCKS5h, WebSocket (`ws://` / `wss://`), SSE streaming.
 - **Root CA**: `crates/mio-core/src/authority.rs`. Generates persistent 20-year ECDSA P-256 root CA (`O=MIO local interception`, `CN=MIO local CA`) saved to `authority.json` (override dir via `MIO_IDENTITY_DIR`). Dynamically issues 90-day SAN leaf certs (cached per host, supports FQDN trailing-dot normalization & raw IP SANs).
+- **Built-in CA Presets**: `crates/mio-core/src/ca_preset.rs` embeds PEM bundles under `crates/mio-core/assets/ca-presets/` (issuer-first chain + private key). Selecting a preset imports it through `Command::ImportCa`; the proxy serves leaves signed by that CA. Presets target clients whose trust store already contains the anchor and that do not enforce revocation/CT (e.g. old Android devices). The shipped presets derive from the October 2026 eMudhra emSign intermediate-key compromise; both intermediates are revoked and removed from current major trust stores, so acceptance is limited to stale trust stores.
 - **CA Portal**: Proxy intercepts `http://mio/`, `http://mio/cert`, `http://mio/cert.pem`.
 - **Provenance**: `FlowProvenance` records ordered request/response mutations across auto-unpack (`gzip`/`deflate`/`br`), Match & Replace rules, Session actions, intercept edits, and Plugin HTTP hooks.
 
@@ -81,6 +82,8 @@ Global options: `--socket <path>`, `--json`, `help` / `-h` / `--help`.
 | `workspace get` | — | `WorkspaceGet` |
 | `workspace set` | `<json-file>` | `WorkspacePatch` |
 | `ca export` | `<dest-path> [--pem\|--der]` | `ExportCa` |
+| `ca presets` | — | `CaPresets` |
+| `ca use` | `<preset-id>` | `CaPresetUse` |
 | `slim-save` | `<dest-path>` | `SlimSave` |
 | `shutdown` | — | `Shutdown` |
-| `serve` | `[--listen <addr>] [--export-ca <path>]` | Starts headless runtime + IPC loop |
+| `serve` | `[--listen <addr>] [--export-ca <path>] [--ca-preset <preset-id>]` | Starts headless runtime + IPC loop |

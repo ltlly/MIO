@@ -21,6 +21,7 @@ mod part_16;
 mod part_17;
 mod part_18;
 mod part_19;
+mod part_20;
 
 pub(crate) const TLS_TEST_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBZDCCAQqgAwIBAgIUcdDiD87qgL+T5tRIVfhqVmxmYRgwCgYIKoZIzj0EAwIw\n\

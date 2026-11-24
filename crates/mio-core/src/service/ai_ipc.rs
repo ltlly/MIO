@@ -104,6 +104,10 @@ pub enum AiIpcRequest {
         #[serde(default)]
         pem: Option<bool>,
     },
+    CaPresets,
+    CaPresetUse {
+        preset_id: String,
+    },
     ProxyStart {
         #[serde(default)]
         bind_address: Option<String>,
@@ -187,6 +191,13 @@ pub struct AiIpcFlowDetail {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaPresetInfo {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AiIpcPendingItem {
     pub flow_id: Uuid,
     pub revision: u64,
@@ -228,6 +239,14 @@ pub enum AiIpcPayload {
     CaExported {
         ca_path: String,
         ca_format: String,
+        ca_subject: String,
+    },
+    CaPresets {
+        presets: Vec<CaPresetInfo>,
+    },
+    CaPresetApplied {
+        preset_id: String,
+        ca_fingerprint: String,
         ca_subject: String,
     },
     ProxyControl {

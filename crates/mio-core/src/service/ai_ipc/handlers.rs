@@ -9,8 +9,8 @@ use super::{
 use crate::{
     Command, Decision, Event, FlowId, FlowRecord, FlowState, FlowSummary, Header, HttpRequest,
     HttpVersion, InterceptStage, ProvenanceActor, SessionTool, SlimSaveOptions, TrafficSource,
-    WorkTab, Workspace, authority, detect_request_line_version, parse_repeater_request,
-    request_to_raw, response_to_raw,
+    WorkTab, Workspace, authority, ca_preset, ca_preset::BUILTIN_CA_PRESETS,
+    detect_request_line_version, parse_repeater_request, request_to_raw, response_to_raw,
     service::{
         State,
         core_repeater_send::{
@@ -187,6 +187,8 @@ impl State {
             }
             AiIpcRequest::SlimSave { path, options } => self.ipc_slim_save(&path, options).await,
             AiIpcRequest::ExportCa { path, pem } => self.ipc_export_ca(&path, pem).await,
+            AiIpcRequest::CaPresets => self.ipc_ca_presets(),
+            AiIpcRequest::CaPresetUse { preset_id } => self.ipc_ca_preset_use(&preset_id).await,
             AiIpcRequest::ProxyStart { bind_address } => self.ipc_proxy_start(bind_address).await,
             AiIpcRequest::ProxyStop => self.ipc_proxy_stop().await,
             AiIpcRequest::ProxyIntercept {
@@ -517,6 +519,37 @@ impl State {
         Ok(AiIpcPayload::CaExported {
             ca_path: dest.to_string_lossy().into_owned(),
             ca_format: if use_pem { "pem".into() } else { "der".into() },
+            ca_subject: subject,
+        })
+    }
+
+    fn ipc_ca_presets(&self) -> Result<AiIpcPayload> {
+        Ok(AiIpcPayload::CaPresets {
+            presets: BUILTIN_CA_PRESETS
+                .iter()
+                .map(|preset| super::CaPresetInfo {
+                    id: preset.id.to_string(),
+                    display_name: preset.display_name.to_string(),
+                    description: preset.description.to_string(),
+                })
+                .collect(),
+        })
+    }
+
+    async fn ipc_ca_preset_use(&mut self, preset_id: &str) -> Result<AiIpcPayload> {
+        let preset = ca_preset(preset_id.trim()).context("未知 CA 预置")?;
+        self.command(Command::ImportCa {
+            cert_pem: preset.pem.to_string(),
+            key_pem: String::new(),
+        })
+        .await?;
+        let ca = self.authority().await?;
+        let der = ca.certificate_der();
+        let subject = mio_proxy::UpstreamTls::certificate_display_name(&der)
+            .unwrap_or_else(|_| preset.display_name.to_string());
+        Ok(AiIpcPayload::CaPresetApplied {
+            preset_id: preset.id.to_string(),
+            ca_fingerprint: authority::fingerprint_sha256(&der),
             ca_subject: subject,
         })
     }

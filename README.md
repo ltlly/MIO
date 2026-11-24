@@ -71,6 +71,19 @@ sudo cp /tmp/mio-root-ca.crt /usr/local/share/ca-certificates/mio-root-ca.crt &&
 certutil.exe -f -addstore "Root" C:\path\to\mio-root-ca.cer
 ```
 
+### Built-in CA Presets
+
+`crates/mio-core/src/ca_preset.rs` ships embedded issuing CA bundles for clients whose system trust store already contains the anchor and does not enforce revocation (old Android devices without updated CA stores). Selection imports the bundle through the same `Command::ImportCa` path, so the listener hot-swaps to the preset CA and serves per-host leaves signed by it.
+
+```sh
+mio-cli ca presets
+mio-cli ca use emudhra-emsign-dv-g3b   # emSign ECC Root CA - G3 chain
+mio-cli ca use emudhra-aaa-dv-g3b      # AAA Certificate Services cross-sign chain
+mio-cli serve --listen 127.0.0.1:8080 --ca-preset emudhra-emsign-dv-g3b
+```
+
+The shipped presets are the two emSign DV TLS CA - G3B cross-signs from the October 2026 eMudhra intermediate-key compromise. Both intermediates were revoked and removed from current major trust stores; they only work on clients with a stale trust store that skips revocation and CT checks. If an origin server still presents a certificate chaining to the same root, add that root to the TLS custom CA list (or use SSL Pass-Through) so the upstream connection verifies.
+
 ---
 
 ## `MioAT` & `mio-cli` Quick Reference
