@@ -14,7 +14,7 @@ pub use crate::audit_engine::{
     ACTIVE_CANARY, ACTIVE_REDIRECT_TARGET, ACTIVE_SPLIT_HEADER, InsertionLocation, InsertionPoint,
     inspect_flow_passive, render_audit_report_html, render_audit_report_json,
 };
-pub use crate::oast::LocalOastServer;
+pub use crate::oast::{LocalOastServer, OastRelayConfig, OastRelayServer};
 
 pub const MAX_AUDIT_TASKS: usize = 512;
 pub const MAX_AUDIT_FINDINGS: usize = 4_096;
@@ -311,6 +311,10 @@ pub struct CollaboratorStatus {
     pub config: SelfHostedOastConfig,
     pub issued_tokens: Vec<OastPayloadToken>,
     pub interactions: Vec<OastInteraction>,
+    #[serde(default)]
+    pub last_poll_unix_ms: Option<i64>,
+    #[serde(default)]
+    pub last_poll_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]

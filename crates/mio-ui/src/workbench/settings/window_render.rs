@@ -252,13 +252,16 @@ impl Settings {
         let vis_editor = Self::page_matches(SettingsPage::UserMessageEditor, scope, &query);
         let vis_misc = Self::page_matches(SettingsPage::UserMisc, scope, &query);
         let vis_user = vis_display || vis_editor || vis_misc;
-        let any_visible = vis_tools || vis_project || vis_sessions || vis_network || vis_user;
+        let vis_suite_updates = Self::page_matches(SettingsPage::SuiteUpdates, scope, &query);
+        let vis_suite = vis_suite_updates;
+        let any_visible =
+            vis_tools || vis_project || vis_sessions || vis_network || vis_user || vis_suite;
 
         let tools_collapsed = !searching && self.collapsed_groups[0];
         let project_collapsed = !searching && self.collapsed_groups[1];
         let network_collapsed = !searching && self.collapsed_groups[3];
         let user_collapsed = !searching && self.collapsed_groups[4];
-
+        let suite_collapsed = !searching && self.collapsed_groups[5];
         let intruder_page = self.page == SettingsPage::Intruder;
         let repeater_page = self.page == SettingsPage::Repeater;
 
@@ -621,6 +624,31 @@ impl Settings {
                         this.select_page(SettingsPage::UserDisplay, window, cx)
                     })),
                 )
+            })
+            .when(vis_suite, |this| {
+                this.child(self.render_nav_group_header(
+                    "settings-suite",
+                    "Suite",
+                    5,
+                    suite_collapsed,
+                    false,
+                    cx,
+                ))
+            })
+            .when(vis_suite_updates && !suite_collapsed, |this| {
+                this.child(
+                    settings_navigation(
+                        "settings-suite-updates",
+                        "Updates",
+                        self.page == SettingsPage::SuiteUpdates,
+                        window,
+                        cx,
+                    )
+                    .tab_stop(false)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_page(SettingsPage::SuiteUpdates, window, cx)
+                    })),
+                )
             });
 
         div()
@@ -656,6 +684,7 @@ impl Settings {
             SettingsPage::UserDisplay => ("User interface", Some("Display")),
             SettingsPage::UserMessageEditor => ("User interface", Some("Message editor")),
             SettingsPage::UserMisc => ("User interface", Some("Hotkeys")),
+            SettingsPage::SuiteUpdates => ("Suite", Some("Updates")),
         };
         let enabled = self.state.enabled;
         let owner = cx.weak_entity();
@@ -858,6 +887,9 @@ impl Render for Settings {
                         })
                         .when(self.page == SettingsPage::UserMisc, |this| {
                             this.child(self.render_user_misc(window, cx))
+                        })
+                        .when(self.page == SettingsPage::SuiteUpdates, |this| {
+                            this.child(self.render_suite_updates(window, cx))
                         }),
                 ),
             )

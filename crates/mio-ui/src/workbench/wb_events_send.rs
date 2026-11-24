@@ -261,18 +261,21 @@ impl Workbench {
             Event::UpdateStatus(status) => {
                 match &status {
                     mio_core::UpdateStatus::Available(info) => {
+                        self.last_available_update = Some(info.clone());
                         self.status = format!(
-                            "发现新版本 v{}（可在设置 > 软件更新中下载安装）",
+                            "发现新版本 v{}（可在设置 > Suite > Updates 中下载安装）",
                             info.latest_version
                         );
                     }
                     mio_core::UpdateStatus::UpToDate { current_version } => {
+                        self.last_available_update = None;
                         self.status = format!("当前已是最新版本 v{current_version}");
                     }
                     mio_core::UpdateStatus::RestartRequired {
                         version,
                         relaunched: true,
                     } => {
+                        self.last_available_update = None;
                         self.status = format!("v{version} 安装完成，正在重启…");
                         self.update_status = status;
                         cx.notify();
@@ -295,6 +298,13 @@ impl Workbench {
                             });
                         }
                         return ControlFlow::Continue(());
+                    }
+                    mio_core::UpdateStatus::RestartRequired {
+                        version,
+                        relaunched: false,
+                    } => {
+                        self.last_available_update = None;
+                        self.status = format!("v{version} 已就绪，请重启 MIO 完成更新");
                     }
                     mio_core::UpdateStatus::Error(err) => {
                         self.status = format!("检查或安装更新失败：{err}");
@@ -357,9 +367,19 @@ impl Workbench {
                 info,
                 panel,
                 auto_reload,
+                hook_filter,
                 order,
             } => {
-                self.handle_plugin_auto_loaded(project, info, panel, auto_reload, order, window, cx);
+                self.handle_plugin_auto_loaded(
+                    project,
+                    info,
+                    panel,
+                    auto_reload,
+                    hook_filter,
+                    order,
+                    window,
+                    cx,
+                );
             }
             Event::PluginAutoLoadFailed {
                 project,

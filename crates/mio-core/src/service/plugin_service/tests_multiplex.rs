@@ -65,6 +65,8 @@ fn setup_multiplex_state() -> MultiplexStateSetup {
             entry_modified: e_mod,
             entry_size: e_sz,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -410,6 +412,8 @@ async fn suite_instance_ceiling_and_child_editor_budget_are_independent() {
                 entry_modified: e_mod,
                 entry_size: e_sz,
                 auto_reload: false,
+                hook_filter: PluginHookFilter::default(),
+                hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
                 info: LoadedPlugin {
                     identity,
                     directory: dir.path().to_path_buf(),
@@ -664,6 +668,7 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
                 )),
             }),
             supports_panel_multiplexing: true,
+            supports_large_body: false,
         };
         let mut session = WorkerSession::accept(
             BlockingReader(worker_rx, rt_handle.clone()),
@@ -737,6 +742,7 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
                                         headers: vec![],
                                         body: b"extra".to_vec(),
                                         trailers: vec![],
+                                        ..Default::default()
                                     },
                                 )),
                                 parent_request_id: reply_to,
@@ -833,6 +839,8 @@ async fn real_running_multiplex_worker_context_viewer_survives_workspace_save_an
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -1177,6 +1185,7 @@ async fn failed_multiplex_init_propagates_close_error_diagnostic_and_keeps_closi
                 )),
             }),
             supports_panel_multiplexing: true,
+            supports_large_body: false,
         };
         let mut session = WorkerSession::accept(
             BlockingReader(worker_rx, rt_handle.clone()),
@@ -1247,6 +1256,8 @@ async fn failed_multiplex_init_propagates_close_error_diagnostic_and_keeps_closi
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -1515,6 +1526,8 @@ async fn real_sdk_natural_ui_timeout_resyncs_and_recovers_next_host_call() {
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -1792,6 +1805,8 @@ async fn real_sdk_natural_destroy_timeout_reclaims_runtime_and_project_quota_on_
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -1992,6 +2007,8 @@ async fn setup_duplex_service_state(
             entry_modified: package.modified,
             entry_size: package.executable_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),
@@ -2078,6 +2095,7 @@ async fn plugin_workspace_changed_cancels_all_waiters_before_event_backpressure_
                 required_components: vec![],
                 panel: Some(make_duplex_panel_snapshot(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -2620,6 +2638,7 @@ async fn service_unpolled_commits_cancelled_synchronously_with_bound_resources()
                 required_components: vec![],
                 panel: Some(make_duplex_panel_snapshot(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -3053,6 +3072,7 @@ async fn service_workspace_close_two_tabs_on_same_panel_cancels_deferred_second_
                 required_components: vec![],
                 panel: Some(make_duplex_panel_snapshot(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;

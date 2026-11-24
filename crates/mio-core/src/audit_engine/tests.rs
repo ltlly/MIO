@@ -534,3 +534,150 @@ fn scanner_inspects_bodies_past_1kb_and_avoids_double_url_encoding() {
         "reflection past 1024 chars must be detected"
     );
 }
+
+#[test]
+fn deepened_passive_and_multi_step_active_rules_cover_fingerprints_and_differentials() {
+    let gql_body = r#"{"data":{"__schema":{"queryType":{"name":"Query"},"types":[]}}}"#;
+    let gql_hits = inspect_passive(
+        None,
+        &rq("https://api.example.invalid/graphql", &[], ""),
+        &rp(
+            200,
+            &[
+                ("Content-Type", "application/json"),
+                ("Strict-Transport-Security", "max-age=0"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+            ],
+            gql_body,
+        ),
+        300,
+    );
+    assert!(gql_hits.iter().any(|f| f.issue_id == "0x00200512"));
+    assert!(gql_hits.iter().any(|f| f.issue_id == "0x01000300"));
+
+    let html_page = concat!(
+        "<html><body>",
+        "<script>const p = location.hash; document.body.innerHTML = p;</script>",
+        "<form method=\"post\" action=\"/profile/save\">",
+        "<input type=\"file\" name=\"avatar\">",
+        "</form>",
+        "<!-- -----BEGIN EC PRIVATE KEY----- -->",
+        "</body></html>"
+    );
+    let page_hits = inspect_passive(
+        None,
+        &rq(
+            "https://portal.example.invalid/settings",
+            &[
+                ("Cookie", "sid=tok_session; prefs=rO0ABXNyAA5qYXZhLnV0aWwu"),
+                ("X-Forwarded-Host", "redir.example.invalid"),
+            ],
+            "",
+        ),
+        &rp(
+            200,
+            &[
+                ("Content-Type", "text/html"),
+                ("Strict-Transport-Security", "max-age=31536000"),
+                ("X-Frame-Options", "DENY"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+                ("Location", "https://redir.example.invalid/next"),
+            ],
+            html_page,
+        ),
+        301,
+    );
+    for expected in [
+        "0x00600550",
+        "0x00400900",
+        "0x00200310",
+        "0x00200700",
+        "0x00500980",
+        "0x00400f00",
+    ] {
+        assert!(
+            page_hits.iter().any(|f| f.issue_id == expected),
+            "expected passive issue {expected}, got {:?}",
+            page_hits.iter().map(|f| &f.issue_id).collect::<Vec<_>>()
+        );
+    }
+
+    let base_req = rq(
+        "https://api.example.invalid/items?id=42&tpl=welcome",
+        &[("Authorization", "Bearer valid_token")],
+        "",
+    );
+    let pts = extract_insertion_points(&base_req);
+    let id_pt = &pts[0];
+    let tpl_pt = &pts[1];
+
+    let base_resp = rp(
+        200,
+        &[("Content-Type", "application/json")],
+        r#"{"id":42,"title":"Standard Widget Inventory Item","stock":18}"#,
+    );
+    let (true_req, _false_req) = build_sql_boolean_pair(&base_req, id_pt).unwrap();
+    let false_resp = rp(200, &[("Content-Type", "application/json")], r#"{"items":[]}"#);
+    let bool_hits = evaluate_sql_boolean_pair(
+        None,
+        &true_req,
+        id_pt,
+        &base_resp,
+        &base_resp,
+        &false_resp,
+        302,
+    );
+    assert_eq!(bool_hits.len(), 1);
+    assert_eq!(bool_hits[0].issue_id, "0x00100200");
+    assert_eq!(bool_hits[0].parameter.as_deref(), Some("id"));
+
+    let ssti_payload = format!("{}{{{{1331*73}}}}", tpl_pt.value);
+    let ssti_req = build_probe_request(&base_req, tpl_pt, &ssti_payload).unwrap();
+    let ssti_hits = evaluate_active_check(
+        None,
+        &ssti_req,
+        tpl_pt,
+        &ssti_payload,
+        &base_resp,
+        &rp(200, &[("Content-Type", "text/html")], "welcome97163"),
+        303,
+    );
+    assert!(ssti_hits.iter().any(|f| f.issue_id == "0x00101080"));
+
+    let trav_req = build_probe_request(&base_req, tpl_pt, "../../../../etc/passwd").unwrap();
+    let trav_hits = evaluate_active_check(
+        None,
+        &trav_req,
+        tpl_pt,
+        "../../../../etc/passwd",
+        &base_resp,
+        &rp(200, &[("Content-Type", "text/plain")], "root:x:0:0:root:/root:/bin/sh"),
+        304,
+    );
+    assert!(trav_hits.iter().any(|f| f.issue_id == "0x00100300"));
+
+    let host_probe = build_host_override_probe(&base_req);
+    let host_hits = evaluate_host_override_probe(
+        None,
+        &host_probe,
+        &base_resp,
+        &rp(
+            302,
+            &[(
+                "Location",
+                &format!("https://{ACTIVE_OVERRIDE_HOST}/reset"),
+            )],
+            "",
+        ),
+        305,
+    );
+    assert_eq!(host_hits.len(), 1);
+    assert_eq!(host_hits[0].issue_id, "0x00400f00");
+
+    let unauth_req = build_authz_strip_probe(&base_req).expect("has Authorization");
+    let authz_hits = evaluate_authz_strip_probe(None, &unauth_req, &base_resp, &base_resp, 306);
+    assert_eq!(authz_hits.len(), 1);
+    assert_eq!(authz_hits[0].issue_id, "0x00100850");
+}

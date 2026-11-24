@@ -666,14 +666,48 @@ pub(crate) struct RenderedResponseLink {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderedResponseImageRef {
+    pub src: String,
+    pub alt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderedResponseTable {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenderedInlineTheme {
+    pub background_hex: Option<u32>,
+    pub text_hex: Option<u32>,
+    pub accent_hex: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderedHtmlSummary {
+    pub title: Option<String>,
+    pub meta_description: Option<String>,
+    pub headings: Vec<(u8, String)>,
+    pub paragraphs: Vec<String>,
+    pub links: Vec<RenderedResponseLink>,
+    pub forms: Vec<RenderedResponseForm>,
+    pub scripts: Vec<String>,
+    pub stylesheets: Vec<String>,
+    pub images: Vec<RenderedResponseImageRef>,
+    pub tables: Vec<RenderedResponseTable>,
+    pub code_blocks: Vec<String>,
+    pub inline_theme: RenderedInlineTheme,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RenderedBodySummary {
-    Html {
-        title: Option<String>,
-        headings: Vec<(u8, String)>,
-        paragraphs: Vec<String>,
-        links: Vec<RenderedResponseLink>,
-        forms: Vec<RenderedResponseForm>,
-        scripts: Vec<String>,
+    Html(Box<RenderedHtmlSummary>),
+    Xml {
+        root_tag: Option<String>,
+        node_count: usize,
+        pretty: String,
+        byte_len: usize,
     },
     Json {
         pretty: String,
@@ -761,6 +795,22 @@ pub(crate) fn parse_rendered_http_response(raw: &[u8]) -> RenderedHttpResponse {
                 byte_len: body_slice.len(),
                 hex_preview: hex_encode(&body_slice[..body_slice.len().min(256)]),
             }
+        }
+    } else if (mime_essence == "application/xml"
+        || mime_essence == "text/xml"
+        || (mime_essence.ends_with("+xml")
+            && !mime_essence.contains("html")
+            && !mime_essence.contains("svg"))
+        || body_slice.trim_ascii_start().starts_with(b"<?xml"))
+        && let Some(ref text) = decoded_body_text
+        && let Some((root_tag, node_count, pretty)) =
+            mio_core::html_extract::format_xml_preview(text.trim())
+    {
+        RenderedBodySummary::Xml {
+            root_tag,
+            node_count,
+            pretty,
+            byte_len: body_slice.len(),
         }
     } else if let Some(text) = decoded_body_text {
         RenderedBodySummary::PlainText {
@@ -850,8 +900,9 @@ fn detect_image_metadata(
 
 fn extract_html_render_summary(html: &str) -> RenderedBodySummary {
     let summary = mio_core::html_extract::extract_html_summary(html);
-    RenderedBodySummary::Html {
+    RenderedBodySummary::Html(Box::new(RenderedHtmlSummary {
         title: summary.title,
+        meta_description: summary.meta_description,
         headings: summary.headings,
         paragraphs: summary.paragraphs,
         links: summary
@@ -880,5 +931,28 @@ fn extract_html_render_summary(html: &str) -> RenderedBodySummary {
             })
             .collect(),
         scripts: summary.scripts,
-    }
+        stylesheets: summary.stylesheets,
+        images: summary
+            .images
+            .into_iter()
+            .map(|img| RenderedResponseImageRef {
+                src: img.src,
+                alt: img.alt,
+            })
+            .collect(),
+        tables: summary
+            .tables
+            .into_iter()
+            .map(|t| RenderedResponseTable {
+                headers: t.headers,
+                rows: t.rows,
+            })
+            .collect(),
+        code_blocks: summary.code_blocks,
+        inline_theme: RenderedInlineTheme {
+            background_hex: summary.inline_theme.background_hex,
+            text_hex: summary.inline_theme.text_hex,
+            accent_hex: summary.inline_theme.accent_hex,
+        },
+    }))
 }

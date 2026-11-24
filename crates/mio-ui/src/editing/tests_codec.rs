@@ -259,14 +259,21 @@ fn rendered_http_response_parses_html_json_and_image_metadata_offline() {
     assert_eq!(parsed_html.status_code, Some(200));
     assert_eq!(parsed_html.location.as_deref(), Some("/dashboard"));
     match parsed_html.summary {
-        RenderedBodySummary::Html {
-            title,
-            headings,
-            paragraphs,
-            links,
-            forms,
-            scripts,
-        } => {
+        RenderedBodySummary::Html(html_summary) => {
+            let RenderedHtmlSummary {
+                title,
+                meta_description: _,
+                headings,
+                paragraphs,
+                links,
+                forms,
+                scripts,
+                stylesheets: _,
+                images: _,
+                tables: _,
+                code_blocks: _,
+                inline_theme: _,
+            } = *html_summary;
             assert_eq!(title.as_deref(), Some("管理后台登录"));
             assert_eq!(headings, vec![(1, "欢迎访问".to_owned())]);
             assert!(paragraphs.iter().any(|p| p.contains("请输入账号密码")));
@@ -282,6 +289,40 @@ fn rendered_http_response_parses_html_json_and_image_metadata_offline() {
             assert_eq!(scripts, vec!["/static/app.js".to_owned()]);
         }
         other => panic!("expected Html summary, got {other:?}"),
+    }
+
+    let xml_resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n\r\n<service><status>ready</status></service>";
+    let parsed_xml = parse_rendered_http_response(xml_resp);
+    match parsed_xml.summary {
+        RenderedBodySummary::Xml {
+            root_tag,
+            node_count,
+            pretty,
+            ..
+        } => {
+            assert_eq!(root_tag.as_deref(), Some("service"));
+            assert_eq!(node_count, 2);
+            assert!(pretty.contains("<status>ready</status>"));
+        }
+        other => panic!("expected Xml summary, got {other:?}"),
+    }
+
+    let svg_resp = b"HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\n\r\n<svg width=\"80\" height=\"40\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"80\" height=\"40\"/></svg>";
+    let parsed_svg = parse_rendered_http_response(svg_resp);
+    match parsed_svg.summary {
+        RenderedBodySummary::Image {
+            format_name,
+            mime_type,
+            width,
+            height,
+            ..
+        } => {
+            assert_eq!(format_name, "SVG");
+            assert_eq!(mime_type, "image/svg+xml");
+            assert_eq!(width, Some(80));
+            assert_eq!(height, Some(40));
+        }
+        other => panic!("expected SVG Image summary, got {other:?}"),
     }
 
     let json_resp = b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"items\":[1,2]}";

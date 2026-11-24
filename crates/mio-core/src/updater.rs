@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     fs,
-    io::{BufWriter, Write as _},
+    io::{BufWriter, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,6 +15,7 @@ use mio_proxy::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_RELEASES_API_URL: &str =
@@ -54,6 +55,10 @@ pub enum UpdateStatus {
         version: String,
         received_bytes: u64,
         total_bytes: Option<u64>,
+        #[serde(default)]
+        attempt: u8,
+        #[serde(default)]
+        max_attempts: u8,
     },
     Verifying {
         version: String,
@@ -654,35 +659,207 @@ struct DownloadedAsset {
     sha256_hex: String,
 }
 
+const PROGRESS_EMIT_BYTES_STEP: u64 = 64 * 1024;
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(80);
+
+#[derive(Clone, Copy, Debug)]
+struct DownloadRetryPolicy {
+    max_attempts: u8,
+    base_backoff: Duration,
+}
+
+impl DownloadRetryPolicy {
+    const DEFAULT: Self = Self {
+        max_attempts: 4,
+        base_backoff: Duration::from_millis(500),
+    };
+}
+
 impl DownloadRouteResolver for UpdateRouteContext {
     async fn resolve_route(&mut self, target_url: &str) -> UpstreamRoute {
         self.resolve(target_url).await
     }
 }
 
-struct TempFileDownloadSink<F> {
-    hasher: Sha256,
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    hint_total_bytes: Option<u64>,
-    on_progress: F,
+fn header_value_from_slice(headers: &[Header], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case(name))
+        .and_then(|h| std::str::from_utf8(&h.value).ok())
+        .map(|s| s.trim().to_owned())
 }
 
-impl<F> DownloadSink for TempFileDownloadSink<F>
+fn parse_content_range(raw: &str) -> Result<(u64, u64, Option<u64>)> {
+    let trimmed = raw.trim();
+    let prefix = trimmed.get(..6).unwrap_or("");
+    ensure!(
+        prefix.eq_ignore_ascii_case("bytes "),
+        "不支持的 Content-Range 单位：{raw}"
+    );
+    let rest = trimmed[6..].trim();
+    let (range_part, total_part) = rest
+        .split_once('/')
+        .context("Content-Range 缺少总长度分隔符")?;
+    let (start_str, end_str) = range_part
+        .split_once('-')
+        .context("Content-Range 缺少区间分隔符")?;
+    let start = start_str
+        .trim()
+        .parse::<u64>()
+        .context("Content-Range 起始偏移无效")?;
+    let end = end_str
+        .trim()
+        .parse::<u64>()
+        .context("Content-Range 结束偏移无效")?;
+    ensure!(start <= end, "Content-Range 区间无效：{raw}");
+    let total = if total_part.trim() == "*" {
+        None
+    } else {
+        let total = total_part
+            .trim()
+            .parse::<u64>()
+            .context("Content-Range 总长度无效")?;
+        ensure!(end < total, "Content-Range 结束偏移超出总长度：{raw}");
+        Some(total)
+    };
+    Ok((start, end, total))
+}
+
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+enum WriteOp {
+    Reset,
+    Chunk(Vec<u8>),
+}
+
+struct ResumableDownloadSink<'a, F> {
+    hasher: Sha256,
+    tx: tokio::sync::mpsc::Sender<WriteOp>,
+    received_so_far: u64,
+    expected_total: Option<u64>,
+    hint_total_bytes: Option<u64>,
+    max_body_bytes: usize,
+    etag: Option<String>,
+    attempt: u8,
+    max_attempts: u8,
+    last_reported_bytes: u64,
+    last_reported_at: Option<Instant>,
+    on_progress: &'a mut F,
+}
+
+impl<F> ResumableDownloadSink<'_, F>
 where
-    F: FnMut(u64, Option<u64>) + Send,
+    F: FnMut(u64, Option<u64>, u8, u8) + Send,
 {
+    fn maybe_emit_progress(&mut self, force: bool) {
+        let should_emit = force
+            || self
+                .received_so_far
+                .saturating_sub(self.last_reported_bytes)
+                >= PROGRESS_EMIT_BYTES_STEP
+            || self
+                .last_reported_at
+                .is_none_or(|t| t.elapsed() >= PROGRESS_EMIT_INTERVAL);
+        if should_emit {
+            let total = self.expected_total.or(self.hint_total_bytes);
+            (self.on_progress)(self.received_so_far, total, self.attempt, self.max_attempts);
+            self.last_reported_bytes = self.received_so_far;
+            self.last_reported_at = Some(Instant::now());
+        }
+    }
+}
+
+impl<F> DownloadSink for ResumableDownloadSink<'_, F>
+where
+    F: FnMut(u64, Option<u64>, u8, u8) + Send,
+{
+    async fn on_response_head(
+        &mut self,
+        status: u16,
+        headers: &[Header],
+        content_length: Option<u64>,
+    ) -> std::result::Result<(), ProxyError> {
+        if let Some(etag) = header_value_from_slice(headers, "etag").filter(|s| !s.is_empty()) {
+            self.etag = Some(etag);
+        }
+        if status == 206 {
+            if self.received_so_far == 0 {
+                return Err(ProxyError::InvalidMessage(
+                    "未发送 Range 请求但收到 206 Partial Content".into(),
+                ));
+            }
+            let raw_range = header_value_from_slice(headers, "content-range")
+                .ok_or_else(|| ProxyError::InvalidMessage("206 响应缺少 Content-Range 头".into()))?;
+            let (start, _end, range_total) = parse_content_range(&raw_range)
+                .map_err(|e| ProxyError::InvalidMessage(e.to_string()))?;
+            if start != self.received_so_far {
+                return Err(ProxyError::Network(format!(
+                    "断点续传起始偏移不匹配：期望 {}，实际 {start}",
+                    self.received_so_far
+                )));
+            }
+            if let Some(total) = range_total {
+                if total > self.max_body_bytes as u64 {
+                    return Err(ProxyError::BodyLimit {
+                        limit: self.max_body_bytes,
+                    });
+                }
+                self.expected_total = Some(total);
+            } else if let Some(cl) = content_length
+                && start.saturating_add(cl) > self.max_body_bytes as u64
+            {
+                return Err(ProxyError::BodyLimit {
+                    limit: self.max_body_bytes,
+                });
+            }
+            return Ok(());
+        }
+
+        if let Some(cl) = content_length {
+            if cl > self.max_body_bytes as u64 {
+                return Err(ProxyError::BodyLimit {
+                    limit: self.max_body_bytes,
+                });
+            }
+            self.expected_total = Some(cl);
+        }
+        if self.received_so_far > 0 {
+            self.tx
+                .send(WriteOp::Reset)
+                .await
+                .map_err(|_| ProxyError::Network("更新包磁盘写入任务意外退出".into()))?;
+            self.received_so_far = 0;
+            self.hasher = Sha256::new();
+            self.last_reported_bytes = 0;
+            self.last_reported_at = None;
+        }
+        Ok(())
+    }
+
     async fn write_chunk(
         &mut self,
         chunk: &[u8],
-        total_received: u64,
-        content_length: Option<u64>,
+        _attempt_received: u64,
+        _content_length: Option<u64>,
     ) -> std::result::Result<(), ProxyError> {
-        self.hasher.update(chunk);
+        let Some(next) = self
+            .received_so_far
+            .checked_add(chunk.len() as u64)
+            .filter(|&n| n <= self.max_body_bytes as u64)
+        else {
+            return Err(ProxyError::BodyLimit {
+                limit: self.max_body_bytes,
+            });
+        };
         self.tx
-            .send(chunk.to_vec())
+            .send(WriteOp::Chunk(chunk.to_vec()))
             .await
             .map_err(|_| ProxyError::Network("更新包磁盘写入任务意外退出".into()))?;
-        (self.on_progress)(total_received, content_length.or(self.hint_total_bytes));
+        self.hasher.update(chunk);
+        self.received_so_far = next;
+        self.maybe_emit_progress(false);
         Ok(())
     }
 }
@@ -695,38 +872,96 @@ async fn http_download_to_temp_file<F>(
     max_body_bytes: usize,
     hint_total_bytes: Option<u64>,
     route_ctx: &mut UpdateRouteContext,
-    on_progress: F,
+    mut on_progress: F,
     cancel: &CancellationToken,
 ) -> Result<DownloadedAsset>
 where
-    F: FnMut(u64, Option<u64>) + Send,
+    F: FnMut(u64, Option<u64>, u8, u8) + Send,
+{
+    http_download_to_temp_file_with_policy(
+        initial_url,
+        accept,
+        timeout,
+        max_body_bytes,
+        hint_total_bytes,
+        route_ctx,
+        DownloadRetryPolicy::DEFAULT,
+        &mut on_progress,
+        cancel,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn http_download_to_temp_file_with_policy<F>(
+    initial_url: &str,
+    accept: &str,
+    timeout: Duration,
+    max_body_bytes: usize,
+    hint_total_bytes: Option<u64>,
+    route_ctx: &mut UpdateRouteContext,
+    policy: DownloadRetryPolicy,
+    on_progress: &mut F,
+    cancel: &CancellationToken,
+) -> Result<DownloadedAsset>
+where
+    F: FnMut(u64, Option<u64>, u8, u8) + Send,
 {
     if cancel.is_cancelled() {
         bail!("更新操作已取消");
     }
 
-    let temp_file = NamedTempFile::new().context("无法创建更新包临时文件")?;
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-    let writer_handle = tokio::task::spawn_blocking(move || -> Result<NamedTempFile> {
-        let mut writer = BufWriter::with_capacity(64 * 1024, temp_file);
-        while let Some(chunk) = rx.blocking_recv() {
-            writer.write_all(&chunk).context("写入更新包临时文件失败")?;
-        }
-        writer.flush().context("刷新更新包临时文件缓冲失败")?;
-        let file = writer
-            .into_inner()
-            .map_err(|err| anyhow!("完成更新包写入失败：{}", err.error()))?;
-        file.as_file()
-            .sync_all()
-            .context("同步更新包临时文件到磁盘失败")?;
-        Ok(file)
-    });
+    let max_attempts = policy.max_attempts.max(1);
+    let mut temp_file = NamedTempFile::new().context("无法创建更新包临时文件")?;
+    let mut received_so_far: u64 = 0;
+    let mut expected_total: Option<u64> = hint_total_bytes;
+    let mut etag: Option<String> = None;
+    let mut hasher = Sha256::new();
 
-    let cfg = DownloadConfig {
-        max_body_bytes,
-        timeout,
-        max_redirects: MAX_REDIRECTS,
-        headers: vec![
+    for attempt in 1..=max_attempts {
+        if cancel.is_cancelled() {
+            bail!("更新操作已取消");
+        }
+        on_progress(
+            received_so_far,
+            expected_total.or(hint_total_bytes),
+            attempt,
+            max_attempts,
+        );
+
+        let attempt_offset = received_so_far;
+        let mut staged_file = temp_file;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WriteOp>(8);
+        let writer_handle =
+            tokio::task::spawn_blocking(move || -> (NamedTempFile, Result<()>) {
+                let res = (|| -> Result<()> {
+                    staged_file
+                        .as_file_mut()
+                        .seek(SeekFrom::Start(attempt_offset))
+                        .context("定位更新包临时文件偏移失败")?;
+                    let mut writer = BufWriter::with_capacity(64 * 1024, &mut staged_file);
+                    while let Some(op) = rx.blocking_recv() {
+                        match op {
+                            WriteOp::Reset => {
+                                writer.flush().context("刷新更新包缓冲失败")?;
+                                let file = writer.get_mut();
+                                file.as_file_mut()
+                                    .set_len(0)
+                                    .and_then(|()| file.as_file_mut().seek(SeekFrom::Start(0)))
+                                    .context("清空重写更新包临时文件失败")?;
+                            }
+                            WriteOp::Chunk(chunk) => {
+                                writer.write_all(&chunk).context("写入更新包临时文件失败")?;
+                            }
+                        }
+                    }
+                    writer.flush().context("刷新更新包临时文件缓冲失败")?;
+                    Ok(())
+                })();
+                (staged_file, res)
+            });
+
+        let mut headers = vec![
             Header {
                 name: "User-Agent".into(),
                 value: format!("MIO/{CURRENT_VERSION}").into_bytes(),
@@ -735,51 +970,165 @@ where
                 name: "Accept".into(),
                 value: accept.as_bytes().to_vec(),
             },
-        ],
-        ..Default::default()
-    };
+        ];
+        if received_so_far > 0 {
+            headers.push(Header {
+                name: "Range".into(),
+                value: format!("bytes={received_so_far}-").into_bytes(),
+            });
+            if let Some(ref tag) = etag {
+                headers.push(Header {
+                    name: "If-Range".into(),
+                    value: tag.as_bytes().to_vec(),
+                });
+            }
+        }
 
-    let mut sink = TempFileDownloadSink {
-        hasher: Sha256::new(),
-        tx,
-        hint_total_bytes,
-        on_progress,
-    };
+        let cfg = DownloadConfig {
+            max_body_bytes,
+            timeout,
+            max_redirects: MAX_REDIRECTS,
+            headers,
+            ..Default::default()
+        };
 
-    let download_result =
-        mio_proxy::download_to_sink(initial_url, cfg, route_ctx, &mut sink, cancel.clone()).await;
-    let TempFileDownloadSink { hasher, tx, .. } = sink;
-    drop(tx);
+        let mut sink = ResumableDownloadSink {
+            hasher,
+            tx,
+            received_so_far,
+            expected_total,
+            hint_total_bytes,
+            max_body_bytes,
+            etag: etag.clone(),
+            attempt,
+            max_attempts,
+            last_reported_bytes: received_so_far,
+            last_reported_at: Some(Instant::now()),
+            on_progress,
+        };
 
-    let writer_res = writer_handle
-        .await
-        .map_err(|e| anyhow!("更新包写入线程异常退出：{e}"))
-        .and_then(|r| r);
+        let download_result = mio_proxy::download_to_sink(
+            initial_url,
+            cfg,
+            &mut *route_ctx,
+            &mut sink,
+            cancel.clone(),
+        )
+        .await;
+        let ResumableDownloadSink {
+            hasher: next_hasher,
+            tx,
+            received_so_far: next_received,
+            expected_total: next_total,
+            etag: next_etag,
+            ..
+        } = sink;
+        drop(tx);
 
-    let outcome = download_result.map_err(|err| match err {
-        ProxyError::Cancelled => anyhow!("更新操作已取消"),
-        ProxyError::Timeout => anyhow!("下载更新包超时"),
-        ProxyError::BodyLimit { limit } => anyhow!("安装包超过 {limit} 字节上限"),
-        other => anyhow!("请求更新服务器失败：{other}"),
-    })?;
+        let (returned_file, writer_res) = writer_handle
+            .await
+            .map_err(|e| anyhow!("更新包写入线程异常退出：{e}"))?;
+        temp_file = returned_file;
+        writer_res?;
+        hasher = next_hasher;
+        received_so_far = next_received;
+        expected_total = next_total;
+        etag = next_etag;
 
-    if !(200..300).contains(&outcome.status) {
-        let text = String::from_utf8_lossy(&outcome.error_snippet);
-        bail!("更新服务器返回 HTTP {}：{}", outcome.status, text.trim());
+        let retry_reason: String = match download_result {
+            Ok(outcome) if (200..300).contains(&outcome.status) => {
+                let slice_truncated = outcome
+                    .content_length
+                    .is_some_and(|cl| outcome.bytes_written < cl);
+                let total_truncated = outcome.status == 206
+                    && expected_total.is_some_and(|total| received_so_far < total);
+                if !slice_truncated && !total_truncated {
+                    temp_file
+                        .as_file()
+                        .sync_all()
+                        .context("同步更新包临时文件到磁盘失败")?;
+                    on_progress(
+                        received_so_far,
+                        Some(received_so_far),
+                        attempt,
+                        max_attempts,
+                    );
+                    let digest = hasher.finalize();
+                    let mut sha256_hex = String::with_capacity(64);
+                    for byte in digest {
+                        use std::fmt::Write as _;
+                        let _ = write!(sha256_hex, "{byte:02x}");
+                    }
+                    return Ok(DownloadedAsset {
+                        file: temp_file,
+                        received_bytes: received_so_far,
+                        sha256_hex,
+                    });
+                }
+                format!(
+                    "更新包传输中断（已接收 {received_so_far} 字节，期望 {} 字节）",
+                    expected_total.or(outcome.content_length).unwrap_or(0)
+                )
+            }
+            Ok(outcome) if outcome.status == 416 => {
+                if expected_total.is_some_and(|t| t > 0 && received_so_far == t) {
+                    temp_file
+                        .as_file()
+                        .sync_all()
+                        .context("同步更新包临时文件到磁盘失败")?;
+                    let digest = hasher.finalize();
+                    let mut sha256_hex = String::with_capacity(64);
+                    for byte in digest {
+                        use std::fmt::Write as _;
+                        let _ = write!(sha256_hex, "{byte:02x}");
+                    }
+                    return Ok(DownloadedAsset {
+                        file: temp_file,
+                        received_bytes: received_so_far,
+                        sha256_hex,
+                    });
+                }
+                temp_file
+                    .as_file_mut()
+                    .set_len(0)
+                    .and_then(|()| temp_file.as_file_mut().seek(SeekFrom::Start(0)))
+                    .context("重置更新包临时文件失败")?;
+                received_so_far = 0;
+                hasher = Sha256::new();
+                etag = None;
+                "服务器拒绝 Range 请求（HTTP 416），将从头重新下载".to_owned()
+            }
+            Ok(outcome) => {
+                let text = String::from_utf8_lossy(&outcome.error_snippet);
+                let msg = format!("更新服务器返回 HTTP {}：{}", outcome.status, text.trim());
+                if !is_retryable_status(outcome.status) {
+                    bail!("{msg}");
+                }
+                msg
+            }
+            Err(ProxyError::Cancelled) => bail!("更新操作已取消"),
+            Err(ProxyError::BodyLimit { limit }) => bail!("安装包超过 {limit} 字节上限"),
+            Err(ProxyError::Timeout) => "下载更新包超时".to_owned(),
+            Err(err @ ProxyError::Network(_)) => format!("请求更新服务器失败：{err}"),
+            Err(err) => bail!("请求更新服务器失败：{err}"),
+        };
+
+        if attempt >= max_attempts {
+            bail!("{retry_reason}（已重试 {max_attempts} 次）");
+        }
+        let backoff = policy
+            .base_backoff
+            .saturating_mul(1u32.checked_shl(u32::from(attempt - 1)).unwrap_or(16));
+        if !backoff.is_zero() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => bail!("更新操作已取消"),
+                _ = tokio::time::sleep(backoff) => {}
+            }
+        }
     }
 
-    let file = writer_res?;
-    let digest = hasher.finalize();
-    let mut sha256_hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(sha256_hex, "{byte:02x}");
-    }
-    Ok(DownloadedAsset {
-        file,
-        received_bytes: outcome.bytes_written,
-        sha256_hex,
-    })
+    unreachable!("loop returns on final attempt")
 }
 
 /// Parses a GitHub Releases JSON payload into either `UpToDate` or `Available(UpdateInfo)`.
@@ -969,6 +1318,8 @@ where
         version: version.clone(),
         received_bytes: 0,
         total_bytes: hint_total,
+        attempt: 1,
+        max_attempts: DownloadRetryPolicy::DEFAULT.max_attempts,
     });
 
     let mut route_ctx = UpdateRouteContext::new(fallback_route);
@@ -979,11 +1330,13 @@ where
         ASSET_MAX_BYTES,
         hint_total,
         &mut route_ctx,
-        |received_bytes, total_bytes| {
+        |received_bytes, total_bytes, attempt, max_attempts| {
             on_status(UpdateStatus::Downloading {
                 version: version.clone(),
                 received_bytes,
                 total_bytes,
+                attempt,
+                max_attempts,
             });
         },
         cancel,
@@ -998,6 +1351,8 @@ where
         version: version.clone(),
         received_bytes: downloaded.received_bytes,
         total_bytes: Some(downloaded.received_bytes),
+        attempt: 1,
+        max_attempts: DownloadRetryPolicy::DEFAULT.max_attempts,
     });
     on_status(UpdateStatus::Verifying {
         version: version.clone(),
@@ -1065,6 +1420,72 @@ fn stage_archive_file(archive: NamedTempFile, target: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            }
+            .with_context(|| format!("清理路径失败：{}", path.display()))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("检查路径失败：{}", path.display())),
+    }
+}
+
+/// Atomically swaps `src` into `dst` with a sibling backup, restoring the previous
+/// target if moving or `verify_and_launch(dst)` fails.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn swap_path_with_rollback<F>(
+    src: &Path,
+    dst: &Path,
+    verify_and_launch: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    ensure!(src.exists(), "新版本源文件不存在：{}", src.display());
+    let parent = dst.parent().context("目标路径缺少父目录")?;
+    let file_name = dst
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mio");
+    let backup = parent.join(format!(".{file_name}.update-backup-{}", std::process::id()));
+    remove_path_if_exists(&backup)?;
+
+    let had_dst = dst.exists();
+    if had_dst {
+        fs::rename(dst, &backup).context("备份旧版本失败")?;
+    }
+    if let Err(err) = fs::rename(src, dst) {
+        if had_dst && backup.exists() {
+            let _ = fs::rename(&backup, dst);
+        }
+        return Err(err).context("替换新版本失败，已恢复原版本");
+    }
+    if let Err(err) = verify_and_launch(dst) {
+        let rollback_err = (|| -> Result<()> {
+            remove_path_if_exists(dst)?;
+            if had_dst && backup.exists() {
+                fs::rename(&backup, dst)?;
+            }
+            Ok(())
+        })()
+        .err();
+        return match rollback_err {
+            Some(re) => {
+                Err(err).context(format!("新版本校验或启动失败，回滚旧版本时发生错误：{re}"))
+            }
+            None => Err(err).context("新版本校验或启动失败，已自动回滚至旧版本"),
+        };
+    }
+    let _ = remove_path_if_exists(&backup);
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool> {
     let current_exe = std::env::current_exe().context("无法定位当前可执行文件路径")?;
@@ -1091,13 +1512,34 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
     let new_exe = new_app.join("Contents/MacOS/mio");
     ensure!(new_exe.is_file(), "更新包中的 MIO.app 缺少可执行文件 Contents/MacOS/mio");
 
+    let verify_sig = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(&new_app)
+        .status()
+        .context("无法调用 /usr/bin/codesign 校验新版本签名")?;
+    ensure!(
+        verify_sig.success(),
+        "新版本 MIO.app 签名校验失败，已终止替换"
+    );
+
     let (src, dst, relaunch, use_open) = if let Some(bundle) = resolve_macos_app_bundle(&current_exe) {
         let relaunch = bundle.clone();
         (new_app, bundle, relaunch, "1")
     } else {
         (new_exe, current_exe.clone(), current_exe, "0")
     };
-    let bak = staging.join("previous-backup");
+    let parent = dst.parent().context("无法确定更新目标所在目录")?;
+    let probe = tempfile::NamedTempFile::new_in(parent)
+        .context("更新目标目录不可写，无法安装更新（请检查权限或应用位置）")?;
+    drop(probe);
+
+    let bak = parent.join(format!(
+        ".{}.update-backup.{}",
+        dst.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("MIO"),
+        std::process::id()
+    ));
     let pid = std::process::id().to_string();
     let script = r#"
 pid="$1"; src="$2"; dst="$3"; bak="$4"; relaunch="$5"; use_open="$6"; stage="$7"
@@ -1114,12 +1556,33 @@ if ! mv "$src" "$dst"; then
   [ -e "$bak" ] && mv "$bak" "$dst"
   exit 1
 fi
-rm -rf "$stage"
+launch_ok=0
 if [ "$use_open" = "1" ]; then
-  open -n "$relaunch"
+  if open -n "$relaunch"; then
+    launch_ok=1
+  fi
 else
   nohup "$relaunch" >/dev/null 2>&1 &
+  child=$!
+  sleep 0.5
+  if kill -0 "$child" 2>/dev/null; then
+    launch_ok=1
+  fi
 fi
+if [ "$launch_ok" != "1" ]; then
+  printf 'update launch failed, rolling back %s\n' "$dst" >"$stage/rollback.log" 2>/dev/null || true
+  rm -rf "$dst"
+  if [ -e "$bak" ]; then
+    mv "$bak" "$dst"
+    if [ "$use_open" = "1" ]; then
+      open -n "$relaunch" || true
+    else
+      nohup "$relaunch" >/dev/null 2>&1 &
+    fi
+  fi
+  exit 1
+fi
+rm -rf "$bak" "$stage"
 "#;
     std::process::Command::new("/bin/sh")
         .arg("-c")
@@ -1174,28 +1637,22 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
 
     let parent = current_exe.parent().context("无法确定可执行文件目录")?;
     let staged_new = parent.join(".mio-update-new");
-    let staged_old = parent.join(".mio-update-old");
-    let _ = fs::remove_file(&staged_new);
-    let _ = fs::remove_file(&staged_old);
+    remove_path_if_exists(&staged_new)?;
 
     fs::copy(&new_bin, &staged_new).context("写入新版二进制失败，请确认安装目录具有写权限")?;
     let mut dst_perms = fs::metadata(&staged_new)?.permissions();
     dst_perms.set_mode(0o755);
     fs::set_permissions(&staged_new, dst_perms)?;
 
-    fs::rename(&current_exe, &staged_old).context("备份旧版二进制失败")?;
-    if let Err(err) = fs::rename(&staged_new, &current_exe) {
-        let _ = fs::rename(&staged_old, &current_exe);
-        return Err(err).context("替换新版本二进制失败");
-    }
-    let _ = fs::remove_file(&staged_old);
-
-    std::process::Command::new(&current_exe)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("无法重启更新后的 MIO 进程")?;
+    swap_path_with_rollback(&staged_new, &current_exe, |installed| {
+        std::process::Command::new(installed)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("无法重启更新后的 MIO 进程")?;
+        Ok(())
+    })?;
     Ok(true)
 }
 
@@ -1227,7 +1684,8 @@ fn install_archive_and_relaunch_from_file(archive: NamedTempFile) -> Result<bool
 
     let new_exe = find_named_entry_recursive(&extract_dir, "mio.exe", false)
         .context("更新包中缺少 mio.exe")?;
-    let bak = staging.join("mio.exe.old");
+    let parent = current_exe.parent().context("无法确定更新目标所在目录")?;
+    let bak = parent.join(format!("mio.exe.update-backup-{}", std::process::id()));
     let ps_script = staging.join("apply-update.ps1");
     fs::write(
         &ps_script,
@@ -1237,14 +1695,24 @@ for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Milliseconds 250
 }
 try {
+    if (Test-Path -LiteralPath $Bak) {
+        Remove-Item -LiteralPath $Bak -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $Dst) {
         Move-Item -LiteralPath $Dst -Destination $Bak -Force
     }
     Move-Item -LiteralPath $Src -Destination $Dst -Force
     Start-Process -FilePath $Dst | Out-Null
+    if (Test-Path -LiteralPath $Bak) {
+        Remove-Item -LiteralPath $Bak -Force -ErrorAction SilentlyContinue
+    }
 } catch {
-    if ((Test-Path -LiteralPath $Bak) -and -not (Test-Path -LiteralPath $Dst)) {
-        Move-Item -LiteralPath $Bak -Destination $Dst -Force
+    if (Test-Path -LiteralPath $Bak) {
+        if (Test-Path -LiteralPath $Dst) {
+            Remove-Item -LiteralPath $Dst -Force -ErrorAction SilentlyContinue
+        }
+        Move-Item -LiteralPath $Bak -Destination $Dst -Force -ErrorAction SilentlyContinue
+        Start-Process -FilePath $Dst -ErrorAction SilentlyContinue | Out-Null
     }
     throw
 } finally {
@@ -1404,7 +1872,7 @@ mod tests {
             ASSET_MAX_BYTES,
             Some(info.asset_size),
             &mut route_ctx,
-            |received, total| progress_updates.push((received, total)),
+            |received, total, _, _| progress_updates.push((received, total)),
             &cancel,
         )
         .await
@@ -1426,7 +1894,7 @@ mod tests {
             ASSET_MAX_BYTES,
             None,
             &mut route_ctx,
-            |_, _| {},
+            |_, _, _, _| {},
             &cancel,
         )
         .await
@@ -1448,7 +1916,7 @@ mod tests {
             4,
             None,
             &mut route_ctx,
-            |_, _| {},
+            |_, _, _, _| {},
             &cancel,
         )
         .await
@@ -1529,7 +1997,7 @@ mod tests {
             ASSET_MAX_BYTES,
             None,
             &mut route_ctx,
-            |_, _| {},
+            |_, _, _, _| {},
             &cancel,
         )
         .await
@@ -1567,5 +2035,170 @@ mod tests {
             info.asset_name,
             downloaded.received_bytes
         );
+    }
+
+    #[tokio::test]
+    async fn updater_resumes_interrupted_download_with_range_and_verifies_sha256() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".to_vec();
+        let expected_hash = sha256_hex(&payload);
+        let server_payload = payload.clone();
+        let seen_ranges = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+        let seen_ranges_srv = std::sync::Arc::clone(&seen_ranges);
+
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let range_hdr = req
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                    .map(str::to_owned);
+                seen_ranges_srv.lock().unwrap().push(range_hdr.clone());
+
+                if attempt == 0 {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                        server_payload.len()
+                    );
+                    sock.write_all(head.as_bytes()).await.unwrap();
+                    sock.write_all(&server_payload[..20]).await.unwrap();
+                    sock.flush().await.unwrap();
+                } else {
+                    assert!(
+                        range_hdr
+                            .as_deref()
+                            .is_some_and(|h| h.to_ascii_lowercase().contains("bytes=20-")),
+                        "unexpected Range header: {range_hdr:?}"
+                    );
+                    let tail = &server_payload[20..];
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 20-{}/{}\r\nContent-Length: {}\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                        server_payload.len() - 1,
+                        server_payload.len(),
+                        tail.len()
+                    );
+                    sock.write_all(head.as_bytes()).await.unwrap();
+                    sock.write_all(tail).await.unwrap();
+                    sock.flush().await.unwrap();
+                }
+            }
+        });
+
+        let mut route_ctx = UpdateRouteContext::new(UpstreamRoute::Direct);
+        let cancel = CancellationToken::new();
+        let mut events = Vec::new();
+        let downloaded = http_download_to_temp_file_with_policy(
+            &format!("http://{addr}/asset.zip"),
+            "*/*",
+            Duration::from_secs(10),
+            ASSET_MAX_BYTES,
+            Some(payload.len() as u64),
+            &mut route_ctx,
+            DownloadRetryPolicy {
+                max_attempts: 3,
+                base_backoff: Duration::from_millis(5),
+            },
+            &mut |received, total, attempt, max| events.push((received, total, attempt, max)),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(downloaded.received_bytes, payload.len() as u64);
+        assert_eq!(downloaded.sha256_hex, expected_hash);
+        assert_eq!(fs::read(downloaded.file.path()).unwrap(), payload);
+        assert!(events.iter().any(|(_, _, attempt, _)| *attempt == 2));
+        assert_eq!(seen_ranges.lock().unwrap().len(), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn updater_resets_cleanly_when_server_ignores_range_and_returns_200() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = b"full-payload-after-200-fallback".to_vec();
+        let expected_hash = sha256_hex(&payload);
+        let server_payload = payload.clone();
+
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                if attempt == 0 {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        server_payload.len()
+                    );
+                    sock.write_all(head.as_bytes()).await.unwrap();
+                    sock.write_all(&server_payload[..10]).await.unwrap();
+                    sock.flush().await.unwrap();
+                } else {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        server_payload.len()
+                    );
+                    sock.write_all(head.as_bytes()).await.unwrap();
+                    sock.write_all(&server_payload).await.unwrap();
+                    sock.flush().await.unwrap();
+                }
+            }
+        });
+
+        let mut route_ctx = UpdateRouteContext::new(UpstreamRoute::Direct);
+        let cancel = CancellationToken::new();
+        let downloaded = http_download_to_temp_file_with_policy(
+            &format!("http://{addr}/fallback.zip"),
+            "*/*",
+            Duration::from_secs(10),
+            ASSET_MAX_BYTES,
+            Some(payload.len() as u64),
+            &mut route_ctx,
+            DownloadRetryPolicy {
+                max_attempts: 3,
+                base_backoff: Duration::from_millis(5),
+            },
+            &mut |_, _, _, _| {},
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(downloaded.received_bytes, payload.len() as u64);
+        assert_eq!(downloaded.sha256_hex, expected_hash);
+        assert_eq!(fs::read(downloaded.file.path()).unwrap(), payload);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn updater_swap_path_with_rollback_restores_previous_file_on_launch_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("mio");
+        let new_src = dir.path().join("mio-new");
+        fs::write(&dst, b"old-binary-v1").unwrap();
+        fs::write(&new_src, b"new-binary-v2").unwrap();
+
+        let err = swap_path_with_rollback(&new_src, &dst, |installed| {
+            assert_eq!(fs::read(installed).unwrap(), b"new-binary-v2");
+            bail!("simulated launch crash")
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("自动回滚"));
+        assert_eq!(fs::read(&dst).unwrap(), b"old-binary-v1");
+
+        // Second swap succeeds and removes backup.
+        let good_src = dir.path().join("mio-good");
+        fs::write(&good_src, b"new-binary-v3").unwrap();
+        swap_path_with_rollback(&good_src, &dst, |installed| {
+            assert_eq!(fs::read(installed).unwrap(), b"new-binary-v3");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new-binary-v3");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

@@ -537,6 +537,7 @@ pub(super) fn mio_table_frame<D: TableDelegate>(
         .items_center()
         .child(
             div()
+                .id(SharedString::from(format!("mio-table-frame-{label}")))
                 .flex_1()
                 .min_w_0()
                 .h_full()

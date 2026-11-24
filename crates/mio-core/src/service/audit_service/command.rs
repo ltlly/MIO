@@ -514,7 +514,8 @@ impl State {
                 plan.oast_callback_url = Some(issued.http_callback_url);
             }
         }
-        let probes_per_point = 4 + u64::from(plan.oast_callback_url.is_some());
+        let probes_per_point = 8 + u64::from(plan.oast_callback_url.is_some());
+        let target_level_probes = 1 + u64::from(build_authz_strip_probe(&plan.request).is_some());
         let crawl_budget = if plan.crawl_same_origin {
             CrawlConfig::default().max_requests as u64
         } else {
@@ -523,8 +524,13 @@ impl State {
         let total_planned = match mode {
             AuditTaskMode::PassiveOnly => 1 + crawl_budget,
             AuditTaskMode::PassiveAndActive => {
-                1 + crawl_budget
-                    + (plan.insertion_points.len() as u64).saturating_mul(probes_per_point)
+                let active_extra = if !plan.insertion_points.is_empty() || plan.crawl_same_origin {
+                    target_level_probes
+                        + (plan.insertion_points.len() as u64).saturating_mul(probes_per_point)
+                } else {
+                    0
+                };
+                1 + crawl_budget + active_extra
             }
         };
         let clean_title = if title.trim().is_empty() {

@@ -57,6 +57,7 @@ pub(in crate::workbench) enum SettingsPage {
     UserDisplay,
     UserMessageEditor,
     UserMisc,
+    SuiteUpdates,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,6 +108,7 @@ struct SettingsState {
     preferences_available: bool,
     pools: resource_pools::PoolPageState,
     update_status: mio_core::UpdateStatus,
+    last_available_update: Option<mio_core::UpdateInfo>,
 }
 
 impl SettingsState {
@@ -114,6 +116,7 @@ impl SettingsState {
         Self {
             pools: resource_pools::PoolPageState::new(view),
             update_status: view.update_status.clone(),
+            last_available_update: view.last_available_update.clone(),
             preferences: view.user_preferences.clone(),
             preferences_available: view.backend_available(),
             project: view.project,
@@ -256,6 +259,8 @@ impl SettingsState {
         self.preferences_available = view.backend_available();
         self.pools = resource_pools::PoolPageState::new(view);
         self.update_status.clone_from(&view.update_status);
+        self.last_available_update
+            .clone_from(&view.last_available_update);
         self.preferences.sync_from(&view.user_preferences)
     }
 }
@@ -267,7 +272,7 @@ struct Settings {
     focus: FocusHandle,
     search_input: Entity<InputState>,
     scope_filter: SettingsScopeFilter,
-    collapsed_groups: [bool; 5],
+    collapsed_groups: [bool; 6],
     nav_scroll: gpui_kit::ScrollHandle,
     content_scroll: gpui_kit::ScrollHandle,
     project_json_feedback: Option<(bool, String)>,
@@ -451,7 +456,7 @@ impl Workbench {
             },
             cx,
         );
-        self.status = format!("正在切换内置 CA 预置：{}…", preset.display_name).into();
+        self.status = format!("正在切换内置 CA 预置：{}…", preset.display_name);
         cx.notify();
     }
 

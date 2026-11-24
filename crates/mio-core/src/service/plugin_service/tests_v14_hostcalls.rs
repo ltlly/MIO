@@ -73,6 +73,8 @@ fn setup_v14_fixture(grants: Vec<Permission>) -> V14Fixture {
             entry_modified,
             entry_size,
             auto_reload: false,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial,
             resources: HashMap::new(),

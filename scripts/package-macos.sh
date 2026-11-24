@@ -75,20 +75,40 @@ install -m 644 crates/mio-app/Info.plist "$app_bundle/Contents/Info.plist"
 /usr/bin/plutil -replace CFBundleShortVersionString -string "$version" "$app_bundle/Contents/Info.plist"
 install -m 644 crates/mio-app/assets/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
 /usr/bin/plutil -lint "$app_bundle/Contents/Info.plist"
-/usr/bin/codesign --force --sign - "$app_bundle/Contents/MacOS/mio-cli"
-/usr/bin/codesign --force --sign - "$app_bundle"
-/usr/bin/codesign --verify --strict "$app_bundle"
+sign_target() {
+  local target="$1"
+  if [[ -n "${MIO_MACOS_SIGN_IDENTITY:-}" ]]; then
+    local sign_args=(--force --timestamp --options runtime --sign "$MIO_MACOS_SIGN_IDENTITY")
+    if [[ -n "${MIO_MACOS_ENTITLEMENTS:-}" ]]; then
+      sign_args+=(--entitlements "$MIO_MACOS_ENTITLEMENTS")
+    fi
+    /usr/bin/codesign "${sign_args[@]}" "$target"
+  else
+    /usr/bin/codesign --force --sign - "$target"
+  fi
+}
+
+signing_mode="adhoc"
+if [[ -n "${MIO_MACOS_SIGN_IDENTITY:-}" ]]; then
+  signing_mode="developer_id"
+fi
+notarized=false
+
+sign_target "$app_bundle/Contents/MacOS/mio-cli"
+sign_target "$app_bundle/Contents/MacOS/mio"
+sign_target "$app_bundle"
+/usr/bin/codesign --verify --deep --strict "$app_bundle"
 distribution_bundle="$distribution_dir/MIO.app"
 mkdir -p "$distribution_dir"
 /usr/bin/ditto "$app_bundle" "$distribution_bundle"
 install -m 755 "$bin_dir/mio-cli" "$distribution_dir/mio-cli"
-/usr/bin/codesign --verify --strict "$distribution_bundle"
+sign_target "$distribution_dir/mio-cli"
+/usr/bin/codesign --verify --deep --strict "$distribution_bundle"
 binary_arch="$(/usr/bin/lipo -archs "$distribution_bundle/Contents/MacOS/mio")"
 if [[ -z "$binary_arch" ]]; then
   echo "Packaged binary is not a valid Mach-O executable: $distribution_bundle/Contents/MacOS/mio" >&2
   exit 1
 fi
-binary_sha256="$(/usr/bin/shasum -a 256 "$distribution_bundle/Contents/MacOS/mio" | awk '{print $1}')"
 dmg_name="MIO-v${version}-macos-${arch}.dmg"
 zip_name="MIO-v${version}-macos-${arch}.zip"
 dmg_path="$distribution_dir/$dmg_name"
@@ -104,7 +124,34 @@ trap cleanup EXIT
 /usr/bin/ditto "$distribution_bundle" "$dmg_stage/MIO.app"
 ln -s /Applications "$dmg_stage/Applications"
 /usr/bin/hdiutil create -volname "MIO" -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path" >/dev/null
+if [[ "$signing_mode" == "developer_id" ]]; then
+  /usr/bin/codesign --force --timestamp --sign "$MIO_MACOS_SIGN_IDENTITY" "$dmg_path"
+fi
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$distribution_bundle" "$zip_path"
+
+notary_auth=()
+if [[ "$signing_mode" == "developer_id" ]]; then
+  if [[ -n "${MIO_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+    notary_auth=(--keychain-profile "$MIO_NOTARY_KEYCHAIN_PROFILE")
+  elif [[ -n "${MIO_APPLE_ID:-}" && -n "${MIO_APPLE_TEAM_ID:-}" && -n "${MIO_APPLE_APP_PASSWORD:-}" ]]; then
+    notary_auth=(--apple-id "$MIO_APPLE_ID" --team-id "$MIO_APPLE_TEAM_ID" --password "$MIO_APPLE_APP_PASSWORD")
+  elif [[ -n "${MIO_ASC_KEY_PATH:-}" && -n "${MIO_ASC_KEY_ID:-}" && -n "${MIO_ASC_ISSUER_ID:-}" ]]; then
+    notary_auth=(--key "$MIO_ASC_KEY_PATH" --key-id "$MIO_ASC_KEY_ID" --issuer "$MIO_ASC_ISSUER_ID")
+  fi
+fi
+
+if [[ ${#notary_auth[@]} -gt 0 ]]; then
+  xcrun notarytool submit "$zip_path" "${notary_auth[@]}" --wait
+  xcrun stapler staple "$distribution_bundle"
+  rm -f "$zip_path"
+  /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$distribution_bundle" "$zip_path"
+  xcrun notarytool submit "$dmg_path" "${notary_auth[@]}" --wait
+  xcrun stapler staple "$dmg_path"
+  /usr/sbin/spctl --assess --type exec --verbose "$distribution_bundle"
+  notarized=true
+fi
+
+binary_sha256="$(/usr/bin/shasum -a 256 "$distribution_bundle/Contents/MacOS/mio" | awk '{print $1}')"
 packaged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MIO_PKG_VERSION="$version" \
 MIO_PKG_COMMIT="$source_commit" \
@@ -115,6 +162,8 @@ MIO_PKG_ARCH="$binary_arch" \
 MIO_PKG_DMG="$dmg_name" \
 MIO_PKG_ZIP="$zip_name" \
 MIO_PKG_SHA256="$binary_sha256" \
+MIO_PKG_SIGNING_MODE="$signing_mode" \
+MIO_PKG_NOTARIZED="$notarized" \
 MIO_PKG_PACKAGED_AT="$packaged_at" \
 python3 - "$manifest" <<'PY'
 import json
@@ -132,6 +181,8 @@ payload = {
     "dmg": os.environ["MIO_PKG_DMG"],
     "zip": os.environ["MIO_PKG_ZIP"],
     "binarySha256": os.environ["MIO_PKG_SHA256"],
+    "signingMode": os.environ["MIO_PKG_SIGNING_MODE"],
+    "notarized": os.environ["MIO_PKG_NOTARIZED"] == "true",
     "packagedAt": os.environ["MIO_PKG_PACKAGED_AT"],
     "validation": {
         "status": "not_run_by_package_script",

@@ -188,7 +188,7 @@ impl State {
             .context("工作标签已关闭")?;
         ensure!(
             revision > 0 && tab.draft.revision == revision,
-            "草稿已改变或尚未保存；未使用旧 revision"
+            "草稿已改变或尚未保存；未使用旧 revision（请先点击“加载当前草稿”同步后再试）"
         );
         Ok(tab)
     }

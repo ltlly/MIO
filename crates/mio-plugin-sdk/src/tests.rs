@@ -2251,3 +2251,122 @@ fn destroying_child_panel_prunes_stale_queued_open_requests() {
         "pruned OpenRequest must receive Stale error reply, got: {replies:?}"
     );
 }
+
+#[test]
+fn sdk_registers_supports_large_body_and_handles_spilled_payloads() {
+    struct LargeBodyPlugin;
+
+    impl MioPlugin for LargeBodyPlugin {
+        fn id(&self) -> &str {
+            "lab.sdk-large-body"
+        }
+
+        fn supports_large_body(&self) -> bool {
+            true
+        }
+
+        fn on_http_hook(
+            &mut self,
+            _ctx: &mut dyn HostClient,
+            call: HttpHookCall,
+        ) -> Result<HttpHookResult, String> {
+            let mut req = call.request.ok_or("missing request")?;
+            let body_bytes = req
+                .read_body_bytes()
+                .map_err(|e| format!("read spill failed: {e}"))?
+                .into_owned();
+            req.headers.push(mio_plugin_api::protocol::HeaderDto {
+                name: "x-read-len".into(),
+                value: body_bytes.len().to_string().into_bytes(),
+            });
+            Ok(HttpHookResult {
+                action: HookAction::Modify as i32,
+                request: Some(req),
+                response: None,
+            })
+        }
+    }
+
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let timeout = Duration::from_secs(5);
+    let spill_root = std::env::temp_dir().join(format!("mio-sdk-large-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&spill_root).unwrap();
+    let spill_file = spill_root.join("req-body.bin");
+    let big_body = vec![b'L'; mio_plugin_api::protocol::MAX_INLINE_BODY + 2048];
+    std::fs::write(&spill_file, &big_body).unwrap();
+
+    let mut incoming_bytes = Vec::new();
+    let mut push = |req_id: u64, in_reply_to: u64, body: envelope::Body| {
+        let mut env = Envelope::new(identity, req_id, 1, body, timeout);
+        env.in_reply_to = in_reply_to;
+        incoming_bytes.extend_from_slice(&encode_frame(&env).unwrap());
+    };
+    push(
+        1,
+        0,
+        envelope::Body::Hello(Hello {
+            max_frame_bytes: MAX_FRAME_BYTES as u32,
+            max_operation_ms: 5000,
+            granted_permissions: vec![Permission::TrafficModify as i32],
+            host_minor: mio_plugin_api::protocol::PROTOCOL_MINOR,
+        }),
+    );
+    push(2, 1, envelope::Body::Ready(Empty {}));
+    push(
+        3,
+        0,
+        envelope::Body::HttpHookCall(HttpHookCall {
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
+            source: mio_plugin_api::protocol::SourceDto::Proxy as i32,
+            plugin_id: String::new(),
+            response_stage: false,
+            response_head_only: false,
+            request: Some(HttpRequestDto {
+                method: "POST".into(),
+                url: "http://127.0.0.1/large".into(),
+                version: HttpVersionDto::Http11 as i32,
+                body: Vec::new(),
+                body_omitted: true,
+                original_body_len: big_body.len() as u64,
+                body_file_path: spill_file.to_str().unwrap().to_owned(),
+                ..Default::default()
+            }),
+            response: None,
+        }),
+    );
+    push(4, 0, envelope::Body::Shutdown(Empty {}));
+
+    let mut outgoing = Vec::new();
+    run_with_io(incoming_bytes.as_slice(), &mut outgoing, LargeBodyPlugin).unwrap();
+
+    let mut cursor = outgoing.as_slice();
+    let reg = read_frame(&mut cursor).unwrap();
+    let Some(envelope::Body::Register(reg_body)) = reg.body else {
+        panic!("expected Register");
+    };
+    assert!(reg_body.supports_large_body);
+
+    let hook_reply = read_frame(&mut cursor).unwrap();
+    let Some(envelope::Body::HttpHookResult(res)) = hook_reply.body else {
+        panic!("expected HttpHookResult, got {hook_reply:?}");
+    };
+    assert_eq!(res.action, HookAction::Modify as i32);
+    let out_req = res.request.unwrap();
+    assert!(out_req.body_omitted);
+    assert_eq!(
+        out_req.original_body_len,
+        (mio_plugin_api::protocol::MAX_INLINE_BODY + 2048) as u64
+    );
+    assert!(out_req.headers.iter().any(|h| {
+        h.name == "x-read-len"
+            && h.value == (mio_plugin_api::protocol::MAX_INLINE_BODY + 2048).to_string().as_bytes()
+    }));
+
+    let _ = std::fs::remove_dir_all(&spill_root);
+}

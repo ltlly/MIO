@@ -4,7 +4,6 @@ use crate::{
     AuditPhase,
     service::plugin_service::passive::{PLUGIN_ACTIVE_ISSUE_ID, convert_plugin_findings_for_phase},
 };
-use mio_plugin_api::protocol;
 
 pub(super) use crate::codec_util::now_unix_ms;
 
@@ -40,6 +39,8 @@ fn active_payloads_for(point: &InsertionPoint, oast_url: Option<&str>) -> Vec<St
         ACTIVE_REDIRECT_TARGET.to_owned(),
         format!("{}\r\n{ACTIVE_SPLIT_HEADER}: 1", point.value),
         format!("{}'\"", point.value),
+        "../../../../etc/passwd".to_owned(),
+        format!("{}{{{{1331*73}}}}", point.value),
     ];
     if let Some(url) = oast_url {
         out.push(url.to_owned());
@@ -66,8 +67,42 @@ pub(super) async fn maybe_unpack_response(
 }
 
 struct ProbeOutcome {
-    sent: bool,
+    sent_count: u64,
     flow_and_findings: Option<(Box<FlowRecord>, Vec<AuditFinding>)>,
+}
+
+async fn execute_single_probe_request(
+    mut req: HttpRequest,
+    cfg: &SendConfig,
+    unpack: bool,
+    sessions: Option<&crate::sessions::SessionRuntime>,
+    cancel: &CancellationToken,
+) -> Option<(HttpRequest, HttpResponse, i64, u64)> {
+    let started_ms = now_unix_ms();
+    let timer = Instant::now();
+    if let Some(sess) = sessions
+        && sess
+            .apply_before_send(
+                crate::SessionTool::Scanner,
+                &mut req,
+                cfg,
+                cancel,
+                timer + cfg.limits.timeout,
+            )
+            .await
+            .is_err()
+    {
+        return None;
+    }
+    let raw_resp = send(req.clone(), cfg.clone(), cancel.child_token())
+        .await
+        .ok()?;
+    if let Some(sess) = sessions {
+        sess.observe_response(crate::SessionTool::Scanner, &req.url, &raw_resp);
+    }
+    let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let resp = maybe_unpack_response(&req, cfg, unpack, raw_resp, cancel).await;
+    Some((req, resp, started_ms, elapsed))
 }
 
 pub(super) async fn send_audit_signal(
@@ -300,6 +335,120 @@ pub(super) async fn run_scan(
     let mut probes = JoinSet::<ProbeOutcome>::new();
 
     for target in crawl_stage.targets {
+        if !cancel.is_cancelled() {
+            let host_probe_req = build_host_override_probe(&target.request);
+            let sem = semaphore.clone();
+            let cfg = probe_config.clone();
+            let base = target.base_response.clone();
+            let child_cancel = cancel.child_token();
+            let mut probe_pause = pause_rx.clone();
+            let probe_sessions = sessions.clone();
+            probes.spawn(async move {
+                let permit = tokio::select! {
+                    biased;
+                    _ = child_cancel.cancelled() => return ProbeOutcome { sent_count: 0, flow_and_findings: None },
+                    p = sem.acquire_owned() => p,
+                };
+                let Ok(_permit) = permit else {
+                    return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                };
+                if !wait_until_resumed(&mut probe_pause, &child_cancel).await {
+                    return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                }
+                let Some((req_sent, resp, started_ms, elapsed)) = execute_single_probe_request(
+                    host_probe_req,
+                    &cfg,
+                    unpack_compressed_responses,
+                    Some(&probe_sessions),
+                    &child_cancel,
+                )
+                .await
+                else {
+                    return ProbeOutcome {
+                        sent_count: u64::from(!child_cancel.is_cancelled()),
+                        flow_and_findings: None,
+                    };
+                };
+                let mut hits = evaluate_host_override_probe(
+                    None,
+                    &req_sent,
+                    &base,
+                    &resp,
+                    now_unix_ms(),
+                );
+                let flow_and_findings = (!hits.is_empty()).then(|| {
+                    let fid = Uuid::new_v4();
+                    for f in &mut hits {
+                        f.flow_id = Some(fid);
+                    }
+                    (
+                        Box::new(build_scanner_flow(fid, req_sent, resp, started_ms, elapsed)),
+                        hits,
+                    )
+                });
+                ProbeOutcome {
+                    sent_count: 1,
+                    flow_and_findings,
+                }
+            });
+        }
+        if !cancel.is_cancelled()
+            && let Some(unauth_probe_req) = build_authz_strip_probe(&target.request)
+        {
+            let sem = semaphore.clone();
+            let cfg = probe_config.clone();
+            let base = target.base_response.clone();
+            let child_cancel = cancel.child_token();
+            let mut probe_pause = pause_rx.clone();
+            probes.spawn(async move {
+                let permit = tokio::select! {
+                    biased;
+                    _ = child_cancel.cancelled() => return ProbeOutcome { sent_count: 0, flow_and_findings: None },
+                    p = sem.acquire_owned() => p,
+                };
+                let Ok(_permit) = permit else {
+                    return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                };
+                if !wait_until_resumed(&mut probe_pause, &child_cancel).await {
+                    return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                }
+                let Some((req_sent, resp, started_ms, elapsed)) = execute_single_probe_request(
+                    unauth_probe_req,
+                    &cfg,
+                    unpack_compressed_responses,
+                    None,
+                    &child_cancel,
+                )
+                .await
+                else {
+                    return ProbeOutcome {
+                        sent_count: u64::from(!child_cancel.is_cancelled()),
+                        flow_and_findings: None,
+                    };
+                };
+                let mut hits = evaluate_authz_strip_probe(
+                    None,
+                    &req_sent,
+                    &base,
+                    &resp,
+                    now_unix_ms(),
+                );
+                let flow_and_findings = (!hits.is_empty()).then(|| {
+                    let fid = Uuid::new_v4();
+                    for f in &mut hits {
+                        f.flow_id = Some(fid);
+                    }
+                    (
+                        Box::new(build_scanner_flow(fid, req_sent, resp, started_ms, elapsed)),
+                        hits,
+                    )
+                });
+                ProbeOutcome {
+                    sent_count: 1,
+                    flow_and_findings,
+                }
+            });
+        }
         for point in target.points {
             if !plugin_active_hooks.is_empty() && !cancel.is_cancelled() {
                 let hooks = plugin_active_hooks.clone();
@@ -308,45 +457,27 @@ pub(super) async fn run_scan(
                 let pt = point.clone();
                 let child_cancel = cancel.child_token();
                 probes.spawn(async move {
-                    if !crate::service::plugin_service::hooks::http_request_fits_inline_fast(&req_copy)
-                        || !crate::service::plugin_service::hooks::http_response_fits_inline_fast(&resp_copy)
-                        || pt.name.len() > 512
-                        || pt.value.len() > 16 * 1024
-                    {
-                        return ProbeOutcome {
-                            sent: false,
-                            flow_and_findings: None,
-                        };
-                    }
                     let probe_flow_id = Uuid::new_v4();
-                    let template_call = protocol::ActiveCheckCall {
-                        flow_id: probe_flow_id.as_bytes().to_vec(),
-                        base_request: Some(req_copy.clone().into()),
-                        base_response: Some((*resp_copy).clone().into()),
-                        parameter_name: pt.name,
-                        parameter_value: pt.value,
-                    };
-                    let Ok(protocol::envelope::Body::ActiveCheckCall(template_call)) =
-                        protocol::try_into_wire_body(
-                            protocol::envelope::Body::ActiveCheckCall(template_call),
-                            protocol::PROTOCOL_MINOR,
-                        )
-                    else {
-                        return ProbeOutcome {
-                            sent: false,
-                            flow_and_findings: None,
-                        };
-                    };
                     let mut plugin_hits = Vec::new();
                     for handle in hooks {
                         if child_cancel.is_cancelled() {
                             break;
                         }
-                        if let Ok(res) = handle
-                            .call_active_check_with_cancel(
-                                template_call.clone(),
-                                child_cancel.child_token(),
+                        let Some((call, _spill)) =
+                            crate::service::plugin_service::hooks::large_body::prepare_active_check_call(
+                                probe_flow_id,
+                                &req_copy,
+                                Some(&resp_copy),
+                                &pt.name,
+                                &pt.value,
+                                handle.protocol_minor(),
+                                handle.supports_large_body(),
                             )
+                        else {
+                            continue;
+                        };
+                        if let Ok(res) = handle
+                            .call_active_check_with_cancel(call, child_cancel.child_token())
                             .await
                             && !res.findings.is_empty()
                         {
@@ -371,7 +502,7 @@ pub(super) async fn run_scan(
                         (Box::new(flow), plugin_hits)
                     });
                     ProbeOutcome {
-                        sent: false,
+                        sent_count: 0,
                         flow_and_findings,
                     }
                 });
@@ -394,18 +525,18 @@ pub(super) async fn run_scan(
                 probes.spawn(async move {
                     let permit = tokio::select! {
                         biased;
-                        _ = child_cancel.cancelled() => return ProbeOutcome { sent: false, flow_and_findings: None },
+                        _ = child_cancel.cancelled() => return ProbeOutcome { sent_count: 0, flow_and_findings: None },
                         p = sem.acquire_owned() => p,
                     };
                     let Ok(_permit) = permit else {
                         return ProbeOutcome {
-                            sent: false,
+                            sent_count: 0,
                             flow_and_findings: None,
                         };
                     };
                     if !wait_until_resumed(&mut probe_pause, &child_cancel).await {
                         return ProbeOutcome {
-                            sent: false,
+                            sent_count: 0,
                             flow_and_findings: None,
                         };
                     }
@@ -423,7 +554,7 @@ pub(super) async fn run_scan(
                         .is_err()
                     {
                         return ProbeOutcome {
-                            sent: false,
+                            sent_count: 0,
                             flow_and_findings: None,
                         };
                     }
@@ -431,7 +562,7 @@ pub(super) async fn run_scan(
                         send(probe_req.clone(), cfg.clone(), child_cancel.child_token()).await
                     else {
                         return ProbeOutcome {
-                            sent: !child_cancel.is_cancelled(),
+                            sent_count: u64::from(!child_cancel.is_cancelled()),
                             flow_and_findings: None,
                         };
                     };
@@ -486,7 +617,92 @@ pub(super) async fn run_scan(
                         Some((Box::new(flow), hits))
                     };
                     ProbeOutcome {
-                        sent: true,
+                        sent_count: 1,
+                        flow_and_findings,
+                    }
+                });
+            }
+            if !cancel.is_cancelled()
+                && let Ok((true_req, false_req)) = build_sql_boolean_pair(&target.request, &point)
+            {
+                let sem = semaphore.clone();
+                let cfg = probe_config.clone();
+                let base = target.base_response.clone();
+                let pt = point.clone();
+                let child_cancel = cancel.child_token();
+                let mut probe_pause = pause_rx.clone();
+                let probe_sessions = sessions.clone();
+                probes.spawn(async move {
+                    let permit = tokio::select! {
+                        biased;
+                        _ = child_cancel.cancelled() => return ProbeOutcome { sent_count: 0, flow_and_findings: None },
+                        p = sem.acquire_owned() => p,
+                    };
+                    let Ok(_permit) = permit else {
+                        return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                    };
+                    if !wait_until_resumed(&mut probe_pause, &child_cancel).await {
+                        return ProbeOutcome { sent_count: 0, flow_and_findings: None };
+                    }
+                    let Some((true_sent, true_resp, _, _)) = execute_single_probe_request(
+                        true_req,
+                        &cfg,
+                        unpack_compressed_responses,
+                        Some(&probe_sessions),
+                        &child_cancel,
+                    )
+                    .await
+                    else {
+                        return ProbeOutcome {
+                            sent_count: u64::from(!child_cancel.is_cancelled()),
+                            flow_and_findings: None,
+                        };
+                    };
+                    if !wait_until_resumed(&mut probe_pause, &child_cancel).await {
+                        return ProbeOutcome { sent_count: 1, flow_and_findings: None };
+                    }
+                    let Some((false_sent, false_resp, started_ms, elapsed)) =
+                        execute_single_probe_request(
+                            false_req,
+                            &cfg,
+                            unpack_compressed_responses,
+                            Some(&probe_sessions),
+                            &child_cancel,
+                        )
+                        .await
+                    else {
+                        return ProbeOutcome {
+                            sent_count: 1 + u64::from(!child_cancel.is_cancelled()),
+                            flow_and_findings: None,
+                        };
+                    };
+                    let mut hits = evaluate_sql_boolean_pair(
+                        None,
+                        &true_sent,
+                        &pt,
+                        &base,
+                        &true_resp,
+                        &false_resp,
+                        now_unix_ms(),
+                    );
+                    let flow_and_findings = (!hits.is_empty()).then(|| {
+                        let fid = Uuid::new_v4();
+                        for f in &mut hits {
+                            f.flow_id = Some(fid);
+                        }
+                        (
+                            Box::new(build_scanner_flow(
+                                fid,
+                                false_sent,
+                                false_resp,
+                                started_ms,
+                                elapsed,
+                            )),
+                            hits,
+                        )
+                    });
+                    ProbeOutcome {
+                        sent_count: 2,
                         flow_and_findings,
                     }
                 });
@@ -503,14 +719,14 @@ pub(super) async fn run_scan(
             }
             next = probes.join_next() => match next {
                 Some(Ok(outcome)) => {
-                    if outcome.sent {
-                        requests_sent = requests_sent.saturating_add(1);
+                    if outcome.sent_count > 0 {
+                        requests_sent = requests_sent.saturating_add(outcome.sent_count);
                     }
                     let (flow, findings) = match outcome.flow_and_findings {
                         Some((f, hits)) => (Some(f), hits),
                         None => (None, Vec::new()),
                     };
-                    if outcome.sent || flow.is_some() {
+                    if outcome.sent_count > 0 || flow.is_some() {
                         let _ = send_audit_signal(
                             &signal_tx,
                             &cancel,

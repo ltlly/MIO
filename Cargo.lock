@@ -4942,6 +4942,7 @@ name = "mio-cli"
 version = "0.3.7"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "clap",
  "mio-core",
  "mio-proxy",

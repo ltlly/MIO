@@ -51,13 +51,25 @@ fn meta(code: u32, p: AuditPhase) -> (&'static str, IssueConfidence, &'static st
             C,
             "CORS 信任 null 源且开启 Access-Control-Allow-Credentials。",
         ),
-        0x00200903 => ("0x00200903", C, "检测到 alg=none 未签名 JWT 令牌。"),
+        0x00200903 => ("0x00200903", C, "检测到 alg=none 或空签名段 JWT 令牌。"),
         0x00300100 => ("0x00300100", F, "HTTP 明文提交凭据。"),
         0x00600100 => ("0x00600100", F, "目录列表开启。"),
+        0x00600550 => ("0x00600550", C, "响应包含 PEM 私钥块。"),
+        0x00200512 => ("0x00200512", C, "GraphQL 响应返回 __schema 自省结构。"),
+        0x00400900 => ("0x00400900", F, "检测到原生序列化对象特征。"),
+        0x00200310 => ("0x00200310", T, "HTML 脚本中存在不可信 DOM 来源到执行点的数据流特征。"),
+        0x00200700 => ("0x00200700", T, "携带会话凭据的 HTML POST 表单缺少防伪令牌字段。"),
+        0x00500980 => ("0x00500980", C, "检测到文件上传表单或 multipart 文件上传接口。"),
+        0x00400f00 => ("0x00400f00", F, "请求头覆盖字段在响应头或页面链接中被信任反射。"),
         0x00200300 => ("0x00200300", F, "无害 canary 原样反射。"),
         0x00500100 => ("0x00500100", F, "开放重定向。"),
         0x00200200 => ("0x00200200", C, "响应头拆分。"),
-        0x00100200 => ("0x00100200", T, "新增数据库异常。"),
+        0x00100200 => ("0x00100200", T, "新增数据库异常或布尔注入响应差分。"),
+        0x00100300 => ("0x00100300", C, "新增本地系统文件或配置结构特征。"),
+        0x00101080 => ("0x00101080", F, "模板算术探针求值结果在响应中出现。"),
+        0x00100100 => ("0x00100100", F, "命令执行环境输出特征在响应中出现。"),
+        0x00100400 => ("0x00100400", F, "新增 XML 外部实体或 DTD 解析异常特征。"),
+        0x00100850 => ("0x00100850", F, "移除认证凭据后接口仍返回一致的受保护业务响应。"),
         _ if p == AuditPhase::Passive => ("0x00600080", F, "私钥或数据库诊断泄露。"),
         _ => ("0x00600080", T, "新增 5xx 异常差分。"),
     }
@@ -209,11 +221,19 @@ pub fn inspect_passive(
         }
     }
     b.hit(body.contains("Index of /"), 0x00600100, "Index of /", true);
-    if let Some(m) = "BEGIN PRIVATE KEY|BEGIN RSA PRIVATE KEY|jdbc:|mysql_connect|SQLSTATE["
-        .split('|')
-        .find(|m| body.contains(m))
+    if let Some(m) =
+        "BEGIN PRIVATE KEY|BEGIN RSA PRIVATE KEY|BEGIN EC PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY|jdbc:|mysql_connect|SQLSTATE["
+            .split('|')
+            .find(|m| body.contains(m))
     {
         b.hit(true, 0x00600080, m, true);
+    }
+    if let Some(pk) =
+        "-----BEGIN PRIVATE KEY-----|-----BEGIN RSA PRIVATE KEY-----|-----BEGIN EC PRIVATE KEY-----|-----BEGIN OPENSSH PRIVATE KEY-----"
+            .split('|')
+            .find(|m| body.contains(m))
+    {
+        b.hit(true, 0x00600550, pk, true);
     }
     let cors_null =
         hdr(hs, "access-control-allow-origin").is_some_and(|v| v.eq_ignore_ascii_case("null"));
@@ -228,6 +248,18 @@ pub fn inspect_passive(
             b.rqs = spans(&request_to_raw(req), tok.as_bytes());
         }
         b.hit(true, 0x00200903, &tok, !in_req);
+        b.rqs.clear();
+    }
+    if body.contains("\"__schema\"")
+        && (body.contains("\"queryType\"") || body.contains("\"types\""))
+    {
+        b.hit(true, 0x00200512, "\"__schema\"", true);
+    }
+    if let Some((ser_ev, in_req)) = find_serialized_object_marker(req, body) {
+        if in_req {
+            b.rqs = spans(&request_to_raw(req), ser_ev.as_bytes());
+        }
+        b.hit(true, 0x00400900, &ser_ev, !in_req);
         b.rqs.clear();
     }
     super::linter::inspect_passive_compliance(&mut b, https, resp);
@@ -257,7 +289,7 @@ fn find_alg_none_jwt(req: &HttpRequest, resp: &HttpResponse, body: &str) -> Opti
 fn scan_alg_none_jwt_in_text(text: &str) -> Option<String> {
     for raw in text.split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.')) {
         let mut parts = raw.split('.');
-        let (Some(hdr_b64), Some(pay_b64), Some(_sig)) = (parts.next(), parts.next(), parts.next())
+        let (Some(hdr_b64), Some(pay_b64), Some(sig)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
@@ -272,9 +304,44 @@ fn scan_alg_none_jwt_in_text(text: &str) -> Option<String> {
                 .filter(|c| !c.is_ascii_whitespace())
                 .collect::<String>()
                 .to_ascii_lowercase();
-            if compact.contains("\"alg\":\"none\"") {
+            if compact.contains("\"alg\":\"none\"")
+                || (sig.is_empty() && compact.contains("\"alg\":\"hs"))
+            {
                 return Some(raw.to_owned());
             }
+        }
+    }
+    None
+}
+
+fn find_serialized_object_marker(req: &HttpRequest, resp_body: &str) -> Option<(String, bool)> {
+    let req_text = String::from_utf8_lossy(&req.body[..req.body.len().min(MAX_SCAN_BODY_BYTES)]);
+    for h in &req.headers {
+        if h.name.eq_ignore_ascii_case("cookie")
+            && let Ok(v) = std::str::from_utf8(&h.value)
+            && let Some(m) = scan_serialized_marker_in_text(v)
+        {
+            return Some((m, true));
+        }
+    }
+    if let Some(m) = scan_serialized_marker_in_text(&req_text) {
+        return Some((m, true));
+    }
+    scan_serialized_marker_in_text(resp_body).map(|m| (m, false))
+}
+
+fn scan_serialized_marker_in_text(text: &str) -> Option<String> {
+    for marker in ["rO0ABX", "rO0ABQ", "aced0005", "__wakeup"] {
+        if text.contains(marker) {
+            return Some(marker.to_owned());
+        }
+    }
+    if let Some(pos) = text.find("O:") {
+        let rest = &text[pos + 2..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && rest[digits..].starts_with(":\"") {
+            let snippet_end = (pos + 2 + digits + 16).min(text.len());
+            return Some(text[pos..snippet_end].to_owned());
         }
     }
     None
@@ -429,11 +496,38 @@ pub fn evaluate_active_check(
         ACTIVE_SPLIT_HEADER,
         true,
     );
-    if let Some(m) = "SQLSTATE[|You have an error in your SQL syntax|ORA-01756|PG::SyntaxError"
+    if let Some(m) =
+        "SQLSTATE[|You have an error in your SQL syntax|ORA-01756|PG::SyntaxError|Unclosed quotation mark after the character string|sqlite3.OperationalError:"
+            .split('|')
+            .find(|m| pb.contains(m) && !bb.contains(m))
+    {
+        b.hit(true, 0x00100200, m, true);
+    }
+    if let Some(m) =
+        "root:x:0:0:|daemon:x:1:1:|; for 16-bit app support|[boot loader]|[operating systems]"
+            .split('|')
+            .find(|m| pb.contains(m) && !bb.contains(m))
+    {
+        b.hit(true, 0x00100300, m, true);
+    }
+    if (payload.contains("{{1331*73}}") || payload.contains("${1331*73}"))
+        && pb.contains("97163")
+        && !bb.contains("97163")
+    {
+        b.hit(true, 0x00101080, "97163", true);
+    }
+    if let Some(m) = "uid=0(root)|gid=0(root)|Windows IP Configuration"
         .split('|')
         .find(|m| pb.contains(m) && !bb.contains(m))
     {
-        b.hit(true, 0x00100200, m, true);
+        b.hit(true, 0x00100100, m, true);
+    }
+    if let Some(m) =
+        "DOCTYPE is disallowed|External Entity: Failed to read external document|xmlParseEntityRef:|SimpleXMLElement"
+            .split('|')
+            .find(|m| pb.contains(m) && !bb.contains(m))
+    {
+        b.hit(true, 0x00100400, m, true);
     }
     let diff = format!("{}->{}", base.status, probe.status);
     b.hit(
@@ -495,4 +589,180 @@ pub fn evaluate_custom_scan_checks(
         }
     }
     findings
+}
+
+pub fn build_sql_boolean_pair(
+    req: &HttpRequest,
+    point: &InsertionPoint,
+) -> Result<(HttpRequest, HttpRequest)> {
+    let (true_val, false_val) = if !point.value.is_empty()
+        && point.value.chars().all(|c| c.is_ascii_digit())
+    {
+        (
+            format!("{} AND 1=1", point.value),
+            format!("{} AND 1=2", point.value),
+        )
+    } else {
+        (
+            format!("{}' AND '1'='1", point.value),
+            format!("{}' AND '1'='2", point.value),
+        )
+    };
+    let true_req = build_probe_request(req, point, &true_val)?;
+    let false_req = build_probe_request(req, point, &false_val)?;
+    Ok((true_req, false_req))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_sql_boolean_pair(
+    flow_id: Option<FlowId>,
+    true_req: &HttpRequest,
+    point: &InsertionPoint,
+    base: &HttpResponse,
+    true_resp: &HttpResponse,
+    false_resp: &HttpResponse,
+    now_unix_ms: i64,
+) -> Vec<AuditFinding> {
+    if base.status >= 400 || true_resp.status != base.status {
+        return vec![];
+    }
+    let base_len = base.body.len();
+    let true_len = true_resp.body.len();
+    let false_len = false_resp.body.len();
+    let true_matches_base = true_resp.body == base.body || true_len.abs_diff(base_len) <= 16;
+    let false_diverges = false_resp.status != base.status
+        || (false_resp.body != base.body && false_len.abs_diff(base_len) >= 32);
+    if !true_matches_base || !false_diverges {
+        return vec![];
+    }
+    let raw_req = request_to_raw(true_req);
+    let rqs = spans(&raw_req, b"1=1")
+        .into_iter()
+        .chain(spans(&raw_req, b"1%3D1"))
+        .take(1)
+        .collect();
+    let mut b = Bag {
+        req: true_req,
+        resp: false_resp,
+        param: Some(&point.name),
+        flow: flow_id,
+        phase: AuditPhase::Active,
+        rqs,
+        raw: None,
+        now: now_unix_ms,
+        out: vec![],
+    };
+    let ev = format!(
+        "boolean-diff: base={}B/{} true={}B/{} false={}B/{}",
+        base_len, base.status, true_len, true_resp.status, false_len, false_resp.status
+    );
+    b.hit_detail(
+        0x00100200,
+        Some("多步布尔条件探针触发稳定响应差分（True 分支与基线一致，False 分支显著偏离）。"),
+        &ev,
+        false,
+    );
+    b.out
+}
+
+pub fn build_host_override_probe(req: &HttpRequest) -> HttpRequest {
+    let mut next = req.clone();
+    let mut updated = false;
+    for h in &mut next.headers {
+        if h.name.eq_ignore_ascii_case("x-forwarded-host") {
+            h.value = ACTIVE_OVERRIDE_HOST.as_bytes().to_vec();
+            updated = true;
+        }
+    }
+    if !updated {
+        next.headers.push(Header {
+            name: "X-Forwarded-Host".into(),
+            value: ACTIVE_OVERRIDE_HOST.as_bytes().to_vec(),
+        });
+    }
+    next
+}
+
+pub fn evaluate_host_override_probe(
+    flow_id: Option<FlowId>,
+    probe_req: &HttpRequest,
+    base: &HttpResponse,
+    probe: &HttpResponse,
+    now_unix_ms: i64,
+) -> Vec<AuditFinding> {
+    let base_body = String::from_utf8_lossy(&base.body[..base.body.len().min(MAX_SCAN_BODY_BYTES)]);
+    let probe_body =
+        String::from_utf8_lossy(&probe.body[..probe.body.len().min(MAX_SCAN_BODY_BYTES)]);
+    let reflected_in_loc = hdr(&probe.headers, "location")
+        .is_some_and(|loc| loc.contains(ACTIVE_OVERRIDE_HOST))
+        && !hdr(&base.headers, "location").is_some_and(|loc| loc.contains(ACTIVE_OVERRIDE_HOST));
+    let reflected_in_body =
+        probe_body.contains(ACTIVE_OVERRIDE_HOST) && !base_body.contains(ACTIVE_OVERRIDE_HOST);
+    if !reflected_in_loc && !reflected_in_body {
+        return vec![];
+    }
+    let raw_req = request_to_raw(probe_req);
+    let mut b = Bag {
+        req: probe_req,
+        resp: probe,
+        param: Some("X-Forwarded-Host"),
+        flow: flow_id,
+        phase: AuditPhase::Active,
+        rqs: spans(&raw_req, ACTIVE_OVERRIDE_HOST.as_bytes()),
+        raw: None,
+        now: now_unix_ms,
+        out: vec![],
+    };
+    b.hit(true, 0x00400f00, ACTIVE_OVERRIDE_HOST, true);
+    b.out
+}
+
+pub fn build_authz_strip_probe(req: &HttpRequest) -> Option<HttpRequest> {
+    let has_creds = req.headers.iter().any(|h| {
+        (h.name.eq_ignore_ascii_case("authorization") || h.name.eq_ignore_ascii_case("cookie"))
+            && !h.value.iter().all(u8::is_ascii_whitespace)
+    });
+    if !has_creds {
+        return None;
+    }
+    let mut next = req.clone();
+    next.headers.retain(|h| {
+        !h.name.eq_ignore_ascii_case("authorization") && !h.name.eq_ignore_ascii_case("cookie")
+    });
+    Some(next)
+}
+
+pub fn evaluate_authz_strip_probe(
+    flow_id: Option<FlowId>,
+    unauth_req: &HttpRequest,
+    base: &HttpResponse,
+    unauth_resp: &HttpResponse,
+    now_unix_ms: i64,
+) -> Vec<AuditFinding> {
+    if !(200..300).contains(&base.status)
+        || unauth_resp.status != base.status
+        || base.body.len() < 16
+        || unauth_resp.body != base.body
+    {
+        return vec![];
+    }
+    let mut b = Bag {
+        req: unauth_req,
+        resp: unauth_resp,
+        param: Some("Authorization/Cookie"),
+        flow: flow_id,
+        phase: AuditPhase::Active,
+        rqs: Vec::new(),
+        raw: None,
+        now: now_unix_ms,
+        out: vec![],
+    };
+    let ev = format!("status={} body_len={}", unauth_resp.status, unauth_resp.body.len());
+    b.hit_detail(
+        0x00100850,
+        Some("移除 Authorization/Cookie 凭据后重放，服务端仍返回完全一致的 2xx 业务响应。"),
+        &ev,
+        false,
+    );
+    b.out
 }

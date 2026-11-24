@@ -635,12 +635,14 @@ impl Workbench {
                 MouseButton::Right,
                 cx.listener(move |this, _, _, cx| {
                     this.extensions.selected = Some(id);
+                    this.query_plugin_hook_metrics(cx);
                     cx.notify();
                 }),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cancel_plugin_interactions(cx);
                 this.extensions.selected = Some(id);
+                this.query_plugin_hook_metrics(cx);
                 cx.notify();
             }))
             .context_menu(move |menu, _, _| {

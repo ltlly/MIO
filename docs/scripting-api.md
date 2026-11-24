@@ -1,12 +1,11 @@
 # MIO Scripting API Specification (Rhai / MioScript Engine)
 
-Authoritative specification generated from `crates/mio-core/src/http/mio_script/`.
+Authoritative specification matching `crates/mio-core/src/http/mio_script/`.
 
 ## 1. Engine & Runtime Model
 
-- **Language**: **Rhai `1.27`** (Rust/JS-like expressions & statements: `let`, `const`, `fn`, `if/else`, `for ... in`, `#{ ... }` map literals, `[...]` arrays, string interpolation `` `... ${expr}` ``, `print(...)`).
-- **NOT Java / JDK**: Arbitrary `java.util.*` imports or static Java builder calls do **not** exist. Script compatibility helpers are registered directly on Rhai `Map` objects and `utilities`.
-- **Regex Flavor**: Rust `regex` crate (linear-time DFA; no lookahead/lookbehind or backreferences). Cached up to 256 patterns, max 4,096 bytes per pattern.
+- **Language**: **Rhai `1.27`** (`let`, `const`, `fn`, `if/else`, `for ... in`, `#{ ... }` map literals, `[...]` arrays, `` `... ${expr}` `` interpolation, `print(...)`). No Java/JDK imports exist; helpers are registered directly on Rhai `Map`s and `utilities`.
+- **Regex Flavor**: Rust `regex` crate (linear-time DFA; no lookaround or backreferences). Pattern cache: `256` entries, `4,096` bytes max per pattern.
 - **Execution Limits**:
 
 | Limit | Value | Constant / Enforcement |
@@ -188,3 +187,11 @@ if auth.contains(".") {
 }
 false
 ```
+
+---
+
+## 7. Known Limitations
+
+- **Lossy UTF-8 body mapping**: `request.body`, `response.body`, and `raw` are materialized via `String::from_utf8_lossy`. Mutating binary/non-UTF-8 payloads (images, protobuf, compressed bytes with unpacking off) through MioScript will corrupt invalid UTF-8 sequences.
+- **Deterministic sandboxed bounds**: Scripts are strictly bounded (`50,000` ops, `16 MiB` string / `MAX_BODY`, `64 KiB` source size, `4,096` collection entries) and have zero network or filesystem access (use Native Plugins for I/O or out-of-band traffic).
+- **Linear-time regex only**: Rust `regex` rejects lookahead, lookbehind, and backreferences.

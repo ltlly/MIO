@@ -53,6 +53,7 @@ fn main() -> io::Result<()> {
             required_components: vec![Component::Button as i32],
             panel: Some(panel.clone()),
             supports_panel_multiplexing: false,
+            supports_large_body: false,
         }),
         std::time::Duration::from_secs(5),
     );
@@ -264,6 +265,7 @@ fn run_multiplex_e2e() -> io::Result<()> {
             required_components: vec![Component::Text as i32, Component::Button as i32],
             panel: Some(initial),
             supports_panel_multiplexing: true,
+            supports_large_body: false,
         },
     )?;
     if session.negotiated_minor() < PROTOCOL_MINOR {
@@ -309,6 +311,7 @@ fn run_multiplex_e2e() -> io::Result<()> {
                             headers: vec![],
                             body: b"from-child".to_vec(),
                             trailers: vec![],
+                            ..Default::default()
                         })),
                         parent_request_id: reply_to,
                     }),
@@ -417,6 +420,7 @@ fn run_hook_peer() -> io::Result<()> {
             required_components: vec![Component::Text as i32],
             panel: Some(initial),
             supports_panel_multiplexing: false,
+            supports_large_body: false,
         },
     )?;
     loop {
@@ -484,6 +488,7 @@ fn run_hook_peer() -> io::Result<()> {
                     envelope::Body::WebSocketHookResult(WebSocketHookResult {
                         action: HookAction::Pass as i32,
                         payload: vec![],
+                        ..Default::default()
                     }),
                     1,
                     reply_to,

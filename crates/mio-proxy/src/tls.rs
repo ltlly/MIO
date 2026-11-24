@@ -494,6 +494,26 @@ impl MitmAuthority {
             .collect()
     }
 
+    /// Issue a per-host leaf certificate chain under this CA and cryptographically
+    /// verify every signature link from the leaf up to the top embedded CA cert.
+    pub fn issue_leaf_chain_der(&self, host: &str) -> Result<Vec<Vec<u8>>, ProxyError> {
+        let normalized = crate::route::normalize_host(host);
+        let (chain, _) = issue_ca_signed_leaf(&self.issuer, &normalized)?;
+        for pair in chain.windows(2) {
+            let (_, child) = x509_parser::parse_x509_certificate(pair[0].as_ref())
+                .map_err(|error| ProxyError::Tls(format!("签发证书解析失败：{error}")))?;
+            let (_, parent) = x509_parser::parse_x509_certificate(pair[1].as_ref())
+                .map_err(|error| ProxyError::Tls(format!("上级 CA 证书解析失败：{error}")))?;
+            if child.issuer() != parent.subject() {
+                return Err(ProxyError::Tls("签发证书链 issuer/subject 不匹配".into()));
+            }
+            child
+                .verify_signature(Some(parent.public_key()))
+                .map_err(|error| ProxyError::Tls(format!("签发证书链签名校验失败：{error}")))?;
+        }
+        Ok(chain.into_iter().map(|cert| cert.as_ref().to_vec()).collect())
+    }
+
     pub fn certificate_pem(&self) -> String {
         der_to_pem(&self.certificate_der(), "CERTIFICATE")
     }
@@ -1826,5 +1846,14 @@ mod tests {
             span_secs <= 195 * 24 * 60 * 60,
             "leaf lifetime must stay well under mobile/browser 397-day limit, got {span_secs}s"
         );
+    }
+
+    #[test]
+    fn issue_leaf_chain_der_verifies_signed_chain_for_generated_ca() {
+        let ca = MitmAuthority::generate().unwrap();
+        let chain = ca.issue_leaf_chain_der("lab.example.invalid.").unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1], ca.certificate_der());
+        assert!(ca.issue_leaf_chain_der("").is_err());
     }
 }

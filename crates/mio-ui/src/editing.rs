@@ -40,9 +40,10 @@ mod tests_syntax_highlight;
 
 pub(crate) use codec::{
     DEFAULT_HIDDEN_REQUEST_HEADERS, DEFAULT_HIDDEN_RESPONSE_HEADERS, RenderedBodySummary,
-    base64_decode_bytes, convert_bytes, convert_selection, extract_http_response_body,
-    extract_http_response_body_and_content_type, filter_http_headers_bytes, hex_decode, hex_encode,
-    parse_rendered_http_response, validate_http_header_names,
+    RenderedHtmlSummary, base64_decode_bytes, convert_bytes, convert_selection,
+    extract_http_response_body, extract_http_response_body_and_content_type,
+    filter_http_headers_bytes, hex_decode, hex_encode, parse_rendered_http_response,
+    validate_http_header_names,
 };
 #[cfg(test)]
 pub(crate) use hex_grid::{

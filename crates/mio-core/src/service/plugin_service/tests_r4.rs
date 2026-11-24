@@ -241,8 +241,10 @@ fn main() -> io::Result<()> {
     }
     let expected_minor: u64 = if plugin_version.starts_with("0.0.0-v15") {
         5
-    } else {
+    } else if plugin_version.starts_with("0.0.0-v16") {
         6
+    } else {
+        7
     };
 
     let mut stdin = io::stdin().lock();
@@ -693,6 +695,8 @@ async fn reload_at_max_instances_succeeds_and_auto_reload_enforces_permission_su
                 entry_modified: e_mod,
                 entry_size: e_sz,
                 auto_reload: false,
+                hook_filter: PluginHookFilter::default(),
+                hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
                 panel,
                 resources: HashMap::new(),
             },
@@ -1255,6 +1259,57 @@ fn supervisor_recovers_from_handshake_zombie_eperm_and_falls_back_to_v15_when_sa
             !inc_msg.contains("无法终止插件进程组"),
             "unexpected process group termination error: {inc_msg}"
         );
+
+        // 4. Existing v1.6 workers (including passive_check + audit.write) must automatically
+        // fall back from v1.7 to minor=6 and complete handshake + UiEvent cleanly.
+        let v16_dir = temp.path().join("v16-compat-worker");
+        fs::create_dir_all(&v16_dir).unwrap();
+        write_native_package(
+            &v16_dir,
+            "lab.v16_compat",
+            "0.0.0-v16",
+            &["storage.kv", "traffic.read", "audit.write"],
+            &["suite_panel", "passive_check"],
+        );
+        let v16_pkg = VerifiedPackage::read(&v16_dir).unwrap();
+        let v16_trust = NativeTrust::confirmed(
+            &v16_pkg,
+            [
+                Permission::Storage,
+                Permission::TrafficRead,
+                Permission::AuditWrite,
+            ],
+        )
+        .unwrap();
+        let (srv_tx4, mut srv_rx4) = mpsc::channel(8);
+        let mut sup16 = PluginSupervisor::start(v16_pkg, project, v16_trust, srv_tx4)
+            .await
+            .expect("compatible v1.6 plugin should fall back cleanly from v1.7");
+        assert_eq!(sup16.protocol_minor, mio_plugin_api::protocol::V16_COMPAT_MINOR);
+        let handle16 = sup16.handle();
+        assert_eq!(
+            handle16.protocol_minor(),
+            mio_plugin_api::protocol::V16_COMPAT_MINOR
+        );
+        handle16
+            .try_event(UiEvent {
+                node_id: 10,
+                event: Some(ui_event::Event::Click(Empty {})),
+                editors: vec![],
+            })
+            .unwrap();
+        let req16 = srv_rx4.recv().await.expect("expected HostCall on v1.6 fallback");
+        let _ = req16.reply.send(Ok(ServiceResult::Done));
+        let updated_rev16 = loop {
+            match sup16.events.recv().await.expect("expected plugin event") {
+                PluginEvent::Panel { snapshot, .. } if snapshot.revision >= 2 => {
+                    break snapshot.revision;
+                }
+                _ => {}
+            }
+        };
+        assert!(updated_rev16 >= 2);
+        sup16.stop().await.unwrap();
         })
         .await
         .expect("supervisor v1.5 fallback test timed out");

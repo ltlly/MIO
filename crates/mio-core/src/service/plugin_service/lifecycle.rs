@@ -382,6 +382,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: false,
+                    hook_filter: PluginHookFilter::default(),
+                    hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
                     info,
                     panel,
                     resources: HashMap::new(),
@@ -457,6 +459,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: entry.auto_reload,
+                    hook_filter: entry.hook_filter,
+                    hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
                     info,
                     panel,
                     resources: HashMap::new(),
@@ -516,6 +520,7 @@ impl State {
                     contributions,
                     enabled: entry.enabled,
                     auto_reload: entry.auto_reload,
+                    hook_filter: entry.hook_filter.clone(),
                 }
             })
             .collect();

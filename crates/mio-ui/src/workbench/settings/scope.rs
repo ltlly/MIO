@@ -1159,6 +1159,7 @@ impl Settings {
             .gap(px(8.))
             .child(
                 div()
+                    .id("scope-oos-custom-table-wrap")
                     .flex()
                     .gap(px(9.))
                     .h(theme::scaled_px(136.).max(px(136.)))
@@ -1372,6 +1373,11 @@ impl Settings {
             .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(title))
             .child(
                 div()
+                    .id(if include {
+                        "scope-include-table-wrap"
+                    } else {
+                        "scope-exclude-table-wrap"
+                    })
                     .flex()
                     .gap(px(9.))
                     .h(theme::scaled_px(148.).max(px(148.)))

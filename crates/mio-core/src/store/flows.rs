@@ -122,6 +122,121 @@ impl<S: std::ops::Deref<Target = ProjectStore>> FlowsRepo<S> {
         Ok(exists)
     }
 
+    fn load_numbered_ai_flows(
+        &self,
+        recovery_map: &std::collections::HashMap<FlowId, FlowSummary>,
+    ) -> Result<Vec<(Option<u64>, FlowSummary)>> {
+        let mut rows_out: Vec<(Option<u64>, FlowSummary)> = Vec::new();
+        let mut stmt = self
+            .0
+            .connection
+            .prepare("SELECT id, summary, capture_number FROM flows")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (raw_id, bytes, raw_num) = row?;
+            let id = Uuid::parse_str(&raw_id).context("流量 ID 损坏")?;
+            let num = raw_num.and_then(|n| u64::try_from(n).ok()).filter(|&n| n > 0);
+            if let Some(recovered) = recovery_map.get(&id) {
+                rows_out.push((num, recovered.clone()));
+            } else {
+                let summary: FlowSummary = serde_json::from_slice(&bytes)?;
+                rows_out.push((num, summary));
+            }
+        }
+        let seen: std::collections::HashSet<FlowId> =
+            rows_out.iter().map(|(_, s)| s.id).collect();
+        for summary in recovery_map.values() {
+            if !seen.contains(&summary.id) {
+                rows_out.push((None, summary.clone()));
+            }
+        }
+        let mut next_num = rows_out
+            .iter()
+            .filter_map(|(n, _)| *n)
+            .max()
+            .unwrap_or(0);
+        // Assign deterministic monotonic 1-based numbers to flows without a stored capture_number.
+        let mut unnumbered_indices: Vec<usize> = rows_out
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (n, _))| n.is_none().then_some(idx))
+            .collect();
+        unnumbered_indices.sort_by(|&a, &b| {
+            let sa = &rows_out[a].1;
+            let sb = &rows_out[b].1;
+            sa.started_unix_ms
+                .cmp(&sb.started_unix_ms)
+                .then_with(|| sa.id.to_string().cmp(&sb.id.to_string()))
+        });
+        for idx in unnumbered_indices {
+            next_num = next_num.saturating_add(1);
+            rows_out[idx].0 = Some(next_num);
+        }
+        Ok(rows_out)
+    }
+
+    pub(crate) fn flow_number_for(
+        &self,
+        id: FlowId,
+        recovery_map: &std::collections::HashMap<FlowId, FlowSummary>,
+    ) -> Result<Option<u64>> {
+        let stored: Option<Option<i64>> = self
+            .0
+            .connection
+            .query_row(
+                "SELECT capture_number FROM flows WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(Some(num)) = stored
+            && let Ok(n) = u64::try_from(num)
+            && n > 0
+        {
+            return Ok(Some(n));
+        }
+        let all = self.load_numbered_ai_flows(recovery_map)?;
+        Ok(all
+            .into_iter()
+            .find(|(_, s)| s.id == id)
+            .and_then(|(num, _)| num))
+    }
+
+    pub(crate) fn resolve_flow_by_number(
+        &self,
+        flow_number: u64,
+        recovery_map: &std::collections::HashMap<FlowId, FlowSummary>,
+    ) -> Result<Option<FlowId>> {
+        if flow_number == 0 {
+            return Ok(None);
+        }
+        if let Ok(num_i64) = i64::try_from(flow_number)
+            && let Some(raw_id) = self
+                .0
+                .connection
+                .query_row(
+                    "SELECT id FROM flows WHERE capture_number=?1 LIMIT 1",
+                    [num_i64],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+        {
+            return Ok(Some(Uuid::parse_str(&raw_id).context("流量 ID 损坏")?));
+        }
+        let all = self.load_numbered_ai_flows(recovery_map)?;
+        Ok(all
+            .into_iter()
+            .find(|(num, _)| *num == Some(flow_number))
+            .map(|(_, s)| s.id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn query_ai_flows(
         &self,
         offset: usize,
@@ -129,63 +244,115 @@ impl<S: std::ops::Deref<Target = ProjectStore>> FlowsRepo<S> {
         filter: &str,
         method: Option<&str>,
         status: Option<u16>,
+        hide_connect: bool,
+        host: Option<&str>,
+        source: Option<&str>,
+        state: Option<&str>,
+        order: Option<&str>,
         recovery_map: &std::collections::HashMap<FlowId, FlowSummary>,
-    ) -> Result<(usize, Vec<FlowSummary>)> {
+    ) -> Result<(usize, Vec<crate::AiIpcFlowItem>)> {
         ensure!((1..=500).contains(&limit), "分页大小必须为 1–500");
         ensure!(filter.len() <= 4096, "筛选文本过长");
         let method = method.map(str::trim).filter(|m| !m.is_empty());
-        if recovery_map.is_empty() && method.is_none() && status.is_none() {
-            return self.page(offset, limit, filter);
-        }
-        let needle = filter.to_ascii_lowercase();
-        let matches_summary = |s: &FlowSummary| -> bool {
-            if !needle.is_empty()
-                && !s.url.to_ascii_lowercase().contains(&needle)
-                && !s.method.to_ascii_lowercase().contains(&needle)
-            {
-                return false;
-            }
-            if let Some(m) = method
-                && !s.method.eq_ignore_ascii_case(m)
-            {
-                return false;
-            }
-            if let Some(code) = status
-                && s.status != Some(code)
-            {
-                return false;
-            }
-            true
+        let host_filter = host
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(str::to_ascii_lowercase);
+        let source_filter = match source.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => Some(match raw.to_ascii_lowercase().as_str() {
+                "proxy" => crate::TrafficSource::Proxy,
+                "repeater" => crate::TrafficSource::Repeater,
+                "intruder" => crate::TrafficSource::Intruder,
+                "scanner" => crate::TrafficSource::Scanner,
+                "plugin" => crate::TrafficSource::Plugin(String::new()),
+                other => bail!(
+                    "无效的 --source 筛选值 `{other}`（支持：proxy、repeater、intruder、scanner、plugin）"
+                ),
+            }),
+            None => None,
         };
-        let mut combined: Vec<FlowSummary> = recovery_map
-            .values()
-            .filter(|s| matches_summary(s))
-            .cloned()
+        let state_filter = match state.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let norm = raw.to_ascii_lowercase();
+                ensure!(
+                    matches!(
+                        norm.as_str(),
+                        "complete"
+                            | "pending"
+                            | "intercepted"
+                            | "dropped"
+                            | "cancelled"
+                            | "failed"
+                            | "error"
+                            | "abnormal"
+                    ),
+                    "无效的 --state 筛选值 `{raw}`（支持：complete、pending、intercepted、dropped、cancelled、failed、abnormal）"
+                );
+                Some(norm)
+            }
+            None => None,
+        };
+        let ascending = match order.map(str::trim).filter(|o| !o.is_empty()) {
+            Some(raw) if raw.eq_ignore_ascii_case("asc") => true,
+            Some(raw) if raw.eq_ignore_ascii_case("desc") => false,
+            Some(other) => bail!("无效的 --order 排序值 `{other}`（支持：asc、desc）"),
+            None => false,
+        };
+        let needle = filter.to_ascii_lowercase();
+        let all = self.load_numbered_ai_flows(recovery_map)?;
+        let mut combined: Vec<crate::AiIpcFlowItem> = all
+            .into_iter()
+            .filter(|(_, s)| {
+                if hide_connect && s.method.eq_ignore_ascii_case("CONNECT") {
+                    return false;
+                }
+                if !needle.is_empty()
+                    && !s.url.to_ascii_lowercase().contains(&needle)
+                    && !s.method.to_ascii_lowercase().contains(&needle)
+                {
+                    return false;
+                }
+                if let Some(m) = method
+                    && !s.method.eq_ignore_ascii_case(m)
+                {
+                    return false;
+                }
+                if let Some(code) = status
+                    && s.status != Some(code)
+                {
+                    return false;
+                }
+                if let Some(want_host) = &host_filter
+                    && !flow_matches_host(&s.url, want_host)
+                {
+                    return false;
+                }
+                if let Some(want_src) = &source_filter {
+                    let matched = match (want_src, &s.source) {
+                        (crate::TrafficSource::Plugin(_), crate::TrafficSource::Plugin(_)) => true,
+                        _ => want_src == &s.source,
+                    };
+                    if !matched {
+                        return false;
+                    }
+                }
+                if let Some(want_state) = &state_filter
+                    && !flow_matches_state(&s.state, want_state)
+                {
+                    return false;
+                }
+                true
+            })
+            .map(|(number, summary)| crate::AiIpcFlowItem { number, summary })
             .collect();
-        let mut stmt = self.0.connection.prepare(
-            "SELECT id, summary FROM flows
-             WHERE (?1='' OR instr(lower(url),lower(?1))>0 OR instr(lower(method),lower(?1))>0)
-               AND (?2 IS NULL OR lower(method)=lower(?2))
-             ORDER BY started DESC, id ASC",
-        )?;
-        let rows = stmt.query_map(params![filter, method], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        for row in rows {
-            let (raw_id, bytes) = row?;
-            let id = Uuid::parse_str(&raw_id).context("流量 ID 损坏")?;
-            if recovery_map.contains_key(&id) {
-                continue;
-            }
-            let summary: FlowSummary = serde_json::from_slice(&bytes)?;
-            if matches_summary(&summary) {
-                combined.push(summary);
-            }
-        }
         combined.sort_by(|a, b| {
-            b.started_unix_ms
-                .cmp(&a.started_unix_ms)
-                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+            let ord = a
+                .summary
+                .started_unix_ms
+                .cmp(&b.summary.started_unix_ms)
+                .then_with(|| a.number.cmp(&b.number))
+                .then_with(|| a.summary.id.to_string().cmp(&b.summary.id.to_string()));
+            if ascending { ord } else { ord.reverse() }
         });
         let total = combined.len();
         let page = combined.into_iter().skip(offset).take(limit).collect();
@@ -379,5 +546,47 @@ pub(super) fn state_code(state: &crate::FlowState) -> &'static str {
         crate::FlowState::Dropped => "dropped",
         crate::FlowState::Cancelled => "cancelled",
         crate::FlowState::Failed(_) => "failed",
+    }
+}
+
+fn flow_matches_host(url: &str, want_host_lower: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        let host_lo = host.to_ascii_lowercase();
+        if host_lo == want_host_lower || host_lo.contains(want_host_lower) {
+            return true;
+        }
+        if let Some(port) = parsed.port() {
+            let host_port = format!("{host_lo}:{port}");
+            if host_port == want_host_lower || host_port.contains(want_host_lower) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    authority == want_host_lower || authority.contains(want_host_lower)
+}
+
+fn flow_matches_state(state: &crate::FlowState, want_state_lower: &str) -> bool {
+    match want_state_lower {
+        "complete" => matches!(state, crate::FlowState::Complete),
+        "pending" => matches!(state, crate::FlowState::Pending),
+        "intercepted" => matches!(state, crate::FlowState::Intercepted),
+        "dropped" => matches!(state, crate::FlowState::Dropped),
+        "cancelled" => matches!(state, crate::FlowState::Cancelled),
+        "failed" | "error" => matches!(state, crate::FlowState::Failed(_)),
+        "abnormal" => matches!(
+            state,
+            crate::FlowState::Failed(_) | crate::FlowState::Dropped | crate::FlowState::Cancelled
+        ),
+        _ => false,
     }
 }

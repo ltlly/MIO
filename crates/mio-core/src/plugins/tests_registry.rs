@@ -96,6 +96,7 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
             grants: vec![Permission::TrafficRead],
             enabled: true,
             auto_reload: true,
+            hook_filter: Default::default(),
         })
         .unwrap();
     dir_staging.commit();
@@ -123,6 +124,7 @@ fn registry_stages_directory_and_tar_gz_into_packages_dir_and_survives_source_de
             grants: vec![Permission::TrafficRead],
             enabled: true,
             auto_reload: false,
+            hook_filter: Default::default(),
         })
         .unwrap();
     arch_staging.commit();
@@ -177,6 +179,7 @@ fn registry_mutations_and_staging_rollback_work() {
             grants: vec![Permission::TrafficRead],
             enabled: true,
             auto_reload: true,
+            hook_filter: Default::default(),
         })
         .unwrap();
     staging1.commit();
@@ -203,6 +206,7 @@ fn registry_mutations_and_staging_rollback_work() {
             grants: vec![Permission::TrafficRead],
             enabled: false,
             auto_reload: false,
+            hook_filter: Default::default(),
         })
         .unwrap();
     staging2.commit();
@@ -221,6 +225,7 @@ fn registry_mutations_and_staging_rollback_work() {
             grants: vec![Permission::TrafficRead],
             enabled: true,
             auto_reload: true,
+            hook_filter: Default::default(),
         })
         .unwrap();
     staging3.commit();
@@ -274,9 +279,22 @@ fn registry_allows_listing_and_uninstalling_legacy_wasm_entries_alongside_native
             grants: vec![Permission::TrafficRead],
             enabled: true,
             auto_reload: false,
+            hook_filter: Default::default(),
         })
         .unwrap();
     staging.commit();
+
+    let mut filter = crate::PluginHookFilter {
+        scope_only: true,
+        skip_static_resources: true,
+        host_allowlist: vec![" API.Example.Invalid ".into()],
+        failure_policy: crate::PluginHookFailurePolicy::FailOpen,
+        ..Default::default()
+    };
+    assert!(store.set_hook_filter("lab.keep", &filter).unwrap());
+    filter = filter.normalized();
+    let loaded_keep = store.get("lab.keep").unwrap().unwrap();
+    assert_eq!(loaded_keep.hook_filter, filter);
 
     let legacy_pkg_dir = root.join("packages").join("lab.legacy_wasm");
     fs::create_dir_all(&legacy_pkg_dir).unwrap();

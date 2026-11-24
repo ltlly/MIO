@@ -200,6 +200,7 @@ impl Settings {
             };
             body = body.child(
                 div()
+                    .id(SharedString::from(format!("proxy-{name}-rules-section")))
                     .flex()
                     .flex_col()
                     .flex_shrink_0()

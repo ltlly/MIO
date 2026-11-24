@@ -634,17 +634,24 @@ impl Settings {
                                         })),
                                     ),
                             )
-                            .child(settings_table_frame(
-                                DataTable::new(&self.pools.table)
-                                    .with_size(px(22.))
-                                    .header_row_height(px(24.))
-                                    .bordered(false)
-                                    .stripe(false)
-                                    .scrollbar_visible(true, false)
-                                    .scroll_bounce(false)
-                                    .accessibility_label("资源池任务计数"),
-                                true,
-                            )),
+                            .child(
+                                div()
+                                    .id("settings-pools-table-wrap")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(settings_table_frame(
+                                        DataTable::new(&self.pools.table)
+                                            .with_size(px(22.))
+                                            .header_row_height(px(24.))
+                                            .bordered(false)
+                                            .stripe(false)
+                                            .scrollbar_visible(true, false)
+                                            .scroll_bounce(false)
+                                            .accessibility_label("资源池任务计数"),
+                                        true,
+                                    )),
+                            ),
                     )
                     .when(state.reading, |this| {
                         this.child(
@@ -918,18 +925,23 @@ impl Settings {
                                             ),
                                     )
                                     .child(
-                                        settings_table_frame(
-                                            DataTable::new(&self.scheduled_tasks_table)
-                                                .with_size(px(22.))
-                                                .header_row_height(px(24.))
-                                                .bordered(false)
-                                                .stripe(false)
-                                                .scrollbar_visible(true, false)
-                                                .scroll_bounce(false)
-                                                .accessibility_label("定时任务"),
-                                            true,
-                                        )
-                                        .max_w(theme::scaled_px(540.).max(px(540.))),
+                                        div()
+                                            .id("settings-scheduled-tasks-table-wrap")
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .max_w(theme::scaled_px(540.).max(px(540.)))
+                                            .child(settings_table_frame(
+                                                DataTable::new(&self.scheduled_tasks_table)
+                                                    .with_size(px(22.))
+                                                    .header_row_height(px(24.))
+                                                    .bordered(false)
+                                                    .stripe(false)
+                                                    .scrollbar_visible(true, false)
+                                                    .scroll_bounce(false)
+                                                    .accessibility_label("定时任务"),
+                                                true,
+                                            )),
                                     ),
                             )
                             .when(self.scheduled_task_editor_open, |this| {

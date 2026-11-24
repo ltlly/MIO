@@ -51,6 +51,8 @@ pub struct InstalledPluginEntry {
     pub enabled: bool,
     #[serde(default)]
     pub auto_reload: bool,
+    #[serde(default)]
+    pub hook_filter: crate::PluginHookFilter,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +304,29 @@ impl PluginRegistryStore {
         Ok(updated)
     }
 
+    pub fn set_hook_filter(
+        &self,
+        plugin_id: &str,
+        filter: &crate::PluginHookFilter,
+    ) -> Result<bool> {
+        validate_plugin_id(plugin_id)?;
+        let normalized = filter.normalized();
+        normalized.validate()?;
+        let Some(root) = &self.root else {
+            return Ok(false);
+        };
+        let mut updated = false;
+        write_registry_file_with(root, |current| {
+            let mut next = current.clone();
+            if let Some(entry) = next.plugins.iter_mut().find(|item| item.id == plugin_id) {
+                entry.hook_filter = normalized.clone();
+                updated = true;
+            }
+            Ok(next)
+        })?;
+        Ok(updated)
+    }
+
     pub fn update_loaded_metadata(
         &self,
         plugin_id: &str,
@@ -502,6 +527,7 @@ fn validate_entry(entry: &InstalledPluginEntry) -> Result<()> {
     for grant in &entry.grants {
         ensure!(unique_grants.insert(*grant), "持久化插件授权列表重复");
     }
+    entry.hook_filter.validate()?;
     Ok(())
 }
 

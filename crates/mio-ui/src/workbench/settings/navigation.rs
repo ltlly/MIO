@@ -605,7 +605,7 @@ pub(super) fn settings_checkbox(
 }
 
 impl Settings {
-    pub(super) const ALL_PAGES: [SettingsPage; 12] = [
+    pub(super) const ALL_PAGES: [SettingsPage; 13] = [
         SettingsPage::Proxy,
         SettingsPage::Intruder,
         SettingsPage::Repeater,
@@ -618,8 +618,9 @@ impl Settings {
         SettingsPage::UserDisplay,
         SettingsPage::UserMessageEditor,
         SettingsPage::UserMisc,
+        SettingsPage::SuiteUpdates,
     ];
-    pub(super) const NAV_ORDER: [SettingsPage; 12] = Self::ALL_PAGES;
+    pub(super) const NAV_ORDER: [SettingsPage; 13] = Self::ALL_PAGES;
 
     pub(super) fn page_matches_scope(page: SettingsPage, scope: SettingsScopeFilter) -> bool {
         match scope {
@@ -643,6 +644,7 @@ impl Settings {
                     | SettingsPage::UserDisplay
                     | SettingsPage::UserMessageEditor
                     | SettingsPage::UserMisc
+                    | SettingsPage::SuiteUpdates
             ),
         }
     }
@@ -855,25 +857,36 @@ impl Settings {
             ],
             SettingsPage::UserMisc => &[
                 "user",
-                "misc",
-                "miscellaneous",
                 "shortcut",
                 "shortcuts",
                 "hotkey",
                 "hotkeys",
+                "快捷键",
+                "热键",
+            ],
+            SettingsPage::SuiteUpdates => &[
+                "suite",
+                "mio",
+                "misc",
+                "miscellaneous",
+                "update",
+                "updates",
+                "auto update",
+                "version",
+                "release",
+                "github",
                 "curl",
                 "redact",
                 "confirm",
-                "update",
-                "updates",
-                "version",
-                "快捷键",
-                "热键",
-                "杂项",
-                "脱敏",
+                "套件",
+                "软件更新",
                 "更新",
                 "自动更新",
+                "检查更新",
                 "版本",
+                "通用行为",
+                "杂项",
+                "脱敏",
             ],
         }
     }
@@ -925,6 +938,7 @@ impl Settings {
             SettingsPage::UserDisplay
             | SettingsPage::UserMessageEditor
             | SettingsPage::UserMisc => 4,
+            SettingsPage::SuiteUpdates => 5,
         }
     }
 
@@ -936,12 +950,12 @@ impl Settings {
     }
 
     pub(super) fn expand_all_nav_groups(&mut self, cx: &mut Context<Self>) {
-        self.collapsed_groups = [false; 5];
+        self.collapsed_groups = [false; 6];
         cx.notify();
     }
 
     pub(super) fn collapse_all_nav_groups(&mut self, cx: &mut Context<Self>) {
-        self.collapsed_groups = [true, true, false, true, true];
+        self.collapsed_groups = [true, true, false, true, true, true];
         cx.notify();
     }
 

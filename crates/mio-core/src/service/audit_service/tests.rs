@@ -131,7 +131,7 @@ async fn active_and_passive_scan_detects_vulns_and_persists_readable_probe_flows
     let snapshot = state.store.read_audit_state().unwrap();
     let task = snapshot.tasks.iter().find(|t| t.id == task_id).unwrap();
     assert_eq!(task.state, AuditTaskState::Completed);
-    assert_eq!(task.requests_sent, 16);
+    assert_eq!(task.requests_sent, 29);
     assert!(task.issues_found >= 4);
 
     for expected_issue in ["0x00200300", "0x00100200", "0x00500100", "0x00500600"] {
@@ -418,6 +418,129 @@ async fn pause_and_resume_scan_gates_active_probes_and_triage_updates_findings()
             .iter()
             .any(|f| f.id == first_id)
     );
+    state.collaborator.shutdown().await.unwrap();
+    origin.abort();
+}
+
+#[tokio::test]
+async fn active_scan_detects_boolean_sqli_host_override_ssti_and_broken_authz() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let origin = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::with_capacity(2048);
+                let mut chunk = [0_u8; 512];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 16 * 1024 {
+                    let Ok(n) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let target = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let xfh = head.lines().skip(1).find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    k.trim()
+                        .eq_ignore_ascii_case("x-forwarded-host")
+                        .then(|| v.trim().to_owned())
+                });
+                let parsed = Url::parse(&format!("http://127.0.0.1{target}"))
+                    .unwrap_or_else(|_| Url::parse("http://127.0.0.1/").unwrap());
+                let mut id = String::new();
+                let mut tpl = String::new();
+                for (k, v) in parsed.query_pairs() {
+                    match k.as_ref() {
+                        "id" => id = v.into_owned(),
+                        "tpl" => tpl = v.into_owned(),
+                        _ => {}
+                    }
+                }
+                let resp = if let Some(host) = xfh {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: https://{host}/account\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else if tpl.contains("{{1331*73}}") {
+                    let body = "rendered=97163";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if id.contains("AND 1=2") {
+                    let body = r#"{"rows":[]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    let body = r#"{"rows":[{"id":7,"owner":"alice","role":"member","quota":500}]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+
+    let (events_tx, mut events_rx) = mpsc::channel(128);
+    let mut state = State::new(events_tx, CancellationToken::new()).unwrap();
+    let project = state.project;
+    let task_id = Uuid::new_v4();
+    let raw = format!(
+        "GET /api/account?id=7&tpl=hi HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret_tok\r\nConnection: close\r\n\r\n"
+    );
+    let draft = Draft {
+        revision: 1,
+        target: format!("http://{addr}"),
+        raw: raw.into_bytes(),
+        version: HttpVersion::Http11,
+    };
+    state
+        .audit_command(AuditCommand::StartScan {
+            project,
+            task_id,
+            title: "Multi-step Active Scan".to_owned(),
+            draft: Box::new(draft),
+            mode: AuditTaskMode::PassiveAndActive,
+            crawl_same_origin: false,
+            cancel: CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+    loop {
+        let sig = timeout(TEST_TIMEOUT, state.audit.next_signal())
+            .await
+            .unwrap()
+            .unwrap();
+        let done = matches!(sig.kind, AuditSignalKind::Finished { .. });
+        state.on_audit_signal(sig).await;
+        while events_rx.try_recv().is_ok() {}
+        if done {
+            break;
+        }
+    }
+    let snapshot = state.store.read_audit_state().unwrap();
+    for expected in ["0x00100200", "0x00101080", "0x00400f00", "0x00100850"] {
+        assert!(
+            snapshot.findings.iter().any(|f| f.issue_id == expected),
+            "missing multi-step active finding {expected}; found {:?}",
+            snapshot
+                .findings
+                .iter()
+                .map(|f| (&f.issue_id, f.parameter.as_deref()))
+                .collect::<Vec<_>>()
+        );
+    }
     state.collaborator.shutdown().await.unwrap();
     origin.abort();
 }

@@ -14,21 +14,26 @@ impl Workbench {
         let header_fg: gpui_kit::Hsla = rgb(if dark { 0xd4d4d4 } else { 0x141414 }).into();
         let zebra_bg: gpui_kit::Hsla = rgb(if dark { 0x25272b } else { 0xfafafa }).into();
 
-        let api_rows: [(&str, &str); 14] = [
+        let api_rows: [(&str, &str); 19] = [
             ("Engine: native", "本地 Native worker 进程（不受 OS 沙箱限制，需用户显式信任）"),
             ("Contribution: suite_panel", "在顶部工具栏注册独立扩展标签页视图"),
-            ("Contribution: tool_panel", "在 Extensions 详情页中展示扩展管理与交互面板"),
             ("Contribution: message_editor", "在 Repeater / Proxy Intercept / History 注册自定义请求编辑器"),
             ("Contribution: message_response_editor", "注册自定义 HTTP 响应查看与编辑视图"),
             ("Contribution: context_menu", "对当前活动请求/响应执行自定义上下文动作"),
+            ("Contribution: http_hook", "在 Proxy / Repeater / Intruder 收发阶段读写或改写 HTTP 请求/响应"),
+            ("Contribution: ws_hook", "在 Proxy WebSocket 收发阶段读写、篡改或拦截帧载荷"),
+            ("Contribution: session_action", "在会话规则链执行请求预处理/签名脚本"),
             ("Contribution: payload_generator / processor", "为 Intruder 提供自定义载荷生成与处理规则"),
-            ("Protocol v1.5: panel_multiplexing", "在单个 worker 进程内按 Envelope.panel_id (>= 2) 复用多个子编辑器标签（需在 Register 设置 supports_panel_multiplexing）"),
+            ("Contribution: passive_check / active_check", "参与实时被动审计与主动扫描并上报漏洞发现"),
+            ("Protocol v1.5+: panel_multiplexing", "在单个 worker 进程内按 Envelope.panel_id (>= 2) 复用多个子编辑器标签（需在 Register 设置 supports_panel_multiplexing）"),
+            ("Protocol v1.7+: large_body", "在 Register 设置 supports_large_body=true 后，>512 KiB 请求/响应/WS 载荷自动通过 body_omitted + 只读共享溢出文件传递"),
+            ("Host Hook Pre-Filter & Fail-Open", "支持按插件配置 Scope/Host/Path 白黑名单、阶段与静态资源过滤，以及指标统计和 Fail-Open/Fail-Closed 策略"),
             ("Permission: traffic.read", permission_label(Permission::TrafficRead)),
             ("Permission: draft.write", permission_label(Permission::DraftWrite)),
             ("Permission: repeater.open", permission_label(Permission::RepeaterOpen)),
             ("Permission: network.send", permission_label(Permission::NetworkSend)),
-            ("Permission: traffic.modify", permission_label(Permission::TrafficModify)),
-            ("Permission: session.hook / payload / kv", "支持会话钩子、载荷处理与项目专属键值存储授权"),
+            ("Permission: traffic.modify / audit.write", "修改实时流量、Target Scope 与向审计仪表盘提交漏洞发现"),
+            ("Permission: session.hook / payload / kv", "支持会话钩子、载荷处理与项目/全局持久化键值存储"),
         ];
 
         let mut table = div()
@@ -182,12 +187,22 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_json() -> Result<Vec<u
         "protocol": {
             "major": PROTOCOL_MAJOR,
             "minor": PROTOCOL_MINOR,
+            "compat_minors": [6, 5],
             "default_panel_id": PANEL_ID,
             "framing": "4-byte big-endian length prefix + Protobuf Envelope",
             "max_frame_bytes": MAX_FRAME_BYTES,
             "max_inline_body_bytes": MAX_INLINE_BODY,
+            "max_spill_body_bytes": mio_core::protocol::MAX_SPILL_BODY_BYTES,
             "max_storage_key_bytes": MAX_STORAGE_KEY_BYTES,
-            "max_storage_value_bytes": MAX_STORAGE_VALUE_BYTES
+            "max_storage_value_bytes": MAX_STORAGE_VALUE_BYTES,
+            "hook_concurrency_limit": 96,
+            "large_body_support": "Workers setting Register.supports_large_body = true (v1.7+) receive body_omitted / payload_omitted + read-only temp spill handles for >512 KiB bodies or combined frames >1 MiB; modified spill outputs are validated inside the per-call spill directory",
+            "host_hook_prefilter_and_policy": "Host-side per-plugin scope/host/path/stage/static-asset pre-filtering, atomic hook metrics (invoked, filtered_skipped, oversized_bypassed, errors_or_timeouts, fail_open_passes), and Fail-Open / Fail-Closed failure policy",
+            "oversized_hook_policy": "Legacy v1.5/v1.6 workers and plugins with supports_large_body=false cleanly bypass payloads >512 KiB or combined frames >1 MiB without failing traffic",
+            "known_limitations": [
+                "Workers on v1.5/v1.6 or without supports_large_body=true cannot inspect/modify >512 KiB inline bodies",
+                "Host/worker synchronous message editors (OpenRequest/CommitEditor) still enforce the 512 KiB inline payload cap"
+            ]
         },
         "panel_multiplexing": {
             "supported_since_minor": 5,
@@ -342,7 +357,16 @@ pub(in crate::workbench::plugins) fn build_mio_plugin_api_markdown() -> String {
          `OpenOrganiser`, `SubmitAuditIssue`, `CollaboratorGenerate`, `CollaboratorPoll`\n\n\
          ## Custom Scan Checks (Rhai)\n\
          Variables: `request`, `response`, `requestResponse`, `utilities`.\n\
-         Return `true`, a non-empty evidence string, or `#{{ matched: true, evidence: \"...\" }}` to report a finding.\n",
+         Return `true`, a non-empty evidence string, or `#{{ matched: true, evidence: \"...\" }}` to report a finding.\n\n\
+         ## Large Body Support (v1.7+)\n\
+         - Set `Register.supports_large_body = true` (in `mio-plugin-sdk`, override `MioPlugin::supports_large_body() -> bool`) to inspect/modify `> {MAX_INLINE_BODY}` bodies and combined frames `> {MAX_FRAME_BYTES}` across `http_hook`, `ws_hook`, `session_action`, `passive_check`, and `active_check`.\n\
+         - When a body exceeds inline limits, the host writes a private read-only spill file, clears `body`, sets `body_omitted = true`, `original_body_len`, and `body_file_path` (or `payload_omitted` / `payload_file_path` for WS). Returning `body_omitted = true` preserves the original large body automatically; plugins rewriting `> 512 KiB` bodies can use `RequestDto::set_body_or_spill` / `ResponseDto::set_body_or_spill` / `WebSocketHookResult::with_modified_payload_from`.\n\
+         - Host-side per-plugin hook pre-filtering (Scope, Host/Path allow/denylists, request/response stages, static resource skipping), hook metrics, and Fail-Open / Fail-Closed policies run in host memory prior to stdio serialization.\n\n\
+         ## Limitations & Hook Overflow Policy\n\
+         - Workers on `v1.5`/`v1.6` or with `supports_large_body = false` cleanly bypass (`Pass`) hook payloads exceeding `{MAX_INLINE_BODY}` or `{MAX_FRAME_BYTES}` without dropping traffic (recorded in `oversized_bypassed`).\n\
+         - Synchronous message editor panels (`OpenRequest`/`CommitEditor`) still enforce `{MAX_INLINE_BODY}`.\n\
+         - Concurrent hook dispatch is backpressure-bounded (`96` hook slots of `128` control queue capacity); correlated hook replies do not consume the `512 frames/s` unsolicited worker rate limit.\n\
+         - Proxy hook timeouts (`5s`) or worker crashes fail the in-flight flow; host-side per-plugin hook pre-filtering is not yet supported.\n",
         permission_label(Permission::TrafficRead),
         permission_label(Permission::DraftWrite),
         permission_label(Permission::RepeaterOpen),

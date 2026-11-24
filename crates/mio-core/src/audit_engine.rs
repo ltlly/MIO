@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::{FlowId, Uuid};
 
 pub use checks::{
-    build_probe_request, evaluate_active_check, evaluate_custom_scan_checks,
+    build_authz_strip_probe, build_host_override_probe, build_probe_request,
+    build_sql_boolean_pair, evaluate_active_check, evaluate_authz_strip_probe,
+    evaluate_custom_scan_checks, evaluate_host_override_probe, evaluate_sql_boolean_pair,
     extract_insertion_points, inspect_passive,
 };
 pub use discovery::{
@@ -97,3 +99,4 @@ pub struct InsertionPoint {
 pub const ACTIVE_CANARY: &str = "mio7f9c2a";
 pub const ACTIVE_REDIRECT_TARGET: &str = "https://mio-audit.invalid/redirect";
 pub const ACTIVE_SPLIT_HEADER: &str = "x-mio-split";
+pub const ACTIVE_OVERRIDE_HOST: &str = "mio-override.invalid";

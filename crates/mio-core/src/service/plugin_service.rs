@@ -39,9 +39,57 @@ struct Instance {
     entry_modified: SystemTime,
     entry_size: u64,
     auto_reload: bool,
+    hook_filter: PluginHookFilter,
+    hook_counters: std::sync::Arc<PluginHookCounters>,
     info: LoadedPlugin,
     panel: std::sync::Arc<PanelSnapshot>,
     resources: HashMap<Uuid, u64>,
+}
+
+#[derive(Debug, Default)]
+pub(in crate::service) struct PluginHookCounters {
+    invoked: std::sync::atomic::AtomicU64,
+    filtered_skipped: std::sync::atomic::AtomicU64,
+    oversized_bypassed: std::sync::atomic::AtomicU64,
+    errors_or_timeouts: std::sync::atomic::AtomicU64,
+    fail_open_passes: std::sync::atomic::AtomicU64,
+}
+
+impl PluginHookCounters {
+    pub(in crate::service) fn snapshot(&self) -> PluginHookMetricsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        PluginHookMetricsSnapshot {
+            invoked: self.invoked.load(Relaxed),
+            filtered_skipped: self.filtered_skipped.load(Relaxed),
+            oversized_bypassed: self.oversized_bypassed.load(Relaxed),
+            errors_or_timeouts: self.errors_or_timeouts.load(Relaxed),
+            fail_open_passes: self.fail_open_passes.load(Relaxed),
+        }
+    }
+
+    pub(in crate::service) fn inc_invoked(&self) {
+        self.invoked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(in crate::service) fn inc_filtered_skipped(&self) {
+        self.filtered_skipped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(in crate::service) fn inc_oversized_bypassed(&self) {
+        self.oversized_bypassed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(in crate::service) fn inc_error_or_timeout(&self) {
+        self.errors_or_timeouts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(in crate::service) fn inc_fail_open_pass(&self) {
+        self.fail_open_passes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct PersistInstallCommit {

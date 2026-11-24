@@ -1,7 +1,9 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     Icon,
+    button::ButtonVariants,
     checkbox::Checkbox,
+    input::Input,
     menu::{ContextMenuExt, PopupMenuItem},
     popover::Popover,
 };
@@ -58,6 +60,7 @@ impl Workbench {
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.extensions.detail_tab = ExtensionsDetailTab::Details;
+                    this.query_plugin_hook_metrics(cx);
                     cx.notify();
                 })),
             )
@@ -367,6 +370,227 @@ impl Workbench {
             } else {
                 format!("{panel_title} — 扩展面板")
             };
+            let has_hook_contrib = instance.info.manifest.contributions.iter().any(|c| {
+                matches!(
+                    c.as_str(),
+                    "http_hook" | "ws_hook" | "session_action" | "passive_check"
+                )
+            });
+            let hook_policy_section = has_hook_contrib.then(|| {
+                let inst_id = instance.info.identity.instance_id;
+                let filter = instance.hook_filter.clone();
+                let metrics = instance.hook_metrics;
+                let controls_disabled = busy || !selected_live;
+                let make_toggle_filter = |mut next: mio_core::PluginHookFilter| {
+                    next.host_allowlist = mio_core::PluginHookFilter::parse_pattern_list(
+                        self.extensions.hook_host_allow.read(cx).value().as_ref(),
+                    );
+                    next.host_denylist = mio_core::PluginHookFilter::parse_pattern_list(
+                        self.extensions.hook_host_deny.read(cx).value().as_ref(),
+                    );
+                    next.path_allowlist = mio_core::PluginHookFilter::parse_pattern_list(
+                        self.extensions.hook_path_allow.read(cx).value().as_ref(),
+                    );
+                    next.path_denylist = mio_core::PluginHookFilter::parse_pattern_list(
+                        self.extensions.hook_path_deny.read(cx).value().as_ref(),
+                    );
+                    next
+                };
+                let f_scope = {
+                    let mut next = filter.clone();
+                    next.scope_only = !filter.scope_only;
+                    make_toggle_filter(next)
+                };
+                let f_req = {
+                    let mut next = filter.clone();
+                    next.request_stage = !filter.request_stage;
+                    make_toggle_filter(next)
+                };
+                let f_resp = {
+                    let mut next = filter.clone();
+                    next.response_stage = !filter.response_stage;
+                    make_toggle_filter(next)
+                };
+                let f_static = {
+                    let mut next = filter.clone();
+                    next.skip_static_resources = !filter.skip_static_resources;
+                    make_toggle_filter(next)
+                };
+                let f_fail_open = {
+                    let mut next = filter.clone();
+                    next.failure_policy = if filter.failure_policy
+                        == mio_core::PluginHookFailurePolicy::FailOpen
+                    {
+                        mio_core::PluginHookFailurePolicy::FailClosed
+                    } else {
+                        mio_core::PluginHookFailurePolicy::FailOpen
+                    };
+                    make_toggle_filter(next)
+                };
+
+                div()
+                    .id("plugin-hook-policy-section")
+                    .test_support()
+                    .w_full()
+                    .flex_shrink_0()
+                    .p(px(10.))
+                    .border_1()
+                    .border_color(table_border)
+                    .bg(theme::toolbar_surface())
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_size(theme::ui_font_size())
+                                    .text_color(theme::foreground())
+                                    .child("Hook 预过滤与 Fail-Open 容错策略"),
+                            )
+                            .child({
+                                let metrics_text = format!(
+                                    "调用: {} · 过滤跳过: {} · 超限旁路: {} · 超时/错误: {} · Fail-Open 放行: {}",
+                                    metrics.invoked,
+                                    metrics.filtered_skipped,
+                                    metrics.oversized_bypassed,
+                                    metrics.errors_or_timeouts,
+                                    metrics.fail_open_passes
+                                );
+                                div()
+                                    .id("plugin-hook-metrics")
+                                    .test_support()
+                                    .aria_label(metrics_text.clone())
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .text_size(px(11.5))
+                                    .text_color(theme::muted_foreground())
+                                    .child(metrics_text)
+                                    .child(
+                                        button("plugin-hook-metrics-refresh", "刷新统计")
+                                            .disabled(controls_disabled)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.query_plugin_hook_metrics(cx);
+                                            })),
+                                    )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                Checkbox::new("plugin-hook-scope-only")
+                                    .label("仅限 Target Scope")
+                                    .checked(filter.scope_only)
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_plugin_hook_filter(inst_id, f_scope.clone(), cx);
+                                    })),
+                            )
+                            .child(
+                                Checkbox::new("plugin-hook-req-stage")
+                                    .label("请求阶段")
+                                    .checked(filter.request_stage)
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_plugin_hook_filter(inst_id, f_req.clone(), cx);
+                                    })),
+                            )
+                            .child(
+                                Checkbox::new("plugin-hook-resp-stage")
+                                    .label("响应阶段")
+                                    .checked(filter.response_stage)
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_plugin_hook_filter(inst_id, f_resp.clone(), cx);
+                                    })),
+                            )
+                            .child(
+                                Checkbox::new("plugin-hook-skip-static")
+                                    .label("跳过静态资源")
+                                    .checked(filter.skip_static_resources)
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_plugin_hook_filter(inst_id, f_static.clone(), cx);
+                                    })),
+                            )
+                            .child(
+                                Checkbox::new("plugin-hook-fail-open")
+                                    .label("Fail-Open（超时/错误自动放行）")
+                                    .checked(
+                                        filter.failure_policy
+                                            == mio_core::PluginHookFailurePolicy::FailOpen,
+                                    )
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_plugin_hook_filter(
+                                            inst_id,
+                                            f_fail_open.clone(),
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.extensions.hook_host_allow)
+                                        .id("plugin-hook-host-allow")
+                                        .small()
+                                        .h(px(24.))
+                                        .disabled(controls_disabled),
+                                ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.extensions.hook_host_deny)
+                                        .id("plugin-hook-host-deny")
+                                        .small()
+                                        .h(px(24.))
+                                        .disabled(controls_disabled),
+                                ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.extensions.hook_path_allow)
+                                        .id("plugin-hook-path-allow")
+                                        .small()
+                                        .h(px(24.))
+                                        .disabled(controls_disabled),
+                                ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.extensions.hook_path_deny)
+                                        .id("plugin-hook-path-deny")
+                                        .small()
+                                        .h(px(24.))
+                                        .disabled(controls_disabled),
+                                ),
+                            )
+                            .child(
+                                button("plugin-hook-apply-patterns", "应用过滤")
+                                    .primary()
+                                    .disabled(controls_disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.apply_plugin_hook_pattern_inputs(inst_id, cx);
+                                    })),
+                            ),
+                    )
+            });
 
             div()
                 .flex_1()
@@ -379,6 +603,7 @@ impl Workbench {
                 .gap(px(10.))
                 .child(control_row)
                 .child(detail_table.flex_shrink_0())
+                .when_some(hook_policy_section, |parent, section| parent.child(section))
                 .child(
                     div()
                         .flex_1()

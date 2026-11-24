@@ -412,3 +412,45 @@ fn two_tabs_keep_distinct_workers_and_close_then_restore_does_not_revive_old_wor
         );
     });
 }
+
+#[gpui_kit::test]
+fn stale_draft_shows_sync_hint_on_plugin_toolbar_and_enables_rebind(cx: &mut TestAppContext) {
+    let tab = tab("1");
+    let fixture = fixture(cx, vec![tab.clone()], 128);
+    let suite = LoadedPlugin {
+        identity: ChannelIdentity {
+            instance_id: Uuid::new_v4(),
+            project: fixture.project,
+        },
+        directory: PathBuf::from("/tmp/mio-ui-generic-suite"),
+        manifest: manifest(),
+        grants: vec![Permission::TrafficRead, Permission::DraftWrite],
+        tab_id: None,
+    };
+    cx.update_window(fixture.window, |_, window, cx| {
+        fixture.view.update(cx, |view, cx| {
+            view.install_plugin(suite, panel(vec![]), None, window, cx);
+        });
+    })
+    .unwrap();
+    let _child = install_editor(&fixture, &tab, cx);
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("plugin-draft-stale-hint").is_none());
+        assert_eq!(window.find("plugin-rebind").disabled(), None);
+    })
+    .unwrap();
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        fixture.view.update(cx, |view, cx| {
+            view.workspace.tabs[0].draft.revision += 1;
+            view.workspace.tabs[0].draft.raw = raw("history changed").into_bytes();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("plugin-draft-stale-hint").is_some());
+        assert_eq!(window.find("plugin-rebind").disabled(), None);
+    })
+    .unwrap();
+}

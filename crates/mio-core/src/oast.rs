@@ -23,9 +23,12 @@ use crate::Uuid;
 mod dns;
 mod listener;
 mod payload;
+mod relay;
 
 #[cfg(test)]
 mod tests;
+
+pub use relay::{OastRelayConfig, OastRelayServer};
 
 const DEFAULT_DNS_DOMAIN: &str = "oast.local";
 const TOKEN_HEX_LEN: usize = 16;

@@ -19,6 +19,13 @@ impl CollaboratorService {
             ),
             None => (false, None, None, Vec::new()),
         };
+        let (last_poll_unix_ms, last_poll_error) = {
+            let guard = self
+                .poll_telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (guard.last_poll_unix_ms, guard.last_poll_error.clone())
+        };
         CollaboratorStatus {
             running,
             http_addr,
@@ -26,6 +33,8 @@ impl CollaboratorService {
             config: self.config.clone(),
             issued_tokens,
             interactions: self.interactions.iter().rev().cloned().collect(),
+            last_poll_unix_ms,
+            last_poll_error,
         }
     }
 
@@ -85,6 +94,10 @@ impl CollaboratorService {
             .retain(|event| event.project() != project);
         if self.project == Some(project) {
             self.clear_interactions();
+            *self
+                .poll_telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = RelayPollTelemetry::default();
             self.config = SelfHostedOastConfig::default();
             self.project = None;
         }
@@ -100,6 +113,10 @@ impl CollaboratorService {
         let server_result = self.stop_server().await;
         self.pending_events.clear();
         self.clear_interactions();
+        *self
+            .poll_telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = RelayPollTelemetry::default();
         self.project = None;
         server_result.and(poll_result)
     }
@@ -118,9 +135,9 @@ impl CollaboratorService {
                     self.accept_poll_output(output);
                 }
                 received = recv_interaction(&mut self.rx) => match received {
-                    Some(interaction) => {
+                    Some(mut interaction) => {
                         if let Some(project) = self.project
-                            && self.record_interaction(interaction.clone())
+                            && self.record_interaction(&mut interaction)
                         {
                             return CollaboratorEvent::InteractionObserved {
                                 project,
@@ -152,6 +169,10 @@ impl CollaboratorService {
         self.stop_server().await?;
         let (tx, rx) = mpsc::channel(INTERACTION_CHANNEL_CAPACITY);
         let server = LocalOastServer::start_with_config(tx, config.clone()).await?;
+        *self
+            .poll_telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = RelayPollTelemetry::default();
         self.project = Some(project);
         self.config = config;
         self.server = Some(server);
@@ -169,6 +190,10 @@ impl CollaboratorService {
         self.stop_server().await?;
         let (tx, rx) = mpsc::channel(INTERACTION_CHANNEL_CAPACITY);
         let server = LocalOastServer::start(tx).await?;
+        *self
+            .poll_telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = RelayPollTelemetry::default();
         self.config = server.self_hosted_config().clone();
         self.project = Some(project);
         self.server = Some(server);
@@ -192,8 +217,8 @@ impl CollaboratorService {
         let mut closed = false;
         while let Some(rx) = self.rx.as_mut() {
             match rx.try_recv() {
-                Ok(interaction) => {
-                    if self.record_interaction(interaction.clone()) {
+                Ok(mut interaction) => {
+                    if self.record_interaction(&mut interaction) {
                         observed.push(interaction);
                     }
                 }
@@ -210,7 +235,10 @@ impl CollaboratorService {
         observed
     }
 
-    pub(super) fn record_interaction(&mut self, mut interaction: OastInteraction) -> bool {
+    pub(super) fn record_interaction(&mut self, interaction: &mut OastInteraction) -> bool {
+        if let Some(server) = &self.server {
+            server.correlate_interaction(interaction);
+        }
         if self.interaction_ids.contains(&interaction.id) {
             return false;
         }
@@ -231,7 +259,7 @@ impl CollaboratorService {
         }
         self.total_raw_bytes = self.total_raw_bytes.saturating_add(incoming_bytes);
         self.interaction_ids.insert(interaction.id);
-        self.interactions.push_back(interaction);
+        self.interactions.push_back(interaction.clone());
         true
     }
 

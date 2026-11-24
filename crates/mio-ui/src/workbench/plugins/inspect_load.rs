@@ -301,6 +301,132 @@ impl Workbench {
         }
     }
 
+    pub(in crate::workbench) fn set_plugin_hook_filter(
+        &mut self,
+        id: Uuid,
+        filter: mio_core::PluginHookFilter,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition.is_some() || !self.backend_available() {
+            return;
+        }
+        if !self.extensions.instance(id).is_some_and(|instance| {
+            instance.live
+                && instance.info.tab_id.is_none()
+                && instance.context_owner.is_none()
+                && self.project == Some(instance.info.identity.project)
+        }) {
+            return;
+        }
+        let normalized = filter.normalized();
+        if let Err(err) = normalized.validate() {
+            self.fail(err.to_string(), cx);
+            return;
+        }
+        if self
+            .plugin_action(
+                PluginAction::SetHookFilter {
+                    instance_id: id,
+                    filter: normalized,
+                },
+                Operation::SetHookFilter { instance: id },
+                cx,
+            )
+            .is_some()
+        {
+            self.status = "正在更新插件 Hook 预过滤与容错策略…".into();
+            cx.notify();
+        }
+    }
+
+    pub(in crate::workbench) fn apply_plugin_hook_pattern_inputs(
+        &mut self,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(base) = self
+            .extensions
+            .instance(id)
+            .map(|inst| inst.hook_filter.clone())
+        else {
+            return;
+        };
+        let host_allow = mio_core::PluginHookFilter::parse_pattern_list(
+            self.extensions.hook_host_allow.read(cx).value().as_ref(),
+        );
+        let host_deny = mio_core::PluginHookFilter::parse_pattern_list(
+            self.extensions.hook_host_deny.read(cx).value().as_ref(),
+        );
+        let path_allow = mio_core::PluginHookFilter::parse_pattern_list(
+            self.extensions.hook_path_allow.read(cx).value().as_ref(),
+        );
+        let path_deny = mio_core::PluginHookFilter::parse_pattern_list(
+            self.extensions.hook_path_deny.read(cx).value().as_ref(),
+        );
+        let next = mio_core::PluginHookFilter {
+            host_allowlist: host_allow,
+            host_denylist: host_deny,
+            path_allowlist: path_allow,
+            path_denylist: path_deny,
+            ..base
+        };
+        self.set_plugin_hook_filter(id, next, cx);
+    }
+
+    pub(in crate::workbench) fn query_plugin_hook_metrics(&mut self, cx: &mut Context<Self>) {
+        if self.transition.is_some()
+            || !self.backend_available()
+            || self.extensions.operations.values().any(|op| {
+                matches!(op, Operation::QueryHookMetrics)
+            })
+        {
+            return;
+        }
+        self.plugin_action(PluginAction::QueryHookMetrics, Operation::QueryHookMetrics, cx);
+    }
+
+    pub(in crate::workbench) fn sync_plugin_hook_filter_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_id = self
+            .extensions
+            .selected
+            .and_then(|id| self.extensions.instance(id))
+            .filter(|inst| inst.info.tab_id.is_none() && inst.context_owner.is_none())
+            .map(|inst| inst.info.identity.instance_id);
+        if self.extensions.hook_inputs_owner == selected_id {
+            return;
+        }
+        self.extensions.hook_inputs_owner = selected_id;
+        let filter = selected_id
+            .and_then(|id| self.extensions.instance(id))
+            .map(|inst| inst.hook_filter.clone())
+            .unwrap_or_default();
+        let fields = [
+            (
+                self.extensions.hook_host_allow.clone(),
+                mio_core::PluginHookFilter::format_pattern_list(&filter.host_allowlist),
+            ),
+            (
+                self.extensions.hook_host_deny.clone(),
+                mio_core::PluginHookFilter::format_pattern_list(&filter.host_denylist),
+            ),
+            (
+                self.extensions.hook_path_allow.clone(),
+                mio_core::PluginHookFilter::format_pattern_list(&filter.path_allowlist),
+            ),
+            (
+                self.extensions.hook_path_deny.clone(),
+                mio_core::PluginHookFilter::format_pattern_list(&filter.path_denylist),
+            ),
+        ];
+        for (entity, value) in fields {
+            entity.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
     pub(in crate::workbench) fn active_context_menu_plugins(&self) -> Vec<(Uuid, String)> {
         self.extensions
             .instances

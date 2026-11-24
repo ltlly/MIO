@@ -60,13 +60,29 @@ pub enum AiIpcRequest {
         method: Option<String>,
         #[serde(default)]
         status: Option<u16>,
+        #[serde(default)]
+        hide_connect: bool,
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        state: Option<String>,
+        #[serde(default)]
+        order: Option<String>,
     },
     FlowsGet {
-        flow_id: Uuid,
+        #[serde(default)]
+        flow_id: Option<Uuid>,
+        #[serde(default)]
+        flow_number: Option<u64>,
     },
+    RepeaterList,
     RepeaterOpen {
         #[serde(default)]
         flow_id: Option<Uuid>,
+        #[serde(default)]
+        flow_number: Option<u64>,
         #[serde(default)]
         use_original: bool,
         #[serde(default)]
@@ -75,10 +91,23 @@ pub enum AiIpcRequest {
         raw_request: Option<String>,
         #[serde(default)]
         title: Option<String>,
+        #[serde(default)]
+        blank: bool,
+    },
+    RepeaterRename {
+        tab_id: TabId,
+        title: String,
+    },
+    RepeaterClose {
+        tab_id: TabId,
     },
     RepeaterSend {
         #[serde(default)]
+        tab_id: Option<TabId>,
+        #[serde(default)]
         flow_id: Option<Uuid>,
+        #[serde(default)]
+        flow_number: Option<u64>,
         #[serde(default)]
         use_original: bool,
         #[serde(default)]
@@ -91,6 +120,8 @@ pub enum AiIpcRequest {
         remove_headers: Vec<String>,
         #[serde(default)]
         override_body: Option<String>,
+        #[serde(default)]
+        override_body_base64: Option<String>,
         #[serde(default)]
         insecure: bool,
     },
@@ -177,7 +208,37 @@ impl AiIpcEnvelope {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AiIpcFlowItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(flatten)]
+    pub summary: FlowSummary,
+}
+
+impl std::ops::Deref for AiIpcFlowItem {
+    type Target = FlowSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AiIpcRepeaterTabSummary {
+    pub tab_id: TabId,
+    pub title: String,
+    pub target: String,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_flow: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AiIpcFlowDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<TabId>,
     pub summary: FlowSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_raw_text: Option<String>,
@@ -225,13 +286,27 @@ pub enum AiIpcPayload {
     },
     FlowsList {
         total: usize,
-        flows: Vec<FlowSummary>,
+        flows: Vec<AiIpcFlowItem>,
     },
     FlowsGet(Box<AiIpcFlowDetail>),
+    RepeaterList {
+        repeater_tabs: Vec<AiIpcRepeaterTabSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tab_id: Option<TabId>,
+    },
     RepeaterOpen {
         tab_id: TabId,
         title: String,
         target: String,
+    },
+    RepeaterRenamed {
+        renamed_tab_id: TabId,
+        title: String,
+    },
+    RepeaterClosed {
+        closed_tab_id: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tab_id: Option<TabId>,
     },
     SlimSave {
         report: SlimSaveReport,
@@ -293,6 +368,7 @@ pub(in crate::service) struct IpcRepeaterOutcome {
 
 pub(in crate::service) struct IpcRepeaterCompletion {
     pub project: crate::ProjectKey,
+    pub tab_id: Option<TabId>,
     pub reply: oneshot::Sender<AiIpcEnvelope>,
     pub outcome: Result<IpcRepeaterOutcome>,
 }

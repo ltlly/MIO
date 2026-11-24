@@ -54,8 +54,51 @@ jobs:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
+      - name: Import macOS signing certificate (optional)
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MIO_APPLE_ID: ${{ secrets.MIO_APPLE_ID }}
+          MIO_APPLE_TEAM_ID: ${{ secrets.MIO_APPLE_TEAM_ID }}
+          MIO_APPLE_APP_PASSWORD: ${{ secrets.MIO_APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$MACOS_CERTIFICATE_P12_BASE64" && -n "$MACOS_SIGN_IDENTITY" ]]; then
+            keychain_pass="$(openssl rand -hex 24)"
+            keychain_path="${RUNNER_TEMP}/mio-signing.keychain-db"
+            cert_path="${RUNNER_TEMP}/mio-cert.p12"
+            printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+            security create-keychain -p "$keychain_pass" "$keychain_path"
+            security set-keychain-settings -lut 21600 "$keychain_path"
+            security unlock-keychain -p "$keychain_pass" "$keychain_path"
+            security import "$cert_path" -k "$keychain_path" -P "${MACOS_CERTIFICATE_PASSWORD:-}" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_pass" "$keychain_path"
+            security list-keychains -d user -s "$keychain_path" login.keychain
+            rm -f "$cert_path"
+            {
+              echo "MIO_SIGN_KEYCHAIN=$keychain_path"
+              echo "MIO_MACOS_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY"
+              if [[ -n "$MIO_APPLE_ID" && -n "$MIO_APPLE_TEAM_ID" && -n "$MIO_APPLE_APP_PASSWORD" ]]; then
+                echo "MIO_APPLE_ID=$MIO_APPLE_ID"
+                echo "MIO_APPLE_TEAM_ID=$MIO_APPLE_TEAM_ID"
+                echo "MIO_APPLE_APP_PASSWORD=$MIO_APPLE_APP_PASSWORD"
+              fi
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Build macOS .app, .dmg, and .zip
         run: bash scripts/package-macos.sh --release --target ${{ matrix.target }}
+
+      - name: Clean up macOS signing keychain
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${RUNNER_TEMP}/mio-cert.p12"
+          if [[ -n "${MIO_SIGN_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$MIO_SIGN_KEYCHAIN" || true
+          fi
 
       - name: Stage macOS release artifacts
         run: |
@@ -235,6 +278,10 @@ jobs:
 
       - name: Build & package Windows release
         shell: pwsh
+        env:
+          MIO_WINDOWS_CERT_PFX_BASE64: ${{ secrets.MIO_WINDOWS_CERT_PFX_BASE64 }}
+          MIO_WINDOWS_CERT_PASSWORD: ${{ secrets.MIO_WINDOWS_CERT_PASSWORD }}
+          MIO_WINDOWS_TIMESTAMP_URL: ${{ secrets.MIO_WINDOWS_TIMESTAMP_URL }}
         run: .\scripts\package-windows.ps1 -Profile release -Target ${{ matrix.target }}
 
       - name: Pack Windows zip release artifact

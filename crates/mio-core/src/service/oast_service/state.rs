@@ -25,11 +25,13 @@ impl State {
                 self.collaborator.stop_auto_poll().await;
                 self.collaborator.start_with_config(project, config).await?;
                 if self.collaborator.config.enabled
-                    && let Some((request, send_config)) = self.prepare_collaborator_poll()?
+                    && let Some((polling_url, auth_header, send_config)) =
+                        self.prepare_collaborator_poll_target()?
                 {
                     self.collaborator.start_auto_poll(
                         self.collaborator.config.poll_interval_ms,
-                        request,
+                        polling_url,
+                        auth_header,
                         send_config,
                         self.cancel.child_token(),
                     );
@@ -144,7 +146,9 @@ impl State {
         .await;
     }
 
-    fn prepare_collaborator_poll(&self) -> Result<Option<(HttpRequest, SendConfig)>> {
+    fn prepare_collaborator_poll_target(
+        &self,
+    ) -> Result<Option<(Url, Option<String>, SendConfig)>> {
         let Some(polling_url) = self.collaborator.config.validate()? else {
             return Ok(None);
         };
@@ -158,10 +162,27 @@ impl State {
         send_config.limits.max_body_bytes = MAX_POLL_BODY_BYTES;
         send_config.limits.timeout = Duration::from_secs(timeout_secs);
         send_config.http.version = Some(HttpVersion::Http11);
-        let request = build_poll_request(
-            &polling_url,
-            self.collaborator.config.authorization_header.as_deref(),
-        );
+        Ok(Some((
+            polling_url,
+            self.collaborator.config.authorization_header.clone(),
+            send_config,
+        )))
+    }
+
+    fn prepare_collaborator_poll(&self) -> Result<Option<(HttpRequest, SendConfig)>> {
+        let Some((polling_url, auth_header, send_config)) =
+            self.prepare_collaborator_poll_target()?
+        else {
+            return Ok(None);
+        };
+        let cursor = self
+            .collaborator
+            .poll_telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cursor
+            .clone();
+        let request = build_poll_request(&polling_url, auth_header.as_deref(), cursor.as_deref());
         Ok(Some((request, send_config)))
     }
 }
@@ -177,7 +198,8 @@ impl CollaboratorService {
     pub(super) fn start_auto_poll(
         &mut self,
         poll_interval_ms: u64,
-        request: HttpRequest,
+        polling_url: Url,
+        auth_header: Option<String>,
         send_config: SendConfig,
         cancel: CancellationToken,
     ) {
@@ -205,6 +227,7 @@ impl CollaboratorService {
         });
         let period = Duration::from_millis(poll_interval_ms.max(250));
         let loop_cancel = cancel.clone();
+        let telemetry = Arc::clone(&self.poll_telemetry);
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval_at(TokioInstant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -215,6 +238,12 @@ impl CollaboratorService {
                     _ = merged_tx.closed() => break,
                     _ = interval.tick() => {}
                 }
+                let cursor = telemetry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .cursor
+                    .clone();
+                let request = build_poll_request(&polling_url, auth_header.as_deref(), cursor.as_deref());
                 let req_cancel = loop_cancel.child_token();
                 let res = tokio::select! {
                     biased;
@@ -226,16 +255,47 @@ impl CollaboratorService {
                         req_cancel.cancel();
                         break;
                     }
-                    r = send(request.clone(), send_config.clone(), req_cancel.clone()) => r,
+                    r = send(request, send_config.clone(), req_cancel.clone()) => r,
                 };
-                if let Ok(resp) = res
-                    && (200..300).contains(&resp.status)
-                    && let Ok(items) = serde_json::from_slice::<Vec<OastInteraction>>(&resp.body)
-                {
-                    for item in items {
-                        if merged_tx.send(item).await.is_err() {
-                            return;
+                match res {
+                    Ok(resp) if (200..300).contains(&resp.status) => {
+                        match parse_poll_response(&resp.body) {
+                            Ok((items, next_cursor)) => {
+                                {
+                                    let mut guard = telemetry
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner);
+                                    if let Some(c) = next_cursor.filter(|c| !c.trim().is_empty()) {
+                                        guard.cursor = Some(c);
+                                    }
+                                    guard.last_poll_unix_ms = Some(crate::codec_util::now_unix_ms());
+                                    guard.last_poll_error = None;
+                                }
+                                for item in items {
+                                    if merged_tx.send(item).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                telemetry
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .last_poll_error = Some(err);
+                            }
                         }
+                    }
+                    Ok(resp) => {
+                        telemetry
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .last_poll_error = Some(format!("Collaborator 轮询返回 HTTP {}", resp.status));
+                    }
+                    Err(err) => {
+                        telemetry
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .last_poll_error = Some(format!("Collaborator 轮询请求失败：{err}"));
                     }
                 }
             }

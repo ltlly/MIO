@@ -240,6 +240,7 @@ pub enum Event {
         info: LoadedPlugin,
         panel: Arc<panel::PanelSnapshot>,
         auto_reload: bool,
+        hook_filter: PluginHookFilter,
         order: Vec<Uuid>,
     },
     PluginAutoLoadFailed {

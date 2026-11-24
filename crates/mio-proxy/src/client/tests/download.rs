@@ -199,6 +199,67 @@ async fn download_to_sink_enforces_body_limits_redirects_and_non_2xx_snippets() 
         .unwrap_err();
         assert!(matches!(err, ProxyError::Network(_)));
 
+        // on_response_head receives status, headers, and content-length before chunks
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let srv2 = tokio::spawn(async move {
+            let (mut sock, _) = listener2.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let resp = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-9/10\r\nContent-Length: 5\r\nConnection: close\r\n\r\n56789";
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        struct HeadCapturingSink {
+            seen_head: Option<(u16, Option<u64>, Option<String>)>,
+            bytes: Vec<u8>,
+        }
+        impl DownloadSink for HeadCapturingSink {
+            async fn on_response_head(
+                &mut self,
+                status: u16,
+                headers: &[Header],
+                content_length: Option<u64>,
+            ) -> Result<(), ProxyError> {
+                let cr = headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("content-range"))
+                    .and_then(|h| std::str::from_utf8(&h.value).ok())
+                    .map(str::to_owned);
+                self.seen_head = Some((status, content_length, cr));
+                Ok(())
+            }
+
+            async fn write_chunk(
+                &mut self,
+                chunk: &[u8],
+                _total_received: u64,
+                _content_length: Option<u64>,
+            ) -> Result<(), ProxyError> {
+                self.bytes.extend_from_slice(chunk);
+                Ok(())
+            }
+        }
+        let mut head_sink = HeadCapturingSink {
+            seen_head: None,
+            bytes: Vec::new(),
+        };
+        let head_out = download_to_sink(
+            &format!("http://{addr2}/part"),
+            DownloadConfig::default(),
+            DirectResolver,
+            &mut head_sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(head_out.status, 206);
+        assert_eq!(
+            head_sink.seen_head,
+            Some((206, Some(5), Some("bytes 5-9/10".into())))
+        );
+        assert_eq!(&head_sink.bytes, b"56789");
+        srv2.await.unwrap();
+
         server.abort();
     })
     .await

@@ -328,6 +328,7 @@ impl Settings {
                     )
                     .child(
                         div()
+                            .id("proxy-ws-mr-table-wrap")
                             .flex()
                             .gap(px(9.))
                             .h(theme::scaled_px(148.).max(px(148.)))

@@ -413,6 +413,7 @@ pub(crate) struct Workbench {
     pub(in crate::workbench) runtime_result: Option<Result<(), String>>,
     pub(in crate::workbench) quitting: bool,
     pub(in crate::workbench) update_status: mio_core::UpdateStatus,
+    pub(in crate::workbench) last_available_update: Option<mio_core::UpdateInfo>,
     #[cfg(not(test))]
     pub(in crate::workbench) startup_update_checked: bool,
     pub(in crate::workbench) _subscriptions: Vec<Subscription>,

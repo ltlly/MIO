@@ -76,6 +76,13 @@ pub trait MioPlugin {
         false
     }
 
+    /// Opts into protocol v1.7+ large-body handling (`body_omitted`, `original_body_len`,
+    /// `body_file_path`) so hooks can inspect or modify >512 KiB HTTP/WS payloads via
+    /// host-managed read-only spill handles.
+    fn supports_large_body(&self) -> bool {
+        false
+    }
+
     fn initial_panel(&self) -> PanelSnapshot {
         ui::snapshot(
             1,
@@ -185,6 +192,8 @@ pub trait MioPlugin {
         Ok(WebSocketHookResult {
             action: HookAction::Pass as i32,
             payload: Vec::new(),
+            payload_omitted: false,
+            payload_file_path: String::new(),
         })
     }
 
@@ -490,6 +499,7 @@ pub(crate) fn run_with_io_bounded<R: Read, W: Write>(
             .collect(),
         panel: Some(initial),
         supports_panel_multiplexing: plugin.supports_panel_multiplexing(),
+        supports_large_body: plugin.supports_large_body(),
     };
     let session = WorkerSession::accept(reader, writer, registration)?;
     let mut runner = Runner {
@@ -737,6 +747,9 @@ impl<T: MioPlugin + ?Sized> MioPlugin for &mut T {
     }
     fn supports_panel_multiplexing(&self) -> bool {
         (**self).supports_panel_multiplexing()
+    }
+    fn supports_large_body(&self) -> bool {
+        (**self).supports_large_body()
     }
     fn initial_panel(&self) -> PanelSnapshot {
         (**self).initial_panel()

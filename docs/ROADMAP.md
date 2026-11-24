@@ -1,22 +1,32 @@
-# MIO 后续演进路线图 (Roadmap)
+# MIO 演进路线图 (Roadmap)
 
-本文档记录当前已完成基础架构建设、但有意延后实施的工程增强与功能演进事项，作为后续迭代的统一规划参考。
+本文档记录基础架构完成后的各项工程增强与功能演进交付状态。
 
-## 1. 发布工程与分发体验
-- **代码签名与公证**：为 macOS 产物接入官方开发者签名与系统公证流程，为 Windows 产物接入平台可执行文件代码签名，消除首次运行时的系统安全拦截提示。
-- **CI 发布矩阵完善**：`.github/workflows/release-all.yml` 已支持自动构建 `macos-arm64`、`macos-x86_64`、`linux-x86_64`、`windows-x86_64` 与 `windows-aarch64` 压缩包并生成 `SHA256SUMS.txt` 校验清单（命名规范与 `mio-core` 自动更新器一致）；后续补充 `linux-arm64` 自动化 CI 矩阵与 PR 验证流水线。
-- **自动更新交互增强**：在现有远端 Release 资产版本检查、`SHA-256` 校验与自替换更新能力基础上，补充下载进度指示、断点重试与升级失败自动回滚保护。
+## 1. 插件宿主与协议演进（解决 `512 KiB` / `1 MiB` 限制）
+- [x] **零改插件的宿主侧 Hook 预过滤**：在扩展配置与设置面板中增加了按插件粒度的触发范围筛选（仅限 Scope、Host/Path 白黑名单、请求/响应阶段开关及静态资源跳过），在宿主机内存阶段直接短路无关流量，避免对全量流量做无意义的 Protobuf IPC 往返。
+- [x] **可观测性与 Fail-Open 降级开关**：在扩展状态与诊断视图中统计展示“因超限旁路 / 过滤跳过 / 超时或错误次数”，并支持按插件配置 **Fail-Open**（插件崩溃或 `5s` 超时时记录诊断并自动放行流量）与 **Fail-Closed** 策略。
+- [x] **协议 `v1.7+` 大报文支持**：为需要检查或改写 `> 512 KiB` 正文/响应的插件补充 `body_omitted`（仅传元数据与 HTTP Header）、`original_body_len` 及只读共享临时文件（`body_file_path`）机制，并保持 `v1.6`/`v1.5` 向下兼容。
 
-## 2. 报文渲染与离线预览能力（非内嵌浏览器）
-- **纯 Rust 静态预览与外部浏览器联动**：遵循架构边界（不内嵌 WebView / 浏览器引擎），持续增强 `Response -> Render` 的纯 Rust 离线静态 HTML/CSS 结构化排版、安全资源预览与编码还原能力；需要完整 DOM/JS 执行时，通过配置的本地代理一键拉起系统外部浏览器进行交互验证。
+## 2. 发布工程与分发体验
+- [x] **代码签名与公证**：`scripts/package-macos.sh` 支持基于环境变量的 Apple Developer ID 签名、公证与 `stapler` 装订（未配置凭据时自动回退 ad-hoc 签名）；`scripts/package-windows.ps1` 支持 Authenticode `signtool` 签名；`.github/workflows/release-all.yml` 已接入可选签名/公证 secrets。
+- [x] **自动更新交互增强**：在现有 Release 检查、`SHA256SUMS.txt` 校验与自替换更新器基础上，补充下载进度事件与 UI 进度条展示、HTTP `Range` 断点续传/重试与升级失败备份回滚保护。
 
-## 3. 安全扫描与带外检测
-- **托管 / 远端 OAST 中继**：扩展 Collaborator 带外探测能力，支持对接可控的远端多协议中继服务端（HTTP/HTTPS/DNS 监听与关联回传），适配内外网隔离及异步延迟触发场景。
-- **主 / 被动审计规则深化**：持续丰富内置漏洞指纹库与多步交互式主动扫描策略，进一步提升复杂参数注入、鉴权绕过与业务逻辑缺陷的检出率与低误报率。
+## 3. 报文渲染、带外检测与 UI 模块化
+- [x] **纯 Rust 静态预览**：遵循不内嵌 WebView 边界，增强 `Response -> Render` 的纯 Rust 离线静态 HTML/CSS 排版（表格、代码块、图片清单、样式表与安全色板预览）与格式化 XML 树预览。
+- [x] **托管 / 远端 OAST 中继**：扩展 Collaborator 支持托管/自建远端 OAST HTTP/HTTPS/DNS 中继（含认证令牌、远端轮询关联与 `OastMode` 配置）。
+- [x] **主 / 被动审计规则深化**：丰富内置被动漏洞指纹（PEM 私钥、GraphQL 自省、序列化对象、DOM XSS 特征、缺 CSRF 令牌 POST 表单、文件上传入口、HSTS `max-age=0`、空签名 JWT、Host 覆盖反射）与多步主动检测策略（布尔条件 SQLi 差分、路径遍历、SSTI 算术求值、Host 头覆盖探针、移除认证凭据越权对照）。
+- [x] **大型 UI 模块拆分**：已将全部 10 个超过 `2,000` 行的界面文件（`tabs/render_pane/drawers.rs`、`settings/connections.rs`、`tools_extra/logger/table.rs`、`inspector/render.rs`、`wb_render_top.rs`、`tools_extra/logger/render.rs`、`wb_render_history.rs`、`wb_render_chrome.rs`、`editing/hex_grid.rs`、`tabs/render_pane.rs`）按职责拆分为浅层子模块，当前 `crates/mio-ui/src/` 下已无超过 `2,000` 行的源文件。
 
-## 4. 扩展生态（本地优先）
-- **扩展索引与生命周期管理**：在坚持本地显式授权、离线目录及单文件归档加载优先原则的前提下，规划可选的自建静态扩展索引清单支持，以及扩展版本升级、兼容协议检查与完整性校验管理。
-
-## 5. `MioAT` 文案统一与模块持续拆分
-- **`MioAT` / CLI 术语统一**：以 `MioAT` 作为 Agent IPC 与助手能力的统一命名，继续统一图形界面各工具视图、`crates/mio-cli` 帮助输出与示例文档中的术语表述。
-- **大型 UI 模块持续拆分**：继拆出编辑、插件面板、设置子页等模块后，继续对剩余 `2,000–3,100` 行级 UI 模块按职责拆分为浅层组件（例如 `tabs/render_pane/drawers.rs`、`target/engagement.rs`、`audit_dashboard/workspace.rs`、`settings/connections.rs`、`tools_extra/logger/table.rs`、`inspector/render.rs`、`wb_render_history.rs`、`wb_render_chrome.rs`、`wb_render_top.rs`），进一步降低编译单元体积并改善可维护性。
+## 4. `mio-cli` 高频工作流增强（HTTP 抓包历史 & Repeater）与体验打磨
+- [x] **HTTP 抓包历史（`flows`）序号与筛选增强**：
+  - `flows list`（人类可读输出与 `--json`）暴露与 GUI 表格一致的自增流量序号，且 `flows get`、`repeater open --flow`、`repeater send --flow` 支持按数字序号或 UUID 寻址。
+  - `flows list` 补充 `--hide-connect`、`--host`、`--source proxy|repeater|...`、`--state`（含 `abnormal` 快速筛选失败/丢弃/取消流量）及 `--order asc|desc`，并在文本输出中标示异常状态。
+  - `flows get` 支持 `--request-only` / `--response-only` / `--headers-only` 与 `--save-body <path>`。
+- [x] **Repeater（`repeater`）标签页管理与输入便利性**：
+  - 补齐 `repeater list`、`repeater rename`、`repeater close`，并支持 `repeater send --tab <tab-id>` 直接向已有标签页发包并回写最近一次结果。
+  - `repeater open` / `send` 支持 `--raw-file <path>`（含 stdin `-`）与 `--body-file <path>`（支持任意二进制字节），并支持 `--blank` 空白标签与仅提供 `--target` 生成默认 GET 模板标签页。
+  - 修正 `repeater send` 携带头/体覆盖参数时的变更链来源标记为 `ProvenanceActor::CliRepeaterOverride`，不再复用 `ProvenanceActor::ManualInterceptEdit`。
+- [x] **无头拦截、工作区与基础 CLI 细节**：
+  - 修复无头 `mio-cli serve` 开启 `proxy intercept --responses on` 时默认响应规则集未启用导致普通响应未进入 `proxy pending` 的问题。
+  - 强化 `workspace set` 的乐观锁 `revision` 校验与清晰冲突提示（包含当前服务端版本与应递增版本号）。
+  - 补充 `--version` / `-V` 版本输出；无头 `serve --listen` / `proxy start` 端口冲突错误提示改用 CLI `--listen` 参数指引；`status` 与 `slim-save` 非 `--json` 输出附带 `KiB` / `MiB` / `GiB` 可读单位。

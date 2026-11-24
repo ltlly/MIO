@@ -143,6 +143,7 @@ impl State {
         let old_engine = old.info.manifest.engine.clone();
         let old_perms = old.package.manifest.permissions.clone();
         let old_auto_reload = old.auto_reload;
+        let old_hook_filter = old.hook_filter.clone();
         let grants = old.info.grants.clone();
         let project = self.project;
         let task_cancel = cancel.clone();
@@ -198,6 +199,8 @@ impl State {
                     entry_modified,
                     entry_size,
                     auto_reload: old_auto_reload,
+                    hook_filter: old_hook_filter,
+                    hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
                     info,
                     panel,
                     resources: HashMap::new(),

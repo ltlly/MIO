@@ -25,13 +25,38 @@ pub struct ExtractedHtmlForm {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedHtmlImage {
+    pub src: String,
+    pub alt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedHtmlTable {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExtractedInlineTheme {
+    pub background_hex: Option<u32>,
+    pub text_hex: Option<u32>,
+    pub accent_hex: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedHtmlSummary {
     pub title: Option<String>,
+    pub meta_description: Option<String>,
     pub headings: Vec<(u8, String)>,
     pub paragraphs: Vec<String>,
     pub links: Vec<ExtractedHtmlLink>,
     pub forms: Vec<ExtractedHtmlForm>,
     pub scripts: Vec<String>,
+    pub stylesheets: Vec<String>,
+    pub images: Vec<ExtractedHtmlImage>,
+    pub tables: Vec<ExtractedHtmlTable>,
+    pub code_blocks: Vec<String>,
+    pub inline_theme: ExtractedInlineTheme,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +178,7 @@ fn extract_form_control(el: ElementRef<'_>) -> ExtractedHtmlFormInput {
 
 pub fn extract_html_summary(html: &str) -> ExtractedHtmlSummary {
     static TITLE_SEL: OnceLock<Selector> = OnceLock::new();
+    static META_SEL: OnceLock<Selector> = OnceLock::new();
     static HEADING_SEL: OnceLock<Selector> = OnceLock::new();
     static PARA_SEL: OnceLock<Selector> = OnceLock::new();
     static BODY_SEL: OnceLock<Selector> = OnceLock::new();
@@ -160,6 +186,14 @@ pub fn extract_html_summary(html: &str) -> ExtractedHtmlSummary {
     static CTRL_SEL: OnceLock<Selector> = OnceLock::new();
     static FORM_SEL: OnceLock<Selector> = OnceLock::new();
     static SCRIPT_SRC_SEL: OnceLock<Selector> = OnceLock::new();
+    static STYLESHEET_SEL: OnceLock<Selector> = OnceLock::new();
+    static IMG_SEL: OnceLock<Selector> = OnceLock::new();
+    static TABLE_SEL: OnceLock<Selector> = OnceLock::new();
+    static TR_SEL: OnceLock<Selector> = OnceLock::new();
+    static TH_SEL: OnceLock<Selector> = OnceLock::new();
+    static CELL_SEL: OnceLock<Selector> = OnceLock::new();
+    static PRE_CODE_SEL: OnceLock<Selector> = OnceLock::new();
+    static STYLE_SEL: OnceLock<Selector> = OnceLock::new();
 
     let document = Html::parse_document(html);
     let title = document
@@ -167,6 +201,27 @@ pub fn extract_html_summary(html: &str) -> ExtractedHtmlSummary {
         .next()
         .map(|el| normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" ")))
         .filter(|s| !s.is_empty());
+
+    let mut meta_description = None;
+    for el in document.select(static_selector(&META_SEL, "meta[content]")) {
+        let is_desc = el
+            .value()
+            .attr("name")
+            .is_some_and(|n| n.trim().eq_ignore_ascii_case("description"))
+            || el
+                .value()
+                .attr("property")
+                .is_some_and(|p| p.trim().eq_ignore_ascii_case("og:description"));
+        if is_desc
+            && let Some(content) = el.value().attr("content")
+        {
+            let clean = normalize_visible_whitespace(content);
+            if !clean.is_empty() {
+                meta_description = Some(clean.chars().take(512).collect());
+                break;
+            }
+        }
+    }
 
     let mut headings = Vec::new();
     for el in document
@@ -182,23 +237,12 @@ pub fn extract_html_summary(html: &str) -> ExtractedHtmlSummary {
     }
 
     let mut paragraphs = Vec::new();
-    for el in document.select(static_selector(
-        &PARA_SEL,
-        "p, li, blockquote, pre, td, th",
-    )) {
+    for el in document.select(static_selector(&PARA_SEL, "p, li, blockquote")) {
         if paragraphs.len() >= 120 {
             break;
         }
         let text = normalize_visible_whitespace(&el.text().collect::<Vec<_>>().join(" "));
         if !text.is_empty() && !paragraphs.contains(&text) {
-            paragraphs.push(text);
-        }
-    }
-    if paragraphs.is_empty()
-        && let Some(body_el) = document.select(static_selector(&BODY_SEL, "body")).next()
-    {
-        let text = collect_visible_element_text(body_el);
-        if !text.is_empty() {
             paragraphs.push(text);
         }
     }
@@ -270,14 +314,267 @@ pub fn extract_html_summary(html: &str) -> ExtractedHtmlSummary {
         }
     }
 
+    let mut stylesheets = Vec::new();
+    for el in document.select(static_selector(&STYLESHEET_SEL, "link[href]")) {
+        if stylesheets.len() >= 64 {
+            break;
+        }
+        let is_stylesheet = el
+            .value()
+            .attr("rel")
+            .is_some_and(|rel| rel.split_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")));
+        if is_stylesheet
+            && let Some(href) = el.value().attr("href")
+        {
+            let trimmed = href.trim();
+            if !trimmed.is_empty() && !stylesheets.iter().any(|s| s == trimmed) {
+                stylesheets.push(trimmed.to_owned());
+            }
+        }
+    }
+
+    let mut images = Vec::new();
+    for el in document
+        .select(static_selector(&IMG_SEL, "img[src]"))
+        .take(64)
+    {
+        if let Some(src) = el.value().attr("src") {
+            let trimmed = src.trim();
+            if !trimmed.is_empty() {
+                let alt = el
+                    .value()
+                    .attr("alt")
+                    .map(normalize_visible_whitespace)
+                    .unwrap_or_default();
+                images.push(ExtractedHtmlImage {
+                    src: trimmed.to_owned(),
+                    alt,
+                });
+            }
+        }
+    }
+
+    let tr_sel = static_selector(&TR_SEL, "tr");
+    let th_sel = static_selector(&TH_SEL, "th");
+    let cell_sel = static_selector(&CELL_SEL, "th, td");
+    let mut tables = Vec::new();
+    for table_el in document
+        .select(static_selector(&TABLE_SEL, "table"))
+        .take(8)
+    {
+        let mut headers = Vec::new();
+        let mut rows = Vec::new();
+        for tr in table_el.select(tr_sel) {
+            if rows.len() >= 24 {
+                break;
+            }
+            let cells: Vec<String> = tr
+                .select(cell_sel)
+                .take(12)
+                .map(|cell| normalize_visible_whitespace(&cell.text().collect::<Vec<_>>().join(" ")))
+                .collect();
+            if cells.iter().all(String::is_empty) {
+                continue;
+            }
+            if headers.is_empty() && tr.select(th_sel).next().is_some() {
+                headers = cells;
+            } else {
+                rows.push(cells);
+            }
+        }
+        if !headers.is_empty() || !rows.is_empty() {
+            tables.push(ExtractedHtmlTable { headers, rows });
+        }
+    }
+
+    let mut code_blocks = Vec::new();
+    for el in document.select(static_selector(&PRE_CODE_SEL, "pre, code")) {
+        if code_blocks.len() >= 16 {
+            break;
+        }
+        if el.value().name() == "code"
+            && el
+                .ancestors()
+                .any(|anc| anc.value().as_element().is_some_and(|e| e.name() == "pre"))
+        {
+            continue;
+        }
+        let raw_code = el.text().collect::<String>();
+        let trimmed = raw_code.trim();
+        let min_len = if el.value().name() == "pre" { 1 } else { 8 };
+        if trimmed.len() >= min_len {
+            let capped: String = trimmed.chars().take(2048).collect();
+            if !code_blocks.contains(&capped) {
+                code_blocks.push(capped);
+            }
+        }
+    }
+
+    if paragraphs.is_empty()
+        && headings.is_empty()
+        && tables.is_empty()
+        && let Some(body_el) = document.select(static_selector(&BODY_SEL, "body")).next()
+    {
+        let text = collect_visible_element_text(body_el);
+        if !text.is_empty() {
+            paragraphs.push(text);
+        }
+    }
+
+    let mut css_chunks = Vec::new();
+    if let Some(body_el) = document.select(static_selector(&BODY_SEL, "body")).next()
+        && let Some(style_attr) = body_el.value().attr("style")
+    {
+        css_chunks.push(style_attr.to_owned());
+    }
+    for style_el in document
+        .select(static_selector(&STYLE_SEL, "style"))
+        .take(16)
+    {
+        css_chunks.push(style_el.text().collect::<String>());
+    }
+    let inline_theme = extract_inline_theme_from_css(&css_chunks.join("\n"));
+
     ExtractedHtmlSummary {
         title,
+        meta_description,
         headings,
         paragraphs,
         links,
         forms,
         scripts,
+        stylesheets,
+        images,
+        tables,
+        code_blocks,
+        inline_theme,
     }
+}
+
+fn parse_css_hex_color(value: &str) -> Option<u32> {
+    let idx = value.find('#')?;
+    let hex_part: String = value[idx + 1..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    match hex_part.len() {
+        3 => {
+            let b = hex_part.as_bytes();
+            let r = u32::from_str_radix(std::str::from_utf8(&[b[0], b[0]]).ok()?, 16).ok()?;
+            let g = u32::from_str_radix(std::str::from_utf8(&[b[1], b[1]]).ok()?, 16).ok()?;
+            let bl = u32::from_str_radix(std::str::from_utf8(&[b[2], b[2]]).ok()?, 16).ok()?;
+            Some((r << 16) | (g << 8) | bl)
+        }
+        6 | 8 => u32::from_str_radix(&hex_part[..6], 16).ok(),
+        _ => None,
+    }
+}
+
+fn extract_inline_theme_from_css(css: &str) -> ExtractedInlineTheme {
+    let mut theme = ExtractedInlineTheme::default();
+    if css.trim().is_empty() {
+        return theme;
+    }
+    for decl in css.split([';', '{', '}']) {
+        let Some((raw_prop, raw_val)) = decl.split_once(':') else {
+            continue;
+        };
+        let prop = raw_prop.trim().to_ascii_lowercase();
+        let Some(hex) = parse_css_hex_color(raw_val) else {
+            continue;
+        };
+        if matches!(prop.as_str(), "background-color" | "background")
+            && theme.background_hex.is_none()
+        {
+            theme.background_hex = Some(hex);
+        } else if prop == "color" && theme.text_hex.is_none() {
+            theme.text_hex = Some(hex);
+        } else if (prop == "accent-color"
+            || prop == "border-color"
+            || prop.contains("accent")
+            || prop.contains("primary"))
+            && theme.accent_hex.is_none()
+        {
+            theme.accent_hex = Some(hex);
+        }
+    }
+    theme
+}
+
+pub fn format_xml_preview(xml: &str) -> Option<(Option<String>, usize, String)> {
+    const MAX_PREVIEW_CHARS: usize = 16 * 1024;
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let root = doc.root_element();
+    let root_tag = (!root.tag_name().name().is_empty()).then(|| root.tag_name().name().to_owned());
+    let mut element_count = 0usize;
+    let mut out = String::new();
+
+    fn format_node(
+        node: roxmltree::Node<'_, '_>,
+        depth: usize,
+        element_count: &mut usize,
+        out: &mut String,
+    ) {
+        if out.len() >= MAX_PREVIEW_CHARS {
+            return;
+        }
+        if !node.is_element() {
+            return;
+        }
+        *element_count += 1;
+        let indent = "  ".repeat(depth.min(24));
+        let tag = node.tag_name().name();
+        out.push_str(&indent);
+        out.push('<');
+        out.push_str(tag);
+        for attr in node.attributes() {
+            out.push(' ');
+            out.push_str(attr.name());
+            out.push_str("=\"");
+            out.push_str(attr.value());
+            out.push('"');
+        }
+        let child_elements: Vec<_> = node.children().filter(|c| c.is_element()).collect();
+        let direct_text: String = node
+            .children()
+            .filter(|c| c.is_text())
+            .filter_map(|c| c.text())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if child_elements.is_empty() && direct_text.is_empty() {
+            out.push_str(" />\n");
+        } else if child_elements.is_empty() {
+            out.push('>');
+            out.push_str(&direct_text);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push_str(">\n");
+        } else {
+            out.push_str(">\n");
+            if !direct_text.is_empty() {
+                out.push_str(&indent);
+                out.push_str("  ");
+                out.push_str(&direct_text);
+                out.push('\n');
+            }
+            for child in child_elements {
+                format_node(child, depth + 1, element_count, out);
+                if out.len() >= MAX_PREVIEW_CHARS {
+                    break;
+                }
+            }
+            out.push_str(&indent);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push_str(">\n");
+        }
+    }
+
+    format_node(root, 0, &mut element_count, &mut out);
+    let capped: String = out.trim_end().chars().take(MAX_PREVIEW_CHARS).collect();
+    Some((root_tag, element_count, capped))
 }
 
 fn append_response_link(
@@ -506,6 +803,49 @@ mod tests {
         assert_eq!(summary.forms.len(), 1);
         assert_eq!(summary.forms[0].method, "POST");
         assert_eq!(summary.scripts, vec!["/app.js".to_owned()]);
+
+        let rich_html = r##"
+        <html>
+          <head>
+            <meta name="description" content="Status console overview">
+            <link rel="stylesheet" href="/static/theme.css">
+            <style>body { background-color: #1e293b; color: #f8fafc; --accent: #38bdf8; }</style>
+          </head>
+          <body>
+            <img src="/logo.svg" alt="System Logo">
+            <table>
+              <tr><th>Service</th><th>Status</th></tr>
+              <tr><td>Proxy</td><td>OK</td></tr>
+            </table>
+            <pre>GET /health HTTP/1.1</pre>
+          </body>
+        </html>"##;
+        let rich = extract_html_summary(rich_html);
+        assert_eq!(
+            rich.meta_description.as_deref(),
+            Some("Status console overview")
+        );
+        assert_eq!(rich.stylesheets, vec!["/static/theme.css".to_owned()]);
+        assert_eq!(
+            rich.images,
+            vec![ExtractedHtmlImage {
+                src: "/logo.svg".into(),
+                alt: "System Logo".into(),
+            }]
+        );
+        assert_eq!(rich.tables.len(), 1);
+        assert_eq!(rich.tables[0].headers, vec!["Service", "Status"]);
+        assert_eq!(rich.tables[0].rows, vec![vec!["Proxy", "OK"]]);
+        assert_eq!(rich.code_blocks, vec!["GET /health HTTP/1.1".to_owned()]);
+        assert_eq!(rich.inline_theme.background_hex, Some(0x1e293b));
+        assert_eq!(rich.inline_theme.text_hex, Some(0xf8fafc));
+        assert_eq!(rich.inline_theme.accent_hex, Some(0x38bdf8));
+
+        let (root_tag, count, pretty_xml) =
+            format_xml_preview("<config env=\"lab\"><item id=\"1\">ok</item></config>").unwrap();
+        assert_eq!(root_tag.as_deref(), Some("config"));
+        assert_eq!(count, 2);
+        assert!(pretty_xml.contains("  <item id=\"1\">ok</item>"));
 
         let scripts = extract_scripts_from_html(
             "https://example.invalid/dir/index.html",

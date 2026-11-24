@@ -15,8 +15,13 @@ pub(in crate::workbench::plugins) use self::api_docs::{
 
 impl Workbench {
     #[inline(never)]
-    pub(in crate::workbench) fn render_extensions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::workbench) fn render_extensions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.sync_active_top_suite_tab();
+        self.sync_plugin_hook_filter_inputs(window, cx);
         if self.extensions.search_subscription.is_none() {
             let search = self.extensions.search.clone();
             self.extensions.search_subscription = Some(cx.subscribe(

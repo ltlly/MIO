@@ -9,8 +9,15 @@ impl State {
         config: SendConfig,
         response_codes: Vec<u16>,
     ) {
-        let session_hooks = self.strict_session_action_hooks();
-        let http_hooks = self.tool_http_hooks();
+        let session_hooks = self.strict_session_action_hook_entries();
+        let http_hooks = self.tool_http_hook_entries();
+        let hook_scope = self
+            .store
+            .metadata()
+            .workspace_arc()
+            .map(|ws| ws.scope.clone())
+            .unwrap_or_default();
+        let plugin_events = self.events.clone();
         let sessions = self.sessions.runtime.clone();
         let project = self.project;
         let run = self.intruder.runs.get_mut(&id).unwrap();
@@ -46,12 +53,15 @@ impl State {
             if !session_hooks.is_empty() || !http_hooks.is_empty() {
                 let mut current = record.request.clone();
                 let flow_id = record.summary.id;
-                match plugin_service::hooks::run_pre_send_plugin_hooks(
+                match plugin_service::hooks::run_pre_send_plugin_hooks_configured(
                     &session_hooks,
                     &http_hooks,
+                    Some(&hook_scope),
+                    Some(&plugin_events),
                     flow_id,
                     protocol::SourceDto::Intruder,
                     &mut current,
+                    None,
                     deadline,
                     &cancel,
                 )

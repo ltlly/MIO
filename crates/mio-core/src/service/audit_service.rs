@@ -23,9 +23,10 @@ use crate::{
     CustomScanCheck, Draft, Event, FlowId, InsertionPoint, MAX_AUDIT_TASKS, ProjectKey,
     TargetScope, Uuid,
     audit_engine::{
-        CrawlConfig, build_probe_request, discover_same_origin_links_and_forms,
-        evaluate_active_check, evaluate_custom_scan_checks, extract_insertion_points,
-        inspect_passive,
+        CrawlConfig, build_authz_strip_probe, build_host_override_probe, build_probe_request,
+        build_sql_boolean_pair, discover_same_origin_links_and_forms, evaluate_active_check,
+        evaluate_authz_strip_probe, evaluate_custom_scan_checks, evaluate_host_override_probe,
+        evaluate_sql_boolean_pair, extract_insertion_points, inspect_passive,
     },
     http,
     store::audit::merge_audit_findings,

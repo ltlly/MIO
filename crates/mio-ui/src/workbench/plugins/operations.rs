@@ -429,6 +429,16 @@ impl Workbench {
                 },
             ) if instance == old_instance => {
                 let was_auto_reload = self.extensions.auto_reload.remove(&old_instance);
+                let old_hook_filter = self
+                    .extensions
+                    .instance(old_instance)
+                    .map(|inst| inst.hook_filter.clone())
+                    .unwrap_or_default();
+                let old_hook_metrics = self
+                    .extensions
+                    .instance(old_instance)
+                    .map(|inst| inst.hook_metrics)
+                    .unwrap_or_default();
                 let was_persisted = self
                     .extensions
                     .instance(old_instance)
@@ -454,9 +464,14 @@ impl Workbench {
                     info.manifest.id, info.manifest.version, new_id
                 ));
                 self.install_plugin(info, panel, None, window, cx);
-                if was_persisted && let Some(inst) = self.extensions.instance_mut(new_id) {
-                    inst.persisted = true;
+                if let Some(inst) = self.extensions.instance_mut(new_id) {
+                    inst.hook_filter = old_hook_filter;
+                    inst.hook_metrics = old_hook_metrics;
+                    if was_persisted {
+                        inst.persisted = true;
+                    }
                 }
+                self.extensions.hook_inputs_owner = None;
                 if was_auto_reload {
                     self.extensions.auto_reload.insert(new_id);
                 } else {
@@ -469,6 +484,7 @@ impl Workbench {
                     info,
                     panel,
                     auto_reload,
+                    hook_filter,
                     order,
                 },
             ) => {
@@ -501,7 +517,9 @@ impl Workbench {
                 self.install_plugin(info.clone(), panel, None, window, cx);
                 if let Some(inst) = self.extensions.instance_mut(new_id) {
                     inst.persisted = true;
+                    inst.hook_filter = hook_filter;
                 }
+                self.extensions.hook_inputs_owner = None;
                 if auto_reload {
                     self.extensions.auto_reload.insert(new_id);
                 } else {
@@ -586,6 +604,29 @@ impl Workbench {
                 },
             ) if instance == instance_id => {
                 self.apply_plugin_auto_reload_updated(instance_id, enabled);
+            }
+            (
+                Operation::SetHookFilter { instance },
+                PluginOutcome::HookFilterUpdated {
+                    instance_id,
+                    filter,
+                },
+            ) if instance == instance_id => {
+                if let Some(inst) = self.extensions.instance_mut(instance_id) {
+                    inst.hook_filter = filter;
+                }
+                if self.extensions.hook_inputs_owner == Some(instance_id) {
+                    self.extensions.hook_inputs_owner = None;
+                }
+                self.extensions.push_log("已保存插件 Hook 预过滤与容错策略");
+                self.status = "已更新插件 Hook 预过滤与容错策略。".into();
+            }
+            (Operation::QueryHookMetrics, PluginOutcome::HookMetrics { metrics }) => {
+                for (instance_id, snapshot) in metrics {
+                    if let Some(inst) = self.extensions.instance_mut(instance_id) {
+                        inst.hook_metrics = snapshot;
+                    }
+                }
             }
             (
                 Operation::ContextMenu { instance: op_id },

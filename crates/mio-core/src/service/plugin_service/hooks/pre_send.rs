@@ -41,6 +41,7 @@ fn tool_name(source: protocol::SourceDto) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub(in crate::service) async fn run_pre_send_plugin_hooks(
     session_hooks: &[crate::plugins::PluginHandle],
     http_hooks: &[crate::plugins::PluginHandle],
@@ -50,17 +51,31 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks(
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> PreSendHookOutcome {
-    let named_session: Vec<(String, crate::plugins::PluginHandle)> = session_hooks
+    let session_entries: Vec<PreSendPluginHook> = session_hooks
         .iter()
-        .map(|h| (String::new(), h.clone()))
+        .map(|handle| PreSendPluginHook {
+            plugin_id: String::new(),
+            identity: handle.identity,
+            handle: handle.clone(),
+            filter: PluginHookFilter::default(),
+            counters: std::sync::Arc::new(PluginHookCounters::default()),
+        })
         .collect();
-    let named_http: Vec<(String, crate::plugins::PluginHandle)> = http_hooks
+    let http_entries: Vec<PreSendPluginHook> = http_hooks
         .iter()
-        .map(|h| (String::new(), h.clone()))
+        .map(|handle| PreSendPluginHook {
+            plugin_id: String::new(),
+            identity: handle.identity,
+            handle: handle.clone(),
+            filter: PluginHookFilter::default(),
+            counters: std::sync::Arc::new(PluginHookCounters::default()),
+        })
         .collect();
-    run_pre_send_plugin_hooks_with_provenance(
-        &named_session,
-        &named_http,
+    run_pre_send_plugin_hooks_configured(
+        &session_entries,
+        &http_entries,
+        None,
+        None,
         flow_id,
         source,
         request,
@@ -72,9 +87,11 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
-    session_hooks: &[(String, crate::plugins::PluginHandle)],
-    http_hooks: &[(String, crate::plugins::PluginHandle)],
+pub(in crate::service) async fn run_pre_send_plugin_hooks_configured(
+    session_hooks: &[PreSendPluginHook],
+    http_hooks: &[PreSendPluginHook],
+    scope: Option<&TargetScope>,
+    events: Option<&mpsc::Sender<Event>>,
     flow_id: FlowId,
     source: protocol::SourceDto,
     request: &mut HttpRequest,
@@ -83,38 +100,57 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
     cancel: &CancellationToken,
 ) -> PreSendHookOutcome {
     let mut current = request.clone();
-    for (plugin_id, handle) in session_hooks {
-        if !super::http_request_fits_inline_fast(&current) {
-            break;
+    for entry in session_hooks {
+        if !entry
+            .filter
+            .should_invoke_http(&current.url, false, None, scope)
+        {
+            entry.counters.inc_filtered_skipped();
+            continue;
         }
-        let call = protocol::SessionActionCall {
-            source: source as i32,
-            request: Some(current.clone().into()),
-        };
-        let Ok(protocol::envelope::Body::SessionActionCall(call)) = protocol::try_into_wire_body(
-            protocol::envelope::Body::SessionActionCall(call),
-            protocol::PROTOCOL_MINOR,
+        let Some((call, _spill)) = super::large_body::prepare_session_action_call(
+            source as i32,
+            &current,
+            entry.handle.protocol_minor(),
+            entry.handle.supports_large_body(),
         ) else {
-            break;
+            entry.counters.inc_oversized_bypassed();
+            continue;
         };
+        entry.counters.inc_invoked();
         let call_cancel = cancel.child_token();
         let _call_cancel_guard = call_cancel.clone().drop_guard();
         let res = match tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
-            handle.call_session_action(call, call_cancel.clone()),
+            entry.handle.call_session_action(call, call_cancel.clone()),
         )
         .await
         {
             Ok(res) => res,
             Err(_) => {
                 call_cancel.cancel();
-                return PreSendHookOutcome::Failed("插件会话钩子超时，未发送请求".into());
+                if cancel.is_cancelled() {
+                    return PreSendHookOutcome::Failed("插件会话钩子已取消，未发送请求".into());
+                }
+                entry.counters.inc_error_or_timeout();
+                let msg = "插件会话钩子超时，未发送请求";
+                if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                    entry.counters.inc_fail_open_pass();
+                    super::emit_fail_open_diagnostic(
+                        events,
+                        entry.identity,
+                        "Session Action Hook",
+                        msg,
+                    );
+                    continue;
+                }
+                return PreSendHookOutcome::Failed(msg.into());
             }
         };
         match res {
             Ok(res) if res.modified => {
                 match res.request.context("插件会话钩子缺少请求").and_then(|req| {
-                    req.try_into()
+                    super::large_body::resolve_request_dto(req, &current.body, &_spill)
                         .map_err(|error| anyhow::anyhow!("插件会话钩子返回无效请求：{error}"))
                 }) {
                     Ok(req) => {
@@ -125,7 +161,7 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                                 flow_id,
                                 orig,
                                 ProvenanceActor::PluginHook {
-                                    plugin_id: plugin_id.clone(),
+                                    plugin_id: entry.plugin_id.clone(),
                                     hook: "session_action".into(),
                                 },
                                 &req,
@@ -134,56 +170,117 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                         current = req;
                     }
                     Err(error) => {
-                        return PreSendHookOutcome::Failed(format!("{error}；未发送请求"));
+                        entry.counters.inc_error_or_timeout();
+                        let msg = format!("{error}；未发送请求");
+                        if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                            entry.counters.inc_fail_open_pass();
+                            super::emit_fail_open_diagnostic(
+                                events,
+                                entry.identity,
+                                "Session Action Hook",
+                                &msg,
+                            );
+                            continue;
+                        }
+                        return PreSendHookOutcome::Failed(msg);
                     }
                 }
             }
             Ok(_) => {}
             Err(error) => {
-                return PreSendHookOutcome::Failed(format!(
-                    "插件会话钩子失败，未发送请求：{error}"
-                ));
+                if cancel.is_cancelled() {
+                    return PreSendHookOutcome::Failed(format!(
+                        "插件会话钩子已取消，未发送请求：{error}"
+                    ));
+                }
+                entry.counters.inc_error_or_timeout();
+                let msg = format!("插件会话钩子失败，未发送请求：{error}");
+                if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                    entry.counters.inc_fail_open_pass();
+                    super::emit_fail_open_diagnostic(
+                        events,
+                        entry.identity,
+                        "Session Action Hook",
+                        &msg,
+                    );
+                    continue;
+                }
+                return PreSendHookOutcome::Failed(msg);
             }
         }
     }
 
     if !http_hooks.is_empty() && plugin_hook_depth(&current) <= 1 {
-        for (plugin_id, handle) in http_hooks {
-            if !super::http_request_fits_inline_fast(&current) {
-                break;
+        for entry in http_hooks {
+            if !entry
+                .filter
+                .should_invoke_http(&current.url, false, None, scope)
+            {
+                entry.counters.inc_filtered_skipped();
+                continue;
             }
-            let call = protocol::HttpHookCall {
-                flow_id: flow_id.as_bytes().to_vec(),
-                source: source as i32,
-                plugin_id: String::new(),
-                response_stage: false,
-                response_head_only: false,
-                request: Some(current.clone().into()),
-                response: None,
-            };
-            let Ok(protocol::envelope::Body::HttpHookCall(call)) = protocol::try_into_wire_body(
-                protocol::envelope::Body::HttpHookCall(call),
-                protocol::PROTOCOL_MINOR,
+            let Some((call, _spill)) = super::large_body::prepare_http_hook_call(
+                flow_id,
+                source as i32,
+                String::new(),
+                false,
+                false,
+                &current,
+                None,
+                entry.handle.protocol_minor(),
+                entry.handle.supports_large_body(),
             ) else {
-                break;
+                entry.counters.inc_oversized_bypassed();
+                continue;
             };
+            entry.counters.inc_invoked();
             let call_cancel = cancel.child_token();
             let _call_cancel_guard = call_cancel.clone().drop_guard();
             let res = match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
-                handle.call_http_hook(call, call_cancel.clone()),
+                entry.handle.call_http_hook(call, call_cancel.clone()),
             )
             .await
             {
                 Ok(Ok(res)) => res,
                 Ok(Err(error)) => {
-                    return PreSendHookOutcome::Failed(format!(
-                        "插件 HTTP 钩子失败，未发送请求：{error}"
-                    ));
+                    if cancel.is_cancelled() {
+                        return PreSendHookOutcome::Failed(format!(
+                            "插件 HTTP 钩子已取消，未发送请求：{error}"
+                        ));
+                    }
+                    entry.counters.inc_error_or_timeout();
+                    let msg = format!("插件 HTTP 钩子失败，未发送请求：{error}");
+                    if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                        entry.counters.inc_fail_open_pass();
+                        super::emit_fail_open_diagnostic(
+                            events,
+                            entry.identity,
+                            "Pre-Send HTTP Hook",
+                            &msg,
+                        );
+                        continue;
+                    }
+                    return PreSendHookOutcome::Failed(msg);
                 }
                 Err(_) => {
                     call_cancel.cancel();
-                    return PreSendHookOutcome::Failed("插件 HTTP 钩子超时，未发送请求".into());
+                    if cancel.is_cancelled() {
+                        return PreSendHookOutcome::Failed("插件 HTTP 钩子已取消，未发送请求".into());
+                    }
+                    entry.counters.inc_error_or_timeout();
+                    let msg = "插件 HTTP 钩子超时，未发送请求";
+                    if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                        entry.counters.inc_fail_open_pass();
+                        super::emit_fail_open_diagnostic(
+                            events,
+                            entry.identity,
+                            "Pre-Send HTTP Hook",
+                            msg,
+                        );
+                        continue;
+                    }
+                    return PreSendHookOutcome::Failed(msg.into());
                 }
             };
             match protocol::HookAction::try_from(res.action) {
@@ -203,11 +300,21 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                 }
                 Ok(protocol::HookAction::Modify) => {
                     let Some(dto) = res.request else {
-                        return PreSendHookOutcome::Failed(
-                            "插件声明修改请求但未返回请求；未发送请求".into(),
-                        );
+                        entry.counters.inc_error_or_timeout();
+                        let msg = "插件声明修改请求但未返回请求；未发送请求";
+                        if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                            entry.counters.inc_fail_open_pass();
+                            super::emit_fail_open_diagnostic(
+                                events,
+                                entry.identity,
+                                "Pre-Send HTTP Hook",
+                                msg,
+                            );
+                            continue;
+                        }
+                        return PreSendHookOutcome::Failed(msg.into());
                     };
-                    match dto.try_into() {
+                    match super::large_body::resolve_request_dto(dto, &current.body, &_spill) {
                         Ok(req) => {
                             if req != current
                                 && let Some((tracker, orig)) = provenance
@@ -216,7 +323,7 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                                     flow_id,
                                     orig,
                                     ProvenanceActor::PluginHook {
-                                        plugin_id: plugin_id.clone(),
+                                        plugin_id: entry.plugin_id.clone(),
                                         hook: "http_hook".into(),
                                     },
                                     &req,
@@ -228,14 +335,36 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                             }
                         }
                         Err(error) => {
-                            return PreSendHookOutcome::Failed(format!(
-                                "插件 HTTP 钩子返回无效请求：{error}；未发送请求"
-                            ));
+                            entry.counters.inc_error_or_timeout();
+                            let msg = format!("插件 HTTP 钩子返回无效请求：{error}；未发送请求");
+                            if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                                entry.counters.inc_fail_open_pass();
+                                super::emit_fail_open_diagnostic(
+                                    events,
+                                    entry.identity,
+                                    "Pre-Send HTTP Hook",
+                                    &msg,
+                                );
+                                continue;
+                            }
+                            return PreSendHookOutcome::Failed(msg);
                         }
                     }
                 }
                 Err(_) => {
-                    return PreSendHookOutcome::Failed("插件返回未知 Hook 动作；未发送请求".into());
+                    entry.counters.inc_error_or_timeout();
+                    let msg = "插件返回未知 Hook 动作；未发送请求";
+                    if entry.filter.failure_policy == PluginHookFailurePolicy::FailOpen {
+                        entry.counters.inc_fail_open_pass();
+                        super::emit_fail_open_diagnostic(
+                            events,
+                            entry.identity,
+                            "Pre-Send HTTP Hook",
+                            msg,
+                        );
+                        continue;
+                    }
+                    return PreSendHookOutcome::Failed(msg.into());
                 }
             }
         }

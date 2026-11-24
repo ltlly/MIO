@@ -424,6 +424,14 @@ impl Workbench {
                         .then(|| self.capture_drafts(window, cx));
                     match captured {
                         Some(Ok(false)) if !self.organiser.notes_dirty => {
+                            let active_tab_before = self.workspace.active;
+                            let prev_last_flow = active_tab_before.and_then(|id| {
+                                self.workspace
+                                    .tabs
+                                    .iter()
+                                    .find(|t| t.id == id)
+                                    .and_then(|t| t.last_flow)
+                            });
                             *self.workspace = workspace.clone();
                             self.target_pane.advanced_mode_input =
                                 self.workspace.scope.advanced_mode;
@@ -446,8 +454,36 @@ impl Workbench {
                                 f32::from(self.workspace.tab_sidebar_width)
                             };
                             self.sync_tab_editors(window, cx);
+                            if let (Some(project), Some(active_id)) =
+                                (self.project, self.workspace.active)
+                                && let Some(flow_id) = self
+                                    .workspace
+                                    .tabs
+                                    .iter()
+                                    .find(|t| t.id == active_id)
+                                    .and_then(|t| t.last_flow)
+                                && (self.workspace.active != active_tab_before
+                                    || Some(flow_id) != prev_last_flow)
+                                && !self.tab_editors.get(&active_id).is_some_and(|e| {
+                                    e.loaded_flow
+                                        .as_ref()
+                                        .is_some_and(|f| f.summary.id == flow_id)
+                                })
+                            {
+                                self.selection_revision += 1;
+                                let revision = self.selection_revision;
+                                if self.enqueue(
+                                    Command::ReadFlow {
+                                        project,
+                                        selection_revision: revision,
+                                        flow_id,
+                                    },
+                                    cx,
+                                ) {
+                                    self.repeater_reads.insert(revision, active_id);
+                                }
+                            }
                             self.sync_organiser_table(window, cx);
-                            self.reload_selected_organiser_detail(window, cx);
                             self.apply_workspace_ack(&workspace, window, cx);
                         }
                         Some(Ok(true)) | Some(Ok(false)) => {
@@ -551,14 +587,14 @@ impl Workbench {
                 self.flush_project_save(window, cx);
                 self.advance_settings_pool_delete(cx);
             }
-            Event::RepeaterOpened { project, mut tab } if self.project == Some(project)
-                && !self
+            Event::RepeaterOpened { project, mut tab } if self.project == Some(project) => {
+                if !self
                     .workspace
                     .tabs
                     .iter()
                     .chain(&self.workspace.closed)
                     .any(|existing| existing.id == tab.id)
-                => {
+                {
                     if tab.title.parse::<usize>().is_ok() {
                         tab.title = self.next_repeater_tab_title(None, Some(&tab.draft.raw));
                     }
@@ -570,11 +606,12 @@ impl Workbench {
                     self.workspace.tabs.push(tab);
                     self.sync_tab_editors(window, cx);
                     self.save_workspace(cx);
-                    self.tool = Tool::Repeater;
                     if let Some(error) = composition_error {
                         self.fail(error, cx);
                     }
                 }
+                self.tool = Tool::Repeater;
+            }
             _ => {}
         }
         ControlFlow::Continue(())

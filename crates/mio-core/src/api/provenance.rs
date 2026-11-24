@@ -159,6 +159,7 @@ pub enum ProvenanceActor {
     SessionRule { rule_name: String },
     PluginHook { plugin_id: String, hook: String },
     ManualInterceptEdit,
+    CliRepeaterOverride,
     InspectorEdit,
     ProtocolNormalization { description: String },
     ExtArchiveEdited,
@@ -195,6 +196,7 @@ impl ProvenanceActor {
                 }
             }
             Self::ManualInterceptEdit => "手动拦截修改 (Intercept Edit)".into(),
+            Self::CliRepeaterOverride => "CLI Repeater 参数覆盖 (CLI Override)".into(),
             Self::InspectorEdit => "Inspector 修改".into(),
             Self::ProtocolNormalization { description } => {
                 format!("协议规范化: {description}")

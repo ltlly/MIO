@@ -478,7 +478,7 @@ impl State {
         operation: Operation,
     ) {
         let Candidate {
-            instance,
+            mut instance,
             replace,
             reloaded,
             autoload,
@@ -491,6 +491,14 @@ impl State {
         let auto_reload = instance.auto_reload;
         let is_suite = info.tab_id.is_none();
         if let Some(commit) = persist_install {
+            let preserved_filter = self
+                .plugins
+                .registry
+                .get(&info.manifest.id)
+                .ok()
+                .flatten()
+                .map_or_else(|| instance.hook_filter.clone(), |prev| prev.hook_filter);
+            instance.hook_filter = preserved_filter.clone();
             let entry = InstalledPluginEntry {
                 id: info.manifest.id.clone(),
                 version: info.manifest.version.clone(),
@@ -500,6 +508,7 @@ impl State {
                 grants: info.grants.clone(),
                 enabled: true,
                 auto_reload,
+                hook_filter: preserved_filter,
             };
             match self.plugins.registry.upsert(entry) {
                 Ok(()) => commit.staging.commit(),
@@ -522,6 +531,7 @@ impl State {
         {
             self.error("plugin_registry", err).await;
         }
+        let hook_filter = instance.hook_filter.clone();
         self.plugins.instances.insert(id, instance);
         if is_suite {
             if !self.plugins.order.contains(&id) {
@@ -536,6 +546,7 @@ impl State {
                 info,
                 panel,
                 auto_reload,
+                hook_filter,
                 order: self.plugins.order.clone(),
             })
             .await;
@@ -545,6 +556,7 @@ impl State {
                     info,
                     panel,
                     auto_reload,
+                    hook_filter,
                     order: self.plugins.order.clone(),
                 }
             } else if let (true, Some(old_instance)) = (reloaded, replace) {

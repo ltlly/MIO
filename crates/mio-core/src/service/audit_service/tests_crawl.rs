@@ -199,7 +199,7 @@ async fn active_scan_detects_canary_reflection_on_structured_json_post_parameter
     let snapshot = state.store.read_audit_state().unwrap();
     let task = snapshot.tasks.iter().find(|t| t.id == task_id).unwrap();
     assert_eq!(task.state, AuditTaskState::Completed);
-    assert_eq!(task.requests_sent, 11);
+    assert_eq!(task.requests_sent, 20);
 
     let canary_hit = snapshot
         .findings

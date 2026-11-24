@@ -120,7 +120,7 @@ pub(in crate::service) fn convert_plugin_findings_for_phase(
 
 impl State {
     pub(in crate::service) fn spawn_plugin_passive_checks(&mut self, record: &FlowRecord) {
-        let handles = self.passive_check_hooks();
+        let handles = self.passive_check_hook_entries();
         if handles.is_empty() {
             return;
         }
@@ -143,53 +143,93 @@ impl State {
         let Some(response) = record.response.as_ref() else {
             return;
         };
-        if !super::hooks::http_request_fits_inline_fast(&record.request)
-            || !super::hooks::http_response_fits_inline_fast(response)
-        {
-            return;
-        }
         let Ok(audit_state) = self.store.audit().read_state() else {
             return;
         };
+        let scope = self
+            .store
+            .metadata()
+            .workspace_arc()
+            .ok()
+            .map(|ws| ws.scope.clone());
         if !audit_state.live_passive_enabled
             || (audit_state.live_passive_suite_scope_only
-                && self
-                    .store
-                    .metadata()
-                    .workspace_arc()
-                    .is_ok_and(|ws| !ws.scope.is_url_in_scope(&record.summary.url)))
+                && scope
+                    .as_ref()
+                    .is_some_and(|s| !s.is_url_in_scope(&record.summary.url)))
         {
             return;
         }
+        let resp_ct = super::hooks::response_content_type(response);
+        let inline_fits = super::hooks::http_request_fits_inline_fast(&record.request)
+            && super::hooks::http_response_fits_inline_fast(response);
         let flow_id = record.summary.id;
         let url = record.request.url.clone();
-        let call = protocol::PassiveCheckCall {
-            flow_id: flow_id.as_bytes().to_vec(),
-            url: url.clone(),
-            request: Some(record.request.clone().into()),
-            response: Some(response.clone().into()),
-        };
-        let Ok(protocol::envelope::Body::PassiveCheckCall(call)) = protocol::try_into_wire_body(
-            protocol::envelope::Body::PassiveCheckCall(call),
-            protocol::PROTOCOL_MINOR,
-        ) else {
-            return;
+        let wire_call = if inline_fits {
+            let call = protocol::PassiveCheckCall {
+                flow_id: flow_id.as_bytes().to_vec(),
+                url: url.clone(),
+                request: Some(record.request.clone().into()),
+                response: Some(response.clone().into()),
+            };
+            match protocol::try_into_wire_body(
+                protocol::envelope::Body::PassiveCheckCall(call),
+                protocol::PROTOCOL_MINOR,
+            ) {
+                Ok(protocol::envelope::Body::PassiveCheckCall(call)) => Some(call),
+                _ => None,
+            }
+        } else {
+            None
         };
         let project = self.project;
-        for handle in handles {
+        for (identity, handle, filter, counters) in handles {
+            if handle.protocol_minor() < protocol::V16_COMPAT_MINOR {
+                continue;
+            }
+            if !filter.should_invoke_http(&record.request.url, true, resp_ct, scope.as_ref()) {
+                counters.inc_filtered_skipped();
+                continue;
+            }
+            let (call, spill) = if let Some(call) = wire_call.as_ref() {
+                (call.clone(), super::hooks::large_body::HookSpillScope::default())
+            } else if let Some(prepared) = super::hooks::large_body::prepare_passive_check_call(
+                flow_id,
+                &url,
+                &record.request,
+                response,
+                handle.protocol_minor(),
+                handle.supports_large_body(),
+            ) {
+                prepared
+            } else {
+                counters.inc_oversized_bypassed();
+                continue;
+            };
             if self.plugins.operations.len() >= MAX_OPERATIONS {
                 break;
             }
-            let (instance_id, call, url) = (handle.identity.instance_id, call.clone(), url.clone());
+            let (instance_id, url) = (identity.instance_id, url.clone());
             let resp_copy = Box::new(response.clone());
             let op_id = Uuid::new_v4();
             let cancel = CancellationToken::new();
             let task_cancel = cancel.clone();
+            counters.inc_invoked();
+            let job_counters = std::sync::Arc::clone(&counters);
             self.plugin_job_start(op_id, Some(instance_id), cancel, false, async move {
-                let result = handle
-                    .call_passive_check_with_cancel(call, task_cancel)
+                let _spill = spill;
+                let result = match handle
+                    .call_passive_check_with_cancel(call, task_cancel.clone())
                     .await
-                    .with_context(|| "被动合规检查调用失败")?;
+                {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if !task_cancel.is_cancelled() {
+                            job_counters.inc_error_or_timeout();
+                        }
+                        return Err(err).context("被动合规检查调用失败");
+                    }
+                };
                 Ok(Output::PassiveChecked {
                     project,
                     flow_id,

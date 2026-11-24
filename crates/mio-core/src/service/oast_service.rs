@@ -1,11 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
 use anyhow::{Result, bail, ensure};
 use mio_plugin_api::{Header, HttpRequest, HttpVersion};
 use mio_proxy::{SendConfig, send};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,
     task::{JoinError, JoinHandle, JoinSet},
@@ -18,7 +21,7 @@ use super::State;
 use crate::{
     CollaboratorCommand, CollaboratorEvent, CollaboratorStatus, Event,
     MAX_COLLABORATOR_BATCH_PAYLOADS, MAX_COLLABORATOR_INTERACTIONS, ProjectKey, Uuid,
-    oast::{LocalOastServer, OastInteraction, OastPayloadToken, SelfHostedOastConfig},
+    oast::{LocalOastServer, OastInteraction, OastPayloadToken, OastProtocol, SelfHostedOastConfig},
 };
 
 const INTERACTION_CHANNEL_CAPACITY: usize = 256;
@@ -26,10 +29,17 @@ const MAX_INTERACTIONS_RAW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_POLL_BODY_BYTES: usize = 4 * 1024 * 1024;
 const POLL_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Default)]
+pub(super) struct RelayPollTelemetry {
+    pub(super) cursor: Option<String>,
+    pub(super) last_poll_unix_ms: Option<i64>,
+    pub(super) last_poll_error: Option<String>,
+}
+
 struct PollJobOutput {
     job_id: Uuid,
     project: ProjectKey,
-    result: std::result::Result<Vec<OastInteraction>, String>,
+    result: std::result::Result<(Vec<OastInteraction>, Option<String>), String>,
 }
 
 #[derive(Default)]
@@ -45,6 +55,7 @@ pub(super) struct CollaboratorService {
     poll_jobs: JoinSet<PollJobOutput>,
     active_polls: HashMap<Uuid, (ProjectKey, CancellationToken)>,
     auto_poll: Option<(CancellationToken, JoinHandle<()>)>,
+    poll_telemetry: Arc<Mutex<RelayPollTelemetry>>,
 }
 
 mod listener;
@@ -53,4 +64,4 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use poll::build_poll_request;
+use poll::{build_poll_request, parse_poll_response};

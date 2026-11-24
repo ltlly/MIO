@@ -433,8 +433,15 @@ impl State {
         let process_cookies_in_redirects = settings.process_cookies_in_redirects;
         let cross_domain_protocol_redirects = settings.cross_domain_protocol_redirects;
         let cert_callback = self.build_server_cert_callback(project);
-        let session_hooks = self.strict_session_action_hooks_named();
-        let http_hooks = self.tool_http_hooks_named();
+        let session_hooks = self.strict_session_action_hook_entries();
+        let http_hooks = self.tool_http_hook_entries();
+        let hook_scope = self
+            .store
+            .metadata()
+            .workspace_arc()
+            .map(|ws| ws.scope.clone())
+            .unwrap_or_default();
+        let plugin_events = self.events.clone();
         let mut record =
             pending_repeater_flow_record(run_id, request.clone(), crate::codec_util::now_unix_ms());
         if let Err(error) = self
@@ -501,9 +508,11 @@ impl State {
             };
             if !session_hooks.is_empty() || !http_hooks.is_empty() {
                 let mut current = current_request.clone();
-                match plugin_service::hooks::run_pre_send_plugin_hooks_with_provenance(
+                match plugin_service::hooks::run_pre_send_plugin_hooks_configured(
                     &session_hooks,
                     &http_hooks,
+                    Some(&hook_scope),
+                    Some(&plugin_events),
                     flow_id,
                     protocol::SourceDto::Repeater,
                     &mut current,

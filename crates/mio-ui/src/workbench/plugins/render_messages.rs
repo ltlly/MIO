@@ -56,8 +56,33 @@ impl Workbench {
                         && cand.info.manifest.id == instance.info.manifest.id
                 })
                 .map(|cand| cand.info.identity.instance_id);
-            sources = sources.child(div().flex_1()).child(
+            let draft_stale = !self.plugin_waiting(tab_id)
+                && self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .is_some_and(|tab| instance.bound.as_ref() != Some(&tab.draft));
+            sources = sources.child(div().flex_1());
+            if draft_stale {
+                sources = sources.child(
+                    div()
+                        .id("plugin-draft-stale-hint")
+                        .test_support()
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .bg(theme::danger_bg())
+                        .border_1()
+                        .border_color(theme::danger_border())
+                        .text_color(theme::danger_fg())
+                        .text_size(theme::scaled_px(11.))
+                        .child("当前草稿已变更，请先同步"),
+                );
+            }
+            sources = sources.child(
                 button("plugin-rebind", "加载当前草稿")
+                    .when(draft_stale, |btn| btn.primary())
                     .tooltip("将当前 Repeater 请求草稿同步载入到此插件编辑器")
                     .disabled(self.plugin_waiting(tab_id) || suite_source.is_none())
                     .on_click(cx.listener(move |this, _, window, cx| {

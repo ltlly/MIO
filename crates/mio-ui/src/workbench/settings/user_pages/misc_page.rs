@@ -4,6 +4,7 @@ use gpui_kit::base::CheckboxState;
 use gpui_kit::component::{
     Icon,
     menu::{DropdownMenu, PopupMenuItem},
+    progress::Progress,
     scroll::{Scrollbar, ScrollbarMode},
 };
 
@@ -1174,12 +1175,12 @@ impl Settings {
     }
 
     #[inline(never)]
-    fn render_user_misc_updates_section(
+    pub(in crate::workbench) fn render_suite_updates(
         &self,
-        enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let enabled = self.user_settings_enabled();
         let misc = &self.state.preferences.misc;
         let update_status_text = match &self.state.update_status {
             mio_core::UpdateStatus::Idle => {
@@ -1199,14 +1200,30 @@ impl Settings {
                 version,
                 received_bytes,
                 total_bytes,
-            } => match total_bytes {
-                Some(total) if *total > 0 => format!(
-                    "正在下载 v{version}（{:.1} MB / {:.1} MB）…",
-                    *received_bytes as f64 / (1024.0 * 1024.0),
-                    *total as f64 / (1024.0 * 1024.0)
-                ),
-                _ => format!("正在下载 v{version}…"),
-            },
+                attempt,
+                max_attempts,
+            } => {
+                let retry_note = if *attempt > 1 {
+                    let denom = (*max_attempts).max(*attempt);
+                    format!(" · 第 {attempt}/{denom} 次重试")
+                } else {
+                    String::new()
+                };
+                match total_bytes {
+                    Some(total) if *total > 0 => {
+                        let pct = ((*received_bytes as u128 * 100) / (*total as u128)).min(100);
+                        format!(
+                            "正在下载 v{version}（{pct}% · {:.1} MB / {:.1} MB{retry_note}）…",
+                            *received_bytes as f64 / (1024.0 * 1024.0),
+                            *total as f64 / (1024.0 * 1024.0),
+                        )
+                    }
+                    _ => format!(
+                        "正在下载 v{version}（{:.1} MB{retry_note}）…",
+                        *received_bytes as f64 / (1024.0 * 1024.0),
+                    ),
+                }
+            }
             mio_core::UpdateStatus::Verifying { version } => {
                 format!("正在校验 v{version} 安装包 SHA-256…")
             }
@@ -1227,6 +1244,31 @@ impl Settings {
         };
         let available_update = match &self.state.update_status {
             mio_core::UpdateStatus::Available(info) => Some(info.clone()),
+            _ => None,
+        };
+        let retry_update = match &self.state.update_status {
+            mio_core::UpdateStatus::Error(_) => self.state.last_available_update.clone(),
+            _ => None,
+        };
+        let progress_indicator: Option<(f32, String)> = match &self.state.update_status {
+            mio_core::UpdateStatus::Downloading {
+                received_bytes,
+                total_bytes,
+                ..
+            } => match total_bytes {
+                Some(total) if *total > 0 => {
+                    let pct = ((*received_bytes as f64 / *total as f64) * 100.0).clamp(0.0, 100.0)
+                        as f32;
+                    Some((pct, format!("下载进度：{pct:.0}%")))
+                }
+                _ => Some((15.0, "正在下载更新包…".into())),
+            },
+            mio_core::UpdateStatus::Verifying { .. } => {
+                Some((100.0, "正在校验安装包 SHA-256…".into()))
+            }
+            mio_core::UpdateStatus::Installing { .. } => {
+                Some((100.0, "正在安装新版本…".into()))
+            }
             _ => None,
         };
         let update_busy = matches!(
@@ -1250,155 +1292,6 @@ impl Settings {
             let _ = weak_auto_upd.update(cx, |this, cx| {
                 this.toggle_user_misc(|m| m.auto_check_updates = checked, window, cx);
             });
-        });
-
-        div()
-            .id("settings-user-updates-section")
-            .test_support()
-            .mt(px(12.))
-            .pt(px(14.))
-            .border_t_1()
-            .border_color(theme::border())
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(user_section_heading(
-                Some("settings-user-updates-heading"),
-                Some("settings-user-updates-scope"),
-                "软件更新",
-            ))
-            .child(user_desc_row_with_icon(
-                user_gear_static_icon(),
-                "检查 GitHub Releases 中的 MIO 新版本，校验 SHA-256 后自动下载、替换并重启。",
-            ))
-            .child(
-                div()
-                    .pl(px(29.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(auto_check_cb)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                uniform_editor_button(
-                                    "settings-user-check-updates",
-                                    "检查更新",
-                                    update_busy,
-                                )
-                                .px(px(12.))
-                                .tooltip("立即查询 GitHub Releases 最新版本")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.check_for_updates(cx);
-                                })),
-                            )
-                            .when_some(available_update, |row, info| {
-                                let label = format!("立即下载并更新 (v{})", info.latest_version);
-                                row.child(
-                                    button("settings-user-install-update", label)
-                                        .primary()
-                                        .disabled(update_busy)
-                                        .h(theme::scaled_px(24.).max(px(24.)))
-                                        .px(px(12.))
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .tooltip("下载最新安装包、校验 SHA-256 并自动替换重启")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.install_available_update(info.clone(), cx);
-                                        })),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id("settings-user-update-status")
-                                    .test_support()
-                                    .aria_label(update_status_text.clone())
-                                    .text_size(theme::scaled_px(12.))
-                                    .text_color(theme::muted_foreground())
-                                    .child(update_status_text),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    #[inline(never)]
-    pub(in crate::workbench) fn render_user_misc(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let _ = &self.user_pages.send_hotkey_select;
-        let enabled = self.user_settings_enabled();
-        let misc = &self.state.preferences.misc;
-
-        let settings_weak_sub = cx.weak_entity();
-        let hotkey_ui = window.use_keyed_state("settings-user-hotkey-editor-ui", cx, |window, cx| {
-            let capture_input =
-                cx.new(|icx| InputState::new(window, icx).placeholder("如 cmd-shift-r"));
-            let capture_focus = cx.focus_handle();
-            let _sub = cx.subscribe_in(
-                &capture_input,
-                window,
-                move |state: &mut HotkeyEditorUi, input, event, window, cx| {
-                    if !matches!(event, InputEvent::PressEnter { .. }) {
-                        return;
-                    }
-                    let Some(row_idx) = state.editing_row else {
-                        return;
-                    };
-                    if input.read(cx).has_marked_text() {
-                        let _ = settings_weak_sub.update(cx, |this, cx| {
-                            this.user_pages.local_error =
-                                Some(editing::COMPOSITION_PENDING.into());
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    let raw = input.read(cx).value().to_string();
-                    let saved = settings_weak_sub
-                        .update(cx, |this, cx| {
-                            this.save_hotkey_binding(row_idx, &raw, window, cx)
-                        })
-                        .unwrap_or(false);
-                    if saved {
-                        state.editing_row = None;
-                        state.capturing = false;
-                        cx.notify();
-                    }
-                },
-            );
-            HotkeyEditorUi {
-                selected_row: None,
-                editing_row: None,
-                capturing: false,
-                capture_input,
-                capture_focus,
-                _sub,
-            }
-        });
-
-        let owner_gear = cx.weak_entity();
-        let ui_gear = hotkey_ui.clone();
-        let hotkeys_gear = user_gear_menu_button(
-            "settings-user-misc-settings",
-            "快捷键设置菜单",
-            !enabled,
-        )
-        .dropdown_menu(move |menu, _, _| {
-            let owner = owner_gear.clone();
-            let ui_gear = ui_gear.clone();
-            menu.item(PopupMenuItem::new("恢复默认设置").on_click(move |_, window, cx| {
-                ui_gear.update(cx, |ui, cx| {
-                    ui.editing_row = None;
-                    ui.capturing = false;
-                    cx.notify();
-                });
-                let _ = owner.update(cx, |this, cx| this.reset_user_hotkeys_defaults(window, cx));
-            }))
         });
 
         let weak_close = cx.weak_entity();
@@ -1469,11 +1362,195 @@ impl Settings {
                     .child(confirm_close_cb)
                     .child(redact_curl_cb),
             );
+        let update_section = div()
+            .id("settings-user-updates-section")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(user_section_heading(
+                Some("settings-user-updates-heading"),
+                Some("settings-user-updates-scope"),
+                "软件更新",
+            ))
+            .child(user_desc_row_with_icon(
+                user_gear_static_icon(),
+                "检查 GitHub Releases 中的 MIO 新版本，校验 SHA-256 后自动下载、替换并重启。",
+            ))
+            .child(
+                div()
+                    .pl(px(29.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(auto_check_cb)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                uniform_editor_button(
+                                    "settings-user-check-updates",
+                                    "检查更新",
+                                    update_busy,
+                                )
+                                .px(px(12.))
+                                .tooltip("立即查询 GitHub Releases 最新版本")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.check_for_updates(cx);
+                                })),
+                            )
+                            .when_some(available_update, |row, info| {
+                                let label = format!("立即下载并更新 (v{})", info.latest_version);
+                                row.child(
+                                    button("settings-user-install-update", label)
+                                        .primary()
+                                        .disabled(update_busy)
+                                        .h(theme::scaled_px(24.).max(px(24.)))
+                                        .px(px(12.))
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .tooltip("下载最新安装包、校验 SHA-256 并自动替换重启")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.install_available_update(info.clone(), cx);
+                                        })),
+                                )
+                            })
+                            .when_some(retry_update, |row, info| {
+                                let label = format!("重试更新 (v{})", info.latest_version);
+                                row.child(
+                                    button("settings-user-retry-update", label)
+                                        .primary()
+                                        .disabled(update_busy)
+                                        .h(theme::scaled_px(24.).max(px(24.)))
+                                        .px(px(12.))
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .tooltip("重新尝试下载、校验并安装更新包")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.install_available_update(info.clone(), cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("settings-user-update-status")
+                                    .test_support()
+                                    .aria_label(update_status_text.clone())
+                                    .text_size(theme::scaled_px(12.))
+                                    .text_color(theme::muted_foreground())
+                                    .child(update_status_text),
+                            ),
+                    )
+                    .when_some(progress_indicator, |col, (pct, progress_label)| {
+                        col.child(
+                            div()
+                                .id("settings-user-update-progress")
+                                .test_support()
+                                .aria_label(progress_label)
+                                .w(px(260.))
+                                .child(
+                                    Progress::new("settings-user-update-bar")
+                                        .value(pct)
+                                        .small(),
+                                ),
+                        )
+                    }),
+            );
+
+        let body = div()
+            .id("settings-suite-updates-inner")
+            .px(px(22.))
+            .py(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(update_section)
+            .child(behavior_section);
+        settings_scrollable_pane(
+            "settings-suite-updates-page",
+            &self.content_scroll,
+            self.append_user_pages_feedback(body, cx),
+        )
+        .into_any_element()
+    }
+
+    #[inline(never)]
+    pub(in crate::workbench) fn render_user_misc(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let _ = &self.user_pages.send_hotkey_select;
+        let enabled = self.user_settings_enabled();
+        let settings_weak_sub = cx.weak_entity();
+        let hotkey_ui = window.use_keyed_state("settings-user-hotkey-editor-ui", cx, |window, cx| {
+            let capture_input =
+                cx.new(|icx| InputState::new(window, icx).placeholder("如 cmd-shift-r"));
+            let capture_focus = cx.focus_handle();
+            let _sub = cx.subscribe_in(
+                &capture_input,
+                window,
+                move |state: &mut HotkeyEditorUi, input, event, window, cx| {
+                    if !matches!(event, InputEvent::PressEnter { .. }) {
+                        return;
+                    }
+                    let Some(row_idx) = state.editing_row else {
+                        return;
+                    };
+                    if input.read(cx).has_marked_text() {
+                        let _ = settings_weak_sub.update(cx, |this, cx| {
+                            this.user_pages.local_error =
+                                Some(editing::COMPOSITION_PENDING.into());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    let raw = input.read(cx).value().to_string();
+                    let saved = settings_weak_sub
+                        .update(cx, |this, cx| {
+                            this.save_hotkey_binding(row_idx, &raw, window, cx)
+                        })
+                        .unwrap_or(false);
+                    if saved {
+                        state.editing_row = None;
+                        state.capturing = false;
+                        cx.notify();
+                    }
+                },
+            );
+            HotkeyEditorUi {
+                selected_row: None,
+                editing_row: None,
+                capturing: false,
+                capture_input,
+                capture_focus,
+                _sub,
+            }
+        });
+
+        let owner_gear = cx.weak_entity();
+        let ui_gear = hotkey_ui.clone();
+        let hotkeys_gear = user_gear_menu_button(
+            "settings-user-misc-settings",
+            "快捷键设置菜单",
+            !enabled,
+        )
+        .dropdown_menu(move |menu, _, _| {
+            let owner = owner_gear.clone();
+            let ui_gear = ui_gear.clone();
+            menu.item(PopupMenuItem::new("恢复默认设置").on_click(move |_, window, cx| {
+                ui_gear.update(cx, |ui, cx| {
+                    ui.editing_row = None;
+                    ui.capturing = false;
+                    cx.notify();
+                });
+                let _ = owner.update(cx, |this, cx| this.reset_user_hotkeys_defaults(window, cx));
+            }))
+        });
 
         let hotkey_table = self.render_user_misc_hotkey_table(&hotkey_ui, window, cx);
         let toolbar_row = self.render_user_misc_hotkey_toolbar(&hotkey_ui, enabled, cx);
-        let update_section = self.render_user_misc_updates_section(enabled, window, cx);
-
         let body = div()
             .id("settings-user-misc-inner")
             .px(px(22.))
@@ -1508,10 +1585,7 @@ impl Settings {
                     .gap(px(12.))
                     .child(toolbar_row)
                     .child(hotkey_table),
-            )
-            .child(behavior_section)
-            .child(update_section);
-
+            );
         settings_scrollable_pane(
             "settings-user-misc-page",
             &self.user_pages.misc_scroll,

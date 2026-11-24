@@ -130,6 +130,8 @@ fn fixture() -> Fixture {
             entry_modified,
             entry_size,
             auto_reload: true,
+            hook_filter: PluginHookFilter::default(),
+            hook_counters: std::sync::Arc::new(PluginHookCounters::default()),
             info,
             panel: initial.clone(),
             resources: HashMap::from([(tab_id, 1)]),

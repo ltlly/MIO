@@ -203,6 +203,111 @@ pub(super) fn find_mixed_content_html(html: &str) -> Option<&str> {
     None
 }
 
+fn find_dom_xss_sink_html(html: &str) -> Option<&'static str> {
+    let lo = html.to_ascii_lowercase();
+    if !lo.contains("<script") {
+        return None;
+    }
+    let sources = [
+        "location.hash",
+        "location.search",
+        "location.href",
+        "document.url",
+        "document.referrer",
+        "window.name",
+    ];
+    let sinks = [
+        ".innerhtml",
+        ".outerhtml",
+        "document.write(",
+        "eval(",
+        "insertadjacenthtml(",
+    ];
+    let has_src = sources.iter().any(|s| lo.contains(s));
+    if !has_src {
+        return None;
+    }
+    sinks.into_iter().find(|sink| lo.contains(sink))
+}
+
+fn find_post_form_missing_csrf(html: &str) -> Option<&str> {
+    let lo = html.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while let Some(rel) = lo[cursor..].find("<form") {
+        let form_start = cursor + rel;
+        let Some(rel_end) = lo[form_start..].find("</form>") else {
+            break;
+        };
+        let form_end = form_start + rel_end + 7;
+        let form_lo = &lo[form_start..form_end];
+        let tag_end = form_lo.find('>').unwrap_or(form_lo.len());
+        let open_tag = &form_lo[..tag_end];
+        let is_post = open_tag.contains("method=\"post\"")
+            || open_tag.contains("method='post'")
+            || open_tag.contains("method=post");
+        if is_post {
+            let has_token = [
+                "csrf",
+                "xsrf",
+                "_token",
+                "authenticity_token",
+                "__requestverificationtoken",
+            ]
+            .iter()
+            .any(|tok| form_lo.contains(tok));
+            if !has_token {
+                let orig_tag_end = html[form_start..form_end]
+                    .find('>')
+                    .map_or(form_end, |p| form_start + p + 1);
+                return Some(&html[form_start..orig_tag_end]);
+            }
+        }
+        cursor = form_end;
+    }
+    None
+}
+
+fn find_file_upload_marker(req_headers: &[Header], html: &str) -> Option<(&'static str, bool)> {
+    if req_headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("content-type")
+            && String::from_utf8_lossy(&h.value)
+                .to_ascii_lowercase()
+                .contains("multipart/form-data")
+    }) {
+        return Some(("multipart/form-data", true));
+    }
+    let lo = html.to_ascii_lowercase();
+    if lo.contains("type=\"file\"") || lo.contains("type='file'") || lo.contains("type=file") {
+        return Some(("type=\"file\"", false));
+    }
+    None
+}
+
+fn find_host_override_reflection(req_headers: &[Header], resp: &HttpResponse, body: &str) -> Option<String> {
+    for h in req_headers {
+        if !h.name.eq_ignore_ascii_case("x-forwarded-host")
+            && !h.name.eq_ignore_ascii_case("x-host")
+        {
+            continue;
+        }
+        let Ok(val) = std::str::from_utf8(&h.value) else {
+            continue;
+        };
+        let trimmed = val.trim();
+        if trimmed.len() < 4 {
+            continue;
+        }
+        let in_location = resp.headers.iter().any(|rh| {
+            rh.name.eq_ignore_ascii_case("location")
+                && String::from_utf8_lossy(&rh.value).contains(trimmed)
+        });
+        if in_location || body.contains(trimmed) {
+            return Some(trimmed.to_owned());
+        }
+    }
+    None
+}
+
 pub(super) fn inspect_passive_compliance(b: &mut Bag<'_>, https: bool, resp: &HttpResponse) {
     let hs = &resp.headers;
     for h in hs {
@@ -241,11 +346,11 @@ pub(super) fn inspect_passive_compliance(b: &mut Bag<'_>, https: bool, resp: &Ht
                 &cc,
                 true,
             );
-        } else if let Some(cookie_ev) = first_cookie {
+        } else if let Some(cookie_ev) = &first_cookie {
             b.hit_detail(
                 0x00700100,
                 Some("下发 Set-Cookie 的响应缺少 Cache-Control: no-store。"),
-                &cookie_ev,
+                cookie_ev,
                 true,
             );
         } else {
@@ -307,5 +412,61 @@ pub(super) fn inspect_passive_compliance(b: &mut Bag<'_>, https: bool, resp: &Ht
             let url = b.req.url.clone();
             b.hit_detail(0x005009c0, None, &url, false);
         }
+    }
+
+    if https
+        && let Some(hsts) = hs
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("strict-transport-security"))
+            .and_then(|h| std::str::from_utf8(&h.value).ok())
+    {
+        let compact: String = hsts
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if compact.contains("max-age=0") {
+            b.hit_detail(
+                0x01000300,
+                Some("HTTPS 响应将 Strict-Transport-Security 设为 max-age=0，HSTS 未生效。"),
+                hsts.trim(),
+                true,
+            );
+        }
+    }
+
+    let html_body = if is_html_response(resp) {
+        let slice = &resp.body[..resp.body.len().min(MAX_PASSIVE_HTML_BYTES)];
+        Some(String::from_utf8_lossy(slice).into_owned())
+    } else {
+        None
+    };
+    if let Some(html) = &html_body {
+        if let Some(sink) = find_dom_xss_sink_html(html) {
+            b.hit_detail(0x00200310, None, sink, true);
+        }
+        let has_session_cookie = b.req.headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("cookie") && !h.value.iter().all(u8::is_ascii_whitespace)
+        }) || first_cookie.is_some();
+        if has_session_cookie
+            && let Some(form_tag) = find_post_form_missing_csrf(html)
+        {
+            b.hit_detail(0x00200700, None, form_tag, true);
+        }
+    }
+    if let Some((marker, in_req)) =
+        find_file_upload_marker(&b.req.headers, html_body.as_deref().unwrap_or(""))
+    {
+        if in_req {
+            b.rqs = spans_ci(&request_to_raw(b.req), marker.as_bytes());
+        }
+        b.hit_detail(0x00500980, None, marker, !in_req);
+        b.rqs.clear();
+    }
+    let scan_body = html_body.as_deref().unwrap_or("");
+    if let Some(reflected) = find_host_override_reflection(&b.req.headers, resp, scan_body) {
+        b.rqs = spans_ci(&request_to_raw(b.req), reflected.as_bytes());
+        b.hit_detail(0x00400f00, None, &reflected, true);
+        b.rqs.clear();
     }
 }

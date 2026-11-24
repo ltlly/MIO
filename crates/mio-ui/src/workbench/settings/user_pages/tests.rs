@@ -1077,17 +1077,32 @@ fn software_update_settings_check_install_and_top_badge_flow(cx: &mut TestAppCon
     cx.update_window(settings, |_, window, cx| {
         window.click("settings-user-misc", cx);
         window.render_frame(cx);
-        let entity = settings_entity(window, cx).unwrap();
-        entity.update(cx, |this, cx| {
-            this.user_pages.misc_scroll.scroll_to_bottom();
-            cx.notify();
-        });
+        assert!(
+            window.try_find("settings-user-updates-heading").is_none(),
+            "software updates must not live under User interface > Hotkeys"
+        );
+        assert!(
+            window.try_find("settings-user-behavior-heading").is_none(),
+            "general behavior options must not live under User interface > Hotkeys"
+        );
+        window.click("settings-suite-updates", cx);
         window.render_frame(cx);
+        assert_eq!(window.find("settings-suite-updates").selected(), Some(true));
         assert!(window.find("settings-user-updates-heading").visible());
+        assert!(window.find("settings-user-behavior-heading").visible());
         assert_eq!(
             window.find("settings-user-auto-check-updates").checked(),
             Some(true)
         );
+        window.click("settings-search-input", cx);
+        window.input("更新", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("settings-user-misc").is_none());
+        assert_eq!(window.find("settings-suite-updates").selected(), Some(true));
+        window.click("settings-search-input", cx);
+        window.press(crate::kbd!("a"), cx);
+        window.press("backspace", cx);
+        window.render_frame(cx);
         window.click("settings-user-auto-check-updates", cx);
     })
     .unwrap();
@@ -1135,15 +1150,16 @@ fn software_update_settings_check_install_and_top_badge_flow(cx: &mut TestAppCon
     cx.update_window(fixture.window, |_, window, cx| {
         window.render_frame(cx);
         assert!(window.find("suiteUpdateBadge").visible());
+        window.click("suiteUpdateBadge", cx);
     })
     .unwrap();
-
+    cx.run_until_parked();
     cx.update_window(settings, |_, window, cx| {
-        let entity = settings_entity(window, cx).unwrap();
-        entity.update(cx, |this, cx| {
-            this.user_pages.misc_scroll.scroll_to_bottom();
-            cx.notify();
-        });
+        window.render_frame(cx);
+        assert_eq!(window.find("settings-suite-updates").selected(), Some(true));
+    })
+    .unwrap();
+    cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
         assert!(window.find("settings-user-install-update").visible());
         window.click("settings-user-install-update", cx);
@@ -1155,5 +1171,48 @@ fn software_update_settings_check_install_and_top_badge_flow(cx: &mut TestAppCon
     assert!(matches!(
         &install_cmds[0],
         Command::InstallUpdate { info } if info == &available
+    ));
+
+    fixture
+        .events
+        .try_send(Event::UpdateStatus(mio_core::UpdateStatus::Downloading {
+            version: "0.3.0".into(),
+            received_bytes: 21_000_000,
+            total_bytes: Some(42_000_000),
+            attempt: 2,
+            max_attempts: 4,
+        }))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        let status_el = window.find("settings-user-update-status");
+        let status_label = status_el.label().unwrap_or("");
+        assert!(status_label.contains("50%"), "{status_label}");
+        assert!(status_label.contains("第 2/4 次重试"), "{status_label}");
+        let progress_el = window.find("settings-user-update-progress");
+        assert!(progress_el.visible());
+        assert_eq!(progress_el.label(), Some("下载进度：50%"));
+    })
+    .unwrap();
+
+    fixture
+        .events
+        .try_send(Event::UpdateStatus(mio_core::UpdateStatus::Error(
+            "模拟下载中断".into(),
+        )))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("settings-user-retry-update").visible());
+        window.click("settings-user-retry-update", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let retry_cmds = drain(&mut fixture.commands);
+    assert!(matches!(
+        retry_cmds.as_slice(),
+        [Command::InstallUpdate { info }] if info == &available
     ));
 }

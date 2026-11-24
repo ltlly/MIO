@@ -27,6 +27,8 @@ pub struct Register {
     pub panel: Option<PanelSnapshot>,
     #[prost(bool, tag = "5")]
     pub supports_panel_multiplexing: bool,
+    #[prost(bool, tag = "6")]
+    pub supports_large_body: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -374,6 +376,10 @@ impl HostResult {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for_minor(PROTOCOL_MINOR)
+    }
+
+    pub fn validate_for_minor(&self, expected_minor: u32) -> Result<(), String> {
         match self.outcome.as_ref().ok_or("宿主结果为空")? {
             host_result::Outcome::History(page) => {
                 if page.rows.len() > MAX_TABLE_ROWS
@@ -396,12 +402,14 @@ impl HostResult {
                     .request
                     .as_ref()
                     .ok_or("流量缺少 request")?
-                    .validate()?;
+                    .validate_for_minor(expected_minor)?;
                 if let Some(response) = &record.response {
-                    response.validate()?;
+                    response.validate_for_minor(expected_minor)?;
                 }
             }
-            host_result::Outcome::Response(response) => response.validate()?,
+            host_result::Outcome::Response(response) => {
+                response.validate_for_minor(expected_minor)?
+            }
             host_result::Outcome::Resource(resource) => {
                 uuid(&resource.resource_id)?;
                 if resource.revision == 0 {
@@ -566,6 +574,30 @@ pub struct WebSocketHookCall {
     pub is_binary: bool,
     #[prost(bytes = "vec", tag = "6")]
     pub payload: Vec<u8>,
+    #[prost(bool, tag = "7")]
+    pub payload_omitted: bool,
+    #[prost(uint64, tag = "8")]
+    pub original_payload_len: u64,
+    #[prost(string, tag = "9")]
+    pub payload_file_path: String,
+}
+
+impl WebSocketHookCall {
+    pub fn read_payload_bytes(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        if self.payload_omitted {
+            dto::read_spill_file_bounded(&self.payload_file_path).map(std::borrow::Cow::Owned)
+        } else {
+            Ok(std::borrow::Cow::Borrowed(&self.payload))
+        }
+    }
+
+    pub fn open_payload_reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
+        if self.payload_omitted {
+            dto::open_spill_reader(&self.payload_file_path)
+        } else {
+            Ok(Box::new(&self.payload[..]))
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -574,6 +606,54 @@ pub struct WebSocketHookResult {
     pub action: i32,
     #[prost(bytes = "vec", tag = "2")]
     pub payload: Vec<u8>,
+    #[prost(bool, tag = "3")]
+    pub payload_omitted: bool,
+    #[prost(string, tag = "4")]
+    pub payload_file_path: String,
+}
+
+impl WebSocketHookResult {
+    pub fn preserve_omitted(action: HookAction, call: &WebSocketHookCall) -> Self {
+        if call.payload_omitted {
+            Self {
+                action: action as i32,
+                payload: Vec::new(),
+                payload_omitted: true,
+                payload_file_path: call.payload_file_path.clone(),
+            }
+        } else {
+            Self {
+                action: action as i32,
+                payload: call.payload.clone(),
+                payload_omitted: false,
+                payload_file_path: String::new(),
+            }
+        }
+    }
+
+    pub fn with_modified_payload_from(
+        action: HookAction,
+        call: &WebSocketHookCall,
+        payload: Vec<u8>,
+    ) -> std::io::Result<Self> {
+        if payload.len() <= MAX_INLINE_BODY {
+            Ok(Self {
+                action: action as i32,
+                payload,
+                payload_omitted: false,
+                payload_file_path: String::new(),
+            })
+        } else {
+            let payload_file_path =
+                dto::write_spill_sibling(&call.payload_file_path, "modified-ws", &payload)?;
+            Ok(Self {
+                action: action as i32,
+                payload: Vec::new(),
+                payload_omitted: true,
+                payload_file_path,
+            })
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]

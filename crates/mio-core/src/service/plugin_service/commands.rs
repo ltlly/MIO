@@ -581,6 +581,66 @@ impl State {
                 )
                 .await;
             }
+            PluginAction::SetHookFilter {
+                instance_id,
+                filter,
+            } => {
+                self.plugin_instance(instance_id)?;
+                let filter = filter.normalized();
+                filter.validate()?;
+                let is_suite = self
+                    .plugins
+                    .instances
+                    .get(&instance_id)
+                    .is_some_and(|inst| {
+                        inst.info.tab_id.is_none()
+                            && !self.plugins.context_viewers.contains_key(&instance_id)
+                    });
+                ensure!(is_suite, "仅主工具插件实例可配置 Hook 预过滤策略");
+                let inst = self
+                    .plugins
+                    .instances
+                    .get_mut(&instance_id)
+                    .context("插件实例不存在")?;
+                inst.hook_filter = filter.clone();
+                let plugin_id = inst.info.manifest.id.clone();
+                if let Err(err) = self.plugins.registry.set_hook_filter(&plugin_id, &filter) {
+                    self.error("plugin_registry", err).await;
+                }
+                self.sync_proxy_plugin_hooks();
+                self.plugin_result(
+                    project,
+                    operation_id,
+                    Ok(PluginOutcome::HookFilterUpdated {
+                        instance_id,
+                        filter,
+                    }),
+                )
+                .await;
+            }
+            PluginAction::QueryHookMetrics => {
+                let metrics = self
+                    .plugins
+                    .order
+                    .iter()
+                    .filter_map(|id| {
+                        self.plugins
+                            .instances
+                            .get(id)
+                            .filter(|inst| {
+                                inst.info.tab_id.is_none()
+                                    && !self.plugins.context_viewers.contains_key(id)
+                            })
+                            .map(|inst| (*id, inst.hook_counters.snapshot()))
+                    })
+                    .collect();
+                self.plugin_result(
+                    project,
+                    operation_id,
+                    Ok(PluginOutcome::HookMetrics { metrics }),
+                )
+                .await;
+            }
             PluginAction::EnableInstalled { plugin_id } => {
                 ensure!(
                     !self.quiesced && !self.plugins.stopping,

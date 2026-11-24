@@ -130,6 +130,7 @@ fn hooks_session_payload_and_kv_intruder_buttons_behave_as_specified() {
         client_to_server: true,
         is_binary: false,
         payload: b"hello".to_vec(),
+        ..Default::default()
     });
     assert_eq!(ws.action, HookAction::Modify as i32);
     assert_eq!(ws.payload, b"[lab] hello");
@@ -379,6 +380,7 @@ fn passive_check_detects_audit_header_and_body_markers() {
         }],
         body: b"normal response".to_vec(),
         trailers: vec![],
+        ..Default::default()
     };
     let clean = lab
         .passive_check(PassiveCheckCall {

@@ -363,6 +363,8 @@ impl Workbench {
             bound,
             document: None,
             context_owner,
+            hook_filter: mio_core::PluginHookFilter::default(),
+            hook_metrics: mio_core::PluginHookMetricsSnapshot::default(),
             _subscription: subscription,
         });
         if is_suite {
@@ -638,6 +640,8 @@ impl Workbench {
                 bound: None,
                 document: None,
                 context_owner: None,
+                hook_filter: entry.hook_filter,
+                hook_metrics: mio_core::PluginHookMetricsSnapshot::default(),
                 _subscription: sub,
             });
             if entry.auto_reload {
@@ -663,6 +667,7 @@ impl Workbench {
         info: LoadedPlugin,
         panel: std::sync::Arc<PanelSnapshot>,
         auto_reload: bool,
+        hook_filter: mio_core::PluginHookFilter,
         order: Vec<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -706,7 +711,9 @@ impl Workbench {
         }
         if let Some(inst) = self.extensions.instance_mut(new_id) {
             inst.persisted = true;
+            inst.hook_filter = hook_filter;
         }
+        self.extensions.hook_inputs_owner = None;
         if !self
             .extensions
             .persisted_order

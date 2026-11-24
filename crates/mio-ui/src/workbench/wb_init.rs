@@ -347,6 +347,7 @@ impl Workbench {
             runtime_result: None,
             quitting: false,
             update_status: mio_core::UpdateStatus::Idle,
+            last_available_update: None,
             #[cfg(not(test))]
             startup_update_checked: false,
             _subscriptions: vec![

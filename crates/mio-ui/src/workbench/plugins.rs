@@ -54,6 +54,11 @@ pub(super) struct Extensions {
     directory: Entity<InputState>,
     search: Entity<InputState>,
     search_subscription: Option<Subscription>,
+    hook_inputs_owner: Option<Uuid>,
+    hook_host_allow: Entity<InputState>,
+    hook_host_deny: Entity<InputState>,
+    hook_path_allow: Entity<InputState>,
+    hook_path_deny: Entity<InputState>,
     page: ExtensionsPage,
     detail_tab: ExtensionsDetailTab,
     add_panel_open: bool,
@@ -116,6 +121,8 @@ struct Instance {
     bound: Option<Draft>,
     document: Option<u64>,
     context_owner: Option<&'static str>,
+    hook_filter: mio_core::PluginHookFilter,
+    hook_metrics: mio_core::PluginHookMetricsSnapshot,
     _subscription: Subscription,
 }
 
@@ -219,6 +226,10 @@ pub(in crate::workbench) enum Operation {
     SetAutoReload {
         instance: Uuid,
     },
+    SetHookFilter {
+        instance: Uuid,
+    },
+    QueryHookMetrics,
     ContextMenu {
         instance: Uuid,
     },
@@ -239,6 +250,16 @@ impl Extensions {
             }),
             search: cx.new(|cx| InputState::new(window, cx).placeholder("搜索")),
             search_subscription: None,
+            hook_inputs_owner: None,
+            hook_host_allow: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("api.example.invalid, *.lab.invalid")
+            }),
+            hook_host_deny: cx
+                .new(|cx| InputState::new(window, cx).placeholder("static.example.invalid")),
+            hook_path_allow: cx
+                .new(|cx| InputState::new(window, cx).placeholder("/api/, /v1/*")),
+            hook_path_deny: cx
+                .new(|cx| InputState::new(window, cx).placeholder("/health, /assets/*")),
             page: ExtensionsPage::Installed,
             detail_tab: ExtensionsDetailTab::Details,
             add_panel_open: false,

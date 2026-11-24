@@ -1562,6 +1562,41 @@ impl Settings {
         .detach();
     }
 
+    fn confirm_use_builtin_ca_preset(
+        &mut self,
+        preset: mio_core::CaPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.proxy_listeners_available() {
+            return;
+        }
+        let title = format!("切换内置 CA 预置：{}", preset.display_name);
+        let detail = format!(
+            "{}\n\n切换后会覆盖当前持久化的 Proxy CA 证书与私钥；如需恢复本地自签 MIO Root CA，可随时点击“重新生成 CA 证书”。",
+            preset.description
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(detail.as_str()),
+            &["取消", "确认切换"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(1) {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.listeners_tls.listener_error = None;
+                    let _ = this
+                        .owner
+                        .update(cx, |wb, cx| wb.use_builtin_ca_preset(preset, cx));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(in crate::workbench::settings) fn render_proxy_listeners_section(
         &self,
         _window: &mut Window,
@@ -1771,8 +1806,13 @@ impl Settings {
                                 })),
                             )
                             .child({
-                                let preset_owner = self.owner.clone();
-                                let preset_window = self.owner_window;
+                                let preset_settings = cx.weak_entity();
+                                let active_preset_id = self
+                                    .state
+                                    .last_ca_fingerprint
+                                    .as_deref()
+                                    .and_then(mio_core::ca_preset_by_fingerprint)
+                                    .map(|preset| preset.id);
                                 settings_action_button(
                                     "settings-proxy-builtin-ca",
                                     "内置 CA 预置",
@@ -1785,18 +1825,16 @@ impl Settings {
                                 .dropdown_menu(move |mut menu, _, _| {
                                     for preset in mio_core::BUILTIN_CA_PRESETS {
                                         let preset = *preset;
-                                        let owner = preset_owner.clone();
+                                        let settings = preset_settings.clone();
                                         menu = menu.item(
                                             PopupMenuItem::new(preset.display_name)
+                                                .checked(active_preset_id == Some(preset.id))
                                                 .disabled(!enabled)
-                                                .on_click(move |_, _, cx| {
-                                                    let owner = owner.clone();
-                                                    cx.defer(move |cx| {
-                                                        let _ = preset_window.update(cx, |_, _window, cx| {
-                                                            let _ = owner.update(cx, |wb, cx| {
-                                                                wb.use_builtin_ca_preset(preset, cx)
-                                                            });
-                                                        });
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = settings.update(cx, |this, cx| {
+                                                        this.confirm_use_builtin_ca_preset(
+                                                            preset, window, cx,
+                                                        )
                                                     });
                                                 }),
                                         );
@@ -1806,16 +1844,29 @@ impl Settings {
                             }),
                     )
                     .when_some(self.state.last_ca_fingerprint.clone(), |this, fp| {
+                        let text = match mio_core::ca_preset_by_fingerprint(&fp) {
+                            Some(preset) => {
+                                format!("CA SHA-256 指纹：{fp}（内置预置：{}）", preset.display_name)
+                            }
+                            None => format!("CA SHA-256 指纹：{fp}"),
+                        };
+                        let aria = match mio_core::ca_preset_by_fingerprint(&fp) {
+                            Some(preset) => format!(
+                                "当前 CA 指纹 (SHA-256)：{fp}，内置预置：{}",
+                                preset.display_name
+                            ),
+                            None => format!("当前 CA 指纹 (SHA-256)：{fp}"),
+                        };
                         this.child(
                             div()
                                 .id("settings-proxy-ca-fingerprint")
                                 .test_support()
                                 .role(Role::Status)
-                                .aria_label(format!("当前 CA 指纹 (SHA-256)：{fp}"))
+                                .aria_label(aria)
                                 .text_size(theme::scaled_px(12.))
                                 .text_color(theme::muted_foreground())
                                 .font_family(theme::mono_font_family())
-                                .child(format!("CA SHA-256 指纹：{fp}")),
+                                .child(text),
                         )
                     }),
             )

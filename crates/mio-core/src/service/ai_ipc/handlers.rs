@@ -2,14 +2,18 @@ use std::{collections::HashMap, path::Path, path::PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64_STANDARD};
+
 use super::{
-    AiIpcCall, AiIpcEnvelope, AiIpcFlowDetail, AiIpcPayload, AiIpcPendingItem, AiIpcRequest,
-    IpcRepeaterCompletion, IpcRepeaterOutcome, MAX_CONCURRENT_IPC_CLIENTS,
+    AiIpcCall, AiIpcEnvelope, AiIpcFlowDetail, AiIpcPayload, AiIpcPendingItem,
+    AiIpcRepeaterTabSummary, AiIpcRequest, IpcRepeaterCompletion, IpcRepeaterOutcome,
+    MAX_CONCURRENT_IPC_CLIENTS,
 };
 use crate::{
     Command, Decision, Event, FlowId, FlowRecord, FlowState, FlowSummary, Header, HttpRequest,
-    HttpVersion, InterceptStage, ProvenanceActor, SessionTool, SlimSaveOptions, TrafficSource,
-    WorkTab, Workspace, authority, ca_preset, ca_preset::BUILTIN_CA_PRESETS,
+    HttpVersion, InterceptStage, ProvenanceActor, SessionTool, SlimSaveOptions, TabId,
+    TrafficSource, WorkTab, Workspace, authority,
+    ca_preset::{builtin_ca_preset_infos, resolve_ca_preset},
     detect_request_line_version, parse_repeater_request, request_to_raw, response_to_raw,
     service::{
         State,
@@ -46,26 +50,32 @@ impl State {
 
     pub(in crate::service) async fn accept_ai_ipc_call(&mut self, call: AiIpcCall) {
         if let AiIpcRequest::RepeaterSend {
+            tab_id,
             flow_id,
+            flow_number,
             use_original,
             target,
             raw_request,
             add_headers,
             remove_headers,
             override_body,
+            override_body_base64,
             insecure,
         } = call.request
         {
             let reply = call.reply;
             if let Err(error) = self.spawn_ipc_repeater_send(
                 reply,
+                tab_id,
                 flow_id,
+                flow_number,
                 use_original,
                 target,
                 raw_request,
                 add_headers,
                 remove_headers,
                 override_body,
+                override_body_base64,
                 insecure,
             ) {
                 let (reply, err) = error;
@@ -116,6 +126,23 @@ impl State {
                         .send(AiIpcEnvelope::err(format!("保存 Repeater 请求记录失败：{error:#}")));
                     return;
                 }
+                if let Some(tab_id) = done.tab_id
+                    && self.unsaved_count() == 0
+                    && let Ok(mut workspace) = self.store.metadata().workspace()
+                    && let Some(tab) = workspace.tabs.iter_mut().find(|t| t.id == tab_id)
+                {
+                    tab.last_flow = Some(record.summary.id);
+                    tab.archive_response = None;
+                    workspace.active = Some(tab_id);
+                    workspace.active_websocket_tab = None;
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
+                        self.queue_repeater_event(Event::WorkspaceChanged {
+                            project: self.project,
+                            workspace,
+                        });
+                    }
+                }
                 if let Some(event) = self.audit_inspect_live_flow(&record) {
                     self.queue_repeater_event(Event::Audit(event));
                 }
@@ -127,6 +154,13 @@ impl State {
                     });
                 }
                 self.refresh_project_disk_bytes_throttled();
+                let recovery = self.latest_recovery_summaries();
+                let number = self
+                    .store
+                    .flows()
+                    .flow_number_for(record.summary.id, &recovery)
+                    .ok()
+                    .flatten();
                 let request_raw_text =
                     Some(String::from_utf8_lossy(&request_to_raw(&record.request)).into_owned());
                 let response_raw_text = record
@@ -137,6 +171,8 @@ impl State {
                     .reply
                     .send(AiIpcEnvelope::ok(AiIpcPayload::FlowsGet(Box::new(
                         AiIpcFlowDetail {
+                            number,
+                            tab_id: done.tab_id,
                             summary: record.summary,
                             request_raw_text,
                             response_raw_text,
@@ -170,18 +206,52 @@ impl State {
                 filter,
                 method,
                 status,
-            } => self.ipc_flows_list(offset, limit, &filter, method.as_deref(), status),
-            AiIpcRequest::FlowsGet { flow_id } => self.ipc_flows_get(flow_id),
+                hide_connect,
+                host,
+                source,
+                state,
+                order,
+            } => self.ipc_flows_list(
+                offset,
+                limit,
+                &filter,
+                method.as_deref(),
+                status,
+                hide_connect,
+                host.as_deref(),
+                source.as_deref(),
+                state.as_deref(),
+                order.as_deref(),
+            ),
+            AiIpcRequest::FlowsGet {
+                flow_id,
+                flow_number,
+            } => self.ipc_flows_get(flow_id, flow_number),
+            AiIpcRequest::RepeaterList => self.ipc_repeater_list(),
             AiIpcRequest::RepeaterOpen {
                 flow_id,
+                flow_number,
                 use_original,
                 target,
                 raw_request,
                 title,
+                blank,
             } => {
-                self.ipc_repeater_open(flow_id, use_original, target, raw_request, title)
-                    .await
+                self.ipc_repeater_open(
+                    flow_id,
+                    flow_number,
+                    use_original,
+                    target,
+                    raw_request,
+                    title,
+                    blank,
+                )
+                .await
             }
+            AiIpcRequest::RepeaterRename { tab_id, title } => {
+                self.ipc_repeater_rename(tab_id, title).await
+            }
+            AiIpcRequest::RepeaterClose { tab_id } => self.ipc_repeater_close(tab_id).await,
             AiIpcRequest::RepeaterSend { .. } => {
                 unreachable!("RepeaterSend is already handled in accept_ai_ipc_call")
             }
@@ -228,6 +298,18 @@ impl State {
                 ensure!(
                     !self.quiesced,
                     "项目正在切换或静默保存，暂无法修改工作区配置"
+                );
+                let current = self.store.metadata().workspace()?;
+                let expected = current
+                    .revision
+                    .checked_add(1)
+                    .context("工作区 revision 已达上限")?;
+                ensure!(
+                    workspace.revision == expected,
+                    "工作区 revision 冲突：当前服务端 revision={}，提交的 revision={}，请将 workspace.revision 递增为 {} 后重试（先执行 workspace get 获取最新配置）",
+                    current.revision,
+                    workspace.revision,
+                    expected
                 );
                 self.apply_save_workspace(self.project, workspace).await?;
                 let saved = self.store.metadata().workspace()?;
@@ -283,6 +365,7 @@ impl State {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ipc_flows_list(
         &self,
         offset: usize,
@@ -290,19 +373,63 @@ impl State {
         filter: &str,
         method: Option<&str>,
         status: Option<u16>,
+        hide_connect: bool,
+        host: Option<&str>,
+        source: Option<&str>,
+        state: Option<&str>,
+        order: Option<&str>,
     ) -> Result<AiIpcPayload> {
         let clamped_limit = limit.clamp(1, 500);
         let recovery = self.latest_recovery_summaries();
-        let (total, flows) =
-            self.store
-                .flows()
-                .query_ai_flows(offset, clamped_limit, filter, method, status, &recovery)?;
+        let (total, flows) = self.store.flows().query_ai_flows(
+            offset,
+            clamped_limit,
+            filter,
+            method,
+            status,
+            hide_connect,
+            host,
+            source,
+            state,
+            order,
+            &recovery,
+        )?;
         Ok(AiIpcPayload::FlowsList { total, flows })
     }
 
-    fn ipc_flows_get(&self, flow_id: FlowId) -> Result<AiIpcPayload> {
-        let record = self.read_flow(flow_id)?;
-        let original = self.original_flow(flow_id)?;
+    fn resolve_ipc_flow_id(
+        &self,
+        flow_id: Option<FlowId>,
+        flow_number: Option<u64>,
+    ) -> Result<FlowId> {
+        match (flow_id, flow_number) {
+            (Some(id), None) => Ok(id),
+            (None, Some(num)) => {
+                ensure!(num > 0, "流量序号必须为正整数（从 1 开始）");
+                let recovery = self.latest_recovery_summaries();
+                self.store
+                    .flows()
+                    .resolve_flow_by_number(num, &recovery)?
+                    .with_context(|| format!("未找到序号为 #{num} 的流量"))
+            }
+            (Some(_), Some(_)) => bail!("不能同时指定 flow_id 与 flow_number"),
+            (None, None) => bail!("必须指定流量 UUID 或正整数序号"),
+        }
+    }
+
+    fn ipc_flows_get(
+        &self,
+        flow_id: Option<FlowId>,
+        flow_number: Option<u64>,
+    ) -> Result<AiIpcPayload> {
+        let resolved_id = self.resolve_ipc_flow_id(flow_id, flow_number)?;
+        let record = self.read_flow(resolved_id)?;
+        let original = self.original_flow(resolved_id)?;
+        let recovery = self.latest_recovery_summaries();
+        let number = self
+            .store
+            .flows()
+            .flow_number_for(resolved_id, &recovery)?;
         let request_raw_text =
             Some(String::from_utf8_lossy(&request_to_raw(&record.request)).into_owned());
         let response_raw_text = record
@@ -310,6 +437,8 @@ impl State {
             .as_ref()
             .map(|r| String::from_utf8_lossy(&response_to_raw(r)).into_owned());
         Ok(AiIpcPayload::FlowsGet(Box::new(AiIpcFlowDetail {
+            number,
+            tab_id: None,
             summary: record.summary,
             request_raw_text,
             response_raw_text,
@@ -321,31 +450,72 @@ impl State {
         })))
     }
 
+    fn ipc_repeater_list(&self) -> Result<AiIpcPayload> {
+        let workspace = self.store.metadata().workspace()?;
+        let active_tab_id = workspace.active;
+        let repeater_tabs = workspace
+            .tabs
+            .iter()
+            .map(|tab| AiIpcRepeaterTabSummary {
+                tab_id: tab.id,
+                title: tab.title.clone(),
+                target: tab.draft.target.clone(),
+                active: active_tab_id == Some(tab.id),
+                last_flow: tab.last_flow,
+            })
+            .collect();
+        Ok(AiIpcPayload::RepeaterList {
+            repeater_tabs,
+            active_tab_id,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn ipc_repeater_open(
         &mut self,
         flow_id: Option<FlowId>,
+        flow_number: Option<u64>,
         use_original: bool,
         target: Option<String>,
         raw_request: Option<String>,
         title: Option<String>,
+        blank: bool,
     ) -> Result<AiIpcPayload> {
         ensure!(
             !self.quiesced,
             "项目正在切换或静默保存，暂无法打开 Repeater 标签"
         );
-        let request = resolve_repeater_open_request(
-            self,
-            flow_id,
-            use_original,
-            target.as_deref(),
-            raw_request.as_deref(),
-        )?;
+        let resolved_flow_id = if flow_id.is_some() || flow_number.is_some() {
+            ensure!(!blank, "不能同时指定 --blank 与来源流量");
+            Some(self.resolve_ipc_flow_id(flow_id, flow_number)?)
+        } else {
+            None
+        };
+        let request = if blank
+            || (resolved_flow_id.is_none()
+                && target.as_deref().map(str::trim).is_none_or(str::is_empty)
+                && raw_request.is_none())
+        {
+            None
+        } else {
+            Some(resolve_repeater_open_request(
+                self,
+                resolved_flow_id,
+                use_original,
+                target.as_deref(),
+                raw_request.as_deref(),
+            )?)
+        };
         let mut workspace = self.store.metadata().workspace()?;
         let resolved_title = match title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()) {
             Some(custom) => custom,
-            None => next_repeater_tab_title(&workspace, &request),
+            None => match &request {
+                Some(req) => next_repeater_tab_title(&workspace, req),
+                None => next_blank_repeater_tab_title(&workspace),
+            },
         };
-        let tab = WorkTab::from_request(Some(&request), resolved_title);
+        let tab = WorkTab::from_request(request.as_ref(), resolved_title);
+        let mut persisted_workspace = None;
         if self.unsaved_count() == 0 {
             let next_rev = workspace.revision.saturating_add(1);
             workspace.revision = next_rev;
@@ -354,11 +524,19 @@ impl State {
             workspace.tabs.push(tab.clone());
             if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
                 self.ai_ipc.repeater_revisions.insert((tab.id, next_rev));
+                persisted_workspace = Some(workspace);
             }
         }
         let tab_id = tab.id;
         let tab_title = tab.title.clone();
         let tab_target = tab.draft.target.clone();
+        if let Some(workspace) = persisted_workspace {
+            self.emit(Event::WorkspaceChanged {
+                project: self.project,
+                workspace,
+            })
+            .await;
+        }
         self.emit(Event::RepeaterOpened {
             project: self.project,
             tab,
@@ -371,17 +549,76 @@ impl State {
         })
     }
 
+    async fn ipc_repeater_rename(&mut self, tab_id: TabId, title: String) -> Result<AiIpcPayload> {
+        ensure!(
+            !self.quiesced,
+            "项目正在切换或静默保存，暂无法重命名 Repeater 标签"
+        );
+        let trimmed = title.trim().to_owned();
+        ensure!(!trimmed.is_empty(), "Repeater 标签标题不能为空");
+        ensure!(trimmed.len() <= 128, "Repeater 标签标题不能超过 128 字节");
+        let mut workspace = self.store.metadata().workspace()?;
+        let tab = workspace
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab_id)
+            .with_context(|| format!("未找到 Repeater 标签 {tab_id}"))?;
+        tab.title.clone_from(&trimmed);
+        workspace.revision = workspace.revision.saturating_add(1);
+        self.apply_save_workspace(self.project, workspace).await?;
+        Ok(AiIpcPayload::RepeaterRenamed {
+            renamed_tab_id: tab_id,
+            title: trimmed,
+        })
+    }
+
+    async fn ipc_repeater_close(&mut self, tab_id: TabId) -> Result<AiIpcPayload> {
+        ensure!(
+            !self.quiesced,
+            "项目正在切换或静默保存，暂无法关闭 Repeater 标签"
+        );
+        let mut workspace = self.store.metadata().workspace()?;
+        let pos = workspace
+            .tabs
+            .iter()
+            .position(|t| t.id == tab_id)
+            .with_context(|| format!("未找到 Repeater 标签 {tab_id}"))?;
+        let removed = workspace.tabs.remove(pos);
+        workspace.closed.push(removed);
+        if workspace.closed.len() > 64 {
+            let excess = workspace.closed.len() - 64;
+            workspace.closed.drain(..excess);
+        }
+        if workspace.active == Some(tab_id) {
+            workspace.active = workspace
+                .tabs
+                .get(pos)
+                .or_else(|| pos.checked_sub(1).and_then(|i| workspace.tabs.get(i)))
+                .map(|t| t.id);
+        }
+        let active_tab_id = workspace.active;
+        workspace.revision = workspace.revision.saturating_add(1);
+        self.apply_save_workspace(self.project, workspace).await?;
+        Ok(AiIpcPayload::RepeaterClosed {
+            closed_tab_id: tab_id,
+            active_tab_id,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_ipc_repeater_send(
         &mut self,
         reply: tokio::sync::oneshot::Sender<AiIpcEnvelope>,
+        tab_id: Option<TabId>,
         flow_id: Option<FlowId>,
+        flow_number: Option<u64>,
         use_original: bool,
         target: Option<String>,
         raw_request: Option<String>,
         add_headers: Vec<(String, String)>,
         remove_headers: Vec<String>,
         override_body: Option<String>,
+        override_body_base64: Option<String>,
         insecure: bool,
     ) -> std::result::Result<(), (tokio::sync::oneshot::Sender<AiIpcEnvelope>, anyhow::Error)> {
         let prepared = (|| -> Result<_> {
@@ -394,22 +631,66 @@ impl State {
                 self.ai_ipc.jobs.len() < MAX_CONCURRENT_IPC_CLIENTS,
                 "并发 IPC Repeater 请求已达上限"
             );
-            let mut request = resolve_repeater_open_request(
-                self,
-                flow_id,
-                use_original,
-                target.as_deref(),
-                raw_request.as_deref(),
-            )?;
+            ensure!(
+                override_body.is_none() || override_body_base64.is_none(),
+                "不能同时指定 override_body 与 override_body_base64"
+            );
+            let override_body_bytes = match (override_body, override_body_base64) {
+                (Some(text), None) => Some(text.into_bytes()),
+                (None, Some(b64)) => Some(
+                    B64_STANDARD
+                        .decode(b64.trim())
+                        .context("解析 override_body_base64 失败")?,
+                ),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            let workspace = self.store.metadata().workspace_arc()?;
+            let mut request = if let Some(tid) = tab_id {
+                ensure!(
+                    flow_id.is_none()
+                        && flow_number.is_none()
+                        && target.is_none()
+                        && raw_request.is_none(),
+                    "不能同时指定 tab_id 与 flow/target/raw_request"
+                );
+                let tab = workspace
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .with_context(|| format!("未找到 Repeater 标签 {tid}"))?;
+                let target_origin = tab.draft.target.trim();
+                ensure!(
+                    !target_origin.is_empty(),
+                    "Repeater 标签 {tid} 尚未配置目标 origin，请先设置目标地址后再发送"
+                );
+                let normalized_raw = ensure_header_terminator(&tab.draft.raw);
+                let version =
+                    detect_request_line_version(&normalized_raw).unwrap_or(tab.draft.version);
+                parse_repeater_request(&normalized_raw, target_origin, version, true)
+                    .context("解析 Repeater 标签草稿失败")?
+            } else {
+                let resolved_flow_id = if flow_id.is_some() || flow_number.is_some() {
+                    Some(self.resolve_ipc_flow_id(flow_id, flow_number)?)
+                } else {
+                    None
+                };
+                resolve_repeater_open_request(
+                    self,
+                    resolved_flow_id,
+                    use_original,
+                    target.as_deref(),
+                    raw_request.as_deref(),
+                )?
+            };
             let base_request = request.clone();
             apply_header_and_body_overrides(
                 &mut request.headers,
                 &mut request.body,
                 remove_headers,
                 add_headers,
-                override_body,
+                override_body_bytes,
             )?;
-            let workspace = self.store.metadata().workspace_arc()?;
             let settings = workspace.repeater_settings.clone();
             let runtime_cfg = self.build_repeater_send_runtime_config(
                 &workspace,
@@ -451,6 +732,7 @@ impl State {
             .await;
             IpcRepeaterCompletion {
                 project,
+                tab_id,
                 reply,
                 outcome,
             }
@@ -525,19 +807,12 @@ impl State {
 
     fn ipc_ca_presets(&self) -> Result<AiIpcPayload> {
         Ok(AiIpcPayload::CaPresets {
-            presets: BUILTIN_CA_PRESETS
-                .iter()
-                .map(|preset| super::CaPresetInfo {
-                    id: preset.id.to_string(),
-                    display_name: preset.display_name.to_string(),
-                    description: preset.description.to_string(),
-                })
-                .collect(),
+            presets: builtin_ca_preset_infos(),
         })
     }
 
     async fn ipc_ca_preset_use(&mut self, preset_id: &str) -> Result<AiIpcPayload> {
-        let preset = ca_preset(preset_id.trim()).context("未知 CA 预置")?;
+        let preset = resolve_ca_preset(preset_id)?;
         self.command(Command::ImportCa {
             cert_pem: preset.pem.to_string(),
             key_pem: String::new(),
@@ -629,6 +904,27 @@ impl State {
         if requests.is_some() || responses.is_some() {
             let reqs = requests.unwrap_or(self.proxy.intercept_requests);
             let resps = responses.unwrap_or(self.proxy.intercept_responses);
+            if resps
+                && !self.quiesced
+                && self.unsaved_count() == 0
+                && let Ok(mut workspace) = self.store.metadata().workspace()
+                && !workspace.proxy_interception.response.enabled
+            {
+                // Default workspace ships with response interception ruleset disabled and a
+                // narrow `Content-Type ~= text` rule. When enabling response interception via
+                // CLI/IPC on untouched defaults, enable the response ruleset and clear the
+                // default narrow rule so ordinary HTTP responses enter `proxy pending`.
+                let default_resp = crate::ProxyInterceptionSettings::default().response;
+                let untouched_default = workspace.proxy_interception.response == default_resp;
+                workspace.proxy_interception.response.enabled = true;
+                if untouched_default {
+                    for rule in &mut workspace.proxy_interception.response.rules {
+                        rule.enabled = false;
+                    }
+                }
+                workspace.revision = workspace.revision.saturating_add(1);
+                self.apply_save_workspace(self.project, workspace).await?;
+            }
             self.command_proxy_intercept(Command::SetIntercept {
                 project: self.project,
                 requests: reqs,
@@ -696,7 +992,7 @@ impl State {
                         &mut req.body,
                         remove_headers,
                         add_headers,
-                        override_body,
+                        override_body.map(String::into_bytes),
                     )?;
                     Decision::ForwardRequest(req)
                 }
@@ -727,7 +1023,7 @@ impl State {
                         &mut resp.body,
                         remove_headers,
                         add_headers,
-                        override_body,
+                        override_body.map(String::into_bytes),
                     )?;
                     Decision::ForwardResponse(resp)
                 }
@@ -800,10 +1096,39 @@ fn resolve_repeater_open_request(
             parse_repeater_request(&normalized_raw, origin, version, true)
                 .context("解析自定义 HTTP 请求报文失败")
         }
+        (None, Some(origin), None) => {
+            let origin = origin.trim();
+            ensure!(!origin.is_empty(), "Repeater 目标 origin 不能为空");
+            let parsed = url::Url::parse(origin)
+                .context("无效的目标 URL/origin（例如 http://127.0.0.1:8080 或 https://example.invalid/path）")?;
+            let host = parsed.host_str().context("目标 URL 缺少主机名")?;
+            let host_header = match parsed.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            let mut path_and_query = parsed.path().to_owned();
+            if path_and_query.is_empty() {
+                path_and_query.push('/');
+            }
+            if let Some(q) = parsed.query() {
+                path_and_query.push('?');
+                path_and_query.push_str(q);
+            }
+            let origin_only = format!("{}://{host_header}", parsed.scheme());
+            let raw_template =
+                format!("GET {path_and_query} HTTP/1.1\r\nHost: {host_header}\r\n\r\n");
+            parse_repeater_request(
+                raw_template.as_bytes(),
+                &origin_only,
+                HttpVersion::Http11,
+                true,
+            )
+            .context("构造默认模板 HTTP 请求失败")
+        }
         (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
             bail!("不能同时指定 flow_id 与自定义 target/raw_request")
         }
-        _ => bail!("必须指定 flow_id，或同时提供 target 与 raw_request"),
+        _ => bail!("必须指定来源流量（--flow）、已有标签（--tab）或目标地址（--target）"),
     }
 }
 
@@ -839,6 +1164,22 @@ fn next_repeater_tab_title(workspace: &Workspace, request: &HttpRequest) -> Stri
     format!("{number}: {path}")
 }
 
+fn next_blank_repeater_tab_title(workspace: &Workspace) -> String {
+    let mut number = 1usize;
+    while workspace
+        .tabs
+        .iter()
+        .chain(&workspace.closed)
+        .any(|existing| {
+            existing.title == number.to_string()
+                || existing.title.starts_with(&format!("{number}: "))
+        })
+    {
+        number += 1;
+    }
+    format!("{number}")
+}
+
 fn concise_request_path(url: &str) -> String {
     let trimmed = url.trim();
     let raw_path = if let Some((_, tail)) = trimmed.split_once("://") {
@@ -870,7 +1211,7 @@ fn apply_header_and_body_overrides(
     body: &mut Vec<u8>,
     remove_headers: Vec<String>,
     add_headers: Vec<(String, String)>,
-    override_body: Option<String>,
+    override_body: Option<Vec<u8>>,
 ) -> Result<()> {
     for name in &remove_headers {
         ensure!(
@@ -898,8 +1239,7 @@ fn apply_header_and_body_overrides(
             value: value.into_bytes(),
         });
     }
-    if let Some(new_body) = override_body {
-        let bytes = new_body.into_bytes();
+    if let Some(bytes) = override_body {
         ensure!(
             bytes.len() <= crate::http::MAX_BODY,
             "覆盖报文正文超过 16 MiB 上限"
@@ -933,7 +1273,7 @@ async fn execute_ipc_repeater_send(
         provenance.record_request(
             run_id,
             &original_request,
-            ProvenanceActor::ManualInterceptEdit,
+            ProvenanceActor::CliRepeaterOverride,
             &request,
         );
     }

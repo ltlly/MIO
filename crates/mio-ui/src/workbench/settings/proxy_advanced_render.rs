@@ -391,6 +391,7 @@ impl Settings {
                     )
                     .child(
                         div()
+                            .id("proxy-http-mr-table-wrap")
                             .flex()
                             .gap(px(9.))
                             .h(theme::scaled_px(168.).max(px(168.)))
@@ -546,6 +547,7 @@ impl Settings {
                     )
                     .child(
                         div()
+                            .id("proxy-ssl-pt-table-wrap")
                             .flex()
                             .gap(px(9.))
                             .h(theme::scaled_px(136.).max(px(136.)))

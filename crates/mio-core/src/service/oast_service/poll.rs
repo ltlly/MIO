@@ -1,4 +1,126 @@
+use base64::Engine as _;
+
 use super::*;
+
+#[derive(Deserialize)]
+struct RemotePollEnvelope {
+    #[serde(default)]
+    interactions: Vec<RemotePollItem>,
+    #[serde(default, alias = "cursor")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRequestWire {
+    Bytes(Vec<u8>),
+    Text(String),
+}
+
+#[derive(Deserialize)]
+struct RemotePollItem {
+    #[serde(default)]
+    id: Option<Uuid>,
+    #[serde(default)]
+    token: Option<String>,
+    protocol: String,
+    #[serde(default, alias = "remote_address")]
+    peer_addr: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    raw_request: Option<RawRequestWire>,
+    #[serde(default)]
+    raw_request_base64: Option<String>,
+    #[serde(default, alias = "timestamp_ms")]
+    observed_unix_ms: Option<i64>,
+}
+
+fn parse_protocol_str(raw: &str) -> std::result::Result<OastProtocol, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "http" | "https" => Ok(OastProtocol::Http),
+        "dns" => Ok(OastProtocol::Dns),
+        other => Err(format!("不支持的 OAST 交互协议：{other}")),
+    }
+}
+
+fn deterministic_remote_id(
+    protocol: OastProtocol,
+    peer_addr: &str,
+    summary: &str,
+    observed_unix_ms: i64,
+    raw_request: &[u8],
+) -> Uuid {
+    let mut h = Sha256::new();
+    h.update([protocol as u8]);
+    h.update(peer_addr.as_bytes());
+    h.update(summary.as_bytes());
+    h.update(observed_unix_ms.to_be_bytes());
+    h.update(raw_request);
+    let digest = h.finalize();
+    let mut bytes: [u8; 16] = digest[..16].try_into().unwrap_or_default();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn convert_remote_item(item: RemotePollItem) -> std::result::Result<OastInteraction, String> {
+    let protocol = parse_protocol_str(&item.protocol)?;
+    let raw_request = if let Some(b64) = item.raw_request_base64 {
+        base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .map_err(|e| format!("解码 remote OAST raw_request_base64 失败：{e}"))?
+    } else {
+        match item.raw_request {
+            Some(RawRequestWire::Bytes(b)) => b,
+            Some(RawRequestWire::Text(s)) => s.into_bytes(),
+            None => Vec::new(),
+        }
+    };
+    let observed_unix_ms = item
+        .observed_unix_ms
+        .unwrap_or_else(crate::codec_util::now_unix_ms);
+    let id = item.id.unwrap_or_else(|| {
+        deterministic_remote_id(
+            protocol,
+            &item.peer_addr,
+            &item.summary,
+            observed_unix_ms,
+            &raw_request,
+        )
+    });
+    Ok(OastInteraction {
+        id,
+        token: item.token.filter(|t| !t.trim().is_empty()),
+        protocol,
+        peer_addr: item.peer_addr,
+        summary: item.summary,
+        raw_request,
+        observed_unix_ms,
+    })
+}
+
+pub(super) fn parse_poll_response(
+    body: &[u8],
+) -> std::result::Result<(Vec<OastInteraction>, Option<String>), String> {
+    if let Ok(items) = serde_json::from_slice::<Vec<OastInteraction>>(body) {
+        return Ok((items, None));
+    }
+    if let Ok(envelope) = serde_json::from_slice::<RemotePollEnvelope>(body) {
+        let mut out = Vec::with_capacity(envelope.interactions.len());
+        for item in envelope.interactions {
+            out.push(convert_remote_item(item)?);
+        }
+        return Ok((out, envelope.next_cursor));
+    }
+    let items = serde_json::from_slice::<Vec<RemotePollItem>>(body)
+        .map_err(|error| format!("Collaborator 轮询响应 JSON 解析失败：{error}"))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(convert_remote_item(item)?);
+    }
+    Ok((out, None))
+}
 
 impl CollaboratorService {
     pub(super) fn spawn_poll(
@@ -44,9 +166,20 @@ impl CollaboratorService {
                     return;
                 }
                 match result {
-                    Ok(items) => {
-                        for interaction in items {
-                            if self.record_interaction(interaction.clone()) {
+                    Ok((items, next_cursor)) => {
+                        {
+                            let mut telemetry = self
+                                .poll_telemetry
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            if let Some(c) = next_cursor.filter(|c| !c.trim().is_empty()) {
+                                telemetry.cursor = Some(c);
+                            }
+                            telemetry.last_poll_unix_ms = Some(crate::codec_util::now_unix_ms());
+                            telemetry.last_poll_error = None;
+                        }
+                        for mut interaction in items {
+                            if self.record_interaction(&mut interaction) {
                                 self.pending_events.push_back(
                                     CollaboratorEvent::InteractionObserved {
                                         project,
@@ -62,6 +195,13 @@ impl CollaboratorService {
                     }
                     Err(_) if cancel.is_cancelled() => {}
                     Err(message) => {
+                        {
+                            let mut telemetry = self
+                                .poll_telemetry
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            telemetry.last_poll_error = Some(message.clone());
+                        }
                         self.pending_events
                             .push_back(CollaboratorEvent::Error { project, message });
                     }
@@ -108,22 +248,29 @@ impl CollaboratorService {
     }
 }
 
-async fn execute_poll_request(
+pub(super) async fn execute_poll_request(
     request: HttpRequest,
     config: SendConfig,
     cancel: CancellationToken,
-) -> std::result::Result<Vec<OastInteraction>, String> {
+) -> std::result::Result<(Vec<OastInteraction>, Option<String>), String> {
     let response = send(request, config, cancel)
         .await
         .map_err(|error| format!("Collaborator 轮询请求失败：{error}"))?;
     if !(200..300).contains(&response.status) {
         return Err(format!("Collaborator 轮询返回 HTTP {}", response.status));
     }
-    serde_json::from_slice::<Vec<OastInteraction>>(&response.body)
-        .map_err(|error| format!("Collaborator 轮询响应 JSON 解析失败：{error}"))
+    parse_poll_response(&response.body)
 }
 
-pub(super) fn build_poll_request(polling_url: &Url, auth_header: Option<&str>) -> HttpRequest {
+pub(super) fn build_poll_request(
+    polling_url: &Url,
+    auth_header: Option<&str>,
+    cursor: Option<&str>,
+) -> HttpRequest {
+    let mut url = polling_url.clone();
+    if let Some(c) = cursor.map(str::trim).filter(|s| !s.is_empty()) {
+        url.query_pairs_mut().append_pair("cursor", c);
+    }
     let mut headers = vec![Header {
         name: "Accept".to_owned(),
         value: b"application/json".to_vec(),
@@ -142,7 +289,7 @@ pub(super) fn build_poll_request(polling_url: &Url, auth_header: Option<&str>) -
     }
     HttpRequest {
         method: "GET".to_owned(),
-        url: polling_url.as_str().to_owned(),
+        url: url.as_str().to_owned(),
         version: HttpVersion::Http11,
         headers,
         body: Vec::new(),

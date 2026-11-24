@@ -400,6 +400,29 @@ impl LocalOastServer {
         &self.config
     }
 
+    pub fn correlate_interaction(&self, interaction: &mut OastInteraction) {
+        if interaction.token.is_some() {
+            return;
+        }
+        let mut candidates = vec![interaction.summary.clone()];
+        let capped = &interaction.raw_request[..interaction.raw_request.len().min(MAX_RAW_REQUEST_BYTES)];
+        if !capped.is_empty() {
+            let lossy = String::from_utf8_lossy(capped);
+            candidates.push(lossy.clone().into_owned());
+            for line in lossy.lines().take(64) {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    candidates.push(trimmed.to_owned());
+                }
+            }
+        }
+        let book = self
+            .issued_tokens
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        interaction.token = book.match_candidates(&candidates);
+    }
+
     pub async fn stop(mut self) -> Result<()> {
         self.cancel.cancel();
         self.connections.close();

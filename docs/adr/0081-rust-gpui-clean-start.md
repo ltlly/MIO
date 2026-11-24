@@ -6,7 +6,7 @@
 
 ## 用户决定
 
-采用原生 Rust + GPUI 从空白工程实现 MIO，移除旧 Python/Qt/mitmproxy 代码，不写入原 `main` 工作树。
+采用原生 Rust + GPUI 从空白工程实现 MIO，移除旧 Python/Qt 代理原型代码，不写入原 `main` 工作树。
 
 ## 技术决定
 

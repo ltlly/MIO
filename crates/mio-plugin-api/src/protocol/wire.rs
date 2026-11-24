@@ -68,7 +68,10 @@ impl Envelope {
 
     pub fn validate_for_minor(&self, expected_minor: u32) -> Result<(), String> {
         if self.major != PROTOCOL_MAJOR
-            || !matches!(expected_minor, LEGACY_COMPAT_MINOR | PROTOCOL_MINOR)
+            || !matches!(
+                expected_minor,
+                LEGACY_COMPAT_MINOR | V16_COMPAT_MINOR | PROTOCOL_MINOR
+            )
             || self.minor != expected_minor
         {
             return Err("插件协议版本不兼容".into());
@@ -85,7 +88,7 @@ impl Envelope {
             return Err("插件消息超过 1 MiB 帧限额".into());
         }
         let body = self.body.as_ref().unwrap();
-        if expected_minor < PROTOCOL_MINOR
+        if expected_minor < V16_COMPAT_MINOR
             && (matches!(
                 body,
                 envelope::Body::PassiveCheckCall(_)
@@ -101,26 +104,43 @@ impl Envelope {
             return Err("当前兼容协议版本不支持该检查/审计消息，请升级插件至协议 v1.6".into());
         }
         match body {
+            envelope::Body::Register(register) => {
+                if expected_minor < PROTOCOL_MINOR && register.supports_large_body {
+                    return Err(
+                        "当前兼容协议版本不支持 supports_large_body，请升级宿主协议至 v1.7".into(),
+                    );
+                }
+            }
             envelope::Body::OpenRequest(open) => {
                 uuid(&open.resource_id)?;
                 if open.message_revision == 0 {
                     return Err("消息 revision 不能为零".into());
                 }
-                open.request.as_ref().ok_or("缺少请求")?.validate()?;
+                open.request
+                    .as_ref()
+                    .ok_or("缺少请求")?
+                    .validate_for_minor(expected_minor)?;
             }
             envelope::Body::OpenResponse(open) => {
                 uuid(&open.resource_id)?;
                 if open.message_revision == 0 {
                     return Err("消息 revision 不能为零".into());
                 }
-                open.response.as_ref().ok_or("缺少响应")?.validate()?;
+                open.response
+                    .as_ref()
+                    .ok_or("缺少响应")?
+                    .validate_for_minor(expected_minor)?;
             }
             envelope::Body::CommitResponseEditor(commit) => {
                 uuid(&commit.resource_id)?;
                 if commit.message_revision == 0 {
                     return Err("消息 revision 不能为零".into());
                 }
-                commit.response.as_ref().ok_or("缺少响应")?.validate()?;
+                commit
+                    .response
+                    .as_ref()
+                    .ok_or("缺少响应")?
+                    .validate_for_minor(expected_minor)?;
                 commit.editor.as_ref().ok_or("缺少编辑快照")?.validate()?;
             }
             envelope::Body::ResponseCommitted(committed) => {
@@ -128,27 +148,34 @@ impl Envelope {
                 if committed.message_revision == 0 || committed.document_revision == 0 {
                     return Err("消息或文档 revision 不能为零".into());
                 }
-                committed.response.as_ref().ok_or("缺少响应")?.validate()?;
+                committed
+                    .response
+                    .as_ref()
+                    .ok_or("缺少响应")?
+                    .validate_for_minor(expected_minor)?;
             }
             envelope::Body::CloseRequest(close) => {
                 uuid(&close.resource_id)?;
             }
-            envelope::Body::HostResult(result) => result.validate()?,
+            envelope::Body::HostResult(result) => result.validate_for_minor(expected_minor)?,
             envelope::Body::HttpHookCall(call) => {
                 uuid(&call.flow_id)?;
                 SourceDto::try_from(call.source).map_err(|_| "未知流量来源")?;
-                call.request.as_ref().ok_or("缺少请求")?.validate()?;
+                call.request
+                    .as_ref()
+                    .ok_or("缺少请求")?
+                    .validate_for_minor(expected_minor)?;
                 if let Some(resp) = &call.response {
-                    resp.validate()?;
+                    resp.validate_for_minor(expected_minor)?;
                 }
             }
             envelope::Body::HttpHookResult(res) => {
                 HookAction::try_from(res.action).map_err(|_| "未知 Hook 动作")?;
                 if let Some(req) = &res.request {
-                    req.validate()?;
+                    req.validate_for_minor(expected_minor)?;
                 }
                 if let Some(resp) = &res.response {
-                    resp.validate()?;
+                    resp.validate_for_minor(expected_minor)?;
                 }
             }
             envelope::Body::WebSocketHookCall(call) => {
@@ -160,20 +187,37 @@ impl Envelope {
                 {
                     return Err("WebSocket Hook 调用超过内联限额".into());
                 }
+                validate_omitted_fields(
+                    expected_minor,
+                    call.payload.len(),
+                    call.payload_omitted,
+                    call.original_payload_len,
+                    &call.payload_file_path,
+                )?;
             }
             envelope::Body::WebSocketHookResult(res) => {
                 HookAction::try_from(res.action).map_err(|_| "未知 Hook 动作")?;
                 if res.payload.len() > MAX_INLINE_BODY {
                     return Err("WebSocket Hook 结果超过内联限额".into());
                 }
+                validate_omitted_fields(
+                    expected_minor,
+                    res.payload.len(),
+                    res.payload_omitted,
+                    0,
+                    &res.payload_file_path,
+                )?;
             }
             envelope::Body::SessionActionCall(call) => {
                 SourceDto::try_from(call.source).map_err(|_| "未知流量来源")?;
-                call.request.as_ref().ok_or("缺少请求")?.validate()?;
+                call.request
+                    .as_ref()
+                    .ok_or("缺少请求")?
+                    .validate_for_minor(expected_minor)?;
             }
             envelope::Body::SessionActionResult(res) => {
                 if let Some(req) = &res.request {
-                    req.validate()?;
+                    req.validate_for_minor(expected_minor)?;
                 } else if res.modified {
                     return Err("Session Hook 声明修改但缺少请求".into());
                 }
@@ -205,9 +249,12 @@ impl Envelope {
                 {
                     return Err("上下文菜单调用参数或选区无效".into());
                 }
-                call.request.as_ref().ok_or("缺少请求")?.validate()?;
+                call.request
+                    .as_ref()
+                    .ok_or("缺少请求")?
+                    .validate_for_minor(expected_minor)?;
                 if let Some(resp) = &call.response {
-                    resp.validate()?;
+                    resp.validate_for_minor(expected_minor)?;
                 }
             }
             envelope::Body::ContextMenuResult(res) => {
@@ -222,7 +269,7 @@ impl Envelope {
                     return Err("上下文菜单原地替换报文超过内联限额".into());
                 }
                 if let Some(req) = &res.open_repeater {
-                    req.validate()?;
+                    req.validate_for_minor(expected_minor)?;
                 }
             }
             envelope::Body::PassiveCheckCall(call) => {
@@ -230,8 +277,14 @@ impl Envelope {
                 if call.url.is_empty() || call.url.len() > 16 * 1024 {
                     return Err("被动检查调用 URL 无效".into());
                 }
-                call.request.as_ref().ok_or("缺少请求")?.validate()?;
-                call.response.as_ref().ok_or("缺少响应")?.validate()?;
+                call.request
+                    .as_ref()
+                    .ok_or("缺少请求")?
+                    .validate_for_minor(expected_minor)?;
+                call.response
+                    .as_ref()
+                    .ok_or("缺少响应")?
+                    .validate_for_minor(expected_minor)?;
             }
             envelope::Body::PassiveCheckResult(res) => {
                 if res.findings.len() > 64 || res.log_line.len() > 4096 {
@@ -247,9 +300,9 @@ impl Envelope {
                 call.base_request
                     .as_ref()
                     .ok_or("缺少基准请求")?
-                    .validate()?;
+                    .validate_for_minor(expected_minor)?;
                 if let Some(resp) = &call.base_response {
-                    resp.validate()?;
+                    resp.validate_for_minor(expected_minor)?;
                 }
             }
             envelope::Body::ActiveCheckResult(res) => {

@@ -61,6 +61,15 @@ impl<T: DownloadRouteResolver + ?Sized> DownloadRouteResolver for &mut T {
 }
 
 pub trait DownloadSink: Send {
+    fn on_response_head(
+        &mut self,
+        _status: u16,
+        _headers: &[Header],
+        _content_length: Option<u64>,
+    ) -> impl Future<Output = Result<(), ProxyError>> + Send {
+        async { Ok(()) }
+    }
+
     fn write_chunk(
         &mut self,
         chunk: &[u8],
@@ -313,6 +322,19 @@ where
             return Err(ProxyError::BodyLimit {
                 limit: config.max_body_bytes,
             });
+        }
+
+        let head_res = tokio::select! {
+            biased;
+            _ = req_cancel.cancelled() => Err(ProxyError::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(ProxyError::Timeout),
+            res = sink.on_response_head(status, &response_headers, content_length) => res,
+        };
+        if let Err(err) = head_res {
+            drop(response);
+            req_cancel.cancel();
+            shutdown.shutdown().await;
+            return Err(err);
         }
 
         let mut received = 0u64;

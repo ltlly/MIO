@@ -9,6 +9,55 @@ pub(super) struct CachedRenderedResponse {
     body_len: usize,
     summary: editing::RenderedBodySummary,
     body_for_browser: std::sync::Arc<Vec<u8>>,
+    inline_image: Option<(std::sync::Arc<gpui_kit::RenderImage>, u32, u32)>,
+}
+
+fn decode_static_inline_image(
+    body: &[u8],
+    format_name: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    cx: &App,
+) -> Option<(std::sync::Arc<gpui_kit::RenderImage>, u32, u32)> {
+    if format_name == "SVG" {
+        if body.len() > 512 * 1024 {
+            return None;
+        }
+        let img = cx.svg_renderer().render_single_frame(body, 1.0).ok()?;
+        let w = width.unwrap_or(320).clamp(32, 4096);
+        let h = height.unwrap_or(180).clamp(32, 4096);
+        return Some((img, w, h));
+    }
+    if body.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    if let (Some(w), Some(h)) = (width, height)
+        && (w == 0 || h == 0 || w > 4096 || h > 4096)
+    {
+        return None;
+    }
+    let decoded = image::load_from_memory(body).ok()?;
+    let w = decoded.width();
+    let h = decoded.height();
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut rgba = decoded.into_rgba8();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Some((
+        std::sync::Arc::new(gpui_kit::RenderImage::new(vec![image::Frame::new(rgba)])),
+        w,
+        h,
+    ))
+}
+
+fn fit_preview_box(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    let wf = w.max(1) as f32;
+    let hf = h.max(1) as f32;
+    let scale = (max_w / wf).min(max_h / hf).min(1.0);
+    ((wf * scale).max(16.0), (hf * scale).max(16.0))
 }
 
 impl Workbench {
@@ -52,6 +101,15 @@ impl Workbench {
                 None
             } else {
                 let parsed = editing::parse_rendered_http_response(&raw);
+                let inline_image = match &parsed.summary {
+                    editing::RenderedBodySummary::Image {
+                        format_name,
+                        width,
+                        height,
+                        ..
+                    } => decode_static_inline_image(&parsed.body, format_name, *width, *height, cx),
+                    _ => None,
+                };
                 let body_for_browser = std::sync::Arc::new(parsed.body);
                 Some(std::rc::Rc::new(CachedRenderedResponse {
                     status_line: parsed.status_line,
@@ -61,6 +119,7 @@ impl Workbench {
                     body_len: parsed.body_len,
                     summary: parsed.summary,
                     body_for_browser,
+                    inline_image,
                 }))
             };
             {
@@ -174,15 +233,22 @@ impl Workbench {
             .child(header_bar);
 
         match &parsed.summary {
-            editing::RenderedBodySummary::Html {
-                title,
-                headings,
-                paragraphs,
-                links,
-                forms,
-                scripts,
-            } => {
-                if let Some(page_title) = title {
+            editing::RenderedBodySummary::Html(html_summary) => {
+                let editing::RenderedHtmlSummary {
+                    title,
+                    meta_description,
+                    headings,
+                    paragraphs,
+                    links,
+                    forms,
+                    scripts,
+                    stylesheets,
+                    images,
+                    tables,
+                    code_blocks,
+                    inline_theme,
+                } = html_summary.as_ref();
+                if title.is_some() || meta_description.is_some() {
                     content = content.child(
                         div()
                             .p(px(10.))
@@ -193,19 +259,87 @@ impl Workbench {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .child(
-                                div()
-                                    .text_size(theme::scaled_px(11.))
-                                    .text_color(theme::muted_foreground())
-                                    .child("页面标题 (<title>)"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme::scaled_px(14.5))
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child(page_title.clone()),
-                            ),
+                            .when_some(title.clone(), |box_el, page_title| {
+                                box_el
+                                    .child(
+                                        div()
+                                            .text_size(theme::scaled_px(11.))
+                                            .text_color(theme::muted_foreground())
+                                            .child("页面标题 (<title>)"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(theme::scaled_px(14.5))
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(page_title),
+                                    )
+                            })
+                            .when_some(meta_description.clone(), |box_el, desc| {
+                                box_el.child(
+                                    div()
+                                        .text_size(theme::scaled_px(11.5))
+                                        .text_color(theme::muted_foreground())
+                                        .child(desc),
+                                )
+                            }),
                     );
+                }
+                if inline_theme.background_hex.is_some()
+                    || inline_theme.text_hex.is_some()
+                    || inline_theme.accent_hex.is_some()
+                {
+                    let mut swatches = div()
+                        .id(SharedString::from(format!("{id}-render-css-theme")))
+                        .test_support()
+                        .p(px(10.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(card_bg)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child("静态 CSS 配色提取"),
+                        );
+                    for (label, maybe_hex) in [
+                        ("背景", inline_theme.background_hex),
+                        ("正文", inline_theme.text_hex),
+                        ("强调", inline_theme.accent_hex),
+                    ] {
+                        if let Some(hex_val) = maybe_hex {
+                            swatches = swatches.child(
+                                div()
+                                    .px(px(6.))
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .child(
+                                        div()
+                                            .w(px(12.))
+                                            .h(px(12.))
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(theme::border())
+                                            .bg(rgb(hex_val)),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(theme::mono_font_family())
+                                            .text_size(theme::scaled_px(11.))
+                                            .child(format!("{label}: #{hex_val:06x}")),
+                                    ),
+                            );
+                        }
+                    }
+                    content = content.child(swatches);
                 }
                 if !headings.is_empty() || !paragraphs.is_empty() {
                     let mut body_box = div()
@@ -234,6 +368,111 @@ impl Workbench {
                         body_box = body_box.child(div().child(para.clone()));
                     }
                     content = content.child(body_box);
+                }
+                if !tables.is_empty() {
+                    let mut tables_box = div()
+                        .id(SharedString::from(format!("{id}-render-tables")))
+                        .test_support()
+                        .p(px(10.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(card_bg)
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(format!("静态表格内容 ({})", tables.len())),
+                        );
+                    for table in tables {
+                        let mut grid = div()
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(theme::border())
+                            .bg(theme::surface())
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col();
+                        if !table.headers.is_empty() {
+                            let mut hdr_row = div()
+                                .w_full()
+                                .px(px(8.))
+                                .py(px(4.))
+                                .bg(theme::toolbar_surface())
+                                .border_b_1()
+                                .border_color(theme::border())
+                                .flex()
+                                .gap(px(8.));
+                            for col in &table.headers {
+                                hdr_row = hdr_row.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_size(theme::scaled_px(11.5))
+                                        .child(col.clone()),
+                                );
+                            }
+                            grid = grid.child(hdr_row);
+                        }
+                        for (r_idx, row) in table.rows.iter().enumerate() {
+                            let mut row_el = div()
+                                .w_full()
+                                .px(px(8.))
+                                .py(px(3.))
+                                .when(r_idx % 2 == 1, |r| r.bg(card_bg))
+                                .flex()
+                                .gap(px(8.));
+                            for cell in row {
+                                row_el = row_el.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(theme::scaled_px(11.5))
+                                        .child(cell.clone()),
+                                );
+                            }
+                            grid = grid.child(row_el);
+                        }
+                        tables_box = tables_box.child(grid);
+                    }
+                    content = content.child(tables_box);
+                }
+                if !code_blocks.is_empty() {
+                    let mut code_box = div()
+                        .id(SharedString::from(format!("{id}-render-code")))
+                        .test_support()
+                        .p(px(10.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(card_bg)
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(format!("代码块片段 ({})", code_blocks.len())),
+                        );
+                    for block in code_blocks {
+                        code_box = code_box.child(
+                            div()
+                                .p(px(8.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(theme::border())
+                                .bg(theme::surface())
+                                .font_family(theme::mono_font_family())
+                                .text_size(theme::scaled_px(11.5))
+                                .child(block.clone()),
+                        );
+                    }
+                    content = content.child(code_box);
                 }
                 if !links.is_empty() {
                     let mut links_box = div()
@@ -336,8 +575,8 @@ impl Workbench {
                     }
                     content = content.child(forms_box);
                 }
-                if !scripts.is_empty() {
-                    let mut scripts_box = div()
+                if !images.is_empty() {
+                    let mut imgs_box = div()
                         .p(px(10.))
                         .rounded(px(6.))
                         .border_1()
@@ -349,18 +588,94 @@ impl Workbench {
                         .child(
                             div()
                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child(format!("外部脚本引用 ({})", scripts.len())),
+                                .child(format!("静态图片引用 ({})", images.len())),
                         );
-                    for src in scripts {
-                        scripts_box = scripts_box.child(
+                    for image_ref in images {
+                        let line = if image_ref.alt.is_empty() {
+                            image_ref.src.clone()
+                        } else {
+                            format!("{} [alt: {}]", image_ref.src, image_ref.alt)
+                        };
+                        imgs_box = imgs_box.child(
                             div()
                                 .font_family(theme::mono_font_family())
                                 .text_size(theme::scaled_px(11.5))
-                                .child(src.clone()),
+                                .child(line),
                         );
                     }
-                    content = content.child(scripts_box);
+                    content = content.child(imgs_box);
                 }
+                if !scripts.is_empty() || !stylesheets.is_empty() {
+                    let mut assets_box = div()
+                        .p(px(10.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(card_bg)
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(format!(
+                                    "外部脚本与样式引用 ({} JS · {} CSS)",
+                                    scripts.len(),
+                                    stylesheets.len()
+                                )),
+                        );
+                    for src in scripts {
+                        assets_box = assets_box.child(
+                            div()
+                                .font_family(theme::mono_font_family())
+                                .text_size(theme::scaled_px(11.5))
+                                .child(format!("[JS] {src}")),
+                        );
+                    }
+                    for href in stylesheets {
+                        assets_box = assets_box.child(
+                            div()
+                                .font_family(theme::mono_font_family())
+                                .text_size(theme::scaled_px(11.5))
+                                .child(format!("[CSS] {href}")),
+                        );
+                    }
+                    content = content.child(assets_box);
+                }
+            }
+            editing::RenderedBodySummary::Xml {
+                root_tag,
+                node_count,
+                pretty,
+                byte_len,
+            } => {
+                let root_label = root_tag.as_deref().unwrap_or("root");
+                content = content.child(
+                    div()
+                        .id(SharedString::from(format!("{id}-render-xml")))
+                        .test_support()
+                        .p(px(10.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(card_bg)
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(format!(
+                                    "XML 结构化响应卡片 (<{root_label}> · {node_count} 节点 · {byte_len} 字节)"
+                                )),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::mono_font_family())
+                                .text_size(theme::scaled_px(12.))
+                                .child(pretty.clone()),
+                        ),
+                );
             }
             editing::RenderedBodySummary::Json { pretty, byte_len } => {
                 content = content.child(
@@ -406,12 +721,29 @@ impl Workbench {
                         .bg(card_bg)
                         .flex()
                         .flex_col()
-                        .gap(px(6.))
+                        .gap(px(8.))
                         .child(
                             div()
                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child(format!("图像资源元数据卡片 · {format_name}")),
+                                .child(format!("图像离线静态预览 · {format_name}")),
                         )
+                        .when_some(parsed.inline_image.clone(), |card, (img_handle, iw, ih)| {
+                            let (disp_w, disp_h) = fit_preview_box(iw, ih, 420.0, 280.0);
+                            card.child(
+                                div()
+                                    .id(SharedString::from(format!("{id}-render-image-preview")))
+                                    .test_support()
+                                    .p(px(8.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .bg(theme::surface())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(gpui_kit::img(img_handle).w(px(disp_w)).h(px(disp_h))),
+                            )
+                        })
                         .child(div().child(format!("MIME 类型：{mime_type}")))
                         .child(div().child(format!("图像尺寸：{dims}")))
                         .child(div().child(format!("载荷大小：{byte_len} 字节"))),

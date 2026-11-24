@@ -275,8 +275,16 @@ fn run_workflow(cfg: &WorkflowConfig) -> Result<WorkflowReport> {
                         filter: String::new(),
                         method: None,
                         status: None,
+                        hide_connect: false,
+                        host: None,
+                        source: None,
+                        state: None,
+                        order: None,
                     },
-                    _ => AiIpcRequest::FlowsGet { flow_id: api_flow },
+                    _ => AiIpcRequest::FlowsGet {
+                        flow_id: Some(api_flow),
+                        flow_number: None,
+                    },
                 };
                 let (env, _) = call_ai_ipc(&sock_bg, &req, Duration::from_secs(5))?;
                 ensure!(env.ok, "IPC call failed: {:?}", env.error);
@@ -289,10 +297,12 @@ fn run_workflow(cfg: &WorkflowConfig) -> Result<WorkflowReport> {
                 &sock_bg,
                 &AiIpcRequest::RepeaterOpen {
                     flow_id: Some(api_flow),
+                    flow_number: None,
                     use_original: false,
                     target: None,
                     raw_request: None,
                     title: None,
+                    blank: false,
                 },
                 Duration::from_secs(5),
             )?;

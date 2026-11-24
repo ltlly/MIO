@@ -423,6 +423,7 @@ impl Settings {
                             )
                             .child(
                                 div()
+                                    .id("sessions-rules-table-wrap")
                                     .w(theme::scaled_px(704.).max(px(704.)))
                                     .max_w_full()
                                     .h_full()

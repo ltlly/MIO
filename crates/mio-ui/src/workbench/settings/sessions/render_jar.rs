@@ -274,6 +274,7 @@ impl Settings {
                                         )
                                         .child(
                                             div()
+                                                .id("sessions-jar-table-wrap")
                                                 .w(theme::scaled_px(774.).max(px(774.)))
                                                 .max_w_full()
                                                 .h_full()

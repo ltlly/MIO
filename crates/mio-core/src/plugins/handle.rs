@@ -57,11 +57,23 @@ pub(crate) struct PendingRevokeHandle {
 #[derive(Clone)]
 pub struct PluginHandle {
     pub identity: ChannelIdentity,
+    pub(super) protocol_minor: u32,
+    pub(super) supports_large_body: bool,
     pub(super) control: mpsc::Sender<SequencedControl>,
     pub(super) urgent_control: mpsc::UnboundedSender<SequencedControl>,
     pub(super) control_order: Arc<std::sync::Mutex<ControlOrderState>>,
     pub(super) hook_slots: Arc<tokio::sync::Semaphore>,
     pub(super) cancel: CancellationToken,
+}
+
+impl PluginHandle {
+    pub fn protocol_minor(&self) -> u32 {
+        self.protocol_minor
+    }
+
+    pub fn supports_large_body(&self) -> bool {
+        self.supports_large_body
+    }
 }
 
 fn commit_permit(

@@ -807,7 +807,7 @@ impl Settings {
             focus,
             search_input,
             scope_filter: SettingsScopeFilter::All,
-            collapsed_groups: [false; 5],
+            collapsed_groups: [false; 6],
             nav_scroll: ScrollHandle::new(),
             content_scroll: ScrollHandle::new(),
             project_json_feedback: None,

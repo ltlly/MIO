@@ -5,6 +5,8 @@ pub struct PluginSupervisor {
     pub manifest: PluginManifest,
     pub initial_panel: Arc<PanelSnapshot>,
     pub supports_panel_multiplexing: bool,
+    pub protocol_minor: u32,
+    pub supports_large_body: bool,
     pub events: mpsc::Receiver<PluginEvent>,
     handle: PluginHandle,
     task: Option<JoinHandle<Result<()>>>,
@@ -214,9 +216,13 @@ pub(crate) fn spawn_test_multiplex_supervisor(
             manifest,
             initial_panel: panel,
             supports_panel_multiplexing: true,
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            supports_large_body: false,
             events: receiver,
             handle: PluginHandle {
                 identity,
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                supports_large_body: false,
                 control,
                 urgent_control,
                 control_order,
@@ -246,9 +252,13 @@ pub(crate) fn test_supervisor(
             manifest,
             initial_panel: panel,
             supports_panel_multiplexing: false,
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            supports_large_body: false,
             events: receiver,
             handle: PluginHandle {
                 identity,
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                supports_large_body: false,
                 control,
                 urgent_control,
                 control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
@@ -274,12 +284,19 @@ enum SpawnAttemptError {
     Failed(anyhow::Error),
 }
 
+struct HandshakeNegotiated {
+    state: PanelState,
+    incoming_sequence: u64,
+    supports_panel_multiplexing: bool,
+    supports_large_body: bool,
+}
+
 async fn spawn_native_attempt(
     package: &VerifiedPackage,
     trust: &NativeTrust,
     identity: ChannelIdentity,
     protocol_minor: u32,
-) -> std::result::Result<(WorkerTransport, PanelState, u64, bool), SpawnAttemptError> {
+) -> std::result::Result<(WorkerTransport, HandshakeNegotiated), SpawnAttemptError> {
     let mut command = Command::new(&package.executable);
     command
         .current_dir(&package.work_dir)
@@ -336,7 +353,7 @@ async fn spawn_native_attempt(
         protocol_minor,
     );
     match timeout(MAX_OPERATION, handshake).await {
-        Ok(Ok((state, seq, multiplexing))) => Ok((
+        Ok(Ok(negotiated)) => Ok((
             WorkerTransport::Native {
                 child: Box::new(child),
                 #[cfg(windows)]
@@ -345,9 +362,7 @@ async fn spawn_native_attempt(
                 stdout,
                 stderr,
             },
-            state,
-            seq,
-            multiplexing,
+            negotiated,
         )),
         result => {
             #[cfg(windows)]
@@ -383,7 +398,7 @@ async fn handshake_native<W, R>(
     manifest: &PluginManifest,
     grants: &BTreeSet<Permission>,
     protocol_minor: u32,
-) -> Result<(PanelState, u64, bool)>
+) -> Result<HandshakeNegotiated>
 where
     W: tokio::io::AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
@@ -462,11 +477,12 @@ where
         .write_all(&protocol::encode_frame_for_minor(&ready, protocol_minor)?)
         .await?;
     stdin.flush().await?;
-    Ok((
+    Ok(HandshakeNegotiated {
         state,
-        registration.request_id,
-        register.supports_panel_multiplexing,
-    ))
+        incoming_sequence: registration.request_id,
+        supports_panel_multiplexing: register.supports_panel_multiplexing,
+        supports_large_body: register.supports_large_body,
+    })
 }
 
 #[cfg(test)]
@@ -477,7 +493,12 @@ pub(crate) async fn spawn_test_duplex_supervisor(
     mut stdin: tokio::io::DuplexStream,
     mut stdout: tokio::io::DuplexStream,
 ) -> Result<(PluginSupervisor, mpsc::Receiver<ServiceRequest>)> {
-    let (panel_state, incoming_sequence, supports_panel_multiplexing) = timeout(
+    let HandshakeNegotiated {
+        state: panel_state,
+        incoming_sequence,
+        supports_panel_multiplexing,
+        supports_large_body,
+    } = timeout(
         MAX_OPERATION,
         handshake_native(
             &mut stdin,
@@ -498,6 +519,8 @@ pub(crate) async fn spawn_test_duplex_supervisor(
     let cancel = CancellationToken::new();
     let handle = PluginHandle {
         identity,
+        protocol_minor: protocol::PROTOCOL_MINOR,
+        supports_large_body,
         control,
         urgent_control,
         control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
@@ -527,6 +550,8 @@ pub(crate) async fn spawn_test_duplex_supervisor(
             manifest,
             initial_panel,
             supports_panel_multiplexing,
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            supports_large_body,
             events: event_receiver,
             handle,
             task: Some(task),
@@ -568,34 +593,62 @@ impl PluginSupervisor {
             instance_id: Uuid::new_v4(),
             project,
         };
-        let ((transport, panel_state, incoming_sequence, supports_panel_multiplexing), negotiated_minor) =
-            match spawn_native_attempt(&package, &trust, identity, protocol::PROTOCOL_MINOR).await
-            {
-                Ok(ok) => (ok, protocol::PROTOCOL_MINOR),
-                Err(SpawnAttemptError::Failed(err))
-                    if supports_v15_compat_fallback(&package.manifest, &trust.grants) =>
+        let (
+            (
+                transport,
+                HandshakeNegotiated {
+                    state: panel_state,
+                    incoming_sequence,
+                    supports_panel_multiplexing,
+                    supports_large_body,
+                },
+            ),
+            negotiated_minor,
+        ) = match spawn_native_attempt(&package, &trust, identity, protocol::PROTOCOL_MINOR).await
+        {
+            Ok(ok) => (ok, protocol::PROTOCOL_MINOR),
+            Err(SpawnAttemptError::Failed(err_v17)) => {
+                match spawn_native_attempt(
+                    &package,
+                    &trust,
+                    identity,
+                    protocol::V16_COMPAT_MINOR,
+                )
+                .await
                 {
-                    match spawn_native_attempt(
-                        &package,
-                        &trust,
-                        identity,
-                        protocol::LEGACY_COMPAT_MINOR,
-                    )
-                    .await
+                    Ok(ok) => (ok, protocol::V16_COMPAT_MINOR),
+                    Err(SpawnAttemptError::Failed(err_v16))
+                        if supports_v15_compat_fallback(&package.manifest, &trust.grants) =>
                     {
-                        Ok(ok) => (ok, protocol::LEGACY_COMPAT_MINOR),
-                        Err(
-                            SpawnAttemptError::Failed(fallback_err)
-                            | SpawnAttemptError::TimedOut(fallback_err),
-                        ) => {
-                            return Err(fallback_err.context(format!("{err:#}；尝试协议 v1.5 兼容握手失败")));
+                        match spawn_native_attempt(
+                            &package,
+                            &trust,
+                            identity,
+                            protocol::LEGACY_COMPAT_MINOR,
+                        )
+                        .await
+                        {
+                            Ok(ok) => (ok, protocol::LEGACY_COMPAT_MINOR),
+                            Err(
+                                SpawnAttemptError::Failed(fallback_err)
+                                | SpawnAttemptError::TimedOut(fallback_err),
+                            ) => {
+                                return Err(fallback_err.context(format!(
+                                    "{err_v17:#}；v1.6 兼容尝试失败：{err_v16:#}；尝试协议 v1.5 兼容握手失败"
+                                )));
+                            }
                         }
                     }
+                    Err(SpawnAttemptError::Failed(err_v16)) => {
+                        return Err(
+                            err_v16.context(format!("{err_v17:#}；尝试协议 v1.6 兼容握手失败"))
+                        );
+                    }
+                    Err(SpawnAttemptError::TimedOut(timeout_err)) => return Err(timeout_err),
                 }
-                Err(SpawnAttemptError::Failed(err) | SpawnAttemptError::TimedOut(err)) => {
-                    return Err(err);
-                }
-            };
+            }
+            Err(SpawnAttemptError::TimedOut(err)) => return Err(err),
+        };
         let initial_panel = Arc::new(panel_state.snapshot().clone());
         let (control, commands) = mpsc::channel(QUEUE_CAPACITY);
         let (urgent_control, urgent_commands) = mpsc::unbounded_channel();
@@ -603,6 +656,8 @@ impl PluginSupervisor {
         let cancel = CancellationToken::new();
         let handle = PluginHandle {
             identity,
+            protocol_minor: negotiated_minor,
+            supports_large_body,
             control,
             urgent_control,
             control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
@@ -629,6 +684,8 @@ impl PluginSupervisor {
             manifest,
             initial_panel,
             supports_panel_multiplexing,
+            protocol_minor: negotiated_minor,
+            supports_large_body,
             events: event_receiver,
             handle,
             task: Some(task),

@@ -2,7 +2,9 @@ use std::{io, time::Duration};
 
 use prost::Message;
 
-use crate::{Header, HttpRequest, HttpVersion, ProjectKey, Uuid, panel::Empty};
+use crate::{
+    Header, HttpRequest, HttpResponse, HttpVersion, ProjectKey, Uuid, panel::Empty,
+};
 
 use super::*;
 
@@ -120,7 +122,7 @@ fn envelope_checks_forgery_generation_and_replay() {
 
 #[test]
 fn v13_preferences_response_editor_and_context_menu_frames_validate_limits() {
-    assert_eq!(PROTOCOL_MINOR, 6);
+    assert_eq!(PROTOCOL_MINOR, 7);
     let identity = ChannelIdentity {
         instance_id: Uuid::new_v4(),
         project: ProjectKey {
@@ -540,6 +542,7 @@ fn v15_panel_multiplexing_envelope_and_register_wire_compatibility() {
             )),
         }),
         supports_panel_multiplexing: true,
+        supports_large_body: false,
     };
     let reg_bytes = reg.encode_to_vec();
     let decoded_reg = Register::decode(reg_bytes.as_slice()).unwrap();
@@ -580,6 +583,7 @@ fn handshake_strictly_requires_current_protocol_minor() {
             )),
         }),
         supports_panel_multiplexing: true,
+        supports_large_body: false,
     };
 
     // 1. Current PROTOCOL_MINOR handshake succeeds and allows receiving expired frames in sequence.
@@ -823,4 +827,170 @@ fn try_into_wire_body_rejects_oversized_body_and_combined_frame_overflow() {
         try_into_wire_body(envelope::Body::HttpHookCall(normal), PROTOCOL_MINOR),
         Ok(envelope::Body::HttpHookCall(_))
     ));
+}
+
+#[test]
+fn v17_body_omitted_validation_and_helpers_round_trip() {
+    use std::io::Read as _;
+
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let dur = Duration::from_secs(5);
+    let spill_root =
+        std::env::temp_dir().join(format!("mio-proto-v17-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&spill_root).unwrap();
+    let req_spill = spill_root.join("req-body.bin");
+    let big_body = vec![b'A'; MAX_INLINE_BODY + 4096];
+    std::fs::write(&req_spill, &big_body).unwrap();
+
+    let req = HttpRequestDto {
+        method: "POST".into(),
+        url: "http://127.0.0.1/upload".into(),
+        version: HttpVersionDto::Http11 as i32,
+        body: Vec::new(),
+        body_omitted: true,
+        original_body_len: big_body.len() as u64,
+        body_file_path: req_spill.to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(req.read_body_bytes().unwrap().as_ref(), big_body.as_slice());
+    let mut streamed = Vec::new();
+    req.open_body_reader()
+        .unwrap()
+        .read_to_end(&mut streamed)
+        .unwrap();
+    assert_eq!(streamed, big_body);
+    assert!(HttpRequest::try_from(req.clone()).is_err());
+
+    let mut bad_both = req.clone();
+    bad_both.body = b"inline".to_vec();
+    assert!(bad_both.validate().is_err());
+
+    let mut bad_meta = req.clone();
+    bad_meta.body_omitted = false;
+    assert!(bad_meta.validate().is_err());
+
+    let mut resp = HttpResponseDto {
+        status: 200,
+        version: HttpVersionDto::Http11 as i32,
+        body: Vec::new(),
+        body_omitted: true,
+        original_body_len: big_body.len() as u64,
+        body_file_path: req_spill.to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    assert!(HttpResponse::try_from(resp.clone()).is_err());
+
+    // Writing a modified large body spills into a sibling file cleanly.
+    let updated_body = vec![b'B'; MAX_INLINE_BODY + 8192];
+    resp.set_body_or_spill(updated_body.clone()).unwrap();
+    assert!(resp.body_omitted);
+    assert!(resp.body.is_empty());
+    assert_eq!(resp.read_body_bytes().unwrap().as_ref(), updated_body.as_slice());
+
+    let call = HttpHookCall {
+        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+        source: SourceDto::Proxy as i32,
+        plugin_id: String::new(),
+        response_stage: true,
+        response_head_only: false,
+        request: Some(req.clone()),
+        response: Some(resp.clone()),
+    };
+    let env = Envelope::new(identity, 1, 1, envelope::Body::HttpHookCall(call), dur);
+    env.validate().unwrap();
+    let framed = encode_frame(&env).unwrap();
+    assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), env);
+    assert!(env.validate_for_minor(V16_COMPAT_MINOR).is_err());
+    assert!(env.validate_for_minor(LEGACY_COMPAT_MINOR).is_err());
+
+    let resolved = req.try_into_with_resolved_body(Some(big_body.clone())).unwrap();
+    assert_eq!(resolved.body, big_body);
+
+    // WebSocket large payload helper round-trips.
+    let ws_call = WebSocketHookCall {
+        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+        message_id: Uuid::new_v4().as_bytes().to_vec(),
+        url: "ws://127.0.0.1/socket".into(),
+        client_to_server: true,
+        is_binary: true,
+        payload: Vec::new(),
+        payload_omitted: true,
+        original_payload_len: big_body.len() as u64,
+        payload_file_path: req_spill.to_str().unwrap().to_owned(),
+    };
+    assert_eq!(
+        ws_call.read_payload_bytes().unwrap().as_ref(),
+        big_body.as_slice()
+    );
+    let ws_mod = WebSocketHookResult::with_modified_payload_from(
+        HookAction::Modify,
+        &ws_call,
+        updated_body.clone(),
+    )
+    .unwrap();
+    assert!(ws_mod.payload_omitted);
+    assert_eq!(
+        std::fs::read(&ws_mod.payload_file_path).unwrap(),
+        updated_body
+    );
+
+    let _ = std::fs::remove_dir_all(&spill_root);
+}
+
+#[test]
+fn v16_compat_minor_allows_audit_checks_and_rejects_v17_large_body_fields() {
+    let identity = ChannelIdentity {
+        instance_id: Uuid::new_v4(),
+        project: ProjectKey {
+            id: Uuid::new_v4(),
+            generation: 1,
+        },
+    };
+    let dur = Duration::from_secs(5);
+    let passive = Envelope::new(
+        identity,
+        1,
+        1,
+        envelope::Body::PassiveCheckCall(PassiveCheckCall {
+            flow_id: Uuid::new_v4().as_bytes().to_vec(),
+            url: "https://example.invalid/".into(),
+            request: Some(HttpRequestDto {
+                method: "GET".into(),
+                url: "https://example.invalid/".into(),
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+            response: Some(HttpResponseDto {
+                status: 200,
+                version: HttpVersionDto::Http11 as i32,
+                ..Default::default()
+            }),
+        }),
+        dur,
+    )
+    .with_minor(V16_COMPAT_MINOR);
+    passive.validate_for_minor(V16_COMPAT_MINOR).unwrap();
+
+    let v17_register = Envelope::new(
+        identity,
+        2,
+        1,
+        envelope::Body::Register(Register {
+            plugin_id: "lab.v17".into(),
+            plugin_version: "1.7.0".into(),
+            required_components: vec![],
+            panel: None,
+            supports_panel_multiplexing: false,
+            supports_large_body: true,
+        }),
+        dur,
+    )
+    .with_minor(V16_COMPAT_MINOR);
+    assert!(v17_register.validate_for_minor(V16_COMPAT_MINOR).is_err());
 }

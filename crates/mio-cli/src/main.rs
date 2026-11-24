@@ -1,9 +1,17 @@
-use std::{net::SocketAddr, path::Path, path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    io::Read as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64_STANDARD};
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use mio_core::{
-    AiIpcEnvelope, AiIpcRequest, Command, Event, Uuid, call_ai_ipc, default_ipc_socket_path,
+    AiIpcEnvelope, AiIpcRequest, Command, Event, TabId, Uuid, call_ai_ipc,
+    default_ipc_socket_path,
 };
 
 mod render;
@@ -14,6 +22,7 @@ const CLI_REPEATER_SEND_TIMEOUT: Duration = Duration::from_secs(305);
 #[derive(Parser, Debug, PartialEq, Eq)]
 #[command(
     name = "mio-cli",
+    version,
     about = "MIO 本地 IPC 命令行与无头代理工具（支持环境变量 MIO_IPC_SOCKET 指定默认 socket 路径）"
 )]
 struct Cli {
@@ -82,6 +91,35 @@ enum CliCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CliFlowRef {
+    Uuid(Uuid),
+    Number(u64),
+}
+
+impl CliFlowRef {
+    fn into_pair(self) -> (Option<Uuid>, Option<u64>) {
+        match self {
+            Self::Uuid(id) => (Some(id), None),
+            Self::Number(num) => (None, Some(num)),
+        }
+    }
+}
+
+fn parse_flow_ref(raw: &str) -> std::result::Result<CliFlowRef, String> {
+    let trimmed = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if let Ok(id) = Uuid::parse_str(trimmed) {
+        return Ok(CliFlowRef::Uuid(id));
+    }
+    if let Ok(num) = trimmed.parse::<u64>() {
+        if num == 0 {
+            return Err("流量序号必须为正整数（从 1 开始）".into());
+        }
+        return Ok(CliFlowRef::Number(num));
+    }
+    Err(format!("无效的流量标识 `{raw}`：请提供流量 UUID 或正整数序号"))
+}
+
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 enum FlowsCommand {
     /// 列出 HTTP 流量摘要
@@ -95,6 +133,21 @@ enum FlowsCommand {
         /// 按响应状态码过滤
         #[arg(long)]
         status: Option<u16>,
+        /// 隐藏 CONNECT 隧道流量（与 GUI 默认视图一致）
+        #[arg(long = "hide-connect")]
+        hide_connect: bool,
+        /// 按主机名（或 host:port）过滤
+        #[arg(long)]
+        host: Option<String>,
+        /// 按来源过滤（proxy|repeater|intruder|scanner|plugin）
+        #[arg(long)]
+        source: Option<String>,
+        /// 按状态过滤（complete|pending|intercepted|dropped|cancelled|failed|abnormal）
+        #[arg(long)]
+        state: Option<String>,
+        /// 按时间排序方向（asc|desc，默认 desc）
+        #[arg(long)]
+        order: Option<String>,
         /// 分页起始偏移量
         #[arg(long, default_value_t = 0)]
         offset: usize,
@@ -104,11 +157,24 @@ enum FlowsCommand {
     },
     /// 获取单条流量详情
     Get {
-        /// 流量 UUID
-        flow_id: Uuid,
+        /// 流量 UUID 或正整数序号（与 flows list 中的 #N 一致）
+        #[arg(value_parser = parse_flow_ref)]
+        flow: CliFlowRef,
         /// 显示拦截改写前的原始报文
         #[arg(long)]
         original: bool,
+        /// 仅输出请求报文
+        #[arg(long = "request-only", conflicts_with = "response_only")]
+        request_only: bool,
+        /// 仅输出响应报文
+        #[arg(long = "response-only", conflicts_with = "request_only")]
+        response_only: bool,
+        /// 仅输出请求/响应头，不打印正文
+        #[arg(long = "headers-only")]
+        headers_only: bool,
+        /// 将正文原样保存到文件（默认保存响应体；配合 --request-only 时保存请求体）
+        #[arg(long = "save-body")]
+        save_body: Option<PathBuf>,
     },
 }
 
@@ -123,38 +189,57 @@ enum WsCommand {
 }
 
 #[derive(Args, Clone, Debug, PartialEq, Eq)]
-#[command(group(
-    ArgGroup::new("source")
-        .required(true)
-        .args(["flow_id", "target"])
-))]
 struct RepeaterSourceArgs {
-    /// 来源流量 UUID
-    #[arg(long = "flow", conflicts_with_all = ["target", "raw_request"])]
-    flow_id: Option<Uuid>,
+    /// 来源流量 UUID 或正整数序号
+    #[arg(long = "flow", value_parser = parse_flow_ref, conflicts_with_all = ["target", "raw_request", "raw_file"])]
+    flow: Option<CliFlowRef>,
     /// 使用拦截改写前的原始请求（仅配合 --flow）
-    #[arg(long = "original", requires = "flow_id")]
+    #[arg(long = "original", requires = "flow")]
     use_original: bool,
-    /// 目标 origin，例如 http://127.0.0.1:8080（需配合 --raw）
-    #[arg(long, requires = "raw_request")]
+    /// 目标 URL/origin，例如 http://127.0.0.1:8080（省略 --raw/--raw-file 时自动生成 GET 模板）
+    #[arg(long)]
     target: Option<String>,
     /// 原始 HTTP 请求文本（需配合 --target）
-    #[arg(long = "raw", requires = "target", allow_hyphen_values = true)]
+    #[arg(long = "raw", requires = "target", conflicts_with = "raw_file", allow_hyphen_values = true)]
     raw_request: Option<String>,
+    /// 从文件读取原始 HTTP 请求（`-` 表示从 stdin 读取；需配合 --target）
+    #[arg(long = "raw-file", requires = "target", conflicts_with = "raw_request")]
+    raw_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 enum RepeaterCommand {
-    /// 在 Repeater 打开请求标签
+    /// 列出当前工作区中的所有 Repeater 标签页
+    List,
+    /// 在 Repeater 打开请求标签（支持来源流量、模板目标或空白标签）
     Open {
         #[command(flatten)]
         source: RepeaterSourceArgs,
+        /// 新建空白 Repeater 标签页
+        #[arg(long, conflicts_with_all = ["flow", "target", "raw_request", "raw_file", "use_original"])]
+        blank: bool,
         /// 自定义标签标题
         #[arg(long, allow_hyphen_values = true)]
         title: Option<String>,
     },
+    /// 重命名指定 Repeater 标签页
+    Rename {
+        /// Repeater 标签 UUID
+        tab_id: TabId,
+        /// 新的标签标题
+        #[arg(allow_hyphen_values = true)]
+        title: String,
+    },
+    /// 关闭指定 Repeater 标签页
+    Close {
+        /// Repeater 标签 UUID
+        tab_id: TabId,
+    },
     /// 通过 Repeater 发送单次请求
     Send {
+        /// 直接向已有 Repeater 标签页发包并回写最近一次结果
+        #[arg(long = "tab", conflicts_with_all = ["flow", "target", "raw_request", "raw_file", "use_original"])]
+        tab_id: Option<TabId>,
         #[command(flatten)]
         source: RepeaterSourceArgs,
         /// 新增或覆盖请求头（格式 K:V，可重复）
@@ -163,9 +248,12 @@ enum RepeaterCommand {
         /// 移除指定请求头（可重复）
         #[arg(long = "remove-header", value_name = "NAME", value_parser = parse_non_empty_trimmed)]
         remove_headers: Vec<String>,
-        /// 覆盖请求体
-        #[arg(long = "body", allow_hyphen_values = true)]
+        /// 覆盖请求体文本
+        #[arg(long = "body", conflicts_with = "body_file", allow_hyphen_values = true)]
         override_body: Option<String>,
+        /// 从文件读取覆盖请求体（`-` 表示从 stdin 读取；支持任意二进制字节）
+        #[arg(long = "body-file", conflicts_with = "override_body")]
+        body_file: Option<PathBuf>,
         /// 忽略上游 TLS 证书校验
         #[arg(long)]
         insecure: bool,
@@ -367,9 +455,28 @@ async fn main() -> ExitCode {
 }
 
 async fn execute_cli(cli: Cli) -> Result<()> {
-    let socket_path = cli.socket.unwrap_or_else(default_ipc_socket_path);
     let json = cli.json;
-    let (req, show_original) = match cli.command {
+    if cli.socket.is_none()
+        && matches!(
+            cli.command,
+            CliCommand::Ca {
+                command: CaCommand::Presets
+            }
+        )
+    {
+        let payload = mio_core::AiIpcPayload::CaPresets {
+            presets: mio_core::builtin_ca_preset_infos(),
+        };
+        if json {
+            println!("{}", serde_json::to_string(&AiIpcEnvelope::ok(payload))?);
+        } else {
+            render::render_human(&payload, &render::RenderOptions::default());
+        }
+        return Ok(());
+    }
+    let socket_path = cli.socket.unwrap_or_else(default_ipc_socket_path);
+    let mut render_opts = render::RenderOptions::default();
+    let req = match cli.command {
         CliCommand::Serve {
             listen,
             export_ca,
@@ -377,136 +484,176 @@ async fn execute_cli(cli: Cli) -> Result<()> {
         } => {
             return run_headless_server(socket_path, listen, export_ca, ca_preset, json).await;
         }
-        CliCommand::Status => (AiIpcRequest::Status, false),
+        CliCommand::Status => AiIpcRequest::Status,
         CliCommand::Flows { command } => match command {
             FlowsCommand::List {
                 filter,
                 method,
                 status,
+                hide_connect,
+                host,
+                source,
+                state,
+                order,
                 offset,
                 limit,
-            } => (
-                AiIpcRequest::FlowsList {
-                    offset,
-                    limit,
-                    filter,
-                    method,
-                    status,
-                },
-                false,
-            ),
-            FlowsCommand::Get { flow_id, original } => {
-                (AiIpcRequest::FlowsGet { flow_id }, original)
+            } => AiIpcRequest::FlowsList {
+                offset,
+                limit,
+                filter,
+                method,
+                status,
+                hide_connect,
+                host,
+                source,
+                state,
+                order,
+            },
+            FlowsCommand::Get {
+                flow,
+                original,
+                request_only,
+                response_only,
+                headers_only,
+                save_body,
+            } => {
+                let (flow_id, flow_number) = flow.into_pair();
+                render_opts = render::RenderOptions {
+                    show_original: original,
+                    request_only,
+                    response_only,
+                    headers_only,
+                    save_body,
+                };
+                AiIpcRequest::FlowsGet {
+                    flow_id,
+                    flow_number,
+                }
             }
         },
         CliCommand::Ws { command } => match command {
-            WsCommand::List { limit } => (AiIpcRequest::WebSocketList { limit }, false),
+            WsCommand::List { limit } => AiIpcRequest::WebSocketList { limit },
         },
         CliCommand::Repeater { command } => match command {
-            RepeaterCommand::Open { source, title } => (
+            RepeaterCommand::List => AiIpcRequest::RepeaterList,
+            RepeaterCommand::Open {
+                source,
+                blank,
+                title,
+            } => {
+                let (flow_id, flow_number) = source
+                    .flow
+                    .map(CliFlowRef::into_pair)
+                    .unwrap_or((None, None));
+                let raw_request = resolve_raw_request_input(source.raw_request, source.raw_file)?;
                 AiIpcRequest::RepeaterOpen {
-                    flow_id: source.flow_id,
+                    flow_id,
+                    flow_number,
                     use_original: source.use_original,
                     target: source.target,
-                    raw_request: source.raw_request,
+                    raw_request,
                     title,
-                },
-                false,
-            ),
+                    blank,
+                }
+            }
+            RepeaterCommand::Rename { tab_id, title } => {
+                AiIpcRequest::RepeaterRename { tab_id, title }
+            }
+            RepeaterCommand::Close { tab_id } => AiIpcRequest::RepeaterClose { tab_id },
             RepeaterCommand::Send {
+                tab_id,
                 source,
                 add_headers,
                 remove_headers,
                 override_body,
+                body_file,
                 insecure,
-            } => (
+            } => {
+                ensure!(
+                    tab_id.is_some() || source.flow.is_some() || source.target.is_some(),
+                    "repeater send 必须指定 --tab <tab-id>、--flow <uuid|number> 或 --target <url>"
+                );
+                let (flow_id, flow_number) = source
+                    .flow
+                    .map(CliFlowRef::into_pair)
+                    .unwrap_or((None, None));
+                let raw_request = resolve_raw_request_input(source.raw_request, source.raw_file)?;
+                let override_body_base64 = match body_file {
+                    Some(path) => Some(B64_STANDARD.encode(read_cli_input_bytes(&path, "--body-file")?)),
+                    None => None,
+                };
                 AiIpcRequest::RepeaterSend {
-                    flow_id: source.flow_id,
+                    tab_id,
+                    flow_id,
+                    flow_number,
                     use_original: source.use_original,
                     target: source.target,
-                    raw_request: source.raw_request,
+                    raw_request,
                     add_headers: add_headers.into_iter().map(HeaderKv::into_pair).collect(),
                     remove_headers,
                     override_body,
+                    override_body_base64,
                     insecure,
-                },
-                false,
-            ),
+                }
+            }
         },
-        CliCommand::SlimSave { dest_path } => (
-            AiIpcRequest::SlimSave {
-                path: dest_path,
-                options: None,
-            },
-            false,
-        ),
+        CliCommand::SlimSave { dest_path } => AiIpcRequest::SlimSave {
+            path: dest_path,
+            options: None,
+        },
         CliCommand::Ca { command } => match command {
             CaCommand::Export {
                 dest_path,
                 pem,
                 der,
-            } => (
-                AiIpcRequest::ExportCa {
-                    path: dest_path,
-                    pem: if pem {
-                        Some(true)
-                    } else if der {
-                        Some(false)
-                    } else {
-                        None
-                    },
+            } => AiIpcRequest::ExportCa {
+                path: dest_path,
+                pem: if pem {
+                    Some(true)
+                } else if der {
+                    Some(false)
+                } else {
+                    None
                 },
-                false,
-            ),
-            CaCommand::Presets => (AiIpcRequest::CaPresets, false),
-            CaCommand::Use { preset_id } => (
-                AiIpcRequest::CaPresetUse { preset_id },
-                false,
-            ),
+            },
+            CaCommand::Presets => AiIpcRequest::CaPresets,
+            CaCommand::Use { preset_id } => AiIpcRequest::CaPresetUse { preset_id },
         },
         CliCommand::Proxy { command } => match command {
-            ProxyCommand::Start { bind_address } => {
-                (AiIpcRequest::ProxyStart { bind_address }, false)
-            }
-            ProxyCommand::Stop => (AiIpcRequest::ProxyStop, false),
+            ProxyCommand::Start { bind_address } => AiIpcRequest::ProxyStart { bind_address },
+            ProxyCommand::Stop => AiIpcRequest::ProxyStop,
             ProxyCommand::Intercept {
                 requests,
                 responses,
-            } => (
-                AiIpcRequest::ProxyIntercept {
-                    requests,
-                    responses,
-                },
-                false,
-            ),
-            ProxyCommand::Pending => (AiIpcRequest::ProxyPending, false),
-            ProxyCommand::Decide(args) => (
-                AiIpcRequest::ProxyDecide {
-                    flow_id: args.flow_id,
-                    revision: args.revision,
-                    drop_flow: args.drop_flow,
-                    add_headers: args
-                        .add_headers
-                        .into_iter()
-                        .map(HeaderKv::into_pair)
-                        .collect(),
-                    remove_headers: args.remove_headers,
-                    override_body: args.override_body,
-                    override_status: args.override_status,
-                },
-                false,
-            ),
+            } => AiIpcRequest::ProxyIntercept {
+                requests,
+                responses,
+            },
+            ProxyCommand::Pending => AiIpcRequest::ProxyPending,
+            ProxyCommand::Decide(args) => AiIpcRequest::ProxyDecide {
+                flow_id: args.flow_id,
+                revision: args.revision,
+                drop_flow: args.drop_flow,
+                add_headers: args
+                    .add_headers
+                    .into_iter()
+                    .map(HeaderKv::into_pair)
+                    .collect(),
+                remove_headers: args.remove_headers,
+                override_body: args.override_body,
+                override_status: args.override_status,
+            },
         },
         CliCommand::Workspace { command } => match command {
-            WorkspaceCommand::Get => (AiIpcRequest::WorkspaceGet, false),
+            WorkspaceCommand::Get => AiIpcRequest::WorkspaceGet,
             WorkspaceCommand::Set { json_path } => {
                 let raw = std::fs::read_to_string(&json_path)
                     .with_context(|| format!("读取工作区 JSON 失败：{}", json_path.display()))?;
                 let workspace_json = extract_workspace_patch_json(&raw)?;
-                (AiIpcRequest::WorkspacePatch { workspace_json }, false)
+                AiIpcRequest::WorkspacePatch { workspace_json }
             }
         },
-        CliCommand::Shutdown => (AiIpcRequest::Shutdown, false),
+        CliCommand::Shutdown => AiIpcRequest::Shutdown,
     };
     let timeout = if matches!(req, AiIpcRequest::RepeaterSend { .. }) {
         CLI_REPEATER_SEND_TIMEOUT
@@ -518,24 +665,85 @@ async fn execute_cli(cli: Cli) -> Result<()> {
             .await
             .context("执行 IPC 请求任务失败")??;
     if !env.ok {
-        bail!("{}", env.error.unwrap_or_else(|| "IPC 请求失败".into()));
+        let raw_err = env.error.unwrap_or_else(|| "IPC 请求失败".into());
+        bail!("{}", rewrite_cli_error_hint(&raw_err));
     }
+    let saved_body = if let Some(payload) = &env.payload {
+        render::save_flow_body_if_requested(payload, &render_opts)?
+    } else {
+        None
+    };
     if json {
         println!("{}", raw_line.trim());
         return Ok(());
     }
     let payload = env.payload.context("IPC 成功响应缺少数据载荷")?;
-    render::render_human(&payload, show_original);
+    render::render_human(&payload, &render_opts);
+    if let Some((saved_path, byte_len)) = saved_body {
+        println!(
+            "\n已保存正文 ({}) -> {}",
+            render::format_human_bytes(byte_len as u64),
+            saved_path.display()
+        );
+    }
     Ok(())
 }
 
-fn format_headless_ready_json(socket_path: &Path, active_proxy: Option<&str>) -> String {
-    serde_json::json!({
+fn read_cli_input_bytes(path: &Path, flag_name: &str) -> Result<Vec<u8>> {
+    if path == Path::new("-") {
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .with_context(|| format!("从标准输入读取 {flag_name} 失败"))?;
+        Ok(buf)
+    } else {
+        std::fs::read(path)
+            .with_context(|| format!("读取 {flag_name} 文件失败：{}", path.display()))
+    }
+}
+
+fn resolve_raw_request_input(
+    raw_request: Option<String>,
+    raw_file: Option<PathBuf>,
+) -> Result<Option<String>> {
+    match (raw_request, raw_file) {
+        (Some(raw), None) => Ok(Some(raw)),
+        (None, Some(path)) => {
+            let bytes = read_cli_input_bytes(&path, "--raw-file")?;
+            let text = String::from_utf8(bytes)
+                .context("--raw-file 内容必须为有效 UTF-8 文本（如需二进制正文请配合 --body-file）")?;
+            Ok(Some(text))
+        }
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => bail!("不能同时指定 --raw 与 --raw-file"),
+    }
+}
+
+fn rewrite_cli_error_hint(msg: &str) -> String {
+    if msg.contains("Proxy 设置 > Proxy listeners") {
+        msg.replace(
+            "请在“Proxy 设置 > Proxy listeners”中修改为其他空闲端口",
+            "请通过 `--listen <IP:PORT>` 参数修改为其他空闲端口",
+        )
+    } else {
+        msg.to_owned()
+    }
+}
+
+fn format_headless_ready_json(
+    socket_path: &Path,
+    active_proxy: Option<&str>,
+    ca_preset: Option<&str>,
+) -> String {
+    let mut value = serde_json::json!({
         "ready": true,
         "socket": socket_path.to_string_lossy(),
         "proxy_address": active_proxy,
-    })
-    .to_string()
+    });
+    if let Some(preset_id) = ca_preset {
+        value["ca_preset"] = serde_json::Value::String(preset_id.to_owned());
+    }
+    value.to_string()
 }
 
 fn extract_workspace_patch_json(raw: &str) -> Result<String> {
@@ -595,17 +803,11 @@ async fn run_headless_server(
     ca_preset: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let preset = match ca_preset {
-        Some(raw) => {
-            let trimmed = raw.trim();
-            ensure!(!trimmed.is_empty(), "--ca-preset 不能为空");
-            Some(
-                mio_core::ca_preset(trimmed)
-                    .ok_or_else(|| anyhow::anyhow!("未知 CA 预置：{trimmed}"))?,
-            )
-        }
-        None => None,
-    };
+    let preset = ca_preset
+        .as_deref()
+        .map(mio_core::resolve_ca_preset)
+        .transpose()?;
+    let applied_preset = preset.map(|p| p.id);
     let ca_dest = match export_ca {
         Some(raw) => {
             let trimmed = raw.trim();
@@ -706,14 +908,21 @@ async fn run_headless_server(
             drop(events);
             drop(commands);
             let _ = tokio::task::spawn_blocking(move || runtime.shutdown()).await;
-            return Err(err);
+            let rewritten = rewrite_cli_error_hint(&format!("{err:#}"));
+            bail!("{rewritten}");
         }
     };
 
     if json {
         println!(
             "{}",
-            format_headless_ready_json(&socket_path, active_proxy.as_deref())
+            format_headless_ready_json(&socket_path, active_proxy.as_deref(), applied_preset)
+        );
+    } else if let Some(preset_id) = applied_preset {
+        println!(
+            "MIO headless 服务已就绪 | IPC={} | Proxy={} | CA={preset_id}",
+            socket_path.display(),
+            active_proxy.as_deref().unwrap_or("未启动")
         );
     } else {
         println!(
@@ -807,6 +1016,25 @@ mod tests {
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    struct IsolatedCliEnv {
+        _id: EnvVarGuard,
+        _prefs: EnvVarGuard,
+        _plugins: EnvVarGuard,
+    }
+
+    impl IsolatedCliEnv {
+        fn in_dir(root: &Path) -> Self {
+            let identity = root.join("identity");
+            let prefs = root.join("preferences.json");
+            let plugins = root.join("plugins");
+            Self {
+                _id: EnvVarGuard::set("MIO_IDENTITY_DIR", &identity),
+                _prefs: EnvVarGuard::set("MIO_USER_PREFERENCES_PATH", &prefs),
+                _plugins: EnvVarGuard::set("MIO_PLUGINS_DIR", &plugins),
+            }
+        }
+    }
+
     #[test]
     fn parses_all_cli_subcommands_and_global_flags() {
         let cli = parse_cli(&s(&["--socket", "/tmp/x.sock", "status", "--json"])).unwrap();
@@ -815,8 +1043,27 @@ mod tests {
         assert_eq!(cli.command, CliCommand::Status);
 
         let cli = parse_cli(&s(&[
-            "flows", "list", "--filter", "login", "--method", "POST", "--status", "200",
-            "--offset", "5", "--limit", "20",
+            "flows",
+            "list",
+            "--filter",
+            "login",
+            "--method",
+            "POST",
+            "--status",
+            "200",
+            "--hide-connect",
+            "--host",
+            "api.example.invalid",
+            "--source",
+            "proxy",
+            "--state",
+            "abnormal",
+            "--order",
+            "asc",
+            "--offset",
+            "5",
+            "--limit",
+            "20",
         ]))
         .unwrap();
         assert_eq!(
@@ -826,6 +1073,11 @@ mod tests {
                     filter: "login".into(),
                     method: Some("POST".into()),
                     status: Some(200),
+                    hide_connect: true,
+                    host: Some("api.example.invalid".into()),
+                    source: Some("proxy".into()),
+                    state: Some("abnormal".into()),
+                    order: Some("asc".into()),
                     offset: 5,
                     limit: 20,
                 }
@@ -833,17 +1085,44 @@ mod tests {
         );
 
         let fid = Uuid::new_v4();
-        let cli = parse_cli(&s(&["flows", "get", &fid.to_string(), "--original"])).unwrap();
+        let cli = parse_cli(&s(&[
+            "flows",
+            "get",
+            &fid.to_string(),
+            "--original",
+            "--headers-only",
+            "--response-only",
+            "--save-body",
+            "/tmp/body.bin",
+        ]))
+        .unwrap();
         assert_eq!(
             cli.command,
             CliCommand::Flows {
                 command: FlowsCommand::Get {
-                    flow_id: fid,
+                    flow: CliFlowRef::Uuid(fid),
                     original: true,
+                    request_only: false,
+                    response_only: true,
+                    headers_only: true,
+                    save_body: Some(PathBuf::from("/tmp/body.bin")),
                 }
             }
         );
-
+        let cli_num = parse_cli(&s(&["flows", "get", "42", "--request-only"])).unwrap();
+        assert_eq!(
+            cli_num.command,
+            CliCommand::Flows {
+                command: FlowsCommand::Get {
+                    flow: CliFlowRef::Number(42),
+                    original: false,
+                    request_only: true,
+                    response_only: false,
+                    headers_only: false,
+                    save_body: None,
+                }
+            }
+        );
         let cli = parse_cli(&s(&["ws", "list", "--limit", "10"])).unwrap();
         assert_eq!(
             cli.command,
@@ -889,11 +1168,13 @@ mod tests {
             cli.command,
             CliCommand::Repeater {
                 command: RepeaterCommand::Send {
+                    tab_id: None,
                     source: RepeaterSourceArgs {
-                        flow_id: Some(fid),
+                        flow: Some(CliFlowRef::Uuid(fid)),
                         use_original: true,
                         target: None,
                         raw_request: None,
+                        raw_file: None,
                     },
                     add_headers: vec![HeaderKv {
                         name: "X-Test".into(),
@@ -901,10 +1182,77 @@ mod tests {
                     }],
                     remove_headers: vec!["Cookie".into()],
                     override_body: Some("{\"ok\":true}".into()),
+                    body_file: None,
                     insecure: true,
                 }
             }
         );
+
+        let tid = Uuid::new_v4();
+        assert_eq!(
+            parse_cli(&s(&["repeater", "list"])).unwrap().command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::List
+            }
+        );
+        assert_eq!(
+            parse_cli(&s(&["repeater", "rename", &tid.to_string(), "New Name"]))
+                .unwrap()
+                .command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::Rename {
+                    tab_id: tid,
+                    title: "New Name".into(),
+                }
+            }
+        );
+        assert_eq!(
+            parse_cli(&s(&["repeater", "close", &tid.to_string()]))
+                .unwrap()
+                .command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::Close { tab_id: tid }
+            }
+        );
+        assert!(matches!(
+            parse_cli(&s(&["repeater", "open", "--blank"]))
+                .unwrap()
+                .command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::Open { blank: true, .. }
+            }
+        ));
+        assert!(matches!(
+            &parse_cli(&s(&["repeater", "open", "--target", "http://127.0.0.1:8080"]))
+                .unwrap()
+                .command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::Open {
+                    source: RepeaterSourceArgs {
+                        target: Some(t),
+                        raw_request: None,
+                        ..
+                    },
+                    ..
+                }
+            } if t == "http://127.0.0.1:8080"
+        ));
+        assert!(matches!(
+            &parse_cli(&s(&["repeater", "send", "--tab", &tid.to_string(), "--body-file", "-"]))
+                .unwrap()
+                .command,
+            CliCommand::Repeater {
+                command: RepeaterCommand::Send {
+                    tab_id: Some(t),
+                    body_file: Some(p),
+                    ..
+                }
+            } if *t == tid && p == Path::new("-")
+        ));
+        let ver_err = parse_cli(&s(&["--version"])).unwrap_err();
+        assert_eq!(ver_err.kind(), ErrorKind::DisplayVersion);
+        let ver_short = parse_cli(&s(&["-V"])).unwrap_err();
+        assert_eq!(ver_short.kind(), ErrorKind::DisplayVersion);
 
         let cli = parse_cli(&s(&["slim-save", "/tmp/slimmed.mio", "--json"])).unwrap();
         assert!(cli.json);
@@ -1145,11 +1493,16 @@ mod tests {
             .is_err()
         );
         assert!(
+            parse_cli(&s(&["flows", "get", "0"])).is_err(),
+            "flow number 0 must be rejected"
+        );
+        assert!(
             parse_cli(&s(&[
-                "repeater",
-                "open",
-                "--target",
-                "http://127.0.0.1:8080",
+                "flows",
+                "get",
+                "1",
+                "--request-only",
+                "--response-only",
             ]))
             .is_err()
         );
@@ -1193,17 +1546,26 @@ mod tests {
 
     #[test]
     fn formats_valid_json_for_headless_readiness_and_errors() {
-        let ready_json =
-            format_headless_ready_json(Path::new("/tmp/mio-test.sock"), Some("127.0.0.1:8080"));
+        let ready_json = format_headless_ready_json(
+            Path::new("/tmp/mio-test.sock"),
+            Some("127.0.0.1:8080"),
+            None,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&ready_json).unwrap();
         assert_eq!(parsed["ready"], serde_json::json!(true));
         assert_eq!(parsed["socket"], serde_json::json!("/tmp/mio-test.sock"));
         assert_eq!(parsed["proxy_address"], serde_json::json!("127.0.0.1:8080"));
+        assert!(parsed.get("ca_preset").is_none());
 
-        let no_proxy_json = format_headless_ready_json(Path::new("/tmp/mio-test.sock"), None);
+        let no_proxy_json =
+            format_headless_ready_json(Path::new("/tmp/mio-test.sock"), None, Some("emudhra-emsign-dv-g3b"));
         let parsed_no_proxy: serde_json::Value = serde_json::from_str(&no_proxy_json).unwrap();
         assert_eq!(parsed_no_proxy["ready"], serde_json::json!(true));
         assert_eq!(parsed_no_proxy["proxy_address"], serde_json::Value::Null);
+        assert_eq!(
+            parsed_no_proxy["ca_preset"],
+            serde_json::json!("emudhra-emsign-dv-g3b")
+        );
 
         let err_json = AiIpcEnvelope::err_json("bad argument");
         let parsed_err: serde_json::Value = serde_json::from_str(&err_json).unwrap();
@@ -1212,8 +1574,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_ca_presets_succeeds_without_running_server() {
+        execute_cli(parse_cli(&s(&["ca", "presets"])).unwrap())
+            .await
+            .unwrap();
+        execute_cli(parse_cli(&s(&["ca", "presets", "--json"])).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn cli_executes_against_live_runtime_ipc_socket() {
+        let _lock = ENV_LOCK.lock().await;
         let dir = TempDirGuard::new("mio-cli");
+        let _env = IsolatedCliEnv::in_dir(&dir.path);
         let sock = dir.path.join("cli.sock");
         let slim = dir.path.join("slim.mio");
         let sock_for_rt = sock.clone();
@@ -1228,6 +1602,22 @@ mod tests {
         execute_cli(parse_cli(&s(&["--socket", &sock_str, "status", "--json"])).unwrap())
             .await
             .unwrap();
+        execute_cli(parse_cli(&s(&["--socket", &sock_str, "ca", "presets", "--json"])).unwrap())
+            .await
+            .unwrap();
+        execute_cli(
+            parse_cli(&s(&[
+                "--socket",
+                &sock_str,
+                "ca",
+                "use",
+                "emudhra-aaa-dv-g3b",
+                "--json",
+            ]))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         execute_cli(parse_cli(&s(&["--socket", &sock_str, "flows", "list", "--limit", "5"])).unwrap())
             .await
             .unwrap();
@@ -1273,8 +1663,7 @@ mod tests {
     async fn headless_server_exports_ca_starts_proxy_and_shuts_down_via_ipc() {
         let _lock = ENV_LOCK.lock().await;
         let dir = TempDirGuard::new("mio-srv");
-        let identity_dir = dir.path.join("identity");
-        let _id_guard = EnvVarGuard::set("MIO_IDENTITY_DIR", &identity_dir);
+        let _env = IsolatedCliEnv::in_dir(&dir.path);
 
         let sock = dir.path.join("headless.sock");
         let ca_pem = dir.path.join("ca.pem");
@@ -1337,8 +1726,7 @@ mod tests {
     async fn headless_server_applies_builtin_ca_preset_and_exports_it() {
         let _lock = ENV_LOCK.lock().await;
         let dir = TempDirGuard::new("mio-preset");
-        let identity_dir = dir.path.join("identity");
-        let _id_guard = EnvVarGuard::set("MIO_IDENTITY_DIR", &identity_dir);
+        let _env = IsolatedCliEnv::in_dir(&dir.path);
 
         let sock = dir.path.join("preset.sock");
         let ca_pem = dir.path.join("preset-ca.pem");
@@ -1392,10 +1780,23 @@ mod tests {
                 .unwrap_err();
         assert!(err.to_string().contains("SocketAddr"));
 
-        let blank_err = run_headless_server(sock, Some("   ".into()), None, None, true)
+        let blank_err = run_headless_server(sock.clone(), Some("   ".into()), None, None, true)
             .await
             .unwrap_err();
         assert!(blank_err.to_string().contains("--listen"));
+
+        let blank_preset = run_headless_server(sock.clone(), None, None, Some("   ".into()), true)
+            .await
+            .unwrap_err();
+        assert!(blank_preset.to_string().contains("不能为空"));
+
+        let bad_preset = run_headless_server(sock, None, None, Some("missing-preset".into()), true)
+            .await
+            .unwrap_err();
+        let bad_msg = bad_preset.to_string();
+        assert!(bad_msg.contains("missing-preset"));
+        assert!(bad_msg.contains("emudhra-emsign-dv-g3b"));
+        assert!(bad_msg.contains("emudhra-aaa-dv-g3b"));
     }
 
     #[test]
@@ -1413,5 +1814,18 @@ mod tests {
         let extracted2: serde_json::Value =
             serde_json::from_str(&extract_workspace_patch_json(nested).unwrap()).unwrap();
         assert_eq!(extracted2["revision"], 4);
+    }
+
+    #[test]
+    fn rewrites_port_conflict_hint_for_cli_and_formats_human_bytes() {
+        let gui_msg = "Proxy 监听地址 127.0.0.1:8080 已被占用（可能正由另一个 MIO 窗口或其他程序监听）；请在“Proxy 设置 > Proxy listeners”中修改为其他空闲端口（如 8081）后重试";
+        let cli_msg = rewrite_cli_error_hint(gui_msg);
+        assert!(!cli_msg.contains("Proxy 设置 > Proxy listeners"));
+        assert!(cli_msg.contains("--listen <IP:PORT>"));
+        assert!(cli_msg.contains("8081"));
+
+        assert_eq!(render::format_human_bytes(512), "512 B");
+        assert!(render::format_human_bytes(2048).contains("2.00 KiB"));
+        assert!(render::format_human_bytes(3 * 1024 * 1024).contains("3.00 MiB"));
     }
 }

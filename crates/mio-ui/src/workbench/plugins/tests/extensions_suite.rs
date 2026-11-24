@@ -609,14 +609,14 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
     let api_json = super::super::render_suite::build_mio_plugin_api_json().unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&api_json).unwrap();
     assert_eq!(parsed["name"], "mio-plugin-api");
-    assert_eq!(parsed["protocol"]["minor"], 6);
+    assert_eq!(parsed["protocol"]["minor"], 7);
     assert_eq!(
         parsed["panel_multiplexing"]["register_field"],
         "supports_panel_multiplexing"
     );
     assert!(parsed["manifest_schema"]["properties"]["engine"].is_object());
     let api_md = super::super::render_suite::build_mio_plugin_api_markdown();
-    assert!(api_md.contains("MIO Extensions API (v1.6)"));
+    assert!(api_md.contains("MIO Extensions API (v1.7)"));
     assert!(api_md.contains("Panel Multiplexing (v1.5)"));
     assert!(api_md.contains("traffic.read"));
 }
@@ -644,6 +644,7 @@ fn persistent_plugins_ui_autoload_toggle_and_uninstall(cx: &mut TestAppContext) 
                 contributions: vec!["suite_panel".into()],
                 enabled: true,
                 auto_reload: false,
+                hook_filter: Default::default(),
             }],
         })
         .unwrap();
@@ -686,6 +687,7 @@ fn persistent_plugins_ui_autoload_toggle_and_uninstall(cx: &mut TestAppContext) 
                 )),
             }),
             auto_reload: false,
+            hook_filter: Default::default(),
             order: vec![live_id],
         })
         .unwrap();
@@ -807,6 +809,7 @@ fn persistent_plugins_ui_autoload_toggle_and_uninstall(cx: &mut TestAppContext) 
                     )),
                 }),
                 auto_reload: false,
+                hook_filter: Default::default(),
                 order: vec![reenabled_id],
             }),
         })
@@ -977,6 +980,137 @@ fn repeater_single_editor_per_plugin_and_extensions_hides_children(cx: &mut Test
             window.try_find(child_row).is_none(),
             "Extensions table must not display internal Repeater child instances"
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn hook_policy_controls_dispatch_filter_and_display_metrics(cx: &mut TestAppContext) {
+    let mut fixture = fixture(cx, vec![], 64);
+    let suite = install_suite_plugin(
+        &fixture,
+        "lab.hook-ui",
+        "native",
+        &["suite_panel", "http_hook"],
+        cx,
+    );
+    let suite_id = suite.identity.instance_id;
+    drain(&mut fixture.commands);
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("plugin-hook-policy-section").visible());
+        window.click("plugin-hook-scope-only", cx);
+    })
+    .unwrap();
+
+    let op1 = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action: PluginAction::SetHookFilter { instance_id, filter },
+                ..
+            } if instance_id == suite_id => {
+                assert!(filter.scope_only);
+                Some((operation_id, filter))
+            }
+            _ => None,
+        })
+        .expect("clicking scope-only checkbox must dispatch SetHookFilter");
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: op1.0,
+            result: Ok(PluginOutcome::HookFilterUpdated {
+                instance_id: suite_id,
+                filter: op1.1,
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("plugin-hook-fail-open", cx);
+    })
+    .unwrap();
+    let op2 = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action: PluginAction::SetHookFilter { instance_id, filter },
+                ..
+            } if instance_id == suite_id => {
+                assert!(filter.scope_only);
+                assert_eq!(
+                    filter.failure_policy,
+                    mio_core::PluginHookFailurePolicy::FailOpen
+                );
+                Some((operation_id, filter))
+            }
+            _ => None,
+        })
+        .expect("clicking fail-open checkbox must preserve scope_only and enable FailOpen");
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: op2.0,
+            result: Ok(PluginOutcome::HookFilterUpdated {
+                instance_id: suite_id,
+                filter: op2.1,
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.click("plugin-hook-metrics-refresh", cx);
+    })
+    .unwrap();
+    let metrics_op = drain(&mut fixture.commands)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::Plugin {
+                operation_id,
+                action: PluginAction::QueryHookMetrics,
+                ..
+            } => Some(operation_id),
+            _ => None,
+        })
+        .expect("refresh button must dispatch QueryHookMetrics");
+    fixture
+        .events
+        .try_send(Event::PluginOperation {
+            project: fixture.project,
+            operation_id: metrics_op,
+            result: Ok(PluginOutcome::HookMetrics {
+                metrics: vec![(
+                    suite_id,
+                    mio_core::PluginHookMetricsSnapshot {
+                        invoked: 12,
+                        filtered_skipped: 34,
+                        oversized_bypassed: 5,
+                        errors_or_timeouts: 2,
+                        fail_open_passes: 2,
+                    },
+                )],
+            }),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(fixture.window, |_, window, cx| {
+        window.render_frame(cx);
+        let metrics_el = window.find("plugin-hook-metrics");
+        let text = metrics_el.label().unwrap_or("");
+        assert!(text.contains("调用: 12"), "{text}");
+        assert!(text.contains("过滤跳过: 34"), "{text}");
+        assert!(text.contains("超限旁路: 5"), "{text}");
+        assert!(text.contains("超时/错误: 2"), "{text}");
+        assert!(text.contains("Fail-Open 放行: 2"), "{text}");
     })
     .unwrap();
 }

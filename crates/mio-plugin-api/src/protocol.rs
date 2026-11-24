@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::{ProjectKey, Uuid, panel::*};
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 6;
+pub const PROTOCOL_MINOR: u32 = 7;
+pub const V16_COMPAT_MINOR: u32 = 6;
 pub const LEGACY_COMPAT_MINOR: u32 = 5;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_BODY: usize = 512 * 1024;
+pub const MAX_BODY_SPILL_PATH_BYTES: usize = 4096;
+pub const MAX_SPILL_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_STORAGE_KEY_BYTES: usize = 256;
 pub const MAX_STORAGE_VALUE_BYTES: usize = 64 * 1024;
 pub const PANEL_ID: u64 = 1;

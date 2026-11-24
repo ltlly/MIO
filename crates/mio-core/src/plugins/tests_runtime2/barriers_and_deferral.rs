@@ -1117,6 +1117,7 @@ async fn child_deferred_command_wakes_when_outgoing_capacity_recovers_without_ne
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                ..Default::default()
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;

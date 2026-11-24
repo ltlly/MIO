@@ -81,6 +81,7 @@ async fn real_duplex_supervisor_writer_blocked_skips_retracted_open_already_in_o
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: false,
+                ..Default::default()
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;

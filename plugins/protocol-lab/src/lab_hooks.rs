@@ -87,12 +87,14 @@ impl Lab {
             return WebSocketHookResult {
                 action: HookAction::Drop as i32,
                 payload: vec![],
+                ..Default::default()
             };
         }
         if call.payload.starts_with(b"[lab:intercept]") {
             return WebSocketHookResult {
                 action: HookAction::Intercept as i32,
                 payload: vec![],
+                ..Default::default()
             };
         }
         if (self.auto_tag_hooks || call.payload.starts_with(b"[lab:tag]"))
@@ -104,11 +106,13 @@ impl Lab {
             return WebSocketHookResult {
                 action: HookAction::Modify as i32,
                 payload: tagged,
+                ..Default::default()
             };
         }
         WebSocketHookResult {
             action: HookAction::Pass as i32,
             payload: vec![],
+            ..Default::default()
         }
     }
 

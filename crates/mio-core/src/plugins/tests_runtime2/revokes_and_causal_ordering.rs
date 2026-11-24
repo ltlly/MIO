@@ -67,6 +67,7 @@ async fn real_duplex_supervisor_prioritizes_queued_revoke_over_deferred_open_on_
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -337,6 +338,7 @@ async fn real_duplex_supervisor_full_control_queue_revoke_cancels_queued_and_def
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -1046,6 +1048,7 @@ async fn real_duplex_supervisor_evicted_revoke_seq_floor_still_blocks_old_queued
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -1479,6 +1482,7 @@ async fn concurrent_handles_and_late_older_revoke_preserve_newer_explicit_open()
                 required_components: vec![],
                 panel: Some(make_snap(rev)),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -1813,6 +1817,7 @@ async fn real_duplex_supervisor_revoke_cancels_unpermitted_open_waiting_on_full_
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -2119,6 +2124,7 @@ async fn real_duplex_supervisor_begin_commit_cancelled_before_poll_on_bound_reso
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -2417,6 +2423,7 @@ async fn real_duplex_supervisor_batch_revoke_cancels_deferred_second_open_before
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -2756,6 +2763,7 @@ async fn real_duplex_supervisor_revoke_retracts_unsent_open_from_outbound_queue_
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: false,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;
@@ -3053,6 +3061,7 @@ async fn real_duplex_supervisor_urgent_burst_past_queue_capacity_still_cancels_d
                 required_components: vec![],
                 panel: Some(make_snap(1, "main")),
                 supports_panel_multiplexing: true,
+                supports_large_body: false,
             }),
         );
         worker_tx.write_all(&protocol::encode_frame(&reg)?).await?;

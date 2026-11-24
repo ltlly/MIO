@@ -25,7 +25,10 @@ pub mod updater;
 mod workspace;
 
 pub use api::*;
-pub use ca_preset::{BUILTIN_CA_PRESETS, CaPreset, ca_preset};
+pub use ca_preset::{
+    BUILTIN_CA_PRESETS, CaPreset, builtin_ca_preset_infos, ca_preset, ca_preset_by_fingerprint,
+    resolve_ca_preset,
+};
 pub use codec_util::now_unix_ms;
 pub use http::html_extract;
 pub use http::mio_script::*;
@@ -61,9 +64,9 @@ pub use preferences::{
 };
 pub use service::{Runtime, build_configured_browser_args, is_valid_scheduled_task_trigger};
 pub use service::ai_ipc::{
-    AiIpcEnvelope, AiIpcFlowDetail, AiIpcPayload, AiIpcPendingItem, AiIpcRequest, CaPresetInfo,
-    ENV_MIO_IPC_SOCKET, call_ai_ipc, default_ipc_socket_path, env_ipc_socket_path,
-    instance_ipc_socket_path,
+    AiIpcEnvelope, AiIpcFlowDetail, AiIpcFlowItem, AiIpcPayload, AiIpcPendingItem,
+    AiIpcRepeaterTabSummary, AiIpcRequest, CaPresetInfo, ENV_MIO_IPC_SOCKET, call_ai_ipc,
+    default_ipc_socket_path, env_ipc_socket_path, instance_ipc_socket_path,
 };
 pub use store::{inspect_mio_ext_archive, read_mio_ext_websocket_fragment};
 pub use sys_metrics::{

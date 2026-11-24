@@ -721,11 +721,19 @@ pub(in crate::workbench) fn server_badge_text(status: &CollaboratorStatus) -> (S
     } else {
         (0xe6f4ea, 0x137333)
     };
+    let (warn_bg, warn_fg) = if dark {
+        (0x472828, 0xf28b82)
+    } else {
+        (0xfce8e6, 0xc5221f)
+    };
     let (idle_bg, idle_fg) = if dark {
         (0x33363a, 0x9da2a8)
     } else {
         (0xeeeeee, 0x555555)
     };
+    if status.running && status.config.enabled && status.last_poll_error.is_some() {
+        return ("中继异常".into(), warn_bg, warn_fg);
+    }
     match (status.running, status.http_addr, status.dns_addr) {
         (true, Some(http), Some(dns)) => (format!("HTTP {http} · DNS {dns}"), running_bg, running_fg),
         (true, http, dns) => (

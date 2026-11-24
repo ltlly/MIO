@@ -552,6 +552,8 @@ impl Settings {
                 version,
                 received_bytes: 0,
                 total_bytes: (info.asset_size > 0).then_some(info.asset_size),
+                attempt: 1,
+                max_attempts: 4,
             };
             view.enqueue(mio_core::Command::InstallUpdate { info }, cx);
             cx.notify();
