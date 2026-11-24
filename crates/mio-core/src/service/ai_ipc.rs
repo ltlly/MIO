@@ -335,6 +335,45 @@ pub fn env_ipc_socket_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub fn instance_ipc_socket_path(pid: u32) -> PathBuf {
+    let filename = format!("mio-{pid}.sock");
+    #[cfg(unix)]
+    {
+        if let Some(sock) = crate::fs_atomic::platform_runtime_dir().map(|d| d.join(&filename))
+            && sock.as_os_str().as_encoded_bytes().len() <= MAX_SUN_PATH_SAFE_LEN
+        {
+            return sock;
+        }
+        PathBuf::from(format!("/tmp/mio-{}/{filename}", current_euid()))
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(dir) = crate::fs_atomic::platform_runtime_dir() {
+            return dir.join(&filename);
+        }
+        std::env::temp_dir().join("mio-run").join(&filename)
+    }
+}
+
+pub(in crate::service) fn instance_ipc_socket_path_near(
+    primary: &Path,
+    pid: u32,
+) -> PathBuf {
+    let filename = format!("mio-{pid}.sock");
+    let candidate = primary.with_file_name(&filename);
+    #[cfg(unix)]
+    {
+        if candidate.as_os_str().as_encoded_bytes().len() <= MAX_SUN_PATH_SAFE_LEN {
+            return candidate;
+        }
+        instance_ipc_socket_path(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        candidate
+    }
+}
+
 pub fn default_ipc_socket_path() -> PathBuf {
     if let Some(explicit) = env_ipc_socket_path() {
         return explicit;

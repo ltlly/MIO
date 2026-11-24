@@ -329,11 +329,11 @@ impl<'a> JsonOffsetScanner<'a> {
             self.skip_ws();
             let (k_start, k_end) = self.scan_string_bounds()?;
             let key_line = self.line_map.line_at(self.base_offset + k_start);
-            let inner = &self.src[k_start + 1..k_end - 1];
+            let inner = self.src.get(k_start + 1..k_end - 1)?;
             let key_name: Cow<'a, str> = if !inner.contains('\\') {
                 Cow::Borrowed(inner)
             } else {
-                Cow::Owned(serde_json::from_str::<String>(&self.src[k_start..k_end]).ok()?)
+                Cow::Owned(serde_json::from_str::<String>(self.src.get(k_start..k_end)?).ok()?)
             };
             self.skip_ws();
             if self.bytes.get(self.pos) != Some(&b':') {
@@ -664,6 +664,10 @@ fn parse_chunked_with_lines(
                 }
             }
             break;
+        }
+        let chunk_end = pos.checked_add(size)?;
+        if chunk_end > bytes.len() {
+            return None;
         }
         spans.push((dechunked_pos, line));
         for i in 0..size {

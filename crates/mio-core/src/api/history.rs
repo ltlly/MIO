@@ -18,6 +18,8 @@ pub enum HttpExtensionFilter {
 pub struct HttpHistoryFilter {
     pub in_scope_only: bool,
     pub hide_without_response: bool,
+    #[serde(default)]
+    pub hide_connect: bool,
     pub parameterized_only: bool,
     pub status_classes: [bool; 4],
     pub mime_types: [bool; 8],
@@ -38,6 +40,7 @@ impl Default for HttpHistoryFilter {
         Self {
             in_scope_only: false,
             hide_without_response: false,
+            hide_connect: false,
             parameterized_only: false,
             status_classes: [true; 4],
             mime_types: [true; 8],

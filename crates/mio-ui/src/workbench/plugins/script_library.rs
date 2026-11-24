@@ -75,10 +75,11 @@ impl ScriptPresetLibraryUi {
             return Ok(path.clone());
         }
         #[cfg(test)]
-        let path = std::env::temp_dir().join(format!(
-            "mio-ui-test-scripts-{}.json",
-            mio_core::Uuid::new_v4()
-        ));
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("mio-ui-test-scripts-{}", mio_core::Uuid::new_v4()))
+            .join("http-filter-scripts.json");
         #[cfg(not(test))]
         let path =
             mio_core::default_user_preferences_path()?.with_file_name("http-filter-scripts.json");
@@ -125,7 +126,7 @@ fn validate_stored_library(library: &StoredScriptPresetLibrary) -> AnyResult<()>
 
 fn read_script_library_file(path: &Path) -> AnyResult<StoredScriptPresetLibrary> {
     let Some(bytes) =
-        mio_core::ui_files::read_bounded_optional_file(path, MAX_SCRIPT_LIBRARY_BYTES, "脚本库")?
+        mio_core::ui_files::read_owned_file_bounded(path, MAX_SCRIPT_LIBRARY_BYTES, "脚本库")?
     else {
         return Ok(StoredScriptPresetLibrary::default());
     };
@@ -135,20 +136,34 @@ fn read_script_library_file(path: &Path) -> AnyResult<StoredScriptPresetLibrary>
     Ok(library)
 }
 
-fn write_script_library_file(path: &Path, scripts: &[ScriptLibraryItem]) -> AnyResult<()> {
-    let library = StoredScriptPresetLibrary {
-        version: 1,
-        scripts: scripts.to_vec(),
-    };
-    validate_stored_library(&library)?;
-    let bytes = serde_json::to_vec_pretty(&library)?;
-    mio_core::ui_files::atomic_write_bounded_file(
+fn update_script_library_file(
+    path: &Path,
+    mutate: impl FnOnce(&mut Vec<ScriptLibraryItem>) -> AnyResult<()>,
+) -> AnyResult<Vec<ScriptLibraryItem>> {
+    let mut updated_scripts = Vec::new();
+    mio_core::ui_files::locked_cas_update_owned_file(
         path,
-        &bytes,
+        "http-filter-scripts.lock",
         MAX_SCRIPT_LIBRARY_BYTES,
         "脚本库",
+        |before| {
+            let mut library = match before {
+                Some(bytes) => {
+                    let parsed: StoredScriptPresetLibrary = serde_json::from_slice(&bytes)
+                        .with_context(|| format!("解析脚本库 JSON 失败：{}", path.display()))?;
+                    validate_stored_library(&parsed)?;
+                    parsed
+                }
+                None => StoredScriptPresetLibrary::default(),
+            };
+            mutate(&mut library.scripts)?;
+            validate_stored_library(&library)?;
+            let encoded = serde_json::to_vec_pretty(&library)?;
+            updated_scripts = library.scripts;
+            Ok(encoded)
+        },
     )?;
-    Ok(())
+    Ok(updated_scripts)
 }
 
 fn parse_imported_script_json(bytes: &[u8]) -> AnyResult<Vec<ScriptLibraryItem>> {
@@ -369,42 +384,40 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let mut next = self.extensions.script_library.scripts.clone();
         let prev_selected = self.extensions.script_library.selected_name.clone();
-        if let Some(prev) = &prev_selected
-            && prev != &name
-        {
-            if next.iter().any(|s| s.name == name) {
-                self.extensions.script_library.feedback =
-                    Some((false, format!("已存在名为「{name}」的脚本。")));
-                cx.notify();
-                return;
-            }
-            if let Some(existing) = next.iter_mut().find(|s| &s.name == prev) {
-                existing.name = name.clone();
-                existing.code = code.clone();
-            } else {
-                next.push(ScriptLibraryItem {
-                    name: name.clone(),
-                    code: code.clone(),
-                });
-            }
-        } else if let Some(existing) = next.iter_mut().find(|s| s.name == name) {
-            existing.code = code.clone();
-        } else {
-            next.push(ScriptLibraryItem {
-                name: name.clone(),
-                code: code.clone(),
-            });
-        }
-        let result = self
-            .extensions
-            .script_library
-            .resolved_path()
-            .and_then(|path| write_script_library_file(&path, &next));
+        let name_for_mutate = name.clone();
+        let code_for_mutate = code.clone();
+        let result = self.extensions.script_library.resolved_path().and_then(|path| {
+            update_script_library_file(&path, |scripts| {
+                if let Some(prev) = &prev_selected
+                    && prev != &name_for_mutate
+                {
+                    if scripts.iter().any(|s| s.name == name_for_mutate) {
+                        anyhow::bail!("已存在名为「{name_for_mutate}」的脚本。");
+                    }
+                    if let Some(existing) = scripts.iter_mut().find(|s| &s.name == prev) {
+                        existing.name = name_for_mutate;
+                        existing.code = code_for_mutate;
+                    } else {
+                        scripts.push(ScriptLibraryItem {
+                            name: name_for_mutate,
+                            code: code_for_mutate,
+                        });
+                    }
+                } else if let Some(existing) = scripts.iter_mut().find(|s| s.name == name_for_mutate) {
+                    existing.code = code_for_mutate;
+                } else {
+                    scripts.push(ScriptLibraryItem {
+                        name: name_for_mutate,
+                        code: code_for_mutate,
+                    });
+                }
+                Ok(())
+            })
+        });
         match result {
-            Ok(()) => {
-                self.extensions.script_library.scripts = next;
+            Ok(updated) => {
+                self.extensions.script_library.scripts = updated;
                 self.extensions.script_library.selected_name = Some(name.clone());
                 self.extensions.script_library.feedback =
                     Some((true, format!("已保存 脚本「{name}」到本地脚本库。")));
@@ -426,35 +439,37 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.ensure_script_library_loaded();
-        let mut next = self.extensions.script_library.scripts.clone();
-        let before = next.len();
-        next.retain(|item| item.name != name);
-        if next.len() == before {
-            return;
-        }
-        let result = self
-            .extensions
-            .script_library
-            .resolved_path()
-            .and_then(|path| write_script_library_file(&path, &next));
+        let name_for_mutate = name.clone();
+        let mut removed = false;
+        let result = self.extensions.script_library.resolved_path().and_then(|path| {
+            update_script_library_file(&path, |scripts| {
+                let before = scripts.len();
+                scripts.retain(|item| item.name != name_for_mutate);
+                removed = scripts.len() < before;
+                Ok(())
+            })
+        });
         match result {
-            Ok(()) => {
-                self.extensions.script_library.scripts = next;
-                if self.extensions.script_library.selected_name.as_deref() == Some(name.as_str()) {
-                    self.extensions.script_library.selected_name = None;
-                    self.extensions
-                        .script_library
-                        .name_input
-                        .update(cx, |inp, cx| inp.set_value("", window, cx));
-                    self.extensions
-                        .script_library
-                        .code_editor
-                        .update(cx, |ed, cx| ed.set_value("", window, cx));
+            Ok(updated) => {
+                self.extensions.script_library.scripts = updated;
+                if removed {
+                    if self.extensions.script_library.selected_name.as_deref() == Some(name.as_str())
+                    {
+                        self.extensions.script_library.selected_name = None;
+                        self.extensions
+                            .script_library
+                            .name_input
+                            .update(cx, |inp, cx| inp.set_value("", window, cx));
+                        self.extensions
+                            .script_library
+                            .code_editor
+                            .update(cx, |ed, cx| ed.set_value("", window, cx));
+                    }
+                    self.extensions.script_library.feedback =
+                        Some((true, format!("已删除 脚本「{name}」。")));
+                    self.error = None;
+                    self.status = format!("已删除 脚本「{name}」。");
                 }
-                self.extensions.script_library.feedback =
-                    Some((true, format!("已删除 脚本「{name}」。")));
-                self.error = None;
-                self.status = format!("已删除 脚本「{name}」。");
             }
             Err(err) => {
                 self.extensions.script_library.feedback =
@@ -509,25 +524,24 @@ impl Workbench {
                             }
                         };
                         this.ensure_script_library_loaded();
-                        let mut merged = this.extensions.script_library.scripts.clone();
                         let count = imported.len();
-                        for script in imported {
-                            if let Some(existing) =
-                                merged.iter_mut().find(|s| s.name == script.name)
-                            {
-                                existing.code = script.code;
-                            } else {
-                                merged.push(script);
-                            }
-                        }
-                        let save_res = this
-                            .extensions
-                            .script_library
-                            .resolved_path()
-                            .and_then(|p| write_script_library_file(&p, &merged));
+                        let save_res = this.extensions.script_library.resolved_path().and_then(|p| {
+                            update_script_library_file(&p, |merged| {
+                                for script in imported {
+                                    if let Some(existing) =
+                                        merged.iter_mut().find(|s| s.name == script.name)
+                                    {
+                                        existing.code = script.code;
+                                    } else {
+                                        merged.push(script);
+                                    }
+                                }
+                                Ok(())
+                            })
+                        });
                         match save_res {
-                            Ok(()) => {
-                                this.extensions.script_library.scripts = merged;
+                            Ok(updated) => {
+                                this.extensions.script_library.scripts = updated;
                                 this.extensions.script_library.feedback = Some((
                                     true,
                                     format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),

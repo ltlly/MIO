@@ -2,7 +2,7 @@ use crate::ProxyError;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rama::crypto::{
     cert::{
-        CertificateAuthorityData, CertificateIdentity, CertificateSubject,
+        CertificateAuthorityData, CertificateIdentity, CertificateSubject, CertificateValidity,
         GeneratedServerAuthConfig, LeafCertRequest, SelfSignedCaConfig, generate_server_auth,
     },
     dep::x509_parser::{self, extensions::GeneralName},
@@ -33,6 +33,9 @@ const CERTIFICATE_CACHE_LIMIT: usize = 1024;
 const CLIENT_TLS_CACHE_LIMIT: usize = 64;
 const CERTIFICATE_CACHE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_CUSTOM_CERT_CHAIN_LEN: usize = 16;
+const CA_CERT_NOT_BEFORE_SKEW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+const LEAF_CERT_LIFETIME: Duration = Duration::from_secs(180 * 24 * 60 * 60);
+const LEAF_CERT_NOT_BEFORE_SKEW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 pub(crate) fn shared_crypto_provider() -> &'static Arc<rustls::crypto::CryptoProvider> {
     static PROVIDER: OnceLock<Arc<rustls::crypto::CryptoProvider>> = OnceLock::new();
@@ -424,11 +427,14 @@ impl std::fmt::Debug for MitmAuthority {
 impl MitmAuthority {
     /// Performs key generation; call from a blocking task, never the UI thread.
     pub fn generate() -> Result<Self, ProxyError> {
+        let mut validity = SelfSignedCaConfig::default().validity;
+        validity.not_before_skew = CA_CERT_NOT_BEFORE_SKEW;
         let config = SelfSignedCaConfig {
             subject: CertificateSubject {
                 organisation_name: Some("MIO local interception".into()),
                 common_name: Some("MIO local CA".into()),
             },
+            validity,
             ..SelfSignedCaConfig::default()
         };
         let issuer = CertificateAuthorityData::generate(config).map_err(ProxyError::tls)?;
@@ -499,12 +505,23 @@ impl MitmAuthority {
         Ok(STANDARD.encode(digest))
     }
 
-    pub(crate) async fn server_config_with_options(
+    pub(crate) async fn connect_server_config(
         &self,
         host: &str,
         options: &ListenerTlsOptions,
+        observed_sni: Arc<std::sync::Mutex<Option<String>>>,
     ) -> Result<TlsServerConfig, ProxyError> {
         let name = crate::route::normalize_host(host);
+        if name.parse::<std::net::IpAddr>().is_ok() {
+            return Ok(TlsServerConfig::new().with_dynamic_config(Arc::new(
+                InvisibleSniCertificate {
+                    ca: self.clone(),
+                    options: options.clone(),
+                    fallback_host: name,
+                    observed_sni,
+                },
+            )));
+        }
         let config = self.resolve_rustls_server_config(&name, options).await?;
         let enforce_sni_match = matches!(options.cert_mode, ListenerCertMode::PerHostCaSigned);
         Ok(TlsServerConfig::new().with_dynamic_config(Arc::new(ConnectCertificate {
@@ -592,7 +609,7 @@ impl MitmAuthority {
                     let identity =
                         CertificateIdentity::try_from_host(&parsed_host).map_err(ProxyError::tls)?;
                     generate_server_auth(GeneratedServerAuthConfig::SelfSignedLeaf(
-                        LeafCertRequest::new(identity),
+                        leaf_cert_request(identity),
                     ))
                     .map_err(ProxyError::tls)?
                 }
@@ -697,6 +714,13 @@ fn parse_server_pem_pair(
     parse_pem_cert_chain_and_key(cert_bytes, key_bytes, MAX_CUSTOM_CERT_CHAIN_LEN, "服务端")
 }
 
+fn leaf_cert_request(identity: CertificateIdentity) -> LeafCertRequest {
+    let mut request = LeafCertRequest::new(identity);
+    request.config.validity =
+        CertificateValidity::new(LEAF_CERT_LIFETIME, LEAF_CERT_NOT_BEFORE_SKEW);
+    request
+}
+
 fn issue_ca_signed_leaf(
     issuer: &CertificateAuthorityData,
     normalized_host: &str,
@@ -704,7 +728,7 @@ fn issue_ca_signed_leaf(
     let host: Host = normalized_host.parse().map_err(ProxyError::tls)?;
     let identity = CertificateIdentity::try_from_host(&host).map_err(ProxyError::tls)?;
     let (mut chain, key) = issuer
-        .issue_leaf(LeafCertRequest::new(identity))
+        .issue_leaf(leaf_cert_request(identity))
         .map_err(ProxyError::tls)?;
     for ca_cert in issuer.certificate_chain() {
         if !chain
@@ -1702,6 +1726,33 @@ mod tests {
                 .await
                 .is_err(),
             "TLS 1.2 custom protocol filter must reject TLS 1.3-only server"
+        );
+    }
+
+    #[test]
+    fn generated_ca_and_leaf_certificates_apply_clock_skew_and_bounded_lifetime() {
+        let ca = MitmAuthority::generate().unwrap();
+        let ca_der = ca.certificate_der();
+        let (_, parsed_ca) = x509_parser::parse_x509_certificate(&ca_der).unwrap();
+        let ca_validity = parsed_ca.validity();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // At least 13 days of backdated clock skew before current time.
+        assert!(
+            now_secs - ca_validity.not_before.timestamp() >= 13 * 24 * 60 * 60,
+            "CA notBefore should tolerate client clock skew"
+        );
+
+        let (leaf_chain, _) = issue_ca_signed_leaf(&ca.issuer, "lab.example.invalid").unwrap();
+        let (_, parsed_leaf) = x509_parser::parse_x509_certificate(leaf_chain[0].as_ref()).unwrap();
+        let leaf_validity = parsed_leaf.validity();
+        assert!(now_secs - leaf_validity.not_before.timestamp() >= 13 * 24 * 60 * 60);
+        let span_secs = leaf_validity.not_after.timestamp() - leaf_validity.not_before.timestamp();
+        assert!(
+            span_secs <= 195 * 24 * 60 * 60,
+            "leaf lifetime must stay well under mobile/browser 397-day limit, got {span_secs}s"
         );
     }
 }

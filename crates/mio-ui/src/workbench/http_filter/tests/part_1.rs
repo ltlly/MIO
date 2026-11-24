@@ -28,6 +28,7 @@ fn http_filter_search_term_toggles_presets_revert_and_ime_guard(cx: &mut TestApp
     assert_eq!(
         applied.filter,
         HttpHistoryFilter {
+            hide_connect: true,
             mime_types: [true, true, true, false, true, false, true, true],
             extensions: HttpExtensionFilter::Hide(HIDDEN_EXTENSIONS.into()),
             search_term: "secret-token".into(),
@@ -43,7 +44,7 @@ fn http_filter_search_term_toggles_presets_revert_and_ime_guard(cx: &mut TestApp
             window.render_frame(cx);
             assert_eq!(
                 window.find("http-history-filter").label(),
-                Some("筛选设置：隐藏 CSS 与图像内容；隐藏指定扩展名；排除表达式 secret-token")
+                Some("筛选设置：隐藏 CONNECT；隐藏 CSS 与图像内容；隐藏指定扩展名；排除表达式 secret-token")
             );
         })
         .unwrap();
@@ -53,6 +54,7 @@ fn http_filter_search_term_toggles_presets_revert_and_ime_guard(cx: &mut TestApp
     cx.read(|cx| {
         let view = dialog.read(cx);
         assert!(view.draft.hide_without_response);
+        assert!(view.draft.hide_connect);
         assert!(view.draft.parameterized_only);
         assert_eq!(view.draft.status_classes, [false; 4]);
         assert_eq!(view.draft.extensions, HttpExtensionFilter::Any);
@@ -126,7 +128,7 @@ fn http_filter_search_term_toggles_presets_revert_and_ime_guard(cx: &mut TestApp
             window.render_frame(cx);
             assert_eq!(
                 window.find("http-history-filter").label(),
-                Some("筛选设置：隐藏 CSS 与图像内容；隐藏指定扩展名；匹配表达式 中文搜索词")
+                Some("筛选设置：隐藏 CONNECT；隐藏 CSS 与图像内容；隐藏指定扩展名；匹配表达式 中文搜索词")
             );
         })
         .unwrap();
@@ -182,7 +184,7 @@ fn http_filter_mime_types_listener_port_validation_presets_revert_and_viewport_b
             assert_eq!(window.find("http-filter-mode-settings").bounds().size, size(px(98.), px(21.)));
             assert_eq!(window.find("http-filter-mode-script").bounds().size, size(px(85.), px(21.)));
             let scale = window.scale_factor();
-            for id in ["http-filter-mime-html", "http-filter-mime-script", "http-filter-2xx"] {
+            for id in ["http-filter-hide-connect", "http-filter-mime-html", "http-filter-mime-script", "http-filter-2xx"] {
                 let check_bounds = window.find(id).bounds();
                 assert_eq!(window.find(id).checked(), Some(true));
                 assert!(window.painted_quads().iter().any(|quad| {
@@ -276,7 +278,7 @@ fn http_filter_mime_types_listener_port_validation_presets_revert_and_viewport_b
             window.render_frame(cx);
             assert_eq!(
                 window.find("http-history-filter").label(),
-                Some("筛选设置：按 MIME 类型筛选；隐藏指定扩展名；Listener 端口 8080")
+                Some("筛选设置：隐藏 CONNECT；按 MIME 类型筛选；隐藏指定扩展名；Listener 端口 8080")
             );
         })
         .unwrap();
@@ -334,6 +336,7 @@ fn http_filter_convert_to_script_validation_and_script_mode_apply(cx: &mut TestA
         let script = view.filter_script_editor.read(cx).value();
         assert!(script.contains("in_scope"));
         assert!(script.contains("has_response"));
+        assert!(script.contains("CONNECT"));
     });
 
     handle
@@ -372,6 +375,7 @@ fn http_filter_convert_to_script_validation_and_script_mode_apply(cx: &mut TestA
     );
     assert!(!applied.filter.in_scope_only);
     assert!(!applied.filter.hide_without_response);
+    assert!(!applied.filter.hide_connect);
     reply(&f, &applied, rows, cx);
     assert!(!cx.read(|cx| cx.windows().contains(&handle)));
 

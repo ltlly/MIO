@@ -281,6 +281,10 @@ impl State {
         })
     }
 
+    fn listener_locks_dir(&self) -> Option<PathBuf> {
+        listener_lock::resolve_listener_locks_dir(self.preferences_path.as_deref())
+    }
+
     async fn start_proxy_listeners(
         &mut self,
         project: ProjectKey,
@@ -290,6 +294,7 @@ impl State {
         emit_state_on_failure: bool,
     ) -> Result<()> {
         let authority = self.authority().await?;
+        let locks_dir = self.listener_locks_dir();
         let (plugin_flow_hook, plugin_ws_hook) = self.build_proxy_plugin_hooks();
         let shared_connections = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
         let shared_requests = Arc::new(tokio::sync::Semaphore::new(PROXY_MAX_CONNECTIONS));
@@ -307,7 +312,27 @@ impl State {
             workspace.scope.clone(),
         )?;
         let mut handles: Vec<(Uuid, ProxyHandle)> = Vec::new();
+        let mut locks: Vec<(Uuid, listener_lock::ActiveListenerLock)> = Vec::new();
         for (listener_cfg, bind) in desired_listeners {
+            let acquired_lock = match listener_lock::acquire_listener_lock(locks_dir.as_deref(), *bind) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    for (_, started) in &handles {
+                        started.request_stop();
+                    }
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    for (_, started) in &mut handles {
+                        let _ = tokio::time::timeout_at(deadline, started.stop()).await;
+                    }
+                    drop(locks);
+                    self.proxy.clear_handles();
+                    if emit_state_on_failure {
+                        self.ws_repeater.set_injectors(None);
+                        self.proxy_state().await;
+                    }
+                    return Err(error);
+                }
+            };
             let mut config = ProxyConfig::new(authority.clone());
             config.network.listen = *bind;
             config.limits.max_connections = PROXY_MAX_CONNECTIONS;
@@ -355,8 +380,14 @@ impl State {
             config.hooks.async_flow_hook = plugin_flow_hook.clone();
             config.hooks.async_websocket_hook = plugin_ws_hook.clone();
             match mio_proxy::start(config, project, self.proxy.sender.clone()).await {
-                Ok(proxy) => handles.push((listener_cfg.id, proxy)),
+                Ok(proxy) => {
+                    handles.push((listener_cfg.id, proxy));
+                    if let Some(lock) = acquired_lock {
+                        locks.push((listener_cfg.id, lock));
+                    }
+                }
                 Err(error) => {
+                    drop(acquired_lock);
                     for (_, started) in &handles {
                         started.request_stop();
                     }
@@ -364,12 +395,13 @@ impl State {
                     for (_, started) in &mut handles {
                         let _ = tokio::time::timeout_at(deadline, started.stop()).await;
                     }
+                    drop(locks);
                     self.proxy.clear_handles();
                     if emit_state_on_failure {
                         self.ws_repeater.set_injectors(None);
                         self.proxy_state().await;
                     }
-                    return Err(error.into());
+                    return Err(format_proxy_start_error(*bind, error));
                 }
             }
         }
@@ -379,6 +411,7 @@ impl State {
             self.proxy.primary_id = Some(first_id);
         }
         self.proxy.extra.extend(handles);
+        self.proxy.listener_locks.extend(locks);
         self.ws_repeater
             .set_injectors(self.proxy.websocket_injectors());
         self.proxy_state().await;
@@ -395,6 +428,9 @@ impl State {
         self.require_saved()?;
         ensure!(!self.quiesced, "正在保存并切换项目；监听未启动");
         ensure!(!self.proxy.is_running(), "Proxy 已在监听");
+        if !self.preferences.is_isolated() {
+            let _ = self.preferences.query();
+        }
         let workspace = self.store.metadata().workspace()?;
         let client_certificates = self
             .compile_client_certificates(&workspace.client_certificates)
@@ -456,6 +492,7 @@ impl State {
                 let _ = tokio::time::timeout_at(deadline, primary.stop()).await;
                 stopped_any = true;
             }
+            self.proxy.listener_locks.remove(&listener_id);
             if !self.proxy.extra.is_empty() {
                 let (next_id, next_handle) = self.proxy.extra.remove(0);
                 self.proxy.primary = Some(next_handle);
@@ -472,6 +509,7 @@ impl State {
             let (_, mut handle) = self.proxy.extra.remove(pos);
             handle.request_stop();
             let _ = tokio::time::timeout_at(deadline, handle.stop()).await;
+            self.proxy.listener_locks.remove(&listener_id);
             stopped_any = true;
         }
         ensure!(stopped_any, "未找到正在运行的指定 Proxy 监听器");
@@ -489,15 +527,35 @@ impl State {
 
     pub(super) async fn reload_running_proxy_from_workspace(
         &mut self,
+        prev_workspace: Option<&Workspace>,
         workspace: &Workspace,
     ) -> Result<()> {
         if !self.proxy.is_running() {
             return Ok(());
         }
+        if !self.preferences.is_isolated() {
+            let _ = self.preferences.query();
+        }
         let net = self.build_proxy_runtime_net_config(workspace, false)?;
 
+        let active_listeners = self.proxy.active_listeners();
         let current_addrs: Vec<SocketAddr> =
-            self.proxy.handles().map(ProxyHandle::address).collect();
+            active_listeners.iter().map(|(_, addr)| *addr).collect();
+        let prev_listeners: Vec<(ProxyListenerConfig, SocketAddr)> = active_listeners
+            .iter()
+            .map(|(id, addr)| {
+                let cfg = prev_workspace
+                    .and_then(|ws| ws.proxy_listeners.iter().find(|l| l.id == *id))
+                    .cloned()
+                    .unwrap_or_else(|| ProxyListenerConfig {
+                        id: *id,
+                        enabled: true,
+                        bind_address: addr.to_string(),
+                        ..ProxyListenerConfig::default()
+                    });
+                (cfg, *addr)
+            })
+            .collect();
 
         let listeners = workspace.effective_proxy_listeners();
         let has_explicit_listeners = !workspace.proxy_listeners.is_empty();
@@ -528,16 +586,56 @@ impl State {
                 return Ok(());
             };
 
+        let locks_dir = self.listener_locks_dir();
+        for (_, desired_bind) in &desired_listeners {
+            if desired_bind.port() != 0
+                && !current_addrs
+                    .iter()
+                    .any(|held| crate::proxy_listener_addrs_overlap(*held, *desired_bind))
+            {
+                let test_lock =
+                    listener_lock::acquire_listener_lock(locks_dir.as_deref(), *desired_bind)?;
+                drop(test_lock);
+            }
+        }
+
         self.stop_proxy().await?;
         let project = self.project;
-        Box::pin(self.start_proxy_listeners(
+        if let Err(error) = Box::pin(self.start_proxy_listeners(
             project,
             workspace,
             &net,
             &desired_listeners,
-            true,
+            prev_listeners.is_empty(),
         ))
         .await
+        {
+            if !prev_listeners.is_empty() {
+                if let Some(prev_ws) = prev_workspace
+                    && let Ok(prev_net) = self.build_proxy_runtime_net_config(prev_ws, false)
+                {
+                    let _ = Box::pin(self.start_proxy_listeners(
+                        project,
+                        prev_ws,
+                        &prev_net,
+                        &prev_listeners,
+                        true,
+                    ))
+                    .await;
+                } else {
+                    let _ = Box::pin(self.start_proxy_listeners(
+                        project,
+                        workspace,
+                        &net,
+                        &prev_listeners,
+                        true,
+                    ))
+                    .await;
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn build_server_cert_callback(
@@ -552,6 +650,59 @@ impl State {
         project: ProjectKey,
     ) -> mio_proxy::ClientTlsFailureCallback {
         self.tls.build_client_tls_failure_callback(project)
+    }
+
+    pub(super) async fn start_default_proxy_with_port_fallback(
+        &mut self,
+        project: ProjectKey,
+        default_addr: SocketAddr,
+        max_offset: u16,
+    ) -> Result<()> {
+        match self
+            .start_proxy_with_override(project, default_addr, Some(default_addr))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(first_err) if listener_lock::is_addr_in_use_or_conflict(&first_err) => {
+                let mut bound = None;
+                for offset in 1..=max_offset {
+                    let Some(port) = default_addr.port().checked_add(offset) else {
+                        break;
+                    };
+                    let candidate = SocketAddr::new(default_addr.ip(), port);
+                    match self
+                        .start_proxy_with_override(project, candidate, Some(candidate))
+                        .await
+                    {
+                        Ok(()) => {
+                            bound = Some(candidate);
+                            break;
+                        }
+                        Err(err) if listener_lock::is_addr_in_use_or_conflict(&err) => continue,
+                        Err(err) => return Err(err),
+                    }
+                }
+                let Some(candidate) = bound else {
+                    return Err(first_err);
+                };
+                let mut workspace = self.store.metadata().workspace()?;
+                workspace.proxy_listeners = vec![ProxyListenerConfig {
+                    id: Uuid::from_u128(1),
+                    enabled: true,
+                    bind_address: candidate.to_string(),
+                    ..ProxyListenerConfig::default()
+                }];
+                workspace.revision = workspace.revision.saturating_add(1);
+                self.store.metadata_mut().save_workspace(&workspace)?;
+                self.emit(Event::WorkspaceChanged {
+                    project,
+                    workspace,
+                })
+                .await;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub(super) async fn open_configured_browser(
@@ -591,25 +742,38 @@ impl State {
         self.sessions
             .runtime
             .stage_browser_navigation_session(&target_url, &session)?;
-        let mut intercept_disabled = false;
-        if self.proxy.intercept_requests || self.proxy.intercept_responses {
+        let prev_intercept = (self.proxy.intercept_requests, self.proxy.intercept_responses);
+        let intercept_disabled = prev_intercept.0 || prev_intercept.1;
+        if intercept_disabled {
             self.proxy.set_intercept(false, false);
-            intercept_disabled = true;
         }
         if self.proxy.primary.is_none() {
             let workspace = self.store.metadata().workspace()?;
-            let listeners = workspace.effective_proxy_listeners();
-            let primary_addr = listeners
-                .iter()
-                .find(|l| l.enabled)
-                .or_else(|| listeners.first())
-                .map(|l| l.bind_address.trim())
-                .unwrap_or(DEFAULT_PROXY_LISTENER);
-            let listen: SocketAddr = primary_addr
-                .parse()
-                .context("Proxy 监听地址不是合法的 IP:Port")?;
-            self.start_proxy_with_override(project, listen, None)
-                .await?;
+            let start_result: Result<()> = if workspace.proxy_listeners.is_empty() {
+                let default_addr: SocketAddr = DEFAULT_PROXY_LISTENER
+                    .parse()
+                    .context("Proxy 默认监听地址无效")?;
+                self.start_default_proxy_with_port_fallback(project, default_addr, 100)
+                    .await
+            } else {
+                let listeners = workspace.effective_proxy_listeners();
+                let primary_addr = listeners
+                    .iter()
+                    .find(|l| l.enabled)
+                    .or_else(|| listeners.first())
+                    .map(|l| l.bind_address.trim())
+                    .unwrap_or(DEFAULT_PROXY_LISTENER);
+                let listen: SocketAddr = primary_addr
+                    .parse()
+                    .context("Proxy 监听地址不是合法的 IP:Port")?;
+                self.start_proxy_with_override(project, listen, None)
+                    .await
+            };
+            if let Err(err) = start_result {
+                self.proxy.intercept_requests = prev_intercept.0;
+                self.proxy.intercept_responses = prev_intercept.1;
+                return Err(err);
+            }
         } else {
             self.sync_proxy_plugin_hooks();
             if intercept_disabled {
@@ -631,16 +795,17 @@ impl State {
             }
         };
         let profile_folder = browser_profile_folder_name(profile_prefix, address);
+        let prefs_path = self.preferences_path.clone();
         let executable = tokio::task::spawn_blocking(move || -> Result<String> {
             let identity_dir = match identity_dir_override {
                 Some(dir) => dir,
-                None => authority::default_identity_dir()?,
+                None => authority::resolved_identity_dir(prefs_path.as_deref())?,
             };
             let base_dir = identity_dir
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(&identity_dir);
-            let profile_dir = base_dir.join(profile_folder);
+            let profile_dir = resolve_ca_scoped_profile_dir(base_dir, &profile_folder, &spki_base64);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt as _;
@@ -653,6 +818,7 @@ impl State {
             {
                 std::fs::create_dir_all(&profile_dir)?;
             }
+            authority::export(spki_base64.as_bytes(), &profile_dir.join(".mio-ca-spki"))?;
             authority::export(&ca_der, &profile_dir.join("mio-ca.cer"))?;
             authority::export(ca_pem.as_bytes(), &profile_dir.join("mio-ca.pem"))?;
             let bin = match executable_override {
@@ -681,14 +847,57 @@ impl State {
     }
 }
 
+fn format_proxy_start_error(bind: SocketAddr, error: mio_proxy::ProxyError) -> anyhow::Error {
+    match &error {
+        mio_proxy::ProxyError::Network(msg)
+            if msg.contains("已被占用")
+                || msg.contains("已在占用")
+                || msg.contains("Address already in use")
+                || msg.contains("Only one usage")
+                || msg.contains("os error 48")
+                || msg.contains("os error 98")
+                || msg.contains("os error 10048") =>
+        {
+            anyhow::Error::new(listener_lock::ListenerConflictError(
+                listener_lock::listener_conflict_message(bind),
+            ))
+        }
+        _ => error.into(),
+    }
+}
+
+pub(crate) fn resolve_ca_scoped_profile_dir(
+    base_dir: &Path,
+    profile_folder: &str,
+    spki_base64: &str,
+) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+
+    let base_profile_dir = base_dir.join(profile_folder);
+    let spki_marker = base_profile_dir.join(".mio-ca-spki");
+    if let Ok(existing) = std::fs::read_to_string(&spki_marker)
+        && existing.trim() != spki_base64
+    {
+        let digest = Sha256::digest(spki_base64.as_bytes());
+        let short_tag: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        return base_dir.join(format!("{profile_folder}-ca-{short_tag}"));
+    }
+    base_profile_dir
+}
+
 pub(crate) fn browser_profile_folder_name(prefix: &str, address: SocketAddr) -> String {
     if address.port() == 8080 && (address.ip().is_loopback() || address.ip().is_unspecified()) {
         prefix.to_owned()
-    } else if address.is_ipv6() {
-        let sanitized_ip = address.ip().to_string().replace(':', "_");
-        format!("{prefix}-{sanitized_ip}-{}", address.port())
+    } else if address.ip().is_loopback() || address.ip().is_unspecified() {
+        if address.is_ipv6() {
+            let sanitized_ip = address.ip().to_string().replace(':', "_");
+            format!("{prefix}-{sanitized_ip}-{}", address.port())
+        } else {
+            format!("{prefix}-{}", address.port())
+        }
     } else {
-        format!("{prefix}-{}", address.port())
+        let sanitized_ip = address.ip().to_string().replace([':', '.'], "_");
+        format!("{prefix}-{sanitized_ip}-{}", address.port())
     }
 }
 

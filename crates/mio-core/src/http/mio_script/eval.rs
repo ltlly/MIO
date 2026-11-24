@@ -510,6 +510,17 @@ pub fn execute_http_match_replace_script(
     Ok(changed)
 }
 
+fn parse_filter_url(method: &str, url: &str) -> Result<Url> {
+    if method.eq_ignore_ascii_case("CONNECT")
+        && !url.contains("://")
+        && let Ok(parsed) = Url::parse(&format!("https://{url}/"))
+        && parsed.host_str().is_some()
+    {
+        return Ok(parsed);
+    }
+    Url::parse(url).context("MioScript 请求 URL 无效")
+}
+
 /// Evaluates an HTTP filter script against `FilterScriptInput`.
 pub fn eval_http_filter_script_input(script: &str, input: &FilterScriptInput<'_>) -> Result<bool> {
     let (highlighted, highlight_name, highlight_color_unknown) = match input.highlight {
@@ -534,9 +545,17 @@ pub fn eval_http_filter_script_input(script: &str, input: &FilterScriptInput<'_>
             parse_imported_request(raw, Some(input.url)).context("MioScript 历史请求无法解析")?;
         request
     } else {
+        let normalized_url = if !input.url.is_empty()
+            && input.method.eq_ignore_ascii_case("CONNECT")
+            && !input.url.contains("://")
+        {
+            parse_filter_url(input.method, input.url)?.into()
+        } else {
+            input.url.into()
+        };
         HttpRequest {
             method: input.method.into(),
-            url: input.url.into(),
+            url: normalized_url,
             version: HttpVersion::Http11,
             headers: Vec::new(),
             body: Vec::new(),
@@ -572,7 +591,7 @@ pub fn eval_http_filter_script_input(script: &str, input: &FilterScriptInput<'_>
         map.insert("method".into(), input.method.into());
         map.insert("url".into(), input.url.into());
         if !input.url.is_empty() {
-            let parsed_url = Url::parse(input.url).context("MioScript 请求 URL 无效")?;
+            let parsed_url = parse_filter_url(input.method, input.url)?;
             let path_with_query = match parsed_url.query() {
                 Some(q) if !q.is_empty() => format!("{}?{q}", parsed_url.path()),
                 _ => parsed_url.path().to_owned(),
@@ -605,7 +624,7 @@ pub fn eval_http_filter_script_input(script: &str, input: &FilterScriptInput<'_>
     response_data.insert("length".into(), i64::try_from(input.length)?.into());
 
     if !input.url.is_empty() {
-        let _ = Url::parse(input.url)?;
+        let _ = parse_filter_url(input.method, input.url)?;
     }
     let parameterized =
         crate::store::ext_archive::http_query::filters::url_has_parameters(input.url, cancel)?
@@ -792,6 +811,9 @@ pub fn convert_http_filter_to_script(filter: &HttpHistoryFilter) -> String {
     }
     if filter.hide_without_response {
         conditions.push("has_response".into());
+    }
+    if filter.hide_connect {
+        conditions.push("!regex_matches(request.method, \"(?i)^CONNECT$\")".into());
     }
     if filter.parameterized_only {
         conditions.push("parameterized".into());

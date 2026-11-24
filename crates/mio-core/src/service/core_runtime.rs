@@ -27,6 +27,14 @@ impl Runtime {
         Self::start_inner(Some(path), ipc)
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_app_with_preferences_and_ipc(
+        path: std::path::PathBuf,
+        ipc_path: std::path::PathBuf,
+    ) -> Result<(Self, Client)> {
+        Self::start_inner(Some(path), Some((ipc_path, false, false)))
+    }
+
     fn start_inner(
         preferences_path: Option<std::path::PathBuf>,
         ipc_spec: Option<(std::path::PathBuf, bool, bool)>,
@@ -57,6 +65,7 @@ impl Runtime {
                 );
                 match state {
                     Ok(mut state) => {
+                        let mut bound_ipc_path = None;
                         if let Some((sock_path, strict_parent, must_succeed)) = ipc_spec {
                             let _enter = runtime.enter();
                             match ai_ipc::start_ipc_server(&sock_path, strict_parent, &state.cancel)
@@ -64,15 +73,30 @@ impl Runtime {
                                 Ok((server, rx)) => {
                                     state.ai_ipc.server = Some(server);
                                     state.ai_ipc.rx = Some(rx);
+                                    bound_ipc_path = Some(sock_path);
                                 }
                                 Err(error) if must_succeed => {
                                     let _ = ready.send(Err(error.to_string()));
                                     return Err(error);
                                 }
-                                Err(_) => {}
+                                Err(_) => {
+                                    let fallback = ai_ipc::instance_ipc_socket_path_near(
+                                        &sock_path,
+                                        std::process::id(),
+                                    );
+                                    if let Ok((server, rx)) = ai_ipc::start_ipc_server(
+                                        &fallback,
+                                        strict_parent,
+                                        &state.cancel,
+                                    ) {
+                                        state.ai_ipc.server = Some(server);
+                                        state.ai_ipc.rx = Some(rx);
+                                        bound_ipc_path = Some(fallback);
+                                    }
+                                }
                             }
                         }
-                        let _ = ready.send(Ok::<_, String>(()));
+                        let _ = ready.send(Ok::<Option<std::path::PathBuf>, String>(bound_ipc_path));
                         let result = runtime.block_on(Box::pin(state.run(receiver)));
                         runtime.shutdown_timeout(Duration::from_secs(5));
                         result
@@ -84,7 +108,7 @@ impl Runtime {
                 }
             })?;
         match initialized.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok((
+            Ok(Ok(ipc_socket_path)) => Ok((
                 Self {
                     cancel: cancel.clone(),
                     worker: Some(worker),
@@ -93,6 +117,7 @@ impl Runtime {
                     commands,
                     events: event_receiver,
                     shutdown: cancel,
+                    ipc_socket_path,
                 },
             )),
             error => {
@@ -221,7 +246,7 @@ impl State {
             .is_some_and(|value| !value.is_empty())
         {
             crate::plugins::PluginPreferencesStore::from_env_or_memory()
-        } else if let Some(user_pref_path) = preferences_path {
+        } else if let Some(user_pref_path) = preferences_path.as_deref() {
             crate::plugins::PluginPreferencesStore::new(Some(
                 user_pref_path.with_file_name("plugin-preferences.json"),
             ))
@@ -230,6 +255,7 @@ impl State {
         };
         Ok(Self {
             preferences,
+            preferences_path,
             user_level_connections_cache: UserLevelConnectionsCache::default(),
             project,
             project_lock: None,

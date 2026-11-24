@@ -57,6 +57,7 @@ pub(crate) fn fixture(cx: &mut TestAppContext, tabs: Vec<WorkTab>, capacity: usi
                             commands: commands_tx,
                             events: events_rx,
                             shutdown: CancellationToken::new(),
+                            ipc_socket_path: None,
                         },
                         window,
                         cx,

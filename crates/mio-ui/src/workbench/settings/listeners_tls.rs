@@ -158,7 +158,14 @@ impl ListenersTlsUi {
                         this.state.proxy_listeners = view.workspace.effective_proxy_listeners();
                         this.state.active_proxy_address = view.proxy_address;
                         this.state.active_proxy_listeners = view.proxy_listeners_bound.clone();
+                        this.state.proxy_busy = view.proxy_busy;
+                        this.state
+                            .last_ca_fingerprint
+                            .clone_from(&view.last_ca_fingerprint);
                         this.state.observed_server_certs = view.observed_server_certs.clone();
+                        if view.proxy_address.is_some() {
+                            this.listeners_tls.listener_error = None;
+                        }
                         if project_changed {
                             this.listeners_tls.selected_index = None;
                             this.listeners_tls.listener_error = None;

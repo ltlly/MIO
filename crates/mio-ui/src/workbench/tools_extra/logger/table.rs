@@ -825,8 +825,8 @@ impl Workbench {
             .unwrap_or_default();
         let req_preview = String::from_utf8_lossy(&req_raw[..req_raw.len().min(4096)]);
         let resp_preview = String::from_utf8_lossy(&resp_raw[..resp_raw.len().min(4096)]);
-        let ipc_path = mio_core::env_ipc_socket_path()
-            .unwrap_or_else(mio_core::default_ipc_socket_path)
+        let ipc_path = self
+            .effective_ipc_socket_path()
             .display()
             .to_string();
         let mut ctx_buf = format!(

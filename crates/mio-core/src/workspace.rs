@@ -12,7 +12,7 @@ use crate::{
 mod scope;
 mod validation;
 pub use validation::{
-    validate_destination_glob_pattern, validate_listener_custom_pem,
+    proxy_listener_addrs_overlap, validate_destination_glob_pattern, validate_listener_custom_pem,
     validate_listener_specific_hostname, validate_redirect_host,
 };
 

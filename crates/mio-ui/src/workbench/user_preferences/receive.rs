@@ -219,7 +219,7 @@ impl Workbench {
         cx.notify();
     }
 
-    fn apply_confirmed_workbench_preferences(
+    pub(in crate::workbench) fn apply_confirmed_workbench_preferences(
         &mut self,
         auto_expand_inspector: bool,
         cx: &mut Context<Self>,

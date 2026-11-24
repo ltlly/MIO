@@ -433,7 +433,11 @@ pub struct DigestRequest<'a> {
 impl DigestChallenge {
     pub fn parse_from_header(raw: &str) -> Option<Self> {
         let trimmed = raw.trim();
-        let rest = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("digest ") {
+        let rest = if trimmed
+            .as_bytes()
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"digest "))
+        {
             &trimmed[7..]
         } else {
             return None;
@@ -652,7 +656,11 @@ pub struct NtlmType2Challenge {
 impl NtlmType2Challenge {
     pub fn parse_from_header(raw: &str) -> Result<Self, ProxyError> {
         let trimmed = raw.trim();
-        let token = if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("ntlm ") {
+        let token = if trimmed
+            .as_bytes()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"ntlm "))
+        {
             trimmed[5..].trim()
         } else {
             return Err(ProxyError::invalid("缺少 NTLM Type 2 Challenge 令牌"));
@@ -957,5 +965,11 @@ mod tests {
             build_ntlm_type3_header_value(&parsed, &creds, true, [0xaa; 8], 130_000_000_000);
         assert!(type3_v1.starts_with("NTLM ") && type3_v2.starts_with("NTLM "));
         assert_ne!(type3_v1, type3_v2);
+    }
+
+    #[test]
+    fn digest_and_ntlm_challenge_parsers_do_not_panic_on_multibyte_utf8() {
+        assert!(DigestChallenge::parse_from_header("认证头中文测试").is_none());
+        assert!(NtlmType2Challenge::parse_from_header("认证头中文测试").is_err());
     }
 }

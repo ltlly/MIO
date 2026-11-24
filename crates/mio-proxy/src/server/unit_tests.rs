@@ -492,3 +492,246 @@ async fn invisible_tls_respects_ssl_passthrough_for_matching_sni() {
     handle.stop().await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), origin_task).await;
 }
+
+#[test]
+fn tunnel_prefix_classifier_and_authority_formatter_handle_edge_cases() {
+    assert!(listener::looks_like_plain_http_prefix(
+        b"GET /p2a HTTP/1.1\r\nHost: lab-plain.invalid\r\n\r\n"
+    ));
+    assert!(listener::looks_like_plain_http_prefix(
+        b"POST /submit HTTP/1.0\r\n"
+    ));
+    assert!(listener::looks_like_plain_http_prefix(b"PRI * HTTP/2.0\r\n"));
+    assert!(listener::looks_like_plain_http_prefix(b"GET"));
+    assert!(listener::looks_like_plain_http_prefix(b"OPTIONS "));
+
+    assert!(!listener::looks_like_plain_http_prefix(b""));
+    assert!(!listener::looks_like_plain_http_prefix(&[0x16, 0x03, 0x01]));
+    assert!(!listener::looks_like_plain_http_prefix(b"\x01\x02\x03\x04RAW\n"));
+    assert!(!listener::looks_like_plain_http_prefix(b"1234 /path"));
+    assert!(!listener::looks_like_plain_http_prefix(b"GET \x00/path"));
+    assert!(!listener::looks_like_plain_http_prefix(
+        b"ABCDEFGHIJKLMNOPQ"
+    ));
+
+    assert_eq!(
+        listener::format_tunnel_authority("localhost", 443, 443),
+        "localhost"
+    );
+    assert_eq!(
+        listener::format_tunnel_authority("localhost", 8443, 443),
+        "localhost:8443"
+    );
+    assert_eq!(
+        listener::format_tunnel_authority("127.0.0.1", 80, 80),
+        "127.0.0.1"
+    );
+    assert_eq!(
+        listener::format_tunnel_authority("[::1]", 8080, 80),
+        "[::1]:8080"
+    );
+    assert_eq!(
+        listener::format_tunnel_authority("::1", 443, 443),
+        "[::1]"
+    );
+}
+
+#[tokio::test]
+async fn set_authority_hot_swaps_cert_portal_and_leaf_signer_without_rebind() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn fetch_ca_der(addr: SocketAddr) -> Vec<u8> {
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"GET http://mio/cert HTTP/1.1\r\nHost: mio\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        conn.read_to_end(&mut raw).await.unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        raw[split..].to_vec()
+    }
+
+    async fn connect_tunnel(proxy_addr: SocketAddr, origin_port: u16) -> tokio::net::TcpStream {
+        let mut tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        tcp.write_all(
+            format!("CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\nHost: 127.0.0.1:{origin_port}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut resp = [0u8; 512];
+        let n = tcp.read(&mut resp).await.unwrap();
+        assert!(std::str::from_utf8(&resp[..n]).unwrap().contains("200"));
+        tcp
+    }
+
+    fn tls_connector_for_ca(ca: &MitmAuthority) -> tokio_rustls::TlsConnector {
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(rama::crypto::pki_types::CertificateDer::from(
+                ca.certificate_der(),
+            ))
+            .unwrap();
+        let tls_cfg = Arc::new(
+            tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(
+                tokio_rustls::rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+        );
+        tokio_rustls::TlsConnector::from(tls_cfg)
+    }
+
+    let origin_cert = rcgen::generate_simple_self_signed(["lab.example.invalid".to_owned()]).unwrap();
+    let origin_cert_der =
+        tokio_rustls::rustls::pki_types::CertificateDer::from(origin_cert.cert.der().to_vec());
+    let origin_key_der = tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
+        tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
+            origin_cert.signing_key.serialize_der(),
+        ),
+    );
+    let origin_tls = Arc::new(
+        tokio_rustls::rustls::ServerConfig::builder_with_provider(Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![origin_cert_der], origin_key_der)
+        .unwrap(),
+    );
+    let acceptor = tokio_rustls::TlsAcceptor::from(origin_tls);
+
+    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = origin.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                if tls.read(&mut buf).await.unwrap_or(0) > 0 {
+                    let _ = tls
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                        .await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+
+    let ca1 = MitmAuthority::generate().unwrap();
+    let ca2 = MitmAuthority::generate().unwrap();
+    assert_ne!(ca1.certificate_der(), ca2.certificate_der());
+
+    let mut config = ProxyConfig::new(ca1.clone());
+    config.network.listen = "127.0.0.1:0".parse().unwrap();
+    config.tls.upstream.trust = crate::tls::UpstreamTls::Insecure;
+    config.network.hostname_overrides =
+        Arc::from([(String::from("lab.example.invalid"), origin_addr.ip())]);
+    let project = ProjectKey {
+        id: Uuid::new_v4(),
+        generation: 1,
+    };
+    let (events_tx, _events_rx) = mpsc::channel(16);
+    let mut handle = start(config, project, events_tx).await.unwrap();
+    let proxy_addr = handle.address();
+
+    assert_eq!(fetch_ca_der(proxy_addr).await, ca1.certificate_der());
+
+    handle.set_authority(ca2.clone());
+    assert_eq!(handle.address(), proxy_addr, "hot swap must keep same port");
+    assert_eq!(fetch_ca_der(proxy_addr).await, ca2.certificate_der());
+
+    let server_name = rama::crypto::pki_types::ServerName::try_from("lab.example.invalid").unwrap();
+    let tcp_old = connect_tunnel(proxy_addr, origin_addr.port()).await;
+    assert!(
+        tls_connector_for_ca(&ca1)
+            .connect(server_name.clone(), tcp_old)
+            .await
+            .is_err(),
+        "stale CA must no longer validate leaf after hot swap"
+    );
+
+    let tcp_new = connect_tunnel(proxy_addr, origin_addr.port()).await;
+    let mut tls = tls_connector_for_ca(&ca2)
+        .connect(server_name, tcp_new)
+        .await
+        .unwrap();
+    tls.write_all(b"GET /hot HTTP/1.1\r\nHost: lab.example.invalid\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut body = Vec::new();
+    let _ = tls.read_to_end(&mut body).await;
+    assert!(std::str::from_utf8(&body).unwrap().contains("ok"));
+
+    handle.stop().await.unwrap();
+    origin_task.abort();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_proxy_bind_rejects_wildcard_specific_overlap_and_allows_time_wait() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let project = ProjectKey {
+        id: Uuid::new_v4(),
+        generation: 1,
+    };
+
+    // Hold 0.0.0.0:<ephemeral>, then verify 127.0.0.1:<same port> is rejected.
+    let mut wild_cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    wild_cfg.network.listen = "0.0.0.0:0".parse().unwrap();
+    let (tx1, _rx1) = mpsc::channel(4);
+    let mut wild_handle = start(wild_cfg, project, tx1).await.unwrap();
+    let shared_port = wild_handle.address().port();
+
+    let mut loop_cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    loop_cfg.network.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, shared_port));
+    let (tx2, _rx2) = mpsc::channel(4);
+    let Err(err) = start(loop_cfg, project, tx2).await else {
+        panic!("expected loopback overlap with wildcard listener to fail");
+    };
+    assert!(
+        matches!(err, ProxyError::Network(_)),
+        "expected network AddrInUse error, got {err}"
+    );
+    wild_handle.stop().await.unwrap();
+
+    // Hold 127.0.0.1:<port>, then verify 0.0.0.0:<same port> is rejected.
+    let mut loop_cfg2 = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    loop_cfg2.network.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, shared_port));
+    let (tx3, _rx3) = mpsc::channel(4);
+    let mut loop_handle = start(loop_cfg2, project, tx3).await.unwrap();
+
+    // Create an active client connection + close to leave a TIME_WAIT socket after stop().
+    let mut cli = tokio::net::TcpStream::connect(loop_handle.address())
+        .await
+        .unwrap();
+    let _ = cli.shutdown().await;
+    drop(cli);
+
+    let mut wild_cfg2 = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    wild_cfg2.network.listen = SocketAddr::from((Ipv4Addr::UNSPECIFIED, shared_port));
+    let (tx4, _rx4) = mpsc::channel(4);
+    let Err(err2) = start(wild_cfg2, project, tx4).await else {
+        panic!("expected wildcard overlap with loopback listener to fail");
+    };
+    assert!(
+        matches!(err2, ProxyError::Network(_)),
+        "expected wildcard overlap error, got {err2}"
+    );
+
+    loop_handle.stop().await.unwrap();
+
+    // Rebinding the same loopback address right after stop (with TIME_WAIT sockets) must succeed.
+    let mut rebind_cfg = ProxyConfig::new(MitmAuthority::generate().unwrap());
+    rebind_cfg.network.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, shared_port));
+    let (tx5, _rx5) = mpsc::channel(4);
+    let mut rebind_handle = start(rebind_cfg, project, tx5).await.unwrap();
+    rebind_handle.stop().await.unwrap();
+}

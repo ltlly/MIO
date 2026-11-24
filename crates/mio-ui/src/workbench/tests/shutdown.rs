@@ -75,6 +75,7 @@ fn uninitialized_startup_fixture(cx: &mut TestAppContext) -> Fixture {
                             commands: commands_tx,
                             events: events_rx,
                             shutdown: CancellationToken::new(),
+                            ipc_socket_path: None,
                         },
                         None,
                         window,

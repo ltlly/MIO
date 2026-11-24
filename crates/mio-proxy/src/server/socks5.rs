@@ -1,5 +1,4 @@
 use super::*;
-use rama::http::header::{HOST, HeaderValue};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -96,7 +95,7 @@ pub(super) async fn serve_socks5(
         }
     };
 
-    let failed_request = HttpRequest {
+    let mut failed_request = HttpRequest {
         method: "CONNECT".into(),
         url: authority.clone(),
         version: mio_plugin_api::HttpVersion::Http11,
@@ -121,6 +120,9 @@ pub(super) async fn serve_socks5(
     };
 
     if is_tls {
+        let target_is_ip = crate::route::normalize_host(&host)
+            .parse::<IpAddr>()
+            .is_ok();
         if ssl_passthrough::should_pass_through(&state, &host, port) {
             let (pt_host, pt_port) = state.effective_passthrough_target(&host, port);
             if let Err(error) =
@@ -131,15 +133,53 @@ pub(super) async fn serve_socks5(
             }
             return;
         }
+        if target_is_ip && state.dynamic.borrow().ssl_pass_through.is_some() {
+            let mut peek_buf = [0u8; 4096];
+            let peeked = tokio::select! {
+                biased;
+                _ = state.cancel.cancelled() => return,
+                res = tokio::time::timeout(
+                    state.config.limits.request_timeout,
+                    stream.peek(&mut peek_buf),
+                ) => res,
+            };
+            let peeked_len = match peeked {
+                Ok(Ok(n)) if n > 0 => n,
+                Ok(Ok(_)) => return,
+                Ok(Err(err)) if is_benign_pre_handshake_io(&err) => return,
+                Ok(Err(err)) => {
+                    state.failure(failed_request, &ProxyError::network(err)).await;
+                    return;
+                }
+                Err(_) => {
+                    state.failure(failed_request, &ProxyError::Timeout).await;
+                    return;
+                }
+            };
+            if let Some(sni) = listener::parse_client_hello_sni(&peek_buf[..peeked_len])
+                && ssl_passthrough::should_pass_through(&state, &sni, port)
+            {
+                let (pt_host, pt_port) = state.effective_passthrough_target(&sni, port);
+                failed_request.url = format!(
+                    "{}:{pt_port}",
+                    crate::route::format_host_for_authority(&pt_host)
+                );
+                if let Err(error) =
+                    ssl_passthrough::relay_stream(stream, &pt_host, pt_port, &state).await
+                    && !matches!(error, ProxyError::Cancelled)
+                {
+                    state.failure(failed_request, &error).await;
+                }
+                return;
+            }
+        }
 
+        let ca = state.dynamic.borrow().ca.clone();
         let tls_options = state.listener_tls_options();
+        let observed_sni = Arc::new(Mutex::new(None::<String>));
         let config = match tokio::time::timeout(
             state.config.limits.request_timeout,
-            state
-                .config
-                .tls
-                .ca
-                .server_config_with_options(&host, &tls_options),
+            ca.connect_server_config(&host, &tls_options, observed_sni.clone()),
         )
         .await
         {
@@ -161,43 +201,71 @@ pub(super) async fn serve_socks5(
         let served_any = Arc::new(AtomicBool::new(false));
         let served_flag = served_any.clone();
         let handler_state = state.clone();
+        let sni_for_req = observed_sni.clone();
+        let fallback_authority = authority.clone();
         let service = service_fn(move |request: Request| {
             served_flag.store(true, Ordering::Relaxed);
             let state = handler_state.clone();
-            let authority = authority.clone();
+            let effective_authority = if target_is_ip {
+                if let Some(sni) = crate::lock_unpoison(&sni_for_req).clone() {
+                    listener::format_tunnel_authority(&sni, port, 443)
+                } else {
+                    fallback_authority.clone()
+                }
+            } else {
+                fallback_authority.clone()
+            };
             async move {
                 Ok::<_, Infallible>(
-                    listener::handle_http_with_ingress(request, state, Some(authority), true).await,
+                    listener::handle_http_with_ingress(
+                        request,
+                        state,
+                        Some(message::TunnelTarget::Tls(effective_authority)),
+                        true,
+                    )
+                    .await,
                 )
             }
         });
         let failure_state = state.clone();
         let failure_host = host.clone();
+        let sni_for_err = observed_sni.clone();
         let run = async {
-            let serve_result = state
+            let outcome = state
                 .serve_tls_http_connection(io, config, service, false)
-                .await;
-            serve_result
+                .await
                 .or_else(|err| {
                     if served_any.load(Ordering::Relaxed)
                         || listener::is_benign_tunnel_disconnect(err.as_ref())
                     {
                         Ok(())
                     } else {
-                        failure_state.notify_client_tls_failure(failure_host, port);
+                        let observed = crate::lock_unpoison(&sni_for_err).clone();
+                        let effective_host = if let Some(ref sni) = observed {
+                            failed_request.url = format!(
+                                "{}:{port}",
+                                crate::route::format_host_for_authority(sni)
+                            );
+                            sni.clone()
+                        } else {
+                            failure_host
+                        };
+                        failure_state.notify_client_tls_failure(effective_host, port);
                         Err(err)
                     }
                 })
-                .map_err(ProxyError::network)
+                .map_err(ProxyError::network);
+            if let Err(error) = outcome
+                && !matches!(error, ProxyError::Cancelled)
+                && !state.cancel.is_cancelled()
+            {
+                state.failure(failed_request, &error).await;
+            }
         };
         tokio::select! {
             biased;
             _ = state.cancel.cancelled() => {},
-            result = run => {
-                if let Err(error) = result {
-                    state.failure(failed_request, &error).await;
-                }
-            }
+            _ = run => {},
         }
     } else {
         let io = GracefulIo::new(
@@ -205,19 +273,19 @@ pub(super) async fn serve_socks5(
             TcpStream::new(stream),
         );
         let handler_state = state.clone();
-        let fallback_authority = authority.clone();
-        let service = service_fn(move |mut request: Request| {
+        let plain_authority = listener::format_tunnel_authority(&host, port, 80);
+        let service = service_fn(move |request: Request| {
             let state = handler_state.clone();
-            let fallback_authority = fallback_authority.clone();
+            let plain_authority = plain_authority.clone();
             async move {
-                if request.uri().scheme().is_none()
-                    && !request.headers().contains_key(HOST)
-                    && let Ok(hv) = HeaderValue::from_str(&fallback_authority)
-                {
-                    request.headers_mut().insert(HOST, hv);
-                }
                 Ok::<_, Infallible>(
-                    listener::handle_http_with_ingress(request, state, None, true).await,
+                    listener::handle_http_with_ingress(
+                        request,
+                        state,
+                        Some(message::TunnelTarget::PlainHttp(plain_authority)),
+                        true,
+                    )
+                    .await,
                 )
             }
         });

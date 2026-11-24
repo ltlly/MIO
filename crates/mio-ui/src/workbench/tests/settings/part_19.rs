@@ -813,3 +813,81 @@ fn proxy_listener_editor_supports_all_interfaces_and_specific_bind_addresses(
     assert_eq!(ws_full.proxy_listeners[3].bind_address, "0.0.0.0:8088");
     acknowledge(&fixture, ws_full, cx);
 }
+
+#[gpui_kit::test]
+fn toggling_second_listener_when_stopped_updates_enabled_mask_and_workspace_rejected_restores_listeners(
+    cx: &mut TestAppContext,
+) {
+    let listener1 = mio_core::ProxyListenerConfig {
+        id: mio_core::Uuid::new_v4(),
+        enabled: true,
+        bind_address: "127.0.0.1:8080".into(),
+        ..mio_core::ProxyListenerConfig::default()
+    };
+    let listener2 = mio_core::ProxyListenerConfig {
+        id: mio_core::Uuid::new_v4(),
+        enabled: true,
+        bind_address: "127.0.0.1:18081".into(),
+        ..mio_core::ProxyListenerConfig::default()
+    };
+    let mut fixture = fixture(cx, Vec::new(), 64);
+    drain(&mut fixture.commands);
+
+    let initial_ws = cx.update(|cx| {
+        fixture.view.update(cx, |view, cx| {
+            view.workspace.revision += 1;
+            view.workspace.proxy_listeners = vec![listener1.clone(), listener2.clone()];
+            cx.notify();
+            (*view.workspace).clone()
+        })
+    });
+    cx.run_until_parked();
+
+    let settings = open_settings(&fixture, cx);
+    cx.update_window(settings, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-proxy", cx);
+        window.render_frame(cx);
+        // Proxy is stopped and row 0 + row 1 are both enabled; clicking row 1's Running
+        // toggle must normalize enabled mask to row 1 only before StartProxy.
+        window.click(("settings-listener-toggle", 1usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let commands = drain(&mut fixture.commands);
+    let mut saw_save = None;
+    let mut saw_start = false;
+    for cmd in commands {
+        match cmd {
+            Command::SaveWorkspace { workspace, .. } => saw_save = Some(workspace),
+            Command::StartProxy { listen, .. } => {
+                assert_eq!(listen, "127.0.0.1:18081".parse::<SocketAddr>().unwrap());
+                saw_start = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_start, "expected StartProxy on row 1");
+    let saved_ws = saw_save.expect("expected SaveWorkspace updating enabled mask");
+    assert!(!saved_ws.proxy_listeners[0].enabled);
+    assert!(saved_ws.proxy_listeners[1].enabled);
+
+    // Rejecting that listener workspace edit must restore stored proxy_listeners + listener_input.
+    fixture
+        .events
+        .try_send(Event::WorkspaceRejected {
+            project: fixture.project,
+            revision: saved_ws.revision,
+            stored: initial_ws.clone(),
+            message: "synthetic listener conflict".into(),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let view = fixture.view.read(cx);
+        assert_eq!(view.workspace.proxy_listeners, initial_ws.proxy_listeners);
+        assert_eq!(view.listener_input.read(cx).value(), "127.0.0.1:8080");
+    });
+}

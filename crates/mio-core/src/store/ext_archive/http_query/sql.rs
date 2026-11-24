@@ -598,6 +598,8 @@ pub(super) fn history_sql(
             archive_sort_metadata.insert(id.to_string(), value);
         }
     }
+    let request_flags = i64::from(query.filter.hide_without_response)
+        | (i64::from(query.filter.hide_connect) << 1);
     let values: Vec<SqlValue> = vec![
         query.url_filter.clone().into(),
         (MAX_SUMMARY_BYTES as i64).into(),
@@ -696,7 +698,7 @@ pub(super) fn history_sql(
                 .collect::<Vec<_>>(),
         )?
         .into(),
-        i64::from(query.filter.hide_without_response).into(),
+        request_flags.into(),
         status_mask.into(),
         i64::from(query.filter.only_with_notes).into(),
         i64::from(query.filter.only_highlighted).into(),
@@ -984,7 +986,8 @@ pub(super) fn history_sql(
     ), paths AS (
         SELECT *,{request_path_sql} AS request_path FROM urls
     ), filtered AS (
-        SELECT * FROM paths WHERE (?5=0 OR has_response)
+        SELECT * FROM paths WHERE ((?5 & 1)=0 OR has_response)
+        AND ((?5 & 2)=0 OR coalesce(upper(method),'')!='CONNECT')
         AND (NOT has_response OR ?6=15 OR CASE WHEN status BETWEEN 200 AND 599 THEN (?6 & (1 << (status/100-2)))!=0 ELSE 0 END)
         AND (?7=0 OR has_notes) AND (?8=0 OR highlighted)
         AND (json_extract(?9,'$[0]')=0 OR

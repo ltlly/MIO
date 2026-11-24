@@ -224,7 +224,7 @@ impl Workbench {
 
     pub(in crate::workbench) fn receive_startup_wizard_preferences(
         &mut self,
-        _operation_id: Uuid,
+        operation_id: Uuid,
         state: &UserPreferencesState,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -236,6 +236,33 @@ impl Workbench {
                 .as_ref()
                 .is_some_and(|current| state.preferences.revision > current.revision)
         {
+            if operation_id.is_nil() && !self.user_preferences.busy() {
+                if !self.user_preferences.retain_selection {
+                    self.user_preferences.running = state.preferences.running;
+                    self.user_preferences.finished = state.preferences.finished;
+                }
+                if !self.user_preferences.retain_workbench {
+                    self.user_preferences
+                        .display
+                        .clone_from(&state.preferences.display);
+                    self.user_preferences
+                        .message_editor
+                        .clone_from(&state.preferences.message_editor);
+                    self.user_preferences
+                        .misc
+                        .clone_from(&state.preferences.misc);
+                    theme::apply_user_display(
+                        &state.preferences.display,
+                        &state.preferences.message_editor,
+                        cx,
+                    );
+                    theme::apply_user_misc(&state.preferences.misc, cx);
+                    self.apply_confirmed_workbench_preferences(
+                        state.preferences.message_editor.auto_expand_inspector,
+                        cx,
+                    );
+                }
+            }
             self.user_preferences.confirmed = Some(state.preferences.clone());
             cx.notify();
         }

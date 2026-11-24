@@ -35,9 +35,34 @@ impl Default for UserPreferences {
     }
 }
 
+fn read_file_stamp(path: &Path) -> Option<PreferencesFileStamp> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let modified = meta.modified().ok();
+    #[cfg(unix)]
+    let dev_ino = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let dev_ino = None;
+    Some((meta.len(), modified, dev_ino))
+}
+
 impl PreferencesStore {
     pub(crate) fn is_isolated(&self) -> bool {
         self.path.is_none()
+    }
+
+    pub(crate) fn file_changed_on_disk(&self) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        let current = read_file_stamp(path);
+        match (&self.file_stamp, &current) {
+            (Some(prev), Some(now)) => prev != now,
+            (None, Some(_)) => true,
+            _ => false,
+        }
     }
 
     pub(crate) fn new(path: Option<PathBuf>) -> Self {
@@ -47,6 +72,7 @@ impl PreferencesStore {
                 preferences: UserPreferences::default(),
                 load_error: None,
             },
+            file_stamp: None,
         };
         store.query();
         store
@@ -64,6 +90,7 @@ impl PreferencesStore {
                     load_error: Some(format!("用户偏好未载入，使用询问策略：{error:#}")),
                 },
             };
+            self.file_stamp = read_file_stamp(path);
         }
         self.state.clone()
     }
@@ -201,6 +228,9 @@ impl PreferencesStore {
             preferences: preferences.clone(),
             load_error: None,
         };
+        if let Some(path) = &self.path {
+            self.file_stamp = read_file_stamp(path);
+        }
         Ok(preferences)
     }
 }

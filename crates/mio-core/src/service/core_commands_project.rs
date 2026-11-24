@@ -167,13 +167,15 @@ impl State {
                 self.queries.cancel_all();
                 self.stop_websocket_query_until(query_deadline).await?;
                 self.stop_http_query_until(query_deadline).await?;
-                let destination_changed = path
-                    .as_deref()
-                    .is_some_and(|target| self.store.path.as_deref() != Some(target));
-                let destination_lock = match path
-                    .as_deref()
-                    .filter(|target| self.store.path.as_deref() != Some(*target))
-                {
+                let same_path = path.as_deref().is_some_and(|target| {
+                    self.store.path.as_deref() == Some(target)
+                        || self
+                            .project_lock
+                            .as_ref()
+                            .is_some_and(|lock| lock.matches_path(target))
+                });
+                let destination_changed = path.as_deref().is_some() && !same_path;
+                let destination_lock = match path.as_deref().filter(|_| !same_path) {
                     Some(target) => {
                         ensure!(
                             !crate::is_external_archive_file(target),
@@ -189,9 +191,10 @@ impl State {
                     .is_some()
                     .then(|| self.store.metadata().workspace().ok())
                     .flatten();
+                let save_path = path.as_deref().filter(|_| !same_path);
                 let (path, total_bytes, (websocket_notes, ext_http_notes, ext_http_highlights)) =
                     self.store.save_with_notes(
-                        path.as_deref(),
+                        save_path,
                         (
                             workspace.as_ref(),
                             &websocket_notes,
@@ -309,27 +312,45 @@ impl State {
                 self.emit(Event::CaExported { path }).await;
             }
             Command::RegenerateCa => {
-                let ca = tokio::task::spawn_blocking(authority::regenerate).await??;
+                let ca = if self.preferences.is_isolated() {
+                    tokio::task::spawn_blocking(MitmAuthority::generate).await??
+                } else {
+                    let identity_dir = self.identity_dir()?;
+                    let (ca, stamp) = tokio::task::spawn_blocking(move || {
+                        authority::regenerate_with_stamp_at(&identity_dir)
+                    })
+                    .await??;
+                    self.proxy.ca_stamp = Some(stamp);
+                    ca
+                };
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
-                self.proxy.ca = Some(ca);
-                if self.proxy.is_running() {
-                    let workspace = self.store.metadata().workspace()?;
-                    self.reload_running_proxy_from_workspace(&workspace).await?;
+                self.proxy.ca = Some(ca.clone());
+                for proxy in self.proxy.handles() {
+                    proxy.set_authority(ca.clone());
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
             }
             Command::ImportCa { cert_pem, key_pem } => {
-                let ca = tokio::task::spawn_blocking(move || -> Result<MitmAuthority> {
-                    let ca = MitmAuthority::from_pem_pair(&cert_pem, &key_pem)?;
-                    authority::save_authority(&ca)?;
-                    Ok(ca)
-                })
-                .await??;
+                let ca = if self.preferences.is_isolated() {
+                    tokio::task::spawn_blocking(move || {
+                        MitmAuthority::from_pem_pair(&cert_pem, &key_pem)
+                    })
+                    .await??
+                } else {
+                    let identity_dir = self.identity_dir()?;
+                    let (ca, stamp) = tokio::task::spawn_blocking(move || {
+                        let ca = MitmAuthority::from_pem_pair(&cert_pem, &key_pem)?;
+                        let stamp = authority::save_authority_with_stamp_at(&identity_dir, &ca)?;
+                        Ok::<_, anyhow::Error>((ca, stamp))
+                    })
+                    .await??;
+                    self.proxy.ca_stamp = Some(stamp);
+                    ca
+                };
                 let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
-                self.proxy.ca = Some(ca);
-                if self.proxy.is_running() {
-                    let workspace = self.store.metadata().workspace()?;
-                    self.reload_running_proxy_from_workspace(&workspace).await?;
+                self.proxy.ca = Some(ca.clone());
+                for proxy in self.proxy.handles() {
+                    proxy.set_authority(ca.clone());
                 }
                 self.emit(Event::CaRegenerated { fingerprint }).await;
             }
@@ -409,6 +430,38 @@ impl State {
         workspace: Workspace,
     ) -> Result<()> {
         let prev_workspace = self.store.metadata().workspace().ok();
+        let needs_rebind = self.proxy.is_running()
+            && workspace_requires_proxy_rebind(prev_workspace.as_ref(), &workspace);
+        let mut prev_certs_backup = None;
+        let mut reloaded_proxy_first = false;
+        if needs_rebind {
+            workspace.validate()?;
+            self.store.intruder().validate_session_workspace(&workspace)?;
+            let revision_matches = prev_workspace.as_ref().is_some_and(|prev| {
+                prev.revision.checked_add(1) == Some(workspace.revision)
+                    || (prev.revision == workspace.revision
+                        && workspace.tabs.iter().any(|t| {
+                            self.ai_ipc
+                                .repeater_revisions
+                                .contains(&(t.id, workspace.revision))
+                        }))
+            });
+            if revision_matches {
+                prev_certs_backup = Some(self.tls.compiled_client_certs.clone());
+                self.sync_compiled_client_certs(&workspace).await;
+                if let Err(err) = Box::pin(
+                    self.reload_running_proxy_from_workspace(prev_workspace.as_ref(), &workspace),
+                )
+                .await
+                {
+                    if let Some(prev_certs) = prev_certs_backup.take() {
+                        self.tls.compiled_client_certs = prev_certs;
+                    }
+                    return Err(err);
+                }
+                reloaded_proxy_first = true;
+            }
+        }
         let save_outcome = match self.store.metadata_mut().save_workspace(&workspace) {
             Ok(()) => Ok(()),
             Err(first_err) => {
@@ -437,8 +490,27 @@ impl State {
                 }
             }
         };
-        save_outcome?;
-        Box::pin(self.publish_saved_workspace(project, prev_workspace.as_ref(), workspace)).await?;
+        if let Err(err) = save_outcome {
+            if reloaded_proxy_first {
+                if let Some(prev_certs) = prev_certs_backup.take() {
+                    self.tls.compiled_client_certs = prev_certs;
+                }
+                if let Some(prev_ws) = prev_workspace.as_ref() {
+                    let _ = Box::pin(
+                        self.reload_running_proxy_from_workspace(Some(&workspace), prev_ws),
+                    )
+                    .await;
+                }
+            }
+            return Err(err);
+        }
+        Box::pin(self.publish_saved_workspace_inner(
+            project,
+            prev_workspace.as_ref(),
+            workspace,
+            !reloaded_proxy_first,
+        ))
+        .await?;
         self.refresh_project_disk_bytes();
         Ok(())
     }
@@ -449,6 +521,16 @@ impl State {
         prev_workspace: Option<&Workspace>,
         workspace: Workspace,
     ) -> Result<()> {
+        Box::pin(self.publish_saved_workspace_inner(project, prev_workspace, workspace, true)).await
+    }
+
+    async fn publish_saved_workspace_inner(
+        &mut self,
+        project: ProjectKey,
+        prev_workspace: Option<&Workspace>,
+        workspace: Workspace,
+        rebind_proxy: bool,
+    ) -> Result<()> {
         if prev_workspace.is_none_or(|prev| prev.upstream_proxy != workspace.upstream_proxy) {
             workspace
                 .upstream_proxy
@@ -458,8 +540,8 @@ impl State {
         self.sync_ws_repeater_workspace(&workspace);
         self.sync_sessions_workspace(&workspace);
         let has_running_proxy = self.proxy.is_running();
-        if has_running_proxy && workspace_requires_proxy_rebind(prev_workspace, &workspace) {
-            self.reload_running_proxy_from_workspace(&workspace).await?;
+        if rebind_proxy && has_running_proxy && workspace_requires_proxy_rebind(prev_workspace, &workspace) {
+            self.reload_running_proxy_from_workspace(prev_workspace, &workspace).await?;
         } else if has_running_proxy {
             self.apply_proxy_processing_from_workspace(&workspace)?;
         }

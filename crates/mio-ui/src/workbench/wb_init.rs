@@ -223,6 +223,7 @@ impl Workbench {
             intruder_result_close: None,
             commands: client.commands,
             shutdown: client.shutdown,
+            ipc_socket_path: client.ipc_socket_path,
             backend_disconnected: false,
             project: None,
             project_path: None,
@@ -421,6 +422,13 @@ impl Workbench {
 
     pub(in crate::workbench) fn backend_available(&self) -> bool {
         !self.backend_disconnected && !self.shutdown.is_cancelled()
+    }
+
+    pub(in crate::workbench) fn effective_ipc_socket_path(&self) -> PathBuf {
+        self.ipc_socket_path
+            .clone()
+            .or_else(mio_core::env_ipc_socket_path)
+            .unwrap_or_else(mio_core::default_ipc_socket_path)
     }
 
     pub(in crate::workbench) fn enqueue(

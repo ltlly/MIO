@@ -6,7 +6,7 @@ mod util;
 
 use body::normalize_headers_with_options;
 pub(crate) use body::{
-    has_header_token, invalid_request_head, normalize_headers, outgoing_body,
+    TunnelTarget, has_header_token, invalid_request_head, normalize_headers, outgoing_body,
     request_head_with_fallback, strip_expect_100_continue_vec, strip_header_token_vec,
 };
 pub(crate) use codec::{

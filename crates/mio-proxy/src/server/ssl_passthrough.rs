@@ -112,12 +112,15 @@ async fn relay_tunnel(
     copy_tunnel(&mut ingress, &mut egress, &cancel).await
 }
 
-pub(super) async fn relay_stream(
-    mut ingress: tokio::net::TcpStream,
+pub(super) async fn relay_stream<I>(
+    mut ingress: I,
     host: &str,
     port: u16,
     state: &State,
-) -> Result<(), ProxyError> {
+) -> Result<(), ProxyError>
+where
+    I: Io + Unpin,
+{
     let parsed_host: Host = crate::route::strip_host_brackets(host)
         .parse()
         .map_err(|_| ProxyError::invalid("SOCKS5 透传目标主机无效"))?;

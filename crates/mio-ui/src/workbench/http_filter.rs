@@ -82,6 +82,7 @@ impl Default for HttpFilterState {
     fn default() -> Self {
         Self {
             applied: HttpHistoryFilter {
+                hide_connect: true,
                 mime_types: DEFAULT_MIME_TYPES,
                 extensions: HttpExtensionFilter::Hide(HIDDEN_EXTENSIONS.into()),
                 ..Default::default()

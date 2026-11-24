@@ -526,7 +526,11 @@ fn auto_reload_script_library_custom_scan_checks_and_api_export_work(cx: &mut Te
 
     // 2. MioScript library CRUD + real compilation validation against temp library file.
     let tmp_dir = tempfile::tempdir().unwrap();
-    let lib_path = tmp_dir.path().join("http-filter-scripts.json");
+    let lib_path = tmp_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("http-filter-scripts.json");
     cx.update_window(fixture.window, |_, window, cx| {
         fixture.view.update(cx, |view, cx| {
             view.extensions.script_library.library_path = Some(lib_path.clone());

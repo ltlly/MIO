@@ -59,6 +59,7 @@ mod http_highlights_tests;
 mod http_query;
 mod intruder_result_query;
 mod intruder_service;
+mod listener_lock;
 mod oast_service;
 mod plugin_service;
 mod project_lock;
@@ -134,7 +135,9 @@ struct ProxyRuntimeState {
     primary: Option<ProxyHandle>,
     primary_id: Option<Uuid>,
     extra: Vec<(Uuid, ProxyHandle)>,
+    listener_locks: HashMap<Uuid, listener_lock::ActiveListenerLock>,
     ca: Option<MitmAuthority>,
+    ca_stamp: Option<authority::AuthorityStamp>,
     intercept_requests: bool,
     intercept_responses: bool,
     pending: HashMap<FlowId, Pending>,
@@ -151,7 +154,9 @@ impl ProxyRuntimeState {
             primary: None,
             primary_id: None,
             extra: Vec::new(),
+            listener_locks: HashMap::new(),
             ca: None,
+            ca_stamp: None,
             intercept_requests: false,
             intercept_responses: false,
             pending: HashMap::new(),
@@ -187,6 +192,7 @@ impl ProxyRuntimeState {
         self.primary = None;
         self.primary_id = None;
         self.extra.clear();
+        self.listener_locks.clear();
     }
 
     fn primary_address(&self) -> Option<SocketAddr> {
@@ -389,6 +395,7 @@ impl SessionServiceState {
 
 struct State {
     preferences: crate::preferences::PreferencesStore,
+    preferences_path: Option<std::path::PathBuf>,
     user_level_connections_cache: UserLevelConnectionsCache,
     project: ProjectKey,
     project_lock: Option<project_lock::ActiveProjectLock>,
@@ -439,6 +446,7 @@ enum Incoming {
     ServerCertObserved((ProjectKey, ObservedServerCert)),
     ClientTlsFailure((ProjectKey, String, u16)),
     SchedulerTick,
+    CrossWindowSyncTick,
     Stop,
 }
 

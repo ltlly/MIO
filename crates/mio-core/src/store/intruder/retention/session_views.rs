@@ -206,7 +206,7 @@ impl<S: std::ops::Deref<Target = ProjectStore>> store::IntruderRepo<S> {
             .transpose()
     }
 
-    pub(in crate::store) fn validate_session_workspace(&self, workspace: &Workspace) -> Result<()> {
+    pub(crate) fn validate_session_workspace(&self, workspace: &Workspace) -> Result<()> {
         validate_workspace_links(&self.0.connection, &self.0.intruder_sessions, workspace)
     }
 

@@ -258,6 +258,7 @@ pub struct Client {
     pub events: mpsc::Receiver<Event>,
     /// Out-of-band control: shutdown cannot wait behind a saturated data queue.
     pub shutdown: tokio_util::sync::CancellationToken,
+    pub ipc_socket_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

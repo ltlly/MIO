@@ -59,6 +59,8 @@ mod stop;
 mod stop_reclaim;
 #[path = "http_pipeline/terminal.rs"]
 mod terminal;
+#[path = "http_pipeline/transparent_connect.rs"]
+mod transparent_connect;
 #[path = "http_pipeline/upstream.rs"]
 mod upstream;
 #[path = "http_pipeline/upstream_mtls.rs"]

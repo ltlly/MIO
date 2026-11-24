@@ -227,6 +227,7 @@ impl ProxyConfig {
     }
 
     pub(super) fn into_parts(self) -> (StaticProxyConfig, DynamicProxyState, ProxySharedResources) {
+        let ca = self.tls.ca.clone();
         let static_cfg = StaticProxyConfig {
             network: self.network,
             tls: self.tls,
@@ -236,6 +237,7 @@ impl ProxyConfig {
             annotation_checker: self.hooks.annotation_checker,
         };
         let dynamic = DynamicProxyState {
+            ca,
             intercept: InterceptMode {
                 requests: self.hooks.intercept_requests,
                 responses: self.hooks.intercept_responses,
@@ -300,8 +302,10 @@ fn build_send_config(
             force_streaming_response: false,
         }
     } else {
-        let is_https_target =
-            url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://");
+        let is_https_target = url
+            .as_bytes()
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"));
         let version = if http.use_http10_in_requests {
             Some(HttpVersion::Http10)
         } else if !http.enable_http2
@@ -500,6 +504,10 @@ impl ProxyHandle {
     pub fn set_drop_out_of_scope(&self, drop_fn: Option<DropOutOfScopeFn>) {
         self.dynamic
             .send_modify(|state| state.drop_out_of_scope = drop_fn);
+    }
+
+    pub fn set_authority(&self, ca: MitmAuthority) {
+        self.dynamic.send_modify(|state| state.ca = ca);
     }
 
     /// Starts cancellation synchronously; `stop` still joins all network tasks.

@@ -52,6 +52,6 @@ pub(in crate::workbench) struct UserPreferencesUi {
     pub(in crate::workbench) status: String,
     query: Option<(Uuid, Instant, gpui_kit::BackgroundExecutor)>,
     pending: Option<PendingSave>,
-    retain_selection: bool,
-    retain_workbench: bool,
+    pub(in crate::workbench) retain_selection: bool,
+    pub(in crate::workbench) retain_workbench: bool,
 }

@@ -608,4 +608,395 @@ async fn configured_browser_profiles_are_isolated_per_listener_port() {
     assert_ne!(dir1, dir2);
     assert!(dir1.join("mio-ca.cer").is_file());
     assert!(dir2.join("mio-ca.cer").is_file());
+    state1.stop_proxy().await.unwrap();
+    state2.stop_proxy().await.unwrap();
+}
+
+fn free_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn temp_state_with_prefs(
+    prefs_path: std::path::PathBuf,
+) -> (State, mpsc::Receiver<Event>) {
+    let (events, rx) = mpsc::channel(128);
+    let state = State::with_preference_paths(
+        events,
+        CancellationToken::new(),
+        crate::preferences::PreferencesStore::new(Some(prefs_path.clone())),
+        Some(prefs_path),
+    )
+    .unwrap();
+    (state, rx)
+}
+
+#[tokio::test]
+async fn cross_window_ca_sync_hot_swaps_running_proxy_and_isolated_ca_does_not_write_disk() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let prefs_path = root.join("preferences.json");
+
+    let (mut win1, mut rx1) = temp_state_with_prefs(prefs_path.clone());
+    let (mut win2, mut rx2) = temp_state_with_prefs(prefs_path);
+
+    let listen2: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    win2.command(Command::StartProxy {
+        project: win2.project,
+        listen: listen2,
+    })
+    .await
+    .unwrap();
+    let proxy2_addr = win2.proxy.primary_address().unwrap();
+
+    let ca1 = win1.authority().await.unwrap();
+    let ca2 = win2.proxy.ca.as_ref().unwrap().clone();
+    assert_eq!(ca1.certificate_der(), ca2.certificate_der());
+
+    win1.command(Command::RegenerateCa).await.unwrap();
+    let new_ca = win1.proxy.ca.as_ref().unwrap().clone();
+    assert_ne!(new_ca.certificate_der(), ca1.certificate_der());
+
+    let mut saw_win1_fp = None;
+    while let Ok(ev) = rx1.try_recv() {
+        if let Event::CaRegenerated { fingerprint } = ev {
+            saw_win1_fp = Some(fingerprint);
+        }
+    }
+    let expected_fp = authority::fingerprint_sha256(&new_ca.certificate_der());
+    assert_eq!(saw_win1_fp.as_deref(), Some(expected_fp.as_str()));
+
+    // Window 2 syncs from disk, emits CaRegenerated, and hot-swaps its live proxy listener.
+    win2.sync_shared_state_from_disk().await;
+    assert_eq!(
+        win2.proxy.ca.as_ref().unwrap().certificate_der(),
+        new_ca.certificate_der()
+    );
+    let mut saw_win2_fp = None;
+    while let Ok(ev) = rx2.try_recv() {
+        if let Event::CaRegenerated { fingerprint } = ev {
+            saw_win2_fp = Some(fingerprint);
+        }
+    }
+    assert_eq!(saw_win2_fp.as_deref(), Some(expected_fp.as_str()));
+
+    let mut conn = tokio::net::TcpStream::connect(proxy2_addr).await.unwrap();
+    conn.write_all(b"GET http://mio/cert HTTP/1.1\r\nHost: mio\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    conn.read_to_end(&mut raw).await.unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert_eq!(&raw[split..], new_ca.certificate_der().as_slice());
+    win2.stop_proxy().await.unwrap();
+
+    // Isolated state RegenerateCa / ImportCa must not alter the disk authority.json.
+    let (iso_events, _iso_rx) = mpsc::channel(32);
+    let mut isolated = State::new(iso_events, CancellationToken::new()).unwrap();
+    let alt = MitmAuthority::generate().unwrap();
+    let on_disk_before = authority::load_if_changed_at(&root.join("identity"), None)
+        .unwrap()
+        .unwrap()
+        .0
+        .certificate_der();
+    isolated.command(Command::RegenerateCa).await.unwrap();
+    isolated
+        .command(Command::ImportCa {
+            cert_pem: alt.certificate_pem(),
+            key_pem: alt.private_key_pem(),
+        })
+        .await
+        .unwrap();
+    let on_disk_after = authority::load_if_changed_at(&root.join("identity"), None)
+        .unwrap()
+        .unwrap()
+        .0
+        .certificate_der();
+    assert_eq!(on_disk_before, on_disk_after);
+}
+
+#[tokio::test]
+async fn multi_window_listener_locks_reject_wildcard_overlap_and_rollback_atomic_rebind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let prefs_path = root.join("preferences.json");
+
+    let (mut win1, _rx1) = temp_state_with_prefs(prefs_path.clone());
+    let (mut win2, mut rx2) = temp_state_with_prefs(prefs_path.clone());
+
+    let port1 = free_loopback_port();
+    let port2 = free_loopback_port();
+    assert_ne!(port1, port2);
+
+    // Win 1 listens on 0.0.0.0:port1.
+    let wild_addr: std::net::SocketAddr = (std::net::Ipv4Addr::UNSPECIFIED, port1).into();
+    win1.command(Command::StartProxy {
+        project: win1.project,
+        listen: wild_addr,
+    })
+    .await
+    .unwrap();
+
+    // Win 2 trying 127.0.0.1:port1 must be rejected cleanly via listener_lock.
+    let loop_addr1: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port1).into();
+    let err = win2
+        .command(Command::StartProxy {
+            project: win2.project,
+            listen: loop_addr1,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("已被占用") && err.to_string().contains("Proxy listeners"),
+        "unexpected conflict error: {err}"
+    );
+    assert!(!win2.proxy.is_running());
+
+    // Listener lock layer allows non-overlapping IPv6 loopback on same port.
+    let locks_dir = root.join("run").join("listener-locks");
+    let v6_loop: std::net::SocketAddr = (std::net::Ipv6Addr::LOCALHOST, port1).into();
+    let v6_lock = listener_lock::acquire_listener_lock(Some(&locks_dir), v6_loop).unwrap();
+    drop(v6_lock);
+
+    // Win 2 starts normally on port2, then attempts SaveWorkspace to move onto conflicting port1.
+    let mut ws2 = win2.store.workspace().unwrap();
+    ws2.revision += 1;
+    let listener2 = ProxyListenerConfig {
+        id: Uuid::new_v4(),
+        enabled: true,
+        bind_address: format!("127.0.0.1:{port2}"),
+        ..ProxyListenerConfig::default()
+    };
+    ws2.proxy_listeners = vec![listener2.clone()];
+    win2.command(Command::SaveWorkspace {
+        project: win2.project,
+        workspace: ws2.clone(),
+    })
+    .await
+    .unwrap();
+    let loop_addr2: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port2).into();
+    win2.command(Command::StartProxy {
+        project: win2.project,
+        listen: loop_addr2,
+    })
+    .await
+    .unwrap();
+    while rx2.try_recv().is_ok() {}
+
+    let mut bad_ws2 = ws2.clone();
+    bad_ws2.revision += 1;
+    bad_ws2.proxy_listeners.push(ProxyListenerConfig {
+        id: Uuid::new_v4(),
+        enabled: true,
+        bind_address: format!("127.0.0.1:{port1}"),
+        ..ProxyListenerConfig::default()
+    });
+    win2.command(Command::SaveWorkspace {
+        project: win2.project,
+        workspace: bad_ws2,
+    })
+    .await
+    .unwrap();
+
+    let mut saw_rejected = false;
+    while let Ok(ev) = rx2.try_recv() {
+        if let Event::WorkspaceRejected {
+            stored, message, ..
+        } = ev
+        {
+            assert_eq!(stored.proxy_listeners, vec![listener2.clone()]);
+            assert!(message.contains("已被占用"), "{message}");
+            saw_rejected = true;
+        }
+    }
+    assert!(saw_rejected, "conflicting SaveWorkspace must emit WorkspaceRejected");
+    assert_eq!(
+        win2.store.workspace().unwrap().proxy_listeners,
+        vec![listener2]
+    );
+    assert_eq!(
+        win2.proxy.primary_address(),
+        Some(loop_addr2),
+        "atomic rebind failure must keep win2's previous listener alive"
+    );
+
+    win1.stop_proxy().await.unwrap();
+    win2.stop_proxy().await.unwrap();
+
+    // After StopProxy, port1 is released and Win 2 can bind it.
+    win2.command(Command::StartProxy {
+        project: win2.project,
+        listen: loop_addr1,
+    })
+    .await
+    .unwrap();
+    win2.stop_proxy().await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_profile_and_default_port_fallback_isolate_windows_and_rotated_ca() {
+    let base = tempfile::tempdir().unwrap();
+    let p_default = core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        "127.0.0.1:8080".parse().unwrap(),
+    );
+    let p_other_port = core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        "127.0.0.1:8081".parse().unwrap(),
+    );
+    let p_lan_ip = core_commands_proxy::browser_profile_folder_name(
+        "browser-profile",
+        "192.0.2.10:8080".parse().unwrap(),
+    );
+    assert_eq!(p_default, "browser-profile");
+    assert_eq!(p_other_port, "browser-profile-8081");
+    assert_eq!(p_lan_ip, "browser-profile-192_0_2_10-8080");
+
+    // Same listener port + rotated CA must switch away from stale SPKI profile dir.
+    let first_dir = core_commands_proxy::resolve_ca_scoped_profile_dir(
+        base.path(),
+        "browser-profile",
+        "spki-first",
+    );
+    assert_eq!(first_dir, base.path().join("browser-profile"));
+    std::fs::create_dir_all(&first_dir).unwrap();
+    authority::export(b"spki-first", &first_dir.join(".mio-ca-spki")).unwrap();
+    assert_eq!(
+        core_commands_proxy::resolve_ca_scoped_profile_dir(
+            base.path(),
+            "browser-profile",
+            "spki-first",
+        ),
+        first_dir
+    );
+    let rotated_dir = core_commands_proxy::resolve_ca_scoped_profile_dir(
+        base.path(),
+        "browser-profile",
+        "spki-rotated",
+    );
+    assert_ne!(rotated_dir, first_dir);
+    assert!(
+        rotated_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("browser-profile-ca-")
+    );
+
+    // Default-config fallback finds the next free port when primary port is occupied.
+    let prefs_path = base.path().canonicalize().unwrap().join("preferences.json");
+    let (mut win1, _rx1) = temp_state_with_prefs(prefs_path.clone());
+    let (mut win2, mut rx2) = temp_state_with_prefs(prefs_path);
+    let base_port = free_loopback_port();
+    let occupied: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, base_port).into();
+    win1.command(Command::StartProxy {
+        project: win1.project,
+        listen: occupied,
+    })
+    .await
+    .unwrap();
+
+    win2.start_default_proxy_with_port_fallback(win2.project, occupied, 10)
+        .await
+        .unwrap();
+    let fallback_addr = win2.proxy.primary_address().unwrap();
+    assert_ne!(fallback_addr.port(), base_port);
+    let ws2 = win2.store.workspace().unwrap();
+    assert_eq!(ws2.proxy_listeners.len(), 1);
+    assert_eq!(ws2.proxy_listeners[0].bind_address, fallback_addr.to_string());
+    let mut saw_ws_changed = false;
+    while let Ok(ev) = rx2.try_recv() {
+        if matches!(ev, Event::WorkspaceChanged { .. }) {
+            saw_ws_changed = true;
+        }
+    }
+    assert!(saw_ws_changed);
+    win1.stop_proxy().await.unwrap();
+    win2.stop_proxy().await.unwrap();
+}
+
+#[tokio::test]
+async fn ipc_slim_save_rejects_project_locked_by_another_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let project_a = root.join("win-a.mio");
+    let project_b = root.join("win-b.mio");
+
+    let (events1, _rx1) = mpsc::channel(32);
+    let mut win1 = State::new(events1, CancellationToken::new()).unwrap();
+    win1.command(Command::StartProject {
+        path: Some(project_a.clone()),
+        create_new: true,
+        options: ProjectStartOptions::default(),
+    })
+    .await
+    .unwrap();
+
+    let (events2, _rx2) = mpsc::channel(32);
+    let mut win2 = State::new(events2, CancellationToken::new()).unwrap();
+    win2.command(Command::StartProject {
+        path: Some(project_b),
+        create_new: true,
+        options: ProjectStartOptions::default(),
+    })
+    .await
+    .unwrap();
+
+    let env = win2
+        .handle_ai_ipc(crate::AiIpcRequest::SlimSave {
+            path: project_a.to_string_lossy().into_owned(),
+            options: None,
+        })
+        .await;
+    assert!(!env.ok, "slim save onto project held by win1 must fail");
+    assert!(
+        env.error
+            .as_deref()
+            .unwrap()
+            .contains("已在另一个 MIO 窗口中打开")
+    );
+}
+
+#[test]
+fn multi_window_ipc_falls_back_to_pid_socket_when_primary_is_occupied() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let prefs = root.join("preferences.json");
+    let primary_sock = root.join("mio.sock");
+
+    let (_rt1, client1) =
+        Runtime::start_app_with_preferences_and_ipc(prefs.clone(), primary_sock.clone()).unwrap();
+    assert_eq!(client1.ipc_socket_path.as_deref(), Some(primary_sock.as_path()));
+
+    let (_rt2, client2) =
+        Runtime::start_app_with_preferences_and_ipc(prefs, primary_sock.clone()).unwrap();
+    let sock2 = client2
+        .ipc_socket_path
+        .clone()
+        .expect("second instance must bind per-instance IPC socket");
+    assert_ne!(sock2, primary_sock);
+
+    let (env1, _) =
+        crate::call_ai_ipc(&primary_sock, &crate::AiIpcRequest::Status, Duration::from_secs(2))
+            .unwrap();
+    let (env2, _) =
+        crate::call_ai_ipc(&sock2, &crate::AiIpcRequest::Status, Duration::from_secs(2))
+            .unwrap();
+    assert!(env1.ok);
+    assert!(env2.ok);
+    let Some(crate::AiIpcPayload::Status {
+        project_id: pid1, ..
+    }) = env1.payload
+    else {
+        panic!("expected Status payload from instance 1");
+    };
+    let Some(crate::AiIpcPayload::Status {
+        project_id: pid2, ..
+    }) = env2.payload
+    else {
+        panic!("expected Status payload from instance 2");
+    };
+    assert_ne!(pid1, pid2);
 }

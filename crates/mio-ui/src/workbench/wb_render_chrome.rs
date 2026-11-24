@@ -557,8 +557,7 @@ impl Workbench {
             .read(cx)
             .clone();
         let selected_tpl = *template_state.read(cx);
-        let ipc_path = mio_core::env_ipc_socket_path()
-            .unwrap_or_else(mio_core::default_ipc_socket_path);
+        let ipc_path = self.effective_ipc_socket_path();
         let ipc_path_str = ipc_path.display().to_string();
         let cli_cmd = format!("mio-cli --socket \"{ipc_path_str}\" status");
         let backend_ok = self.backend_available();

@@ -226,3 +226,35 @@ fn pretty_line_map_tracks_exact_original_lines_across_json_xml_html_and_chunked(
     let res = format_pretty_message_with_line_map(plain_http).unwrap();
     assert_eq!(res.line_numbers, None);
 }
+
+#[test]
+fn pretty_html_and_xml_handle_multibyte_utf8_across_prefix_boundaries() {
+    let html_with_cjk = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n\r\n",
+        "<!DOCTYPE html><html><head><title>中文标题</title></head>",
+        "<body><p>a中文测试文本</p><div title=\"中文属性测试\">一二三四五</div></body></html>"
+    );
+    let formatted_html = format_pretty_message_with_line_map(html_with_cjk.as_bytes())
+        .expect("multibyte UTF-8 in HTML must not panic during markup tokenization");
+    assert!(formatted_html.text.contains("a中文测试文本"));
+    assert!(formatted_html.text.contains("一二三四五"));
+
+    let xml_with_cjk = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: application/xml; charset=utf-8\r\n\r\n",
+        "<root><item>a中文节点</item><note>😀多字节测试</note></root>"
+    );
+    let formatted_xml = format_pretty_message_with_line_map(xml_with_cjk.as_bytes())
+        .expect("multibyte UTF-8 in XML must not panic during markup tokenization");
+    assert!(formatted_xml.text.contains("a中文节点"));
+    assert!(formatted_xml.text.contains("😀多字节测试"));
+
+    let doc_32_boundary = concat!(
+        "HTTP/1.1 200 OK\r\n\r\n",
+        "0123456789012345678901234567890中文边界测试"
+    );
+    let formatted_boundary = format_pretty_message_with_line_map(doc_32_boundary.as_bytes())
+        .expect("multibyte UTF-8 crossing byte 32 must not panic in looks_like_html_document");
+    assert!(formatted_boundary.text.contains("中文边界测试"));
+}

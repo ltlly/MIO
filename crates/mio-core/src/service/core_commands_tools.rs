@@ -124,7 +124,8 @@ impl State {
                         self.ws_repeater.set_connect_config(config);
                     }
                     if self.proxy.is_running()
-                        && let Err(error) = self.reload_running_proxy_from_workspace(&workspace).await
+                        && let Err(error) =
+                            self.reload_running_proxy_from_workspace(Some(&workspace), &workspace).await
                     {
                         self.emit(Event::Error {
                             project: Some(self.project),

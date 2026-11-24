@@ -221,9 +221,12 @@ impl Workbench {
                 self.intercept_requests = intercept_requests;
                 self.intercept_responses = intercept_responses;
                 if let Some(addr) = address {
-                    if self.proxy_listeners_bound.is_empty() {
-                        self.proxy_listeners_bound
-                            .push((mio_core::Uuid::from_u128(1), addr));
+                    if self.proxy_listeners_bound.len() <= 1 {
+                        let id = self
+                            .proxy_listeners_bound
+                            .first()
+                            .map_or(mio_core::Uuid::from_u128(1), |(id, _)| *id);
+                        self.proxy_listeners_bound = vec![(id, addr)];
                     }
                 } else {
                     self.proxy_listeners_bound.clear();

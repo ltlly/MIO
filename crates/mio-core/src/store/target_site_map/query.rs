@@ -411,9 +411,14 @@ impl<S: std::ops::Deref<Target = crate::store::ProjectStore>> crate::store::Site
                     origin.as_ref().map(|origin| format!("{origin}{target}"))
                 } else if target == "*" || (!target.contains("://") && !target.is_empty()) {
                     origin.clone()
-                } else if target.len() >= 7
-                    && (target[..7].eq_ignore_ascii_case("http://")
-                        || (target.len() >= 8 && target[..8].eq_ignore_ascii_case("https://")))
+                } else if target
+                    .as_bytes()
+                    .get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http://"))
+                    || target
+                        .as_bytes()
+                        .get(..8)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"))
                 {
                     Some(target.clone())
                 } else {

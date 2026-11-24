@@ -2,16 +2,27 @@ use crate::ProxyError;
 use mio_plugin_api::{Header, HttpRequest};
 use rama::http::{Body, HeaderMap, HeaderName, HeaderValue, Request};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TunnelTarget {
+    Tls(String),
+    PlainHttp(String),
+}
+
 pub(crate) fn request_head_with_fallback(
     request: &Request,
-    tunnel: Option<&str>,
+    tunnel: Option<&TunnelTarget>,
     fallback_host: Option<&str>,
 ) -> Result<HttpRequest, ProxyError> {
     let uri = request.uri();
     let url = if uri.scheme().is_some() {
         uri.to_string()
     } else {
-        let authority = tunnel
+        let (scheme, tunnel_authority) = match tunnel {
+            Some(TunnelTarget::Tls(authority)) => ("https", Some(authority.as_str())),
+            Some(TunnelTarget::PlainHttp(authority)) => ("http", Some(authority.as_str())),
+            None => ("http", None),
+        };
+        let authority = tunnel_authority
             .map(str::to_owned)
             .or_else(|| {
                 request
@@ -29,12 +40,7 @@ pub(crate) fn request_head_with_fallback(
                     .map(crate::route::format_host_for_authority)
             })
             .ok_or_else(|| ProxyError::invalid("缺少请求目标 authority"))?;
-        format!(
-            "{}://{}{}",
-            if tunnel.is_some() { "https" } else { "http" },
-            authority,
-            uri
-        )
+        format!("{scheme}://{authority}{uri}")
     };
     Ok(HttpRequest {
         method: request.method().to_string(),

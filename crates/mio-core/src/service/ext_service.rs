@@ -259,20 +259,35 @@ impl State {
                     "正在切换项目，未开始 外部归档转换；预检已释放"
                 ))
             } else {
-                self.store.check_path_outside_temporary(&destination)
+                self.store
+                    .check_path_outside_temporary(&destination)
+                    .and_then(|()| {
+                        ensure!(
+                            !self
+                                .project_lock
+                                .as_ref()
+                                .is_some_and(|lock| lock.matches_path(&destination)),
+                            "目标项目文件正被当前窗口使用；请选择其他目标路径"
+                        );
+                        crate::service::project_lock::acquire_active_project_lock(&destination)
+                    })
             };
-            if let Err(error) = allowed {
-                self.ext_archive.release(
-                    project,
-                    job_id,
-                    inspection,
-                    import::failed(error, None),
-                    true,
-                );
-                return Ok(());
-            }
+            let dest_lock = match allowed {
+                Ok(lock) => lock,
+                Err(error) => {
+                    self.ext_archive.release(
+                        project,
+                        job_id,
+                        inspection,
+                        import::failed(error, None),
+                        true,
+                    );
+                    return Ok(());
+                }
+            };
             self.ext_archive
                 .start(project, job_id, cancel, true, move |cancel, progress| {
+                    let _dest_lock = dest_lock;
                     let (outcome, cleanup) =
                         import::convert(inspection, destination, cancel, progress);
                     Output::Finished(outcome, cleanup)

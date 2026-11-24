@@ -133,3 +133,98 @@ fn edited_live_history_uses_original_request_and_response_for_filtering_like_arc
         "history filtering never edits either message version"
     );
 }
+
+#[test]
+fn hide_connect_filter_excludes_live_and_pending_connect_and_script_conversion_matches() {
+    let mut store = ProjectStore::create(None).unwrap();
+
+    let mut connect_no_resp = live("example.invalid:443", None, 10, TrafficSource::Proxy);
+    connect_no_resp.summary.method = "CONNECT".into();
+    connect_no_resp.request.method = "CONNECT".into();
+    connect_no_resp.summary.state = FlowState::Failed("TLS handshake failed".into());
+    store.put(&connect_no_resp).unwrap();
+
+    let mut connect_502 = live("example.invalid:8443", Some(502), 20, TrafficSource::Proxy);
+    connect_502.summary.method = "CONNECT".into();
+    connect_502.request.method = "CONNECT".into();
+    store.put(&connect_502).unwrap();
+
+    let failed_get = live(
+        "https://example.invalid/timeout",
+        None,
+        30,
+        TrafficSource::Proxy,
+    );
+    store.put(&failed_get).unwrap();
+
+    let ok_get = live(
+        "https://example.invalid/ok",
+        Some(200),
+        40,
+        TrafficSource::Proxy,
+    );
+    store.put(&ok_get).unwrap();
+
+    let mut pending_connect = live("example.invalid:9443", None, 50, TrafficSource::Proxy);
+    pending_connect.summary.method = "connect".into();
+    pending_connect.request.method = "connect".into();
+    pending_connect.summary.state = FlowState::Failed("TLS handshake failed".into());
+    let pending = crate::HttpHistoryPending {
+        summary: pending_connect.summary.clone(),
+        first_request_method: pending_connect.request.method.clone(),
+        first_request_url: pending_connect.request.url.clone(),
+        first_response_status: None,
+        first_request: Some(pending_connect.request.clone()),
+        first_response: None,
+        request: Some(pending_connect.request),
+        response: None,
+        listener_port: Some(8080),
+        capture_metrics: Default::default(),
+    };
+
+    let cancel = CancellationToken::new();
+    let mut q = query(&store);
+    let all =
+        super::super::query_connection(&store.connection, &q, std::slice::from_ref(&pending), &cancel)
+            .unwrap();
+    assert_eq!(all.total, 5);
+
+    q.filter = HttpHistoryFilter {
+        hide_connect: true,
+        ..Default::default()
+    };
+    let filtered =
+        super::super::query_connection(&store.connection, &q, std::slice::from_ref(&pending), &cancel)
+            .unwrap();
+    let filtered_ids: Vec<_> = filtered.rows.iter().map(HistoryRow::id).collect();
+    assert_eq!(filtered.total, 2);
+    assert_eq!(
+        filtered_ids,
+        vec![
+            HistoryEntryId::Live(ok_get.summary.id),
+            HistoryEntryId::Live(failed_get.summary.id),
+        ],
+        "hide_connect must hide CONNECT rows (with or without response) while keeping non-CONNECT no-response requests visible"
+    );
+
+    let converted = crate::convert_http_filter_to_script(&q.filter);
+    q.filter = HttpHistoryFilter {
+        filter_script: converted,
+        ..Default::default()
+    };
+    let scripted =
+        super::super::query_connection(&store.connection, &q, std::slice::from_ref(&pending), &cancel)
+            .unwrap();
+    assert_eq!(scripted.total, 2);
+    let scripted_ids: Vec<_> = scripted.rows.iter().map(HistoryRow::id).collect();
+    assert_eq!(scripted_ids, filtered_ids);
+
+    let legacy: HttpHistoryFilter = serde_json::from_str(
+        &serde_json::to_string(&HttpHistoryFilter::default())
+            .unwrap()
+            .replace(",\"hide_connect\":false", "")
+            .replace("\"hide_connect\":false,", ""),
+    )
+    .unwrap();
+    assert!(!legacy.hide_connect);
+}

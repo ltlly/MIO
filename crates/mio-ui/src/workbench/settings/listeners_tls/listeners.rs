@@ -369,10 +369,10 @@ impl Workbench {
                     && item
                         .bind_address
                         .parse::<SocketAddr>()
-                        .is_ok_and(|existing| existing == listen)
+                        .is_ok_and(|existing| mio_core::proxy_listener_addrs_overlap(existing, listen))
             })
         {
-            return Err(format!("监听地址 {listen} 已存在于启用列表中，端口冲突。"));
+            return Err(format!("监听地址 {listen} 与已启用监听器存在端口冲突。"));
         }
         next.push(config);
         self.apply_proxy_listeners_change(project, next, window, cx)
@@ -399,10 +399,10 @@ impl Workbench {
                     && item
                         .bind_address
                         .parse::<SocketAddr>()
-                        .is_ok_and(|existing| existing == listen)
+                        .is_ok_and(|existing| mio_core::proxy_listener_addrs_overlap(existing, listen))
             })
         {
-            return Err(format!("监听地址 {listen} 已存在于启用列表中，端口冲突。"));
+            return Err(format!("监听地址 {listen} 与已启用监听器存在端口冲突。"));
         }
         next[index] = config;
         self.apply_proxy_listeners_change(project, next, window, cx)
@@ -472,9 +472,17 @@ impl Workbench {
         }
         if self.proxy_address.is_none() && self.proxy_listeners_bound.is_empty() && enabled {
             let listen = parse_listener_address(&item.bind_address)?;
-            if !self.workspace.proxy_listeners.is_empty() && !item.enabled {
+            let needs_enable_adjustment = !self.workspace.proxy_listeners.is_empty()
+                && (!item.enabled
+                    || listeners
+                        .iter()
+                        .enumerate()
+                        .any(|(other_idx, entry)| other_idx != index && entry.enabled));
+            if needs_enable_adjustment {
                 let mut next = listeners;
-                next[index].enabled = true;
+                for (entry_idx, entry) in next.iter_mut().enumerate() {
+                    entry.enabled = entry_idx == index;
+                }
                 self.apply_proxy_listeners_change(Some(project_key), next, window, cx)?;
             }
             if self.enqueue(

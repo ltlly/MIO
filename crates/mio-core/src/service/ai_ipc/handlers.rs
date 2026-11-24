@@ -464,8 +464,17 @@ impl State {
         let trimmed = path.trim();
         ensure!(!trimmed.is_empty(), "瘦身保存目标路径不能为空");
         let dest = PathBuf::from(trimmed);
+        ensure!(
+            self.store.path.as_deref() != Some(dest.as_path())
+                && !self
+                    .project_lock
+                    .as_ref()
+                    .is_some_and(|lock| lock.matches_path(&dest)),
+            "瘦身另存为必须选择新的目标路径，不会原地覆盖当前项目"
+        );
         let opts = options.unwrap_or_default();
         let pending_prov = self.storage.provenance.snapshot_all();
+        let _slim_lock = crate::service::project_lock::acquire_active_project_lock(&dest)?;
         let report = self.store.slim_save_as(
             Path::new(&dest),
             &opts,

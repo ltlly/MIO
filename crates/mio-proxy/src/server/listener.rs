@@ -5,6 +5,7 @@ use rama::extensions::ExtensionsRef;
 use rama::http::HeaderValue;
 use rama::io::Io;
 use rama::tls::rustls::dep::rustls;
+use tokio::io::AsyncReadExt;
 
 use super::*;
 
@@ -144,6 +145,133 @@ impl Drop for ActiveFlow {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn try_bind_without_reuseaddr(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+    let domain = match addr {
+        SocketAddr::V4(_) => libc::AF_INET,
+        SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    let raw_fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
+    if raw_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    match addr {
+        SocketAddr::V4(v4) => {
+            let sin = libc::sockaddr_in {
+                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            if unsafe {
+                libc::bind(
+                    fd.as_raw_fd(),
+                    (&raw const sin).cast::<libc::sockaddr>(),
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        SocketAddr::V6(v6) => {
+            let one: libc::c_int = 1;
+            if unsafe {
+                libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_V6ONLY,
+                    (&raw const one).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let sin6 = libc::sockaddr_in6 {
+                sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
+                sin6_scope_id: v6.scope_id(),
+            };
+            if unsafe {
+                libc::bind(
+                    fd.as_raw_fd(),
+                    (&raw const sin6).cast::<libc::sockaddr>(),
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    if unsafe { libc::listen(fd.as_raw_fd(), 1024) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let std_listener = std::net::TcpListener::from(fd);
+    std_listener.set_nonblocking(true)?;
+    Ok(std_listener)
+}
+
+async fn bind_proxy_listener(addr: SocketAddr) -> Result<TcpListener, ProxyError> {
+    if addr.port() == 0 {
+        return TcpListener::bind(addr).await.map_err(ProxyError::network);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match try_bind_without_reuseaddr(addr) {
+            Ok(std_listener) => TcpListener::from_std(std_listener).map_err(ProxyError::network),
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                let probe_addr = if addr.ip().is_unspecified() {
+                    match addr {
+                        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port())),
+                        SocketAddr::V6(_) => {
+                            SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+                        }
+                    }
+                } else {
+                    addr
+                };
+                match tokio::time::timeout(
+                    Duration::from_millis(50),
+                    tokio::net::TcpStream::connect(probe_addr),
+                )
+                .await
+                {
+                    Ok(Err(connect_err))
+                        if connect_err.kind() == std::io::ErrorKind::ConnectionRefused =>
+                    {
+                        TcpListener::bind(addr).await.map_err(ProxyError::network)
+                    }
+                    _ => Err(ProxyError::network(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!("地址 {addr} 或同端口通配监听已被占用"),
+                    ))),
+                }
+            }
+            Err(err) => Err(ProxyError::network(err)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TcpListener::bind(addr).await.map_err(ProxyError::network)
+    }
+}
+
 pub async fn start(
     config: ProxyConfig,
     project: ProjectKey,
@@ -170,9 +298,7 @@ pub async fn start(
         &config.tls.upstream.client_certificates,
         &config.tls.upstream.options,
     )?;
-    let listener = TcpListener::bind(config.network.listen)
-        .await
-        .map_err(ProxyError::network)?;
+    let listener = bind_proxy_listener(config.network.listen).await?;
     let address = listener.local_addr().map_err(ProxyError::network)?;
     let cancel = CancellationToken::new();
     let shutdown = Shutdown::new(cancel.clone().cancelled_owned());
@@ -294,7 +420,7 @@ pub async fn start(
     })
 }
 
-fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
+pub(super) fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
     if data.len() < 9 || data[0] != 0x16 || data[1] != 0x03 {
         return None;
     }
@@ -450,7 +576,8 @@ async fn serve_invisible_tls(
         }
     }
     let observed_sni = Arc::new(std::sync::Mutex::new(None::<String>));
-    let tls_config = state.config.tls.ca.invisible_server_config(
+    let ca = state.dynamic.borrow().ca.clone();
+    let tls_config = ca.invisible_server_config(
         state.listener_tls_options(),
         fallback_host.clone(),
         observed_sni.clone(),
@@ -478,7 +605,13 @@ async fn serve_invisible_tls(
             .unwrap_or_else(|| fallback_for_req.clone());
         async move {
             Ok::<_, Infallible>(
-                handle_http_with_ingress(request, state, Some(authority), true).await,
+                handle_http_with_ingress(
+                    request,
+                    state,
+                    Some(message::TunnelTarget::Tls(authority)),
+                    true,
+                )
+                .await,
             )
         }
     });
@@ -525,6 +658,54 @@ async fn serve_invisible_tls(
     }
 }
 
+pub(super) fn format_tunnel_authority(host: &str, port: u16, default_port: u16) -> String {
+    let formatted =
+        crate::route::format_host_for_authority(crate::route::strip_host_brackets(host));
+    if port == default_port {
+        formatted
+    } else {
+        format!("{formatted}:{port}")
+    }
+}
+
+pub(super) fn looks_like_plain_http_prefix(bytes: &[u8]) -> bool {
+    if bytes.is_empty()
+        || bytes[0] == socks5::TLS_CLIENT_HELLO_LEAD_BYTE
+        || !bytes[0].is_ascii_alphabetic()
+    {
+        return false;
+    }
+    let probe = &bytes[..bytes.len().min(24)];
+    if let Some(sp) = probe.iter().position(|&b| b == b' ') {
+        if sp == 0 {
+            return false;
+        }
+        let method_ok = probe[..sp]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+        let after_ok = sp + 1 == probe.len() || (0x21..=0x7E).contains(&probe[sp + 1]);
+        return method_ok && after_ok;
+    }
+    bytes.len() <= 16 && bytes.iter().all(|b| b.is_ascii_uppercase() || *b == b'-')
+}
+
+async fn read_tunnel_prefix(
+    io: &mut rama::http::io::upgrade::Upgraded,
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<u8>>, ProxyError> {
+    let mut buf = [0u8; 4096];
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ProxyError::Cancelled),
+        res = io.read(&mut buf) => match res {
+            Ok(0) => Ok(None),
+            Ok(n) => Ok(Some(buf[..n].to_vec())),
+            Err(err) if is_benign_tunnel_disconnect(&err) => Ok(None),
+            Err(err) => Err(ProxyError::network(err)),
+        },
+    }
+}
+
 async fn handle_entry(
     request: Request,
     state: Arc<State>,
@@ -545,6 +726,9 @@ async fn handle_entry(
         let port = uri
             .port_u16()
             .ok_or_else(|| ProxyError::invalid("CONNECT 目标缺少端口"))?;
+        let _: rama::net::address::Host = crate::route::strip_host_brackets(&host)
+            .parse()
+            .map_err(|_| ProxyError::invalid("CONNECT 目标主机无效"))?;
         if ssl_passthrough::should_pass_through(&state, &host, port) {
             let (pt_host, pt_port) = state.effective_passthrough_target(&host, port);
             return ssl_passthrough::spawn_passthrough(
@@ -557,62 +741,148 @@ async fn handle_entry(
             );
         }
         let tls_options = state.listener_tls_options();
-        let config = tokio::time::timeout(
-            state.config.limits.request_timeout,
-            state
-                .config
-                .tls
-                .ca
-                .server_config_with_options(&host, &tls_options),
-        )
-        .await
-        .map_err(|_| ProxyError::Timeout)??;
         let tls_host = host.to_string();
         let tls_port = port;
+        let target_is_ip = crate::route::normalize_host(&tls_host)
+            .parse::<IpAddr>()
+            .is_ok();
         let upgrade = handle_upgrade(&request);
         let task_state = state.clone();
-        let tunnel_request = failed_request.clone();
+        let mut tunnel_request = failed_request.clone();
         state.tasks.spawn(async move {
             let _permit = permit;
-            let served_any = Arc::new(AtomicBool::new(false));
-            let served_flag = served_any.clone();
             let run = async {
-                let upgraded = upgrade.await.map_err(ProxyError::network)?;
-                let handler_state = task_state.clone();
-                let service = service_fn(move |request: Request| {
-                    served_flag.store(true, Ordering::Relaxed);
-                    let state = handler_state.clone();
-                    let authority = authority.clone();
-                    async move {
-                        Ok::<_, Infallible>(
-                            handle_http_with_ingress(request, state, Some(authority), true).await,
-                        )
+                let outcome: Result<(), ProxyError> = async {
+                    let mut upgraded = upgrade.await.map_err(ProxyError::network)?;
+                    let Some(prefix) = read_tunnel_prefix(&mut upgraded, &task_state.cancel).await?
+                    else {
+                        return Ok(());
+                    };
+                    let plain_http = looks_like_plain_http_prefix(&prefix);
+                    let lead_byte = prefix[0];
+                    let passthrough_sni = if !plain_http
+                        && target_is_ip
+                        && lead_byte == socks5::TLS_CLIENT_HELLO_LEAD_BYTE
+                        && task_state.dynamic.borrow().ssl_pass_through.is_some()
+                    {
+                        parse_client_hello_sni(&prefix)
+                    } else {
+                        None
+                    };
+                    let rewound =
+                        rama::io::PrefixedIo::new(std::io::Cursor::new(prefix), upgraded);
+                    if plain_http {
+                        let plain_authority = format_tunnel_authority(&tls_host, tls_port, 80);
+                        let handler_state = task_state.clone();
+                        let service = service_fn(move |request: Request| {
+                            let state = handler_state.clone();
+                            let plain_authority = plain_authority.clone();
+                            async move {
+                                Ok::<_, Infallible>(
+                                    handle_http_with_ingress(
+                                        request,
+                                        state,
+                                        Some(message::TunnelTarget::PlainHttp(plain_authority)),
+                                        true,
+                                    )
+                                    .await,
+                                )
+                            }
+                        });
+                        task_state.serve_http_connection(rewound, service).await;
+                        return Ok(());
                     }
-                });
-                let serve_result = task_state
-                    .serve_tls_http_connection(upgraded, config, service, true)
-                    .await;
-                serve_result
-                    .or_else(|err| {
-                        if served_any.load(Ordering::Relaxed)
-                            || is_benign_tunnel_disconnect(err.as_ref())
-                        {
-                            Ok(())
+                    if let Some(sni) = passthrough_sni
+                        && ssl_passthrough::should_pass_through(&task_state, &sni, tls_port)
+                    {
+                        let (pt_host, pt_port) =
+                            task_state.effective_passthrough_target(&sni, tls_port);
+                        tunnel_request.url = format!(
+                            "{}:{pt_port}",
+                            crate::route::format_host_for_authority(&pt_host)
+                        );
+                        return ssl_passthrough::relay_stream(
+                            rewound,
+                            &pt_host,
+                            pt_port,
+                            &task_state,
+                        )
+                        .await;
+                    }
+                    let observed_sni = Arc::new(Mutex::new(None::<String>));
+                    let ca = task_state.dynamic.borrow().ca.clone();
+                    let config = tokio::time::timeout(
+                        task_state.config.limits.request_timeout,
+                        ca.connect_server_config(&tls_host, &tls_options, observed_sni.clone()),
+                    )
+                    .await
+                    .map_err(|_| ProxyError::Timeout)??;
+                    let served_any = Arc::new(AtomicBool::new(false));
+                    let served_flag = served_any.clone();
+                    let handler_state = task_state.clone();
+                    let sni_for_req = observed_sni.clone();
+                    let service = service_fn(move |request: Request| {
+                        served_flag.store(true, Ordering::Relaxed);
+                        let state = handler_state.clone();
+                        let effective_authority = if target_is_ip {
+                            if let Some(sni) = crate::lock_unpoison(&sni_for_req).clone() {
+                                format_tunnel_authority(&sni, tls_port, 443)
+                            } else {
+                                authority.clone()
+                            }
                         } else {
-                            task_state.notify_client_tls_failure(tls_host.clone(), tls_port);
-                            Err(err)
+                            authority.clone()
+                        };
+                        async move {
+                            Ok::<_, Infallible>(
+                                handle_http_with_ingress(
+                                    request,
+                                    state,
+                                    Some(message::TunnelTarget::Tls(effective_authority)),
+                                    true,
+                                )
+                                .await,
+                            )
                         }
-                    })
-                    .map_err(ProxyError::network)
+                    });
+                    let serve_result = task_state
+                        .serve_tls_http_connection(rewound, config, service, true)
+                        .await;
+                    serve_result
+                        .or_else(|err| {
+                            if served_any.load(Ordering::Relaxed)
+                                || is_benign_tunnel_disconnect(err.as_ref())
+                            {
+                                Ok(())
+                            } else {
+                                let observed = crate::lock_unpoison(&observed_sni).clone();
+                                let effective_host = if let Some(ref sni) = observed {
+                                    tunnel_request.url = format!(
+                                        "{}:{tls_port}",
+                                        crate::route::format_host_for_authority(sni)
+                                    );
+                                    sni.clone()
+                                } else {
+                                    tls_host.clone()
+                                };
+                                task_state.notify_client_tls_failure(effective_host, tls_port);
+                                Err(err)
+                            }
+                        })
+                        .map_err(ProxyError::network)
+                }
+                .await;
+                if let Err(error) = outcome
+                    && !matches!(error, ProxyError::Cancelled)
+                    && !task_state.cancel.is_cancelled()
+                {
+                    task_state.failure(tunnel_request, &error).await;
+                }
             };
             tokio::select! {
                 biased;
                 _ = task_state.cancel.cancelled() => {},
-                result = run => {
-                    if let Err(error) = result {
-                        task_state.failure(tunnel_request, &error).await;
-                    }
-                },
+                _ = run => {},
             }
         });
         let mut response = Response::new(Body::empty());
@@ -673,9 +943,10 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
     let path_cow = uri.path_or_root();
     let path = path_cow.as_ref();
     let head_only = request.method() == Method::HEAD;
+    let ca = state.dynamic.borrow().ca.clone();
     match path {
         "/cert" | "/cert.der" | "/mio-ca.cer" | "/cacert.der" => {
-            let der = state.config.tls.ca.certificate_der();
+            let der = ca.certificate_der();
             let mut resp = Response::new(rama::http::Body::from(if head_only {
                 Vec::new()
             } else {
@@ -693,7 +964,7 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
             Some(resp)
         }
         "/cert.pem" | "/mio-ca.pem" => {
-            let pem = state.config.tls.ca.certificate_pem().into_bytes();
+            let pem = ca.certificate_pem().into_bytes();
             let mut resp = Response::new(rama::http::Body::from(if head_only {
                 Vec::new()
             } else {
@@ -731,7 +1002,7 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
 pub(in crate::server) async fn handle_http(
     request: Request,
     state: Arc<State>,
-    tunnel: Option<String>,
+    tunnel: Option<message::TunnelTarget>,
 ) -> Response {
     handle_http_with_ingress(request, state, tunnel, false).await
 }
@@ -739,7 +1010,7 @@ pub(in crate::server) async fn handle_http(
 pub(in crate::server) async fn handle_http_with_ingress(
     request: Request,
     state: Arc<State>,
-    tunnel: Option<String>,
+    tunnel: Option<message::TunnelTarget>,
     allow_origin_form: bool,
 ) -> Response {
     if tunnel.is_none()
@@ -769,7 +1040,7 @@ pub(in crate::server) async fn handle_http_with_ingress(
     }
     let mut model = match message::request_head_with_fallback(
         &request,
-        tunnel.as_deref(),
+        tunnel.as_ref(),
         state.config.network.redirect_to_host.as_deref(),
     ) {
         Ok(model) => model,

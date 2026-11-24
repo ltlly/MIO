@@ -328,6 +328,7 @@ pub(super) struct InterceptMode {
 
 #[derive(Clone)]
 pub(super) struct DynamicProxyState {
+    pub ca: MitmAuthority,
     pub intercept: InterceptMode,
     pub flow_transform: Option<FlowTransform>,
     pub intercept_filter: Option<InterceptFilter>,

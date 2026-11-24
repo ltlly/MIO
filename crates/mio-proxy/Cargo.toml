@@ -19,6 +19,9 @@ tokio-util.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["http1", "http2", "client", "server"] }

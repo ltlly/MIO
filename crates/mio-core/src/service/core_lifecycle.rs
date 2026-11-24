@@ -8,6 +8,11 @@ impl State {
             Duration::from_secs(15),
         );
         scheduler_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cross_window_sync_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        cross_window_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // No new command or producer event is admitted while Stop notifications await the UI.
             self.flush_proxy_notifications().await;
@@ -40,6 +45,7 @@ impl State {
                 event = self.collaborator.next_signal(), if intruder_commands_ready => Incoming::Collaborator(event),
                 Some(signal) = self.audit.next_signal(), if intruder_commands_ready => Incoming::Audit(signal),
                 _ = scheduler_tick.tick(), if commands_ready => Incoming::SchedulerTick,
+                _ = cross_window_sync_tick.tick(), if !self.preferences.is_isolated() && commands_ready => Incoming::CrossWindowSyncTick,
             };
             match incoming {
                 Incoming::Stop => break,
@@ -125,6 +131,9 @@ impl State {
                 }
                 Incoming::SchedulerTick => {
                     Box::pin(self.run_scheduled_tasks_tick()).await;
+                }
+                Incoming::CrossWindowSyncTick => {
+                    self.sync_shared_state_from_disk().await;
                 }
             }
             if self.unsaved_count() != 0 && self.intruder.can_accept_commands() {
@@ -225,7 +234,12 @@ impl State {
             intercept_responses: self.proxy.intercept_responses,
         })
         .await;
-        if !self.proxy.extra.is_empty() {
+        if !self.proxy.extra.is_empty()
+            || self
+                .proxy
+                .primary_id
+                .is_some_and(|id| id != Uuid::from_u128(1))
+        {
             let listeners = self.proxy.active_listeners();
             self.emit(Event::ProxyListeners {
                 project: self.project,
@@ -235,16 +249,63 @@ impl State {
         }
     }
 
+    pub(super) fn identity_dir(&self) -> Result<std::path::PathBuf> {
+        authority::resolved_identity_dir(self.preferences_path.as_deref())
+    }
+
     pub(super) async fn authority(&mut self) -> Result<MitmAuthority> {
-        if self.proxy.ca.is_none() {
-            let ca = if self.preferences.is_isolated() {
-                tokio::task::spawn_blocking(MitmAuthority::generate).await??
-            } else {
-                tokio::task::spawn_blocking(authority::load_or_create).await??
-            };
-            self.proxy.ca = Some(ca);
+        if self.preferences.is_isolated() {
+            if self.proxy.ca.is_none() {
+                let ca = tokio::task::spawn_blocking(MitmAuthority::generate).await??;
+                self.proxy.ca = Some(ca);
+            }
+            return Ok(self.proxy.ca.as_ref().unwrap().clone());
+        }
+        let identity_dir = self.identity_dir()?;
+        let current_stamp = self.proxy.ca_stamp.clone();
+        if let Some((ca, stamp)) = tokio::task::spawn_blocking(move || {
+            authority::load_if_changed_at(&identity_dir, current_stamp.as_ref())
+        })
+        .await??
+        {
+            let prev_cert_changed = self
+                .proxy
+                .ca_stamp
+                .as_ref()
+                .is_some_and(|prev| prev.cert_sha256 != stamp.cert_sha256);
+            self.proxy.ca = Some(ca.clone());
+            self.proxy.ca_stamp = Some(stamp);
+            if prev_cert_changed {
+                let fingerprint = authority::fingerprint_sha256(&ca.certificate_der());
+                for proxy in self.proxy.handles() {
+                    proxy.set_authority(ca.clone());
+                }
+                self.emit(Event::CaRegenerated { fingerprint }).await;
+            }
         }
         Ok(self.proxy.ca.as_ref().unwrap().clone())
+    }
+
+    pub(super) async fn sync_shared_state_from_disk(&mut self) {
+        if self.preferences.is_isolated() {
+            return;
+        }
+        if self.proxy.ca_stamp.is_some()
+            && let Ok(identity_dir) = self.identity_dir()
+            && authority::file_changed_on_disk_at(&identity_dir, self.proxy.ca_stamp.as_ref())
+        {
+            let _ = self.authority().await;
+        }
+        if self.preferences.file_changed_on_disk() {
+            let state = self.preferences.query();
+            if state.load_error.is_none() {
+                self.emit(Event::UserPreferences {
+                    operation_id: Uuid::nil(),
+                    state,
+                })
+                .await;
+            }
+        }
     }
 
     #[cfg(test)]

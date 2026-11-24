@@ -152,6 +152,7 @@ fn http_filter_apply_cancel_presets_and_toggle_preserve_successful_conditions(
 ) {
     let (mut f, rows) = boot(cx);
     let initial = cx.read(|cx| f.view.read(cx).http_filter.applied.clone());
+    assert!(initial.hide_connect);
     assert_eq!(
         initial.extensions,
         HttpExtensionFilter::Hide(HIDDEN_EXTENSIONS.into())
@@ -162,11 +163,13 @@ fn http_filter_apply_cancel_presets_and_toggle_preserve_successful_conditions(
     );
     let (handle, dialog) = open(&f, cx);
     click(handle, "http-filter-no-response", cx);
+    click(handle, "http-filter-hide-connect", cx);
     click(handle, "http-filter-4xx", cx);
     click(handle, "http-filter-mime-html", cx);
     click(handle, "http-filter-apply", cx);
     let applied = query(&mut f);
     assert!(applied.filter.hide_without_response);
+    assert!(!applied.filter.hide_connect);
     assert!(!applied.filter.status_classes[2]);
     assert_eq!(
         applied.filter.mime_types,
@@ -210,6 +213,7 @@ fn http_filter_apply_cancel_presets_and_toggle_preserve_successful_conditions(
     cx.read(|cx| {
         let draft = &dialog.read(cx).draft;
         assert!(draft.hide_without_response);
+        assert!(draft.hide_connect);
         assert!(draft.parameterized_only);
         assert_eq!(draft.status_classes, [false; 4]);
         assert_eq!(draft.extensions, HttpExtensionFilter::Any);

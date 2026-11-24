@@ -274,6 +274,7 @@ async fn failed_publication_reports_but_never_deletes_the_acknowledged_created_p
         commands,
         events: event_receiver,
         shutdown: CancellationToken::new(),
+        ipc_socket_path: None,
     };
     let project = ProjectKey {
         id: Uuid::new_v4(),

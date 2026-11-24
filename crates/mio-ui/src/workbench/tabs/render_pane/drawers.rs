@@ -505,16 +505,17 @@ fn custom_actions_library_path() -> AnyResult<Option<PathBuf>> {
 }
 
 fn read_custom_action_library_from_path(path: &Path) -> AnyResult<Vec<CustomActionScriptEntry>> {
-    let Some(bytes) = mio_core::ui_files::read_bounded_optional_file(
-        path,
-        4 * 1024 * 1024,
-        "自定义动作脚本库",
-    )?
+    let Some(bytes) =
+        mio_core::ui_files::read_owned_file_bounded(path, 4 * 1024 * 1024, "自定义动作脚本库")?
     else {
         return Ok(Vec::new());
     };
+    parse_custom_action_library_bytes(&bytes)
+}
+
+fn parse_custom_action_library_bytes(bytes: &[u8]) -> AnyResult<Vec<CustomActionScriptEntry>> {
     let parsed: CustomActionLibraryFile =
-        serde_json::from_slice(&bytes).context("解析 Custom actions 脚本库失败")?;
+        serde_json::from_slice(bytes).context("解析 Custom actions 脚本库失败")?;
     ensure!(parsed.version == 1, "Custom actions 脚本库版本不受支持");
     ensure!(
         parsed.scripts.len() <= 128,
@@ -523,21 +524,39 @@ fn read_custom_action_library_from_path(path: &Path) -> AnyResult<Vec<CustomActi
     Ok(parsed.scripts)
 }
 
-fn write_custom_action_library_to_path(
-    path: &Path,
-    scripts: &[CustomActionScriptEntry],
-) -> AnyResult<()> {
-    let payload = serde_json::to_vec_pretty(&CustomActionLibraryFile {
-        version: 1,
-        scripts: scripts.to_vec(),
-    })
-    .context("序列化 Custom actions 脚本库失败")?;
-    mio_core::ui_files::atomic_write_bounded_file(
-        path,
-        &payload,
-        4 * 1024 * 1024,
-        "Custom actions 脚本库",
-    )
+fn mutate_custom_action_library_at(
+    path: Option<&Path>,
+    current: &[CustomActionScriptEntry],
+    mutate: impl FnOnce(&mut Vec<CustomActionScriptEntry>) -> AnyResult<()>,
+) -> AnyResult<Vec<CustomActionScriptEntry>> {
+    if let Some(p) = path {
+        let mut final_scripts = Vec::new();
+        mio_core::ui_files::locked_cas_update_owned_file(
+            p,
+            "repeater-custom-actions.lock",
+            4 * 1024 * 1024,
+            "Custom actions 脚本库",
+            |before| {
+                let mut scripts = match before {
+                    Some(bytes) => parse_custom_action_library_bytes(&bytes)?,
+                    None => Vec::new(),
+                };
+                mutate(&mut scripts)?;
+                let payload = serde_json::to_vec_pretty(&CustomActionLibraryFile {
+                    version: 1,
+                    scripts: scripts.clone(),
+                })
+                .context("序列化 Custom actions 脚本库失败")?;
+                final_scripts = scripts;
+                Ok(payload)
+            },
+        )?;
+        Ok(final_scripts)
+    } else {
+        let mut scripts = current.to_vec();
+        mutate(&mut scripts)?;
+        Ok(scripts)
+    }
 }
 
 fn save_custom_action_to_path(
@@ -554,26 +573,21 @@ fn save_custom_action_to_path(
         "脚本名称须为 1–256 字节的非空文本且不含控制字符"
     );
     mio_core::validate_filter_script(code)?;
-    let mut scripts = match path {
-        Some(p) => read_custom_action_library_from_path(p)?,
-        None => current.to_vec(),
-    };
-    if let Some(existing) = scripts
-        .iter_mut()
-        .find(|entry| entry.name == trimmed_name)
-    {
-        existing.code = code.to_owned();
-    } else {
-        ensure!(scripts.len() < 128, "自定义动作脚本库最多保存 128 个脚本");
-        scripts.push(CustomActionScriptEntry {
-            name: trimmed_name.to_owned(),
-            code: code.to_owned(),
-        });
-    }
-    if let Some(p) = path {
-        write_custom_action_library_to_path(p, &scripts)?;
-    }
-    Ok(scripts)
+    mutate_custom_action_library_at(path, current, |scripts| {
+        if let Some(existing) = scripts
+            .iter_mut()
+            .find(|entry| entry.name == trimmed_name)
+        {
+            existing.code = code.to_owned();
+        } else {
+            ensure!(scripts.len() < 128, "自定义动作脚本库最多保存 128 个脚本");
+            scripts.push(CustomActionScriptEntry {
+                name: trimmed_name.to_owned(),
+                code: code.to_owned(),
+            });
+        }
+        Ok(())
+    })
 }
 
 fn delete_custom_action_from_path(
@@ -581,15 +595,10 @@ fn delete_custom_action_from_path(
     current: &[CustomActionScriptEntry],
     name: &str,
 ) -> AnyResult<Vec<CustomActionScriptEntry>> {
-    let mut scripts = match path {
-        Some(p) => read_custom_action_library_from_path(p)?,
-        None => current.to_vec(),
-    };
-    scripts.retain(|entry| entry.name != name);
-    if let Some(p) = path {
-        write_custom_action_library_to_path(p, &scripts)?;
-    }
-    Ok(scripts)
+    mutate_custom_action_library_at(path, current, |scripts| {
+        scripts.retain(|entry| entry.name != name);
+        Ok(())
+    })
 }
 
 fn fallback_target_from_raw(raw: &[u8]) -> String {
@@ -3006,7 +3015,11 @@ mod custom_actions_tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let lib_path = dir.path().join("repeater-custom-actions.json");
+        let lib_path = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("repeater-custom-actions.json");
         TEST_CUSTOM_ACTIONS_PATH.with(|cell| *cell.borrow_mut() = Some(lib_path.clone()));
         let _reset = ResetPath;
 

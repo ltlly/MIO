@@ -390,7 +390,14 @@ impl Workbench {
                 operation,
                 message,
             } if project.is_none() || self.project == project => {
-                if matches!(operation, "start_proxy" | "stop_proxy" | "set_intercept") {
+                if matches!(
+                    operation,
+                    "start_proxy"
+                        | "stop_proxy"
+                        | "stop_proxy_listener"
+                        | "set_intercept"
+                        | "open_configured_browser"
+                ) {
                     self.proxy_busy = self
                         .proxy_cancel
                         .as_ref()

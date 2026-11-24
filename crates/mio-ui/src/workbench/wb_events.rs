@@ -477,6 +477,14 @@ impl Workbench {
                 self.pending_proxy_interception = None;
                 self.saving_project_snapshot = false;
                 self.workspace.revision = stored.revision;
+                if self.workspace.proxy_listeners != stored.proxy_listeners {
+                    self.workspace.proxy_listeners = stored.proxy_listeners.clone();
+                    let restored_listener =
+                        self.workspace.proxy_listener_or_default().to_owned();
+                    self.listener_input.update(cx, |input, cx| {
+                        input.set_value(restored_listener, window, cx);
+                    });
+                }
                 self.workspace.match_and_replace_rules = stored.match_and_replace_rules.clone();
                 self.workspace.ssl_pass_through_rules = stored.ssl_pass_through_rules.clone();
                 self.workspace.ws_match_and_replace_rules =

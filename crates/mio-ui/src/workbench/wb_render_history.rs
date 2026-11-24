@@ -371,8 +371,7 @@ impl Workbench {
     pub(crate) fn send_selected_to_mio_at(&mut self, cx: &mut Context<Self>) {
         let (title, url, req_bytes, resp_bytes, flow_id) =
             self.snapshot_active_mio_at_context(cx);
-        let ipc_path = mio_core::env_ipc_socket_path()
-            .unwrap_or_else(mio_core::default_ipc_socket_path);
+        let ipc_path = self.effective_ipc_socket_path();
         let ipc_path_str = ipc_path.display().to_string();
         let cli_cmd = match flow_id {
             Some(flow_id) => format!(

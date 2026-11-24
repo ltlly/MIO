@@ -1,5 +1,16 @@
 use super::*;
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+
+pub fn proxy_listener_addrs_overlap(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() != 0
+        && a.port() == b.port()
+        && a.is_ipv4() == b.is_ipv4()
+        && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified())
+}
 
 fn is_valid_dns_hostname(hostname: &str) -> bool {
     let clean = hostname.trim().trim_end_matches('.');
@@ -561,7 +572,7 @@ impl Workspace {
             "Proxy 监听器数量超过 32 个上限"
         );
         let mut listener_ids = HashSet::new();
-        let mut enabled_listen_addrs = HashSet::new();
+        let mut enabled_listen_addrs: Vec<SocketAddr> = Vec::new();
         for listener in &self.proxy_listeners {
             ensure!(
                 !listener.id.is_nil() && listener_ids.insert(listener.id),
@@ -571,15 +582,20 @@ impl Workspace {
                 !listener.bind_address.is_empty() && listener.bind_address.len() <= 128,
                 "Proxy 监听地址不能为空或超过 128 字节"
             );
-            let addr: std::net::SocketAddr = listener
+            let addr: SocketAddr = listener
                 .bind_address
                 .parse()
                 .context("Proxy 监听地址格式无效，须为 IP:端口")?;
             if listener.enabled && addr.port() != 0 {
-                ensure!(
-                    enabled_listen_addrs.insert(addr),
-                    "启用的 Proxy 监听地址重复：{addr}"
-                );
+                if let Some(&existing) = enabled_listen_addrs
+                    .iter()
+                    .find(|&&existing| proxy_listener_addrs_overlap(existing, addr))
+                {
+                    anyhow::bail!(
+                        "启用的 Proxy 监听地址冲突：{addr} 与 {existing} 存在端口重叠"
+                    );
+                }
+                enabled_listen_addrs.push(addr);
             }
             ensure!(
                 listener.redirect_to_port != Some(0),

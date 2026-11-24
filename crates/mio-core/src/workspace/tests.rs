@@ -307,6 +307,14 @@ fn proxy_listeners_enforce_count_identity_bind_syntax_and_enabled_port_uniquenes
             listener(2, true, "0.0.0.0:8080"),
         ],
         vec![
+            listener(1, true, "0.0.0.0:8080"),
+            listener(2, true, "127.0.0.1:8080"),
+        ],
+        vec![
+            listener(1, true, "[::]:8080"),
+            listener(2, true, "[::1]:8080"),
+        ],
+        vec![
             listener(1, true, "[::1]:8443"),
             listener(2, true, "[0:0:0:0:0:0:0:1]:8443"),
         ],

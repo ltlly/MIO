@@ -61,6 +61,7 @@ pub use service::{Runtime, build_configured_browser_args, is_valid_scheduled_tas
 pub use service::ai_ipc::{
     AiIpcEnvelope, AiIpcFlowDetail, AiIpcPayload, AiIpcPendingItem, AiIpcRequest,
     ENV_MIO_IPC_SOCKET, call_ai_ipc, default_ipc_socket_path, env_ipc_socket_path,
+    instance_ipc_socket_path,
 };
 pub use store::{inspect_mio_ext_archive, read_mio_ext_websocket_fragment};
 pub use sys_metrics::{
@@ -69,6 +70,6 @@ pub use sys_metrics::{
 pub use updater::{UpdateInfo, UpdateStatus};
 pub use ext_archive::is_external_archive_file;
 pub use workspace::{
-    validate_destination_glob_pattern, validate_listener_custom_pem,
+    proxy_listener_addrs_overlap, validate_destination_glob_pattern, validate_listener_custom_pem,
     validate_listener_specific_hostname, validate_redirect_host,
 };

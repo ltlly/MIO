@@ -34,8 +34,14 @@ enum MarkupToken<'a> {
 
 pub(super) fn looks_like_html_document(trimmed: &str) -> bool {
     let trimmed = trimmed.trim_start_matches('\u{feff}').trim_start();
-    let prefix = trimmed.get(..32).unwrap_or(trimmed).to_ascii_lowercase();
-    prefix.starts_with("<!doctype html") || prefix.starts_with("<html")
+    trimmed
+        .as_bytes()
+        .get(..14)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"<!doctype html"))
+        || trimmed
+            .as_bytes()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"<html"))
 }
 
 pub(super) fn looks_like_xml_document(trimmed: &str) -> bool {
@@ -542,7 +548,11 @@ fn tokenize_markup<'a>(
             saw_element_or_decl = true;
             cursor += end;
             rest = &rest[end..];
-        } else if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!doctype") {
+        } else if rest
+            .as_bytes()
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"<!doctype"))
+        {
             let end = scan_doctype_end(rest, kind_label)?;
             tokens.push(MarkupToken::Standalone {
                 raw: &rest[..end],

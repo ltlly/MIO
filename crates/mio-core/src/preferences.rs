@@ -99,7 +99,14 @@ pub struct UserPreferencesState {
     pub load_error: Option<String>,
 }
 
+type PreferencesFileStamp = (
+    u64,
+    Option<std::time::SystemTime>,
+    Option<(u64, u64)>,
+);
+
 pub(crate) struct PreferencesStore {
     path: Option<PathBuf>,
     state: UserPreferencesState,
+    file_stamp: Option<PreferencesFileStamp>,
 }

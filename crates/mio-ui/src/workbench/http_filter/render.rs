@@ -62,6 +62,7 @@ pub(super) fn filter_summary(filter: &HttpHistoryFilter) -> String {
     let mut parts = Vec::new();
     if filter.in_scope_only { parts.push("仅显示范围内".into()); }
     if filter.hide_without_response { parts.push("隐藏无响应项".to_owned()); }
+    if filter.hide_connect { parts.push("隐藏 CONNECT".to_owned()); }
     if filter.parameterized_only { parts.push("仅显示含参数请求".to_owned()); }
     if filter.status_classes != [true; 4] { parts.push("按状态码筛选".into()); }
     if matches!(
@@ -98,6 +99,8 @@ impl FilterWindow {
                 enabled, |this, value| this.draft.in_scope_only = value, cx))
             .child(self.checkbox("http-filter-no-response", "隐藏没有响应的项", self.draft.hide_without_response,
                 enabled, |this, value| this.draft.hide_without_response = value, cx))
+            .child(self.checkbox("http-filter-hide-connect", "隐藏 CONNECT 请求", self.draft.hide_connect,
+                enabled, |this, value| this.draft.hide_connect = value, cx))
             .child(self.checkbox("http-filter-parameterized-only", "仅显示含参数的请求", self.draft.parameterized_only,
                 enabled, |this, value| this.draft.parameterized_only = value, cx));
         let mime = group("http-filter-mime-group", "按 MIME 类型筛选", 299., 123.)

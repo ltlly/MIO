@@ -324,6 +324,7 @@ impl FilterWindow {
         };
         self.draft = HttpHistoryFilter {
             hide_without_response: hide_all,
+            hide_connect: hide_all,
             parameterized_only: hide_all,
             status_classes: [!hide_all; 4],
             mime_types: [!hide_all; 8],

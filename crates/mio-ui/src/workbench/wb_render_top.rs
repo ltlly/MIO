@@ -423,8 +423,7 @@ impl Workbench {
 
     #[inline(never)]
     fn render_discover(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let ipc_path = mio_core::env_ipc_socket_path()
-            .unwrap_or_else(mio_core::default_ipc_socket_path);
+        let ipc_path = self.effective_ipc_socket_path();
         let ipc_path_str = ipc_path.display().to_string();
         let cli_status_cmd = format!("mio-cli --socket \"{}\" status", ipc_path_str);
         let backend_ok = self.backend_available();

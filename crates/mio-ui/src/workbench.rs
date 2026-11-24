@@ -280,6 +280,7 @@ pub(crate) struct Workbench {
         Option<Box<intruder::results_close::ResultClose>>,
     pub(in crate::workbench) commands: mpsc::Sender<Command>,
     pub(in crate::workbench) shutdown: CancellationToken,
+    pub(in crate::workbench) ipc_socket_path: Option<PathBuf>,
     pub(in crate::workbench) backend_disconnected: bool,
     pub(crate) project: Option<ProjectKey>,
     pub(in crate::workbench) project_path: Option<PathBuf>,
