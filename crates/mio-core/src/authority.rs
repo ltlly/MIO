@@ -12,10 +12,14 @@ use mio_proxy::MitmAuthority;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const MAX_AUTHORITY_FILE_BYTES: u64 = 256 * 1024;
+
 #[derive(Serialize, Deserialize)]
 struct StoredAuthority {
     certificate: Vec<u8>,
     private_key: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_certificates: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,7 +34,11 @@ pub(crate) struct AuthorityStamp {
 }
 
 impl AuthorityStamp {
-    fn from_metadata(meta: &fs::Metadata, cert_der: &[u8]) -> Self {
+    fn from_metadata(meta: &fs::Metadata, cert_chain: &[Vec<u8>]) -> Self {
+        let mut hasher = Sha256::new();
+        for cert_der in cert_chain {
+            hasher.update(cert_der);
+        }
         Self {
             file_len: meta.len(),
             modified: meta.modified().ok(),
@@ -38,7 +46,7 @@ impl AuthorityStamp {
             dev: meta.dev(),
             #[cfg(unix)]
             ino: meta.ino(),
-            cert_sha256: Sha256::digest(cert_der).into(),
+            cert_sha256: hasher.finalize().into(),
         }
     }
 
@@ -155,15 +163,33 @@ fn ensure_identity_dir(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+fn stored_authority(authority: &MitmAuthority) -> Result<(StoredAuthority, Vec<Vec<u8>>)> {
+    let mut chain = authority.certificate_chain_der();
+    ensure!(!chain.is_empty(), "CA 证书链不能为空");
+    let certificate = chain[0].clone();
+    let extra_certificates = if chain.len() > 1 {
+        chain.split_off(1)
+    } else {
+        Vec::new()
+    };
+    let mut full_chain = Vec::with_capacity(1 + extra_certificates.len());
+    full_chain.push(certificate.clone());
+    full_chain.extend(extra_certificates.iter().cloned());
+    Ok((
+        StoredAuthority {
+            certificate,
+            private_key: authority.private_key_der(),
+            extra_certificates,
+        },
+        full_chain,
+    ))
+}
+
 fn save_at(directory: &Path, authority: &MitmAuthority) -> Result<AuthorityStamp> {
     ensure_identity_dir(directory)?;
     let _lock = crate::fs_atomic::acquire_sidecar_lock(directory, "authority.lock", "CA 密钥")?;
     let path = directory.join("authority.json");
-    let cert_der = authority.certificate_der();
-    let stored = StoredAuthority {
-        certificate: cert_der.clone(),
-        private_key: authority.private_key_der(),
-    };
+    let (stored, cert_chain) = stored_authority(authority)?;
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     #[cfg(unix)]
     {
@@ -175,7 +201,7 @@ fn save_at(directory: &Path, authority: &MitmAuthority) -> Result<AuthorityStamp
     #[cfg(unix)]
     fs::File::open(directory)?.sync_all()?;
     let meta = fs::symlink_metadata(&path)?;
-    Ok(AuthorityStamp::from_metadata(&meta, &cert_der))
+    Ok(AuthorityStamp::from_metadata(&meta, &cert_chain))
 }
 
 pub fn default_identity_dir() -> Result<PathBuf> {
@@ -191,7 +217,9 @@ fn read_existing_at(path: &Path) -> Result<(MitmAuthority, AuthorityStamp)> {
     #[cfg(not(unix))]
     if let Ok(pre_meta) = fs::symlink_metadata(path) {
         ensure!(
-            pre_meta.is_file() && !pre_meta.file_type().is_symlink() && pre_meta.len() <= 64 * 1024,
+            pre_meta.is_file()
+                && !pre_meta.file_type().is_symlink()
+                && pre_meta.len() <= MAX_AUTHORITY_FILE_BYTES,
             "CA 密钥文件权限或大小异常；未覆盖原密钥"
         );
     }
@@ -210,22 +238,29 @@ fn read_existing_at(path: &Path) -> Result<(MitmAuthority, AuthorityStamp)> {
             && metadata.nlink() == 1
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 == 0
-            && metadata.len() <= 64 * 1024,
+            && metadata.len() <= MAX_AUTHORITY_FILE_BYTES,
         "CA 密钥文件权限或大小异常；未覆盖原密钥"
     );
     #[cfg(not(unix))]
     ensure!(
-        metadata.is_file() && metadata.len() <= 64 * 1024,
+        metadata.is_file() && metadata.len() <= MAX_AUTHORITY_FILE_BYTES,
         "CA 密钥文件权限或大小异常；未覆盖原密钥"
     );
     let mut bytes = Vec::new();
-    (&mut file).take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 64 * 1024, "CA 密钥文件权限或大小异常；未覆盖原密钥");
+    (&mut file)
+        .take(MAX_AUTHORITY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_AUTHORITY_FILE_BYTES,
+        "CA 密钥文件权限或大小异常；未覆盖原密钥"
+    );
     let stored: StoredAuthority =
         serde_json::from_slice(&bytes).context("CA 文件损坏；未生成替代密钥")?;
-    let cert_der = stored.certificate.clone();
-    let authority = MitmAuthority::from_der(stored.certificate, stored.private_key)?;
-    Ok((authority, AuthorityStamp::from_metadata(&metadata, &cert_der)))
+    let mut cert_chain = Vec::with_capacity(1 + stored.extra_certificates.len());
+    cert_chain.push(stored.certificate);
+    cert_chain.extend(stored.extra_certificates);
+    let authority = MitmAuthority::from_der_chain(cert_chain.clone(), stored.private_key)?;
+    Ok((authority, AuthorityStamp::from_metadata(&metadata, &cert_chain)))
 }
 
 #[cfg(test)]
@@ -244,11 +279,7 @@ fn load_at_with_stamp(directory: &Path) -> Result<(MitmAuthority, AuthorityStamp
         return read_existing_at(&path);
     }
     let authority = MitmAuthority::generate()?;
-    let cert_der = authority.certificate_der();
-    let stored = StoredAuthority {
-        certificate: cert_der.clone(),
-        private_key: authority.private_key_der(),
-    };
+    let (stored, cert_chain) = stored_authority(&authority)?;
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     #[cfg(unix)]
     {
@@ -261,7 +292,7 @@ fn load_at_with_stamp(directory: &Path) -> Result<(MitmAuthority, AuthorityStamp
             #[cfg(unix)]
             fs::File::open(directory)?.sync_all()?;
             let meta = fs::symlink_metadata(&path)?;
-            Ok((authority, AuthorityStamp::from_metadata(&meta, &cert_der)))
+            Ok((authority, AuthorityStamp::from_metadata(&meta, &cert_chain)))
         }
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             read_existing_at(&path)
@@ -344,5 +375,49 @@ mod tests {
         assert_eq!(reloaded.certificate_der(), second.certificate_der());
         assert_ne!(reloaded.certificate_der(), first.certificate_der());
         assert_eq!(reloaded_stamp.cert_sha256, stamp2.cert_sha256);
+    }
+
+    #[test]
+    fn save_and_reload_preserves_multi_cert_intermediate_ca_chain() {
+        let mut root_params = rcgen::CertificateParams::default();
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        root_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "MIO Test Root CA");
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let root_cert = root_params.self_signed(&root_key).unwrap();
+        let root_issuer = rcgen::Issuer::new(root_params, root_key);
+
+        let mut inter_params = rcgen::CertificateParams::default();
+        inter_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        inter_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        inter_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "MIO Test Intermediate CA");
+        let inter_key = rcgen::KeyPair::generate().unwrap();
+        let inter_cert = inter_params.signed_by(&inter_key, &root_issuer).unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let identity = directory.path().join("identity");
+        let combined_pem = format!("{}{}", inter_cert.pem(), root_cert.pem());
+        let chained =
+            MitmAuthority::from_pem_pair(&combined_pem, &inter_key.serialize_pem()).unwrap();
+        let expected_chain = vec![
+            inter_cert.der().as_ref().to_vec(),
+            root_cert.der().as_ref().to_vec(),
+        ];
+        assert_eq!(chained.certificate_chain_der(), expected_chain);
+
+        let stamp = save_authority_with_stamp_at(&identity, &chained).unwrap();
+        let (reloaded, reloaded_stamp) = load_at_with_stamp(&identity).unwrap();
+        assert_eq!(reloaded.certificate_chain_der(), expected_chain);
+        assert_eq!(reloaded_stamp.cert_sha256, stamp.cert_sha256);
     }
 }

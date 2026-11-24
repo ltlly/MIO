@@ -150,12 +150,13 @@ impl Running {
             let _ = reply.send(Err(error));
             return Ok(());
         }
-        let envelope = self.envelope_for(panel_id, body, 0)?;
+        let envelope = self.preview_envelope_for(panel_id, body, 0)?;
         if let Err(error) = envelope.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(error)));
             return Ok(());
         }
         let reserved = self.broker.reserve_panel_resource(panel_id, Some(id))?;
+        self.outgoing_sequence = envelope.request_id;
         let pending = match self.enqueue_frame(
             outgoing,
             panel_id,
@@ -263,11 +264,12 @@ impl Running {
             return Ok(());
         }
         let message_revision = request.message_revision;
-        let env = self.envelope_for(panel_id, envelope::Body::CommitEditor(request), 0)?;
+        let env = self.preview_envelope_for(panel_id, envelope::Body::CommitEditor(request), 0)?;
         if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }
+        self.outgoing_sequence = env.request_id;
         let req_id = self.enqueue_frame(
             outgoing,
             panel_id,
@@ -333,11 +335,12 @@ impl Running {
             return Ok(());
         }
         let message_revision = request.message_revision;
-        let env = self.envelope_for(panel_id, envelope::Body::CommitResponseEditor(request), 0)?;
+        let env = self.preview_envelope_for(panel_id, envelope::Body::CommitResponseEditor(request), 0)?;
         if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }
+        self.outgoing_sequence = env.request_id;
         let req_id = self.enqueue_frame(
             outgoing,
             panel_id,

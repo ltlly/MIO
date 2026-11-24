@@ -30,6 +30,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const QUEUE_CAPACITY: usize = 128;
+const HOOK_CONCURRENCY_LIMIT: usize = 96;
 const CHILD_QUEUE_SOFT_LIMIT: usize = 96;
 const OUTGOING_CAPACITY: usize = QUEUE_CAPACITY * 2;
 const OUTBOUND_BUFFER_CAPACITY: usize = QUEUE_CAPACITY * 4;

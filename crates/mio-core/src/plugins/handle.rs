@@ -60,6 +60,7 @@ pub struct PluginHandle {
     pub(super) control: mpsc::Sender<SequencedControl>,
     pub(super) urgent_control: mpsc::UnboundedSender<SequencedControl>,
     pub(super) control_order: Arc<std::sync::Mutex<ControlOrderState>>,
+    pub(super) hook_slots: Arc<tokio::sync::Semaphore>,
     pub(super) cancel: CancellationToken,
 }
 
@@ -221,17 +222,30 @@ impl PendingRevokeHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_hook(
     control: &mpsc::Sender<SequencedControl>,
     control_order: &std::sync::Mutex<ControlOrderState>,
+    hook_slots: &Arc<tokio::sync::Semaphore>,
+    handle_cancel: &CancellationToken,
     cancel: CancellationToken,
     permission: Permission,
     body: envelope::Body,
 ) -> Result<HookReply> {
+    let _hook_permit = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("插件 Hook 调用已取消；未发送"),
+        _ = handle_cancel.cancelled() => bail!("插件已停止"),
+        _ = control.closed() => bail!("插件已停止"),
+        permit = hook_slots.clone().acquire_owned() => {
+            permit.map_err(|_| anyhow::anyhow!("插件已停止"))?
+        }
+    };
     let (reply, received) = oneshot::channel();
     tokio::select! {
     biased;
     _ = cancel.cancelled() => bail!("插件 Hook 调用已取消；未发送"),
+    _ = handle_cancel.cancelled() => bail!("插件已停止"),
     _ = control.closed() => bail!("插件已停止"),
     result = control.reserve() => {
         let permit = result.map_err(|_| anyhow::anyhow!("插件已停止"))?;
@@ -250,6 +264,7 @@ async fn send_hook(
     tokio::select! {
     biased;
     _ = cancel.cancelled() => bail!("插件 Hook 调用已取消"),
+    _ = handle_cancel.cancelled() => bail!("插件已停止"),
     result = received => result.context("插件未完成 Hook 调用")?,
     }
 }
@@ -262,6 +277,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::TrafficRead,
             envelope::Body::HttpHookCall(call),
@@ -281,6 +298,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::TrafficRead,
             envelope::Body::WebSocketHookCall(call),
@@ -300,6 +319,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::SessionHook,
             envelope::Body::SessionActionCall(call),
@@ -319,6 +340,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::PayloadProcess,
             envelope::Body::PayloadCall(call),
@@ -338,6 +361,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::TrafficRead,
             envelope::Body::ContextMenuCall(call),
@@ -365,6 +390,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::TrafficRead,
             envelope::Body::PassiveCheckCall(call),
@@ -384,6 +411,8 @@ impl PluginHandle {
         match send_hook(
             &self.control,
             &self.control_order,
+            &self.hook_slots,
+            &self.cancel,
             cancel,
             Permission::TrafficRead,
             envelope::Body::ActiveCheckCall(call),
@@ -391,7 +420,7 @@ impl PluginHandle {
         .await?
         {
             HookReply::ActiveCheck(res) => Ok(res),
-            _ => bail!("插件返回了不匹配的主动检查结果类型"),
+            _ => bail!("插件返回了不匹配的被动检查结果类型"),
         }
     }
 

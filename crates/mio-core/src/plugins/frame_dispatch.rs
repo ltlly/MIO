@@ -75,8 +75,15 @@ impl Running {
             self.rate_epoch = Instant::now();
             self.frame_count = 0;
         }
-        self.frame_count += 1;
-        ensure!(self.frame_count <= 512, "插件消息频率超过每秒 512 帧限额");
+        let is_hook_reply = envelope.in_reply_to != 0
+            && self
+                .requests
+                .get(&envelope.in_reply_to)
+                .is_some_and(|p| matches!(p.kind, PendingKind::Hook { .. }));
+        if !is_hook_reply {
+            self.frame_count += 1;
+            ensure!(self.frame_count <= 512, "插件消息频率超过每秒 512 帧限额");
+        }
         envelope
             .check_channel_header_for_minor(self.identity, self.incoming_sequence, self.protocol_minor)
             .map_err(anyhow::Error::msg)?;

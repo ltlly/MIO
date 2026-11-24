@@ -143,10 +143,8 @@ impl State {
         let Some(response) = record.response.as_ref() else {
             return;
         };
-        if record.request.url.is_empty()
-            || record.request.url.len() > 16 * 1024
-            || record.request.body.len() > protocol::MAX_INLINE_BODY
-            || response.body.len() > protocol::MAX_INLINE_BODY
+        if !super::hooks::http_request_fits_inline_fast(&record.request)
+            || !super::hooks::http_response_fits_inline_fast(response)
         {
             return;
         }
@@ -163,18 +161,19 @@ impl State {
         {
             return;
         }
-        let request_dto: protocol::HttpRequestDto = record.request.clone().into();
-        let response_dto: protocol::HttpResponseDto = response.clone().into();
-        if request_dto.validate().is_err() || response_dto.validate().is_err() {
-            return;
-        }
         let flow_id = record.summary.id;
         let url = record.request.url.clone();
         let call = protocol::PassiveCheckCall {
             flow_id: flow_id.as_bytes().to_vec(),
             url: url.clone(),
-            request: Some(request_dto),
-            response: Some(response_dto),
+            request: Some(record.request.clone().into()),
+            response: Some(response.clone().into()),
+        };
+        let Ok(protocol::envelope::Body::PassiveCheckCall(call)) = protocol::try_into_wire_body(
+            protocol::envelope::Body::PassiveCheckCall(call),
+            protocol::PROTOCOL_MINOR,
+        ) else {
+            return;
         };
         let project = self.project;
         for handle in handles {

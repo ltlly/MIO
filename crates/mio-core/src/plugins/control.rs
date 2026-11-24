@@ -1969,11 +1969,12 @@ impl Running {
                 .unwrap_or(0),
             _ => 0,
         };
-        let env = self.envelope_for(PANEL_ID, body, 0)?;
+        let env = self.preview_envelope_for(PANEL_ID, body, 0)?;
         if let Err(err) = env.validate_for_minor(self.protocol_minor) {
             let _ = reply.send(Err(anyhow::anyhow!(err)));
             return Ok(());
         }
+        self.outgoing_sequence = env.request_id;
         self.enqueue_frame(
             outgoing,
             PANEL_ID,

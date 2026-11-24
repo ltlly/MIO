@@ -9,6 +9,23 @@ pub(in crate::service) use pre_send::{
     run_pre_send_plugin_hooks_with_provenance, sync_flow_request,
 };
 
+pub(in crate::service) fn http_request_fits_inline_fast(request: &HttpRequest) -> bool {
+    !request.method.is_empty()
+        && request.method.len() <= 32
+        && !request.url.is_empty()
+        && request.url.len() <= 16 * 1024
+        && request.body.len() <= protocol::MAX_INLINE_BODY
+        && request.headers.len() <= 512
+        && request.trailers.len() <= 512
+}
+
+pub(in crate::service) fn http_response_fits_inline_fast(response: &HttpResponse) -> bool {
+    (100..=599).contains(&response.status)
+        && response.body.len() <= protocol::MAX_INLINE_BODY
+        && response.headers.len() <= 512
+        && response.trailers.len() <= 512
+}
+
 impl State {
     fn ordered_suite_plugins(&self) -> Vec<&Instance> {
         self.plugins
@@ -265,92 +282,117 @@ impl State {
                                 0 => u8::from(source == protocol::SourceDto::Plugin as i32),
                                 d => d,
                             };
-                            if depth > 1 {
-                                return Ok(mio_proxy::FlowHookDecision::Pass);
-                            }
-                            for (hook_plugin_id, handle) in handles {
-                                let call = protocol::HttpHookCall {
-                                    flow_id: record.summary.id.as_bytes().to_vec(),
-                                    source,
-                                    plugin_id: plugin_id.clone(),
-                                    response_stage,
-                                    response_head_only,
-                                    request: Some(record.request.clone().into()),
-                                    response: record.response.clone().map(Into::into),
-                                };
-                                let res =
-                                    handle.call_http_hook(call, cancel.clone()).await.map_err(
-                                        |e| mio_proxy::ProxyError::InvalidMessage(e.to_string()),
-                                    )?;
-                                let before_req = record.request.clone();
-                                let before_resp = record.response.clone();
-                                match protocol::HookAction::try_from(res.action) {
-                                    Ok(protocol::HookAction::Pass) => {}
-                                    Ok(protocol::HookAction::Drop) => {
-                                        return Ok(mio_proxy::FlowHookDecision::Drop);
+                            if depth <= 1 {
+                                for (hook_plugin_id, handle) in handles {
+                                    if !http_request_fits_inline_fast(&record.request)
+                                        || record
+                                            .response
+                                            .as_ref()
+                                            .is_some_and(|resp| !http_response_fits_inline_fast(resp))
+                                    {
+                                        break;
                                     }
-                                    Ok(protocol::HookAction::Intercept) => {
-                                        if !response_stage && let Some(req) = res.request {
-                                            record.request = req
-                                                .try_into()
-                                                .map_err(mio_proxy::ProxyError::InvalidMessage)?;
-                                            modified = true;
-                                        } else if response_stage && let Some(resp) = res.response {
-                                            record.response =
-                                                Some(resp.try_into().map_err(
+                                    let call = protocol::HttpHookCall {
+                                        flow_id: record.summary.id.as_bytes().to_vec(),
+                                        source,
+                                        plugin_id: plugin_id.clone(),
+                                        response_stage,
+                                        response_head_only,
+                                        request: Some(record.request.clone().into()),
+                                        response: record.response.clone().map(Into::into),
+                                    };
+                                    let Ok(protocol::envelope::Body::HttpHookCall(call)) =
+                                        protocol::try_into_wire_body(
+                                            protocol::envelope::Body::HttpHookCall(call),
+                                            protocol::PROTOCOL_MINOR,
+                                        )
+                                    else {
+                                        break;
+                                    };
+                                    let res = handle
+                                        .call_http_hook(call, cancel.clone())
+                                        .await
+                                        .map_err(|e| {
+                                            if cancel.is_cancelled() {
+                                                mio_proxy::ProxyError::Cancelled
+                                            } else {
+                                                mio_proxy::ProxyError::InvalidMessage(e.to_string())
+                                            }
+                                        })?;
+                                    let before_req = record.request.clone();
+                                    let before_resp = record.response.clone();
+                                    match protocol::HookAction::try_from(res.action) {
+                                        Ok(protocol::HookAction::Pass) => {}
+                                        Ok(protocol::HookAction::Drop) => {
+                                            return Ok(mio_proxy::FlowHookDecision::Drop);
+                                        }
+                                        Ok(protocol::HookAction::Intercept) => {
+                                            if !response_stage && let Some(req) = res.request {
+                                                record.request = req.try_into().map_err(
+                                                    mio_proxy::ProxyError::InvalidMessage,
+                                                )?;
+                                                modified = true;
+                                            } else if response_stage && let Some(resp) = res.response
+                                            {
+                                                record.response = Some(resp.try_into().map_err(
                                                     mio_proxy::ProxyError::InvalidMessage,
                                                 )?);
-                                            modified = true;
+                                                modified = true;
+                                            }
+                                            force_intercept = true;
                                         }
-                                        force_intercept = true;
-                                    }
-                                    Ok(protocol::HookAction::Modify) => {
-                                        if !response_stage {
-                                            let req = res.request.ok_or_else(|| {
-                                                mio_proxy::ProxyError::InvalidMessage(
-                                                    "插件声明修改请求但未返回请求".into(),
-                                                )
-                                            })?;
-                                            record.request = req
-                                                .try_into()
-                                                .map_err(mio_proxy::ProxyError::InvalidMessage)?;
-                                            modified = true;
-                                        } else {
-                                            let resp = res.response.ok_or_else(|| {
-                                                mio_proxy::ProxyError::InvalidMessage(
-                                                    "插件声明修改响应但未返回响应".into(),
-                                                )
-                                            })?;
-                                            record.response =
-                                                Some(resp.try_into().map_err(
+                                        Ok(protocol::HookAction::Modify) => {
+                                            if !response_stage {
+                                                let req = res.request.ok_or_else(|| {
+                                                    mio_proxy::ProxyError::InvalidMessage(
+                                                        "插件声明修改请求但未返回请求".into(),
+                                                    )
+                                                })?;
+                                                record.request = req.try_into().map_err(
+                                                    mio_proxy::ProxyError::InvalidMessage,
+                                                )?;
+                                                modified = true;
+                                            } else {
+                                                let resp = res.response.ok_or_else(|| {
+                                                    mio_proxy::ProxyError::InvalidMessage(
+                                                        "插件声明修改响应但未返回响应".into(),
+                                                    )
+                                                })?;
+                                                record.response = Some(resp.try_into().map_err(
                                                     mio_proxy::ProxyError::InvalidMessage,
                                                 )?);
-                                            modified = true;
+                                                modified = true;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            return Err(mio_proxy::ProxyError::InvalidMessage(
+                                                "插件返回未知 Hook 动作".into(),
+                                            ));
                                         }
                                     }
-                                    Err(_) => {
-                                        return Err(mio_proxy::ProxyError::InvalidMessage(
-                                            "插件返回未知 Hook 动作".into(),
-                                        ));
+                                    let actor = ProvenanceActor::PluginHook {
+                                        plugin_id: hook_plugin_id,
+                                        hook: "http_hook".into(),
+                                    };
+                                    if !response_stage && record.request != before_req {
+                                        provenance.record_request(
+                                            record.summary.id,
+                                            &initial_req,
+                                            actor,
+                                            &record.request,
+                                        );
+                                    } else if response_stage
+                                        && record.response != before_resp
+                                        && let (Some(orig), Some(cur)) =
+                                            (&initial_resp, &record.response)
+                                    {
+                                        provenance.record_response(
+                                            record.summary.id,
+                                            orig,
+                                            actor,
+                                            cur,
+                                        );
                                     }
-                                }
-                                let actor = ProvenanceActor::PluginHook {
-                                    plugin_id: hook_plugin_id,
-                                    hook: "http_hook".into(),
-                                };
-                                if !response_stage && record.request != before_req {
-                                    provenance.record_request(
-                                        record.summary.id,
-                                        &initial_req,
-                                        actor,
-                                        &record.request,
-                                    );
-                                } else if response_stage
-                                    && record.response != before_resp
-                                    && let (Some(orig), Some(cur)) =
-                                        (&initial_resp, &record.response)
-                                {
-                                    provenance.record_response(record.summary.id, orig, actor, cur);
                                 }
                             }
                             Ok(if force_intercept {
@@ -384,6 +426,12 @@ impl State {
                             let mut modified = false;
                             let mut force_intercept = false;
                             for handle in handles {
+                                if url.is_empty()
+                                    || url.len() > 16 * 1024
+                                    || payload.len() > protocol::MAX_INLINE_BODY
+                                {
+                                    break;
+                                }
                                 let call = protocol::WebSocketHookCall {
                                     flow_id: flow_id.as_bytes().to_vec(),
                                     message_id: msg_id.as_bytes().to_vec(),
@@ -393,8 +441,22 @@ impl State {
                                     is_binary: kind == mio_plugin_api::WebSocketKind::Binary,
                                     payload: payload.clone(),
                                 };
+                                let Ok(protocol::envelope::Body::WebSocketHookCall(call)) =
+                                    protocol::try_into_wire_body(
+                                        protocol::envelope::Body::WebSocketHookCall(call),
+                                        protocol::PROTOCOL_MINOR,
+                                    )
+                                else {
+                                    break;
+                                };
                                 let res = handle.call_ws_hook(call, cancel.clone()).await.map_err(
-                                    |e| mio_proxy::ProxyError::InvalidMessage(e.to_string()),
+                                    |e| {
+                                        if cancel.is_cancelled() {
+                                            mio_proxy::ProxyError::Cancelled
+                                        } else {
+                                            mio_proxy::ProxyError::InvalidMessage(e.to_string())
+                                        }
+                                    },
                                 )?;
                                 match protocol::HookAction::try_from(res.action) {
                                     Ok(protocol::HookAction::Pass) => {}

@@ -758,3 +758,69 @@ fn legacy_v15_compat_minor_allows_core_frames_and_rejects_v16_check_and_audit_fr
     .with_minor(LEGACY_COMPAT_MINOR);
     assert!(submit_audit.validate_for_minor(LEGACY_COMPAT_MINOR).is_err());
 }
+
+#[test]
+fn try_into_wire_body_rejects_oversized_body_and_combined_frame_overflow() {
+    let base_req = HttpRequestDto {
+        method: "POST".into(),
+        url: "http://127.0.0.1/upload".into(),
+        version: HttpVersionDto::Http11 as i32,
+        ..Default::default()
+    };
+    let oversized_resp = HttpHookCall {
+        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+        source: SourceDto::Proxy as i32,
+        plugin_id: String::new(),
+        response_stage: true,
+        response_head_only: false,
+        request: Some(base_req.clone()),
+        response: Some(HttpResponseDto {
+            status: 200,
+            version: HttpVersionDto::Http11 as i32,
+            body: vec![0; MAX_INLINE_BODY + 1],
+            ..Default::default()
+        }),
+    };
+    assert!(
+        try_into_wire_body(envelope::Body::HttpHookCall(oversized_resp), PROTOCOL_MINOR).is_err()
+    );
+
+    let combined_overflow = HttpHookCall {
+        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+        source: SourceDto::Proxy as i32,
+        plugin_id: String::new(),
+        response_stage: true,
+        response_head_only: false,
+        request: Some(HttpRequestDto {
+            body: vec![b'a'; MAX_INLINE_BODY],
+            ..base_req.clone()
+        }),
+        response: Some(HttpResponseDto {
+            status: 200,
+            version: HttpVersionDto::Http11 as i32,
+            body: vec![b'b'; MAX_INLINE_BODY],
+            ..Default::default()
+        }),
+    };
+    assert!(
+        try_into_wire_body(
+            envelope::Body::HttpHookCall(combined_overflow),
+            PROTOCOL_MINOR
+        )
+        .is_err()
+    );
+
+    let normal = HttpHookCall {
+        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+        source: SourceDto::Proxy as i32,
+        plugin_id: String::new(),
+        response_stage: false,
+        response_head_only: false,
+        request: Some(base_req),
+        response: None,
+    };
+    assert!(matches!(
+        try_into_wire_body(envelope::Body::HttpHookCall(normal), PROTOCOL_MINOR),
+        Ok(envelope::Body::HttpHookCall(_))
+    ));
+}

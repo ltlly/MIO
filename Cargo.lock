@@ -4969,6 +4969,7 @@ dependencies = [
  "mio-plugin-sdk",
  "mio-proxy",
  "multer",
+ "rcgen",
  "regex",
  "rhai",
  "roxmltree 0.21.2",

@@ -2139,3 +2139,73 @@ async fn on_cancel_cleanup_host_call_allows_safe_ops_clamps_deadline_and_blocks_
         })) if code == ErrorCode::Stale as i32
     ));
 }
+
+#[tokio::test]
+async fn correlated_hook_replies_do_not_exhaust_unsolicited_frame_rate_limit() {
+    let (mut running, _calls, _updates) = running();
+    let (outgoing, mut wire) = mpsc::channel(QUEUE_CAPACITY * 2);
+
+    for seq in 1..=520u64 {
+        let (reply, mut rx) = oneshot::channel();
+        running
+            .control(
+                Control::Hook {
+                    permission: Permission::TrafficRead,
+                    body: envelope::Body::HttpHookCall(protocol::HttpHookCall {
+                        flow_id: Uuid::new_v4().as_bytes().to_vec(),
+                        source: protocol::SourceDto::Proxy as i32,
+                        plugin_id: String::new(),
+                        response_stage: false,
+                        response_head_only: false,
+                        request: Some(request().into()),
+                        response: None,
+                    }),
+                    cancelled: CancellationToken::new(),
+                    reply,
+                },
+                &outgoing,
+            )
+            .await
+            .unwrap();
+        let sent = wire.try_recv().unwrap();
+        let mut resp = Envelope::new(
+            running.identity,
+            seq,
+            1,
+            envelope::Body::HttpHookResult(protocol::HttpHookResult {
+                action: protocol::HookAction::Pass as i32,
+                request: None,
+                response: None,
+            }),
+            MAX_OPERATION,
+        );
+        resp.in_reply_to = sent.request_id;
+        running.frame(resp, &outgoing).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Ok(HookReply::Http(_)))));
+    }
+
+    let mut hit_rate_limit = false;
+    for offset in 1..=520u64 {
+        let env = Envelope::new(
+            running.identity,
+            520 + offset,
+            1,
+            envelope::Body::HostCall(HostCall {
+                parent_request_id: 0,
+                operation: Some(host_call::Operation::ScopeCheck(
+                    "http://127.0.0.1/".into(),
+                )),
+            }),
+            MAX_OPERATION,
+        );
+        if let Err(err) = running.frame(env, &outgoing).await {
+            assert!(err.to_string().contains("消息频率"), "{err}");
+            hit_rate_limit = true;
+            break;
+        }
+    }
+    assert!(
+        hit_rate_limit,
+        "unsolicited plugin frames above 512/s must still be rate-limited"
+    );
+}

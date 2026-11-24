@@ -308,29 +308,45 @@ pub(super) async fn run_scan(
                 let pt = point.clone();
                 let child_cancel = cancel.child_token();
                 probes.spawn(async move {
-                    let probe_flow_id = Uuid::new_v4();
-                    let req_dto: protocol::HttpRequestDto = req_copy.clone().into();
-                    let resp_dto: protocol::HttpResponseDto = (*resp_copy).clone().into();
-                    if req_dto.validate().is_err() || resp_dto.validate().is_err() {
+                    if !crate::service::plugin_service::hooks::http_request_fits_inline_fast(&req_copy)
+                        || !crate::service::plugin_service::hooks::http_response_fits_inline_fast(&resp_copy)
+                        || pt.name.len() > 512
+                        || pt.value.len() > 16 * 1024
+                    {
                         return ProbeOutcome {
                             sent: false,
                             flow_and_findings: None,
                         };
                     }
+                    let probe_flow_id = Uuid::new_v4();
+                    let template_call = protocol::ActiveCheckCall {
+                        flow_id: probe_flow_id.as_bytes().to_vec(),
+                        base_request: Some(req_copy.clone().into()),
+                        base_response: Some((*resp_copy).clone().into()),
+                        parameter_name: pt.name,
+                        parameter_value: pt.value,
+                    };
+                    let Ok(protocol::envelope::Body::ActiveCheckCall(template_call)) =
+                        protocol::try_into_wire_body(
+                            protocol::envelope::Body::ActiveCheckCall(template_call),
+                            protocol::PROTOCOL_MINOR,
+                        )
+                    else {
+                        return ProbeOutcome {
+                            sent: false,
+                            flow_and_findings: None,
+                        };
+                    };
                     let mut plugin_hits = Vec::new();
                     for handle in hooks {
                         if child_cancel.is_cancelled() {
                             break;
                         }
-                        let call = protocol::ActiveCheckCall {
-                            flow_id: probe_flow_id.as_bytes().to_vec(),
-                            base_request: Some(req_dto.clone()),
-                            base_response: Some(resp_dto.clone()),
-                            parameter_name: pt.name.clone(),
-                            parameter_value: pt.value.clone(),
-                        };
                         if let Ok(res) = handle
-                            .call_active_check_with_cancel(call, child_cancel.child_token())
+                            .call_active_check_with_cancel(
+                                template_call.clone(),
+                                child_cancel.child_token(),
+                            )
                             .await
                             && !res.findings.is_empty()
                         {

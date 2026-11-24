@@ -313,6 +313,29 @@ impl Envelope {
     }
 }
 
+/// Validates `body` against protocol field limits and worst-case `Envelope` framing
+/// overhead (`MAX_FRAME_BYTES`), returning the body untouched without cloning.
+pub fn try_into_wire_body(
+    body: envelope::Body,
+    expected_minor: u32,
+) -> Result<envelope::Body, String> {
+    let probe = Envelope {
+        major: PROTOCOL_MAJOR,
+        minor: expected_minor,
+        request_id: u64::MAX,
+        instance_id: vec![0xff; 16],
+        project_id: vec![0xff; 16],
+        project_generation: u64::MAX,
+        panel_id: u64::MAX,
+        revision: u64::MAX,
+        deadline_unix_ms: u64::MAX,
+        in_reply_to: u64::MAX,
+        body: Some(body),
+    };
+    probe.validate_for_minor(expected_minor)?;
+    Ok(probe.body.expect("body present"))
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

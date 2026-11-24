@@ -67,6 +67,20 @@ impl mio_plugin_sdk::MioPlugin for HookTestPlugin {
         })
     }
 
+    fn on_ws_hook(
+        &mut self,
+        _ctx: &mut dyn mio_plugin_sdk::HostClient,
+        call: mio_plugin_sdk::protocol::WebSocketHookCall,
+    ) -> Result<mio_plugin_sdk::protocol::WebSocketHookResult, String> {
+        use mio_plugin_sdk::protocol::{HookAction, WebSocketHookResult};
+        let mut payload = call.payload;
+        payload.extend_from_slice(b":ws");
+        Ok(WebSocketHookResult {
+            action: HookAction::Modify as i32,
+            payload,
+        })
+    }
+
     fn on_session_action(
         &mut self,
         _ctx: &mut dyn mio_plugin_sdk::HostClient,
@@ -315,5 +329,201 @@ async fn session_and_http_hooks_run_in_order_for_repeater_and_depth_skip_is_nond
     ));
     assert_eq!(blocked, before);
     worker.stop().await.unwrap();
+    worker_thread.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_proxy_http_ws_and_pre_send_messages_bypass_plugin_hooks_without_error() {
+    let root = tempfile::tempdir().unwrap();
+    let (events, _rx) = mpsc::channel(128);
+    let mut state = State::new(events, CancellationToken::new()).unwrap();
+    let (package, _trust, worker, service_rx, worker_thread) = spawn_hook_worker(
+        root.path(),
+        state.project,
+        &["traffic.modify", "session.hook"],
+        vec![Permission::TrafficModify, Permission::SessionHook],
+        &["http_hook", "ws_hook", "session_action"],
+    )
+    .await;
+    let identity = worker.identity;
+    let panel = worker.initial_panel.clone();
+    let manifest_modified = package.manifest_modified;
+    let manifest_size = package.manifest_bytes.len() as u64;
+    let entry_modified = package.modified;
+    let entry_size = package.executable_size;
+    let info = LoadedPlugin {
+        identity,
+        directory: package.directory.clone(),
+        manifest: package.manifest.clone(),
+        grants: vec![Permission::TrafficModify, Permission::SessionHook],
+        tab_id: None,
+    };
+    state.plugins.instances.insert(
+        identity.instance_id,
+        Instance {
+            worker,
+            services: service_rx,
+            package,
+            manifest_modified,
+            manifest_size,
+            entry_modified,
+            entry_size,
+            auto_reload: false,
+            info,
+            panel,
+            resources: HashMap::new(),
+        },
+    );
+    state.plugins.order.push(identity.instance_id);
+
+    let (flow_hook, ws_hook) = state.build_proxy_plugin_hooks();
+    let flow_hook = flow_hook.expect("flow_hook registered");
+    let ws_hook = ws_hook.expect("ws_hook registered");
+    let dl = Instant::now() + Duration::from_secs(3);
+
+    // 1. Small HTTP request still runs through http_hook and gets modified.
+    let small_record = FlowRecord {
+        summary: FlowSummary {
+            id: Uuid::new_v4(),
+            revision: 1,
+            source: TrafficSource::Proxy,
+            method: "POST".into(),
+            url: "http://127.0.0.1/small".into(),
+            status: None,
+            state: FlowState::Pending,
+            request_bytes: 3,
+            response_bytes: 0,
+            started_unix_ms: 0,
+            elapsed_ms: 0,
+        },
+        request: request(),
+        response: None,
+    };
+    let decision = flow_hook(
+        small_record.clone(),
+        false,
+        false,
+        CancellationToken::new(),
+        dl,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        decision,
+        mio_proxy::FlowHookDecision::ModifyRequest(ref req)
+            if req.headers.iter().any(|h| h.name == "x-mio-plugin-hook")
+    ));
+
+    // 2. Response exceeding MAX_INLINE_BODY bypasses http_hook without error.
+    let oversized_resp_record = FlowRecord {
+        summary: FlowSummary {
+            status: Some(200),
+            response_bytes: (protocol::MAX_INLINE_BODY + 1024) as u64,
+            ..small_record.summary.clone()
+        },
+        request: request(),
+        response: Some(HttpResponse {
+            status: 200,
+            version: HttpVersion::Http11,
+            reason_phrase: None,
+            headers: Vec::new(),
+            body: vec![b'x'; protocol::MAX_INLINE_BODY + 1024],
+            trailers: Vec::new(),
+        }),
+    };
+    let decision = flow_hook(
+        oversized_resp_record,
+        true,
+        false,
+        CancellationToken::new(),
+        dl,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(decision, mio_proxy::FlowHookDecision::Pass));
+
+    // 3. Combined req + resp each <= MAX_INLINE_BODY but exceeding MAX_FRAME_BYTES bypasses cleanly.
+    let mut max_req = request();
+    max_req.body = vec![b'a'; protocol::MAX_INLINE_BODY];
+    let combined_overflow_record = FlowRecord {
+        summary: FlowSummary {
+            status: Some(200),
+            request_bytes: protocol::MAX_INLINE_BODY as u64,
+            response_bytes: protocol::MAX_INLINE_BODY as u64,
+            ..small_record.summary.clone()
+        },
+        request: max_req,
+        response: Some(HttpResponse {
+            status: 200,
+            version: HttpVersion::Http11,
+            reason_phrase: None,
+            headers: Vec::new(),
+            body: vec![b'b'; protocol::MAX_INLINE_BODY],
+            trailers: Vec::new(),
+        }),
+    };
+    let decision = flow_hook(
+        combined_overflow_record,
+        true,
+        false,
+        CancellationToken::new(),
+        dl,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(decision, mio_proxy::FlowHookDecision::Pass));
+
+    // 4. WebSocket hook modifies small frames and cleanly bypasses oversized payloads.
+    let ws_small = ws_hook(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "wss://127.0.0.1/ws".into(),
+        mio_plugin_api::WebSocketDirection::ClientToServer,
+        mio_plugin_api::WebSocketKind::Text,
+        b"ping".to_vec(),
+        CancellationToken::new(),
+        dl,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        ws_small,
+        mio_proxy::WebSocketHookDecision::Modify(ref payload) if payload == b"ping:ws"
+    ));
+    let ws_large = ws_hook(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "wss://127.0.0.1/ws".into(),
+        mio_plugin_api::WebSocketDirection::ServerToClient,
+        mio_plugin_api::WebSocketKind::Binary,
+        vec![0x42; protocol::MAX_INLINE_BODY + 1],
+        CancellationToken::new(),
+        dl,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(ws_large, mio_proxy::WebSocketHookDecision::Pass));
+
+    // 5. Repeater/Intruder pre_send cleanly bypasses oversized bodies without failing the send.
+    let mut oversized_pre = request();
+    oversized_pre.body = vec![b'z'; protocol::MAX_INLINE_BODY + 1];
+    let expected_pre = oversized_pre.clone();
+    let outcome = run_pre_send_plugin_hooks(
+        &state.strict_session_action_hooks(),
+        &state.tool_http_hooks(),
+        Uuid::new_v4(),
+        protocol::SourceDto::Repeater,
+        &mut oversized_pre,
+        dl,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        PreSendHookOutcome::Proceed { mutated: false }
+    ));
+    assert_eq!(oversized_pre, expected_pre);
+
+    state.stop_plugins().await.unwrap();
     worker_thread.join().unwrap();
 }

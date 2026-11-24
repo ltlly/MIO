@@ -220,6 +220,7 @@ pub(crate) fn spawn_test_multiplex_supervisor(
                 control,
                 urgent_control,
                 control_order,
+                hook_slots: Arc::new(tokio::sync::Semaphore::new(HOOK_CONCURRENCY_LIMIT)),
                 cancel,
             },
             task: Some(task),
@@ -251,6 +252,7 @@ pub(crate) fn test_supervisor(
                 control,
                 urgent_control,
                 control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
+                hook_slots: Arc::new(tokio::sync::Semaphore::new(HOOK_CONCURRENCY_LIMIT)),
                 cancel: CancellationToken::new(),
             },
             task: None,
@@ -499,6 +501,7 @@ pub(crate) async fn spawn_test_duplex_supervisor(
         control,
         urgent_control,
         control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
+        hook_slots: Arc::new(tokio::sync::Semaphore::new(HOOK_CONCURRENCY_LIMIT)),
         cancel: cancel.clone(),
     };
     let runtime = Running::new(
@@ -603,6 +606,7 @@ impl PluginSupervisor {
             control,
             urgent_control,
             control_order: Arc::new(std::sync::Mutex::new(ControlOrderState::default())),
+            hook_slots: Arc::new(tokio::sync::Semaphore::new(HOOK_CONCURRENCY_LIMIT)),
             cancel: cancel.clone(),
         };
         let manifest = package.manifest;

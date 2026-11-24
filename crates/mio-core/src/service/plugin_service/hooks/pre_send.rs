@@ -84,11 +84,21 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
 ) -> PreSendHookOutcome {
     let mut current = request.clone();
     for (plugin_id, handle) in session_hooks {
+        if !super::http_request_fits_inline_fast(&current) {
+            break;
+        }
         let call = protocol::SessionActionCall {
             source: source as i32,
             request: Some(current.clone().into()),
         };
+        let Ok(protocol::envelope::Body::SessionActionCall(call)) = protocol::try_into_wire_body(
+            protocol::envelope::Body::SessionActionCall(call),
+            protocol::PROTOCOL_MINOR,
+        ) else {
+            break;
+        };
         let call_cancel = cancel.child_token();
+        let _call_cancel_guard = call_cancel.clone().drop_guard();
         let res = match tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             handle.call_session_action(call, call_cancel.clone()),
@@ -139,6 +149,9 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
 
     if !http_hooks.is_empty() && plugin_hook_depth(&current) <= 1 {
         for (plugin_id, handle) in http_hooks {
+            if !super::http_request_fits_inline_fast(&current) {
+                break;
+            }
             let call = protocol::HttpHookCall {
                 flow_id: flow_id.as_bytes().to_vec(),
                 source: source as i32,
@@ -148,7 +161,14 @@ pub(in crate::service) async fn run_pre_send_plugin_hooks_with_provenance(
                 request: Some(current.clone().into()),
                 response: None,
             };
+            let Ok(protocol::envelope::Body::HttpHookCall(call)) = protocol::try_into_wire_body(
+                protocol::envelope::Body::HttpHookCall(call),
+                protocol::PROTOCOL_MINOR,
+            ) else {
+                break;
+            };
             let call_cancel = cancel.child_token();
+            let _call_cancel_guard = call_cancel.clone().drop_guard();
             let res = match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 handle.call_http_hook(call, call_cancel.clone()),

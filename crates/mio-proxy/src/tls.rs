@@ -445,10 +445,26 @@ impl MitmAuthority {
     }
 
     pub fn from_der(certificate: Vec<u8>, private_key: Vec<u8>) -> Result<Self, ProxyError> {
+        Self::from_der_chain(vec![certificate], private_key)
+    }
+
+    pub fn from_der_chain(
+        certificates: Vec<Vec<u8>>,
+        private_key: Vec<u8>,
+    ) -> Result<Self, ProxyError> {
+        if certificates.is_empty() {
+            return Err(ProxyError::Tls("CA 证书链不能为空".into()));
+        }
+        if certificates.len() > MAX_CUSTOM_CERT_CHAIN_LEN {
+            return Err(ProxyError::Tls(format!(
+                "CA 证书链超过 {MAX_CUSTOM_CERT_CHAIN_LEN} 张上限"
+            )));
+        }
+        let certs: Vec<CertificateDer<'static>> =
+            certificates.into_iter().map(CertificateDer::from).collect();
         let private_key = PrivateKeyDer::try_from(private_key).map_err(ProxyError::tls)?;
         let issuer =
-            CertificateAuthorityData::try_new(vec![CertificateDer::from(certificate)], private_key)
-                .map_err(ProxyError::tls)?;
+            CertificateAuthorityData::try_new(certs, private_key).map_err(ProxyError::tls)?;
         Ok(Self {
             issuer: Arc::new(issuer),
             cache: Arc::new(Mutex::new(VecDeque::new())),
@@ -468,6 +484,14 @@ impl MitmAuthority {
 
     pub fn certificate_der(&self) -> Vec<u8> {
         self.issuer.certificate_chain()[0].as_ref().to_vec()
+    }
+
+    pub fn certificate_chain_der(&self) -> Vec<Vec<u8>> {
+        self.issuer
+            .certificate_chain()
+            .iter()
+            .map(|cert| cert.as_ref().to_vec())
+            .collect()
     }
 
     pub fn certificate_pem(&self) -> String {
@@ -1294,6 +1318,54 @@ mod tests {
 
         assert!(MitmAuthority::from_pem_pair(&cert_pem, &second.private_key_pem()).is_err());
         assert!(MitmAuthority::from_pem_pair("not a pem", &key_pem).is_err());
+    }
+
+    #[test]
+    fn ca_from_der_chain_preserves_signed_intermediate_chain() {
+        let mut root_params = rcgen::CertificateParams::default();
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        root_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "MIO Test Root CA");
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let root_cert = root_params.self_signed(&root_key).unwrap();
+        let root_issuer = rcgen::Issuer::new(root_params, root_key);
+
+        let mut inter_params = rcgen::CertificateParams::default();
+        inter_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        inter_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        inter_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "MIO Test Intermediate CA");
+        let inter_key = rcgen::KeyPair::generate().unwrap();
+        let inter_cert = inter_params.signed_by(&inter_key, &root_issuer).unwrap();
+
+        let combined_pem = format!("{}{}", inter_cert.pem(), root_cert.pem());
+        let from_pem =
+            MitmAuthority::from_pem_pair(&combined_pem, &inter_key.serialize_pem()).unwrap();
+        let chain = from_pem.certificate_chain_der();
+        assert_eq!(
+            chain,
+            vec![
+                inter_cert.der().as_ref().to_vec(),
+                root_cert.der().as_ref().to_vec(),
+            ]
+        );
+        let imported = MitmAuthority::from_der_chain(chain.clone(), from_pem.private_key_der())
+            .unwrap();
+        assert_eq!(imported.certificate_chain_der(), chain);
+        let (leaf_chain, _) =
+            issue_ca_signed_leaf(&imported.issuer, "lab.example.invalid").unwrap();
+        assert_eq!(leaf_chain.len(), 3);
+        assert_eq!(leaf_chain[1].as_ref(), inter_cert.der().as_ref());
+        assert_eq!(leaf_chain[2].as_ref(), root_cert.der().as_ref());
     }
 
     #[tokio::test]
