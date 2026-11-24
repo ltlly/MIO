@@ -1459,3 +1459,41 @@ async fn v17_large_body_spill_preserves_rewrites_and_rejects_escape() {
     state.stop_plugins().await.unwrap();
     worker_thread.join().unwrap();
 }
+
+#[test]
+fn try_build_pair_reuses_read_only_request_spill_across_retry_iterations() {
+    let mut req = request();
+    req.body = vec![b'R'; protocol::MAX_INLINE_BODY + 16 * 1024];
+    let mut resp = HttpResponse {
+        status: 200,
+        version: HttpVersion::Http11,
+        reason_phrase: None,
+        headers: Vec::new(),
+        body: vec![b'S'; protocol::MAX_INLINE_BODY - 1024],
+        trailers: Vec::new(),
+    };
+    for idx in 0..40 {
+        resp.headers.push(Header {
+            name: format!("x-extra-{idx:02}"),
+            value: vec![b'V'; 16 * 1024],
+        });
+    }
+    let (call, _spill) = super::large_body::prepare_http_hook_call(
+        Uuid::new_v4(),
+        protocol::SourceDto::Proxy as i32,
+        "lab.hooks".into(),
+        true,
+        false,
+        &req,
+        Some(&resp),
+        protocol::PROTOCOL_MINOR,
+        true,
+    )
+    .expect("two-sided large-body spill must succeed when response spills on retry");
+    let req_dto = call.request.expect("request dto present");
+    let resp_dto = call.response.expect("response dto present");
+    assert!(req_dto.body_omitted);
+    assert!(resp_dto.body_omitted);
+    assert_eq!(req_dto.read_body_bytes().unwrap().as_ref(), req.body.as_slice());
+    assert_eq!(resp_dto.read_body_bytes().unwrap().as_ref(), resp.body.as_slice());
+}

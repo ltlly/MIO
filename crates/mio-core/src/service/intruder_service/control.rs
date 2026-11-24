@@ -57,7 +57,8 @@ impl State {
                     && previous.dispatched.checked_sub(previous.completed)
                         == Some(active.active as u64)
                     && self.intruder.requests.len() <= MAX_REQUESTS_IN_FLIGHT
-                    && self.intruder.jobs.len() == self.intruder.requests.len(),
+                    && self.intruder.jobs.len() == self.intruder.requests.len()
+                    && self.intruder.prep_jobs.len() == self.intruder.prep_requests.len(),
                 "Intruder 在途请求归属不一致；未增加基准请求"
             );
             let mut ordinals = BTreeSet::new();
@@ -100,7 +101,13 @@ impl State {
                         .requests
                         .values()
                         .any(|request| request.run_id == id)
-                    && self.intruder.jobs.len() == self.intruder.requests.len(),
+                    && !self
+                        .intruder
+                        .prep_requests
+                        .values()
+                        .any(|(run_id, _)| *run_id == id)
+                    && self.intruder.jobs.len() == self.intruder.requests.len()
+                    && self.intruder.prep_jobs.len() == self.intruder.prep_requests.len(),
                 "Intruder 活动任务已达上限或原发送尚未回收；未增加基准请求"
             );
             true

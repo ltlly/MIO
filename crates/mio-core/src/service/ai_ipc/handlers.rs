@@ -524,8 +524,11 @@ impl State {
         workspace.active = Some(tab.id);
         workspace.active_websocket_tab = None;
         workspace.tabs.push(tab.clone());
+        workspace.validate()?;
         self.store.metadata_mut().save_workspace(&workspace)?;
         self.ai_ipc.repeater_revisions.insert((tab.id, next_rev));
+        self.plugin_workspace_changed(&workspace).await;
+        self.refresh_project_disk_bytes();
         let persisted_workspace = Some(workspace);
         let tab_id = tab.id;
         let tab_title = tab.title.clone();

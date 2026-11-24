@@ -200,6 +200,56 @@ async fn highlight_commands_correlate_batches_and_reject_stale_cancelled_or_inva
             }
         )]
     );
+    state
+        .command(Command::SetLiveFlowAnnotated {
+            project: owner,
+            flow_id: live_id,
+            annotated: true,
+        })
+        .await
+        .unwrap();
+    drain(&mut receiver);
+    let mut mutated_req = live.request.clone();
+    mutated_req.headers.push(Header {
+        name: "X-Test".into(),
+        value: b"1".to_vec(),
+    });
+    state.storage.provenance.record_request(
+        live_id,
+        &live.request,
+        crate::ProvenanceActor::SessionRule {
+            rule_name: "TestRule".into(),
+        },
+        &mutated_req,
+    );
+    assert!(
+        state
+            .storage
+            .annotated_flows
+            .read()
+            .unwrap()
+            .contains(&live_id)
+    );
+    assert!(state.storage.provenance.get(live_id).is_some());
+    let del_op = Uuid::new_v4();
+    state
+        .command(Command::DeleteHttpHistory {
+            project: owner,
+            operation_id: del_op,
+            flow_ids: vec![live_id],
+        })
+        .await
+        .unwrap();
+    drain(&mut receiver);
+    assert!(
+        !state
+            .storage
+            .annotated_flows
+            .read()
+            .unwrap()
+            .contains(&live_id)
+    );
+    assert!(state.storage.provenance.get(live_id).is_none());
     state.storage.history_dirty = false;
     for scenario in 0..5 {
         let cancel = CancellationToken::new();

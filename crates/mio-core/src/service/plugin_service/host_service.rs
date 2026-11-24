@@ -449,6 +449,7 @@ impl State {
                         .into_iter()
                         .next()
                         .map_or((0, 0), |(_, _, h)| (h.color, h.revision));
+                    self.plugin_check_call(&call)?;
                     Ok(ServiceResult::Annotations {
                         flow_id: *flow_id,
                         notes: final_notes.text,
@@ -460,6 +461,10 @@ impl State {
                 if result.is_ok() {
                     self.history_changed().await;
                 }
+                let result = result.and_then(|res| {
+                    self.plugin_check_call(&call)?;
+                    Ok(res)
+                });
                 let _ = call.reply.send(
                     result.map_err(|error| Failure::new(ErrorCode::Invalid, error.to_string())),
                 );
@@ -538,6 +543,7 @@ impl State {
                         self.store.audit_mut().write_state(&state, &call.cancel)?;
                         emitted_state = Some(state);
                     }
+                    self.plugin_check_call(&call)?;
                     Ok(ServiceResult::Done)
                 })();
                 if let Some(state) = emitted_state {
@@ -548,6 +554,10 @@ impl State {
                     }))
                     .await;
                 }
+                let result = result.and_then(|res| {
+                    self.plugin_check_call(&call)?;
+                    Ok(res)
+                });
                 let _ = call.reply.send(
                     result.map_err(|error| Failure::new(ErrorCode::Invalid, error.to_string())),
                 );
@@ -555,6 +565,7 @@ impl State {
             ServiceOperation::CollaboratorGenerate { label } => {
                 let result: Result<(ServiceResult, crate::oast::OastPayloadToken)> = async {
                     self.collaborator.ensure_default_started(self.project).await?;
+                    self.plugin_check_call(&call)?;
                     let eff_label = if label.trim().is_empty() {
                         call.plugin_id.as_str()
                     } else {
@@ -577,7 +588,11 @@ impl State {
                         ))
                         .await;
                         self.emit_collaborator_status(self.project).await;
-                        let _ = call.reply.send(Ok(res));
+                        let reply = self
+                            .plugin_check_call(&call)
+                            .map(|()| res)
+                            .map_err(|error| Failure::new(ErrorCode::Cancelled, error.to_string()));
+                        let _ = call.reply.send(reply);
                     }
                     Err(error) => {
                         let _ = call
@@ -613,9 +628,11 @@ impl State {
                     })
                     .take(*limit)
                     .collect();
-                let _ = call
-                    .reply
-                    .send(Ok(ServiceResult::CollaboratorInteractions(items)));
+                let reply = self
+                    .plugin_check_call(&call)
+                    .map(|()| ServiceResult::CollaboratorInteractions(items))
+                    .map_err(|error| Failure::new(ErrorCode::Cancelled, error.to_string()));
+                let _ = call.reply.send(reply);
             }
         }
     }

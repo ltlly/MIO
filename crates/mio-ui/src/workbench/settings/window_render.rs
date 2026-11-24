@@ -1062,7 +1062,10 @@ impl Settings {
                     .w_full()
                     .h(px(22.))
                     .tab_stop(false)
-                    .on_click(cx.listener(move |_this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.state.enabled {
+                            return;
+                        }
                         let paths = crate::native_terminate::prompt_for_paths(
                             window,
                             cx,
@@ -1079,12 +1082,18 @@ impl Settings {
                                 Ok(Ok(None)) => return,
                                 Ok(Err(err)) => {
                                     let _ = this.update_in(cx, |this, _, cx| {
+                                        if this.state.project != project || !this.state.enabled {
+                                            return;
+                                        }
                                         this.settings_error(format!("打开文件选择器失败：{err}"), cx);
                                     });
                                     return;
                                 }
                                 Err(_) => {
                                     let _ = this.update_in(cx, |this, _, cx| {
+                                        if this.state.project != project || !this.state.enabled {
+                                            return;
+                                        }
                                         this.settings_error("文件选择器通道意外关闭。", cx);
                                     });
                                     return;
@@ -1100,6 +1109,9 @@ impl Settings {
                                 })
                                 .await;
                             let _ = this.update_in(cx, |this, _, cx| {
+                                if this.state.project != project || !this.state.enabled {
+                                    return;
+                                }
                                 match result {
                                     Ok(entries) => {
                                         let _ = this.owner.update(cx, |v, cx| {

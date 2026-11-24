@@ -658,38 +658,40 @@ fn exec_row_op(
                 &wb.default_directory(),
                 Some(&suggested),
             );
+            let owner = wb.owner_window;
             cx.spawn_in(window, async move |this, cx| {
                 let result = prompt.await;
-                let pending_path = this
-                    .update_in(cx, |view, _, cx| {
-                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
-                            return None;
-                        }
-                        if view.project != project {
-                            view.fail("项目已切换，本次条目保存未写入磁盘。", cx);
-                            return None;
-                        }
-                        match result {
-                            Ok(Ok(Some(mut path))) => {
-                                if path.extension().is_none() {
-                                    path.set_extension("xml");
+                let pending_path = owner
+                    .update(cx, |_, _, cx| {
+                        this.update(cx, |view, cx| {
+                            if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                                return None;
+                            }
+                            if view.project != project {
+                                view.fail("项目已切换，本次条目保存未写入磁盘。", cx);
+                                return None;
+                            }
+                            match result {
+                                Ok(Ok(Some(mut path))) => {
+                                    if path.extension().is_none() {
+                                        path.set_extension("xml");
+                                    }
+                                    Some(path)
                                 }
-                                Some(path)
+                                Ok(Ok(None)) => None,
+                                Ok(Err(err)) => {
+                                    view.fail(format!("选择保存路径失败：{err}"), cx);
+                                    None
+                                }
+                                Err(_) => {
+                                    view.fail("文件选择器已关闭。", cx);
+                                    None
+                                }
                             }
-                            Ok(Ok(None)) => None,
-                            Ok(Err(err)) => {
-                                view.fail(format!("选择保存路径失败：{err}"), cx);
-                                cx.notify();
-                                None
-                            }
-                            Err(_) => {
-                                view.fail("文件选择器已关闭。", cx);
-                                cx.notify();
-                                None
-                            }
-                        }
+                        })
                     })
                     .ok()
+                    .and_then(Result::ok)
                     .flatten();
                 let Some(path) = pending_path else {
                     return;
@@ -701,18 +703,23 @@ fn exec_row_op(
                         mio_core::ui_files::write_export_file(&write_path, &payload)
                     })
                     .await;
-                let _ = this.update_in(cx, |view, _, cx| {
-                    match write_result {
-                        Ok(()) => {
-                            view.error = None;
-                            view.status =
-                                format!("已保存 Intruder 条目到 {}。", path.display());
+                let _ = owner.update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if view.project != project {
+                            return;
                         }
-                        Err(err) => {
-                            view.fail(format!("保存条目失败：{err}"), cx);
+                        match write_result {
+                            Ok(()) => {
+                                view.error = None;
+                                view.status =
+                                    format!("已保存 Intruder 条目到 {}。", path.display());
+                                cx.notify();
+                            }
+                            Err(err) => {
+                                view.fail(format!("保存条目失败：{err}"), cx);
+                            }
                         }
-                    }
-                    cx.notify();
+                    })
                 });
             })
             .detach();

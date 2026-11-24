@@ -112,11 +112,21 @@ fn resolve_preemptive_proxy_auth(request: &HttpRequest, config: &SendConfig) -> 
     ))
 }
 
+fn strip_http_proxy_route_credentials(route: &mut crate::UpstreamRoute) {
+    match route {
+        crate::UpstreamRoute::Http(endpoint)
+        | crate::UpstreamRoute::Https { endpoint, .. } => {
+            endpoint.credentials = None;
+        }
+        _ => {}
+    }
+}
+
 fn build_request_with_proxy_auth(
     model: &HttpRequest,
     config: &SendConfig,
     proxy_auth: Option<&str>,
-) -> Result<Request, ProxyError> {
+) -> Result<(Request, SendConfig), ProxyError> {
     if let Some(val) = proxy_auth {
         let mut patched = model.clone();
         if config.http.strip_proxy_headers {
@@ -130,9 +140,11 @@ fn build_request_with_proxy_auth(
         let mut patched_cfg = config.clone();
         patched_cfg.http.strip_proxy_headers = false;
         patched_cfg.http.raw_http1_override = None;
-        return message::to_request_with_config(&patched, &patched_cfg);
+        strip_http_proxy_route_credentials(&mut patched_cfg.network.upstream_route);
+        let req = message::to_request_with_config(&patched, &patched_cfg)?;
+        return Ok((req, patched_cfg));
     }
-    message::to_request_with_config(model, config)
+    Ok((message::to_request_with_config(model, config)?, config.clone()))
 }
 
 async fn drain_auth_challenge_body(
@@ -229,6 +241,7 @@ async fn exchange_ntlm_handshake(
 ) -> Result<(Response, Arc<Mutex<ResponseTiming>>), ProxyError> {
     let mut ntlm_config = config.clone();
     ntlm_config.http.raw_http1_override = None;
+    ntlm_config.group.single_packet_barrier = None;
     ntlm_config.http.http1_keep_alive = true;
     ntlm_config.http.http2_reuse = false;
     ntlm_config.http.default_to_http2 = false;
@@ -241,18 +254,18 @@ async fn exchange_ntlm_handshake(
     } else {
         crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type1_val);
     }
-    let mut type1_req =
+    let (mut type1_req, type1_cfg) =
         build_request_with_proxy_auth(model, &ntlm_config, proxy_auth_header.as_deref())?;
     let ntlm_client = EphemeralNtlmClient::for_request(
         &mut type1_req,
-        &ntlm_config,
+        &type1_cfg,
         cancel.clone(),
         exec,
     )?;
     let (type2_resp, type2_timing) = ephemeral_exchange_before_deadline(
         &ntlm_client,
         type1_req,
-        &ntlm_config,
+        &type1_cfg,
         deadline,
         cancel.clone(),
     )
@@ -278,9 +291,9 @@ async fn exchange_ntlm_handshake(
     } else {
         crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, type3_val);
     }
-    let type3_req =
+    let (type3_req, type3_cfg) =
         build_request_with_proxy_auth(model, &ntlm_config, proxy_auth_header.as_deref())?;
-    ephemeral_exchange_before_deadline(&ntlm_client, type3_req, &ntlm_config, deadline, cancel)
+    ephemeral_exchange_before_deadline(&ntlm_client, type3_req, &type3_cfg, deadline, cancel)
         .await
 }
 
@@ -296,11 +309,11 @@ pub(crate) async fn exchange_model_with_auth(
     if apply_preemptive_auth_to_model(&mut model, &config) || proxy_auth_header.is_some() {
         config.http.raw_http1_override = None;
     }
-    let initial_req =
+    let (initial_req, initial_cfg) =
         build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
     let (mut response, mut timing) = exchange_before_deadline(
         initial_req,
-        &config,
+        &initial_cfg,
         deadline,
         cancel.clone(),
         exec.clone(),
@@ -374,11 +387,11 @@ pub(crate) async fn exchange_model_with_auth(
                     crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
                 }
                 config.http.raw_http1_override = None;
-                let retry_req =
+                let (retry_req, retry_cfg) =
                     build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
                 (response, timing) = exchange_before_deadline(
                     retry_req,
-                    &config,
+                    &retry_cfg,
                     deadline,
                     cancel.clone(),
                     exec.clone(),
@@ -419,11 +432,11 @@ pub(crate) async fn exchange_model_with_auth(
                     crate::auth::set_or_replace_header(&mut model.headers, auth_hdr_name, val);
                 }
                 config.http.raw_http1_override = None;
-                let retry_req =
+                let (retry_req, retry_cfg) =
                     build_request_with_proxy_auth(&model, &config, proxy_auth_header.as_deref())?;
                 (response, timing) = exchange_before_deadline(
                     retry_req,
-                    &config,
+                    &retry_cfg,
                     deadline,
                     cancel.clone(),
                     exec.clone(),
@@ -462,14 +475,14 @@ pub(crate) async fn exchange_model_with_auth(
                         );
                     }
                     config.http.raw_http1_override = None;
-                    let type3_req = build_request_with_proxy_auth(
+                    let (type3_req, type3_cfg) = build_request_with_proxy_auth(
                         &model,
                         &config,
                         proxy_auth_header.as_deref(),
                     )?;
                     (response, timing) = exchange_before_deadline(
                         type3_req,
-                        &config,
+                        &type3_cfg,
                         deadline,
                         cancel.clone(),
                         exec.clone(),

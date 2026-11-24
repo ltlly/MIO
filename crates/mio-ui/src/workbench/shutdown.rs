@@ -146,6 +146,7 @@ impl Workbench {
         self.after_save = None;
         self.pending_project_save = None;
         self.pending_sends.clear();
+        self.sequential_group_queue = None;
         self.transition = Some(TransitionPhase::ShuttingDown);
         self.shutdown.cancel();
         self.focus.focus(window, cx);

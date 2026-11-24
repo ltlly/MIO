@@ -151,6 +151,11 @@ impl State {
                 return Err(anyhow::anyhow!(message));
             }
         };
+        if self.intruder.runs.get(&run_id).is_some_and(|run| {
+            !run.cancel.is_cancelled() && run.summary.state == IntruderRunState::Paused
+        }) {
+            return Ok(());
+        }
         self.admit_and_spawn_intruder_send(
             run_id,
             ordinal,

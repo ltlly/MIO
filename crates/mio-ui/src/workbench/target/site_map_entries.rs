@@ -227,16 +227,14 @@ impl Workbench {
                             PopupMenuItem::new(label)
                                 .checked(showing_original == is_orig)
                                 .on_click(move |_, window, cx| {
-                                    owner
-                                        .update(cx, |view, cx| {
-                                            if response {
-                                                view.target_pane.response.load(&raw, window, cx);
-                                            } else {
-                                                view.target_pane.request.load(&raw, window, cx);
-                                            }
-                                            cx.notify();
-                                        })
-                                        .expect("站点地图所属工作台必须存在");
+                                    let _ = owner.update(cx, |view, cx| {
+                                        if response {
+                                            view.target_pane.response.load(&raw, window, cx);
+                                        } else {
+                                            view.target_pane.request.load(&raw, window, cx);
+                                        }
+                                        cx.notify();
+                                    });
                                 }),
                         )
                     })

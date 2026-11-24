@@ -89,6 +89,7 @@ pub(crate) fn unpack_plugin_archive(
     let mut reader = gz.take(MAX_UNPACKED_BYTES + 1);
     let mut total_unpacked = 0u64;
     let mut entry_count = 0usize;
+    let mut header_count = 0usize;
     let mut seen_files = BTreeSet::new();
     let mut next_long_name: Option<String> = None;
     let mut next_pax_path: Option<String> = None;
@@ -99,6 +100,11 @@ pub(crate) fn unpack_plugin_archive(
             break;
         }
         verify_tar_checksum(&header)?;
+        header_count += 1;
+        ensure!(
+            header_count <= MAX_ARCHIVE_ENTRIES * 2,
+            "插件归档头部记录数超过上限"
+        );
         let typeflag = header[156];
         let size = parse_tar_octal(&header[124..136])?;
         let mode = parse_tar_octal(&header[100..108])? as u32;
@@ -106,10 +112,13 @@ pub(crate) fn unpack_plugin_archive(
 
         match typeflag {
             b'x' => {
+                ensure!(
+                    next_pax_path.is_none() && next_long_name.is_none(),
+                    "插件归档包含连续未关联目标条目的扩展头"
+                );
                 ensure!(size <= MAX_PAX_RECORD_BYTES as u64, "PAX 扩展头超过 64 KiB 限额");
                 let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
-                next_long_name = None;
                 next_pax_path = parse_pax_path(&data)?;
                 continue;
             }
@@ -124,6 +133,10 @@ pub(crate) fn unpack_plugin_archive(
                 continue;
             }
             b'L' => {
+                ensure!(
+                    next_pax_path.is_none() && next_long_name.is_none(),
+                    "插件归档包含连续未关联目标条目的扩展头"
+                );
                 ensure!(size <= MAX_LONGNAME_BYTES as u64, "GNU 长路径名超过 4 KiB 限额");
                 let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
@@ -131,7 +144,6 @@ pub(crate) fn unpack_plugin_archive(
                     Some(end) => &data[..end],
                     None => &data[..],
                 };
-                next_pax_path = None;
                 next_long_name = Some(
                     std::str::from_utf8(trimmed)
                         .context("归档长路径不是有效 UTF-8")?

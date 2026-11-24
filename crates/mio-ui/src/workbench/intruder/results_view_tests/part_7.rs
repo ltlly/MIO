@@ -471,3 +471,45 @@ fn unselected_rows_render_persisted_grep_columns_and_export_all_loaded_rows(
     assert!(lines[1].ends_with("是\t42\t是"));
     assert!(lines[2].ends_with("否\t99\t否"));
 }
+
+#[gpui_kit::test]
+fn export_results_picker_releases_token_after_originating_result_view_closes(
+    cx: &mut TestAppContext,
+) {
+    use crate::workbench::intruder::results_query_tests as query_tests;
+
+    let summary = query_tests::run(1, None);
+    let first = query_tests::flow(0, 200);
+    let rows = vec![query_tests::row(0, &first, Some(b"alpha"))];
+    let (mut f, window, initial, _) = query_tests::open(&summary, cx);
+    query_tests::answer(&f, initial.clone(), query_tests::page(&summary, &initial, rows, 1), cx);
+    assert!(drain(&mut f.commands).is_empty());
+
+    query_tests::click(window, "intruder-export-results-file", cx);
+    assert!(cx.did_prompt_for_new_path());
+    let picker = cx.read(|cx| {
+        let view = f.view.read(cx);
+        assert!(view.file_picker_pending());
+        view.file_picker.expect("export dialog must hold file_picker token")
+    });
+
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let view = f.view.read(cx);
+        assert!(!view.intruder.results.views.contains_key(&summary.id));
+        assert_eq!(view.file_picker, Some(picker));
+        assert!(view.file_picker_pending());
+    });
+
+    cx.simulate_new_path_selection(|_| None);
+    cx.run_until_parked();
+    assert!(drain(&mut f.commands).is_empty());
+    cx.read(|cx| {
+        let view = f.view.read(cx);
+        assert!(view.file_picker.is_none());
+        assert!(!view.file_picker_pending());
+        assert!(view.error.is_none());
+    });
+}

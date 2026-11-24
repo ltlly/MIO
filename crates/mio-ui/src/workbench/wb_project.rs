@@ -491,6 +491,7 @@ impl Workbench {
                 if for_transition
                     && (view.after_save.is_none() || !view.quit_answer_is_current(attempt, cx))
                 {
+                    view.cancel_save_as(cx);
                     return;
                 }
                 match result {

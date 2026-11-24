@@ -495,6 +495,9 @@ impl FilterWindow {
     }
 
     pub(super) fn close_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.submitting {
+            return;
+        }
         if let Err(error) = editing::input_snapshot(&self.library_name_input, window, cx) {
             self.error = Some(error.into());
         } else {
@@ -509,7 +512,7 @@ impl FilterWindow {
             self.error = Some(error.into()); cx.notify(); return;
         }
         let Some(LibraryOverlay::Load { library }) = &self.library_overlay else { return; };
-        let script = library.scripts.get(index).expect("脚本库所选索引须存在").clone();
+        let Some(script) = library.scripts.get(index).cloned() else { return; };
         self.script_title = script.name;
         self.draft.filter_script = script.code.clone();
         self.filter_script_editor.update(cx, |editor, cx| editor.set_value(script.code, window, cx));
@@ -517,7 +520,6 @@ impl FilterWindow {
         self.error = None;
         cx.notify();
     }
-
     pub(super) fn save_library_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending.is_some() || self.submitting {
             return;
@@ -597,6 +599,7 @@ impl FilterWindow {
             .and_then(|_| editing::input_snapshot(&self.hide, window, cx))
             .and_then(|_| editing::input_snapshot(&self.search_term, window, cx))
             .and_then(|_| editing::input_snapshot(&self.listener_port, window, cx))
+            .and_then(|_| editing::input_snapshot(&self.library_name_input, window, cx))
             .and_then(|_| editing::snapshot(&self.filter_script_editor, window, cx))
             .map(|_| ())
     }

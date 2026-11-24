@@ -182,8 +182,9 @@ pub(super) async fn run_capture(
     let (mut stopped_early, mut error) = terminal.unwrap_or((false, None));
     if timed_out {
         requests.abort_all();
+        let abort_deadline = TokioInstant::now() + Duration::from_millis(500);
         while !requests.is_empty() {
-            match timeout_at(drain_deadline, requests.join_next()).await {
+            match timeout_at(abort_deadline, requests.join_next()).await {
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             }

@@ -308,18 +308,23 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!(
-                            "已保存审计报告到文件：{}（共 {} 条告警）",
-                            path.display(),
-                            finding_count
-                        );
-                        cx.notify();
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail(format!("写入审计报告文件失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!(
+                                "已保存审计报告到文件：{}（共 {} 条告警）",
+                                path.display(),
+                                finding_count
+                            );
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            view.fail(format!("写入审计报告文件失败：{err}"), cx);
+                        }
                     }
                 })
             });

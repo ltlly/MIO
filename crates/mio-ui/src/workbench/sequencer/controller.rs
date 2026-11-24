@@ -1002,7 +1002,18 @@ impl Workbench {
             let read_path = path.clone();
             let read_result = cx
                 .background_executor()
-                .spawn(async move { mio_core::ui_files::read_file_to_string(&read_path) })
+                .spawn(async move {
+                    mio_core::ui_files::read_regular_file_bounded(
+                        &read_path,
+                        4 * 1024 * 1024,
+                        false,
+                        "样本文件",
+                    )
+                    .and_then(|bytes| {
+                        String::from_utf8(bytes)
+                            .map_err(|err| format!("读取样本文件失败：{err}"))
+                    })
+                })
                 .await;
             let _ = this.update_in(cx, |view, window, cx| {
                 if view.project != Some(project) {
@@ -1011,7 +1022,7 @@ impl Workbench {
                 let content = match read_result {
                     Ok(text) => text,
                     Err(err) => {
-                        view.fail(format!("读取样本文件失败：{err}"), cx);
+                        view.fail(err, cx);
                         return;
                     }
                 };
@@ -1188,31 +1199,39 @@ impl Workbench {
         cx.notify();
         let prompt =
             crate::native_terminate::prompt_for_new_path(window, cx, &directory, Some(default_name));
+        let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let pending_path = this
-                .update_in(cx, |view, _, cx| {
-                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                        return None;
-                    }
-                    match result {
-                        Ok(Ok(Some(path))) => Some(path),
-                        Ok(Ok(None)) => None,
-                        Ok(Err(err)) => {
-                            view.fail(format!("选择导出路径失败：{err}"), cx);
-                            view.sequencer_view.update(cx, |_, cx| cx.notify());
-                            cx.notify();
-                            None
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
                         }
-                        Err(_) => {
-                            view.fail("文件选择器已关闭。", cx);
-                            view.sequencer_view.update(cx, |_, cx| cx.notify());
-                            cx.notify();
-                            None
+                        if view.project != Some(project) {
+                            view.fail("项目已切换，本次文件导出未写入磁盘。", cx);
+                            return None;
                         }
-                    }
+                        match result {
+                            Ok(Ok(Some(path))) => Some(path),
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail(format!("选择导出路径失败：{err}"), cx);
+                                view.sequencer_view.update(cx, |_, cx| cx.notify());
+                                cx.notify();
+                                None
+                            }
+                            Err(_) => {
+                                view.fail("文件选择器已关闭。", cx);
+                                view.sequencer_view.update(cx, |_, cx| cx.notify());
+                                cx.notify();
+                                None
+                            }
+                        }
+                    })
                 })
                 .ok()
+                .and_then(Result::ok)
                 .flatten();
             let Some(path) = pending_path else {
                 return;
@@ -1224,18 +1243,23 @@ impl Workbench {
                     mio_core::ui_files::write_export_file(&write_path, &bytes)
                 })
                 .await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        let msg = format!("{done_prefix}到 {}。", path.display());
-                        view.sequencer_pane.status_text = Some(msg.clone());
-                        view.status = msg;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| {
+                    if view.project != Some(project) {
+                        return;
                     }
-                    Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
-                }
-                view.sequencer_view.update(cx, |_, cx| cx.notify());
-                cx.notify();
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            let msg = format!("{done_prefix}到 {}。", path.display());
+                            view.sequencer_pane.status_text = Some(msg.clone());
+                            view.status = msg;
+                        }
+                        Err(err) => view.fail(format!("写入文件失败：{err}"), cx),
+                    }
+                    view.sequencer_view.update(cx, |_, cx| cx.notify());
+                    cx.notify();
+                })
             });
         })
         .detach();

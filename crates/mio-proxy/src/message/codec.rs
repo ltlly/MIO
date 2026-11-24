@@ -48,11 +48,14 @@ fn validate_and_build_request_head(
     if method == Method::CONNECT {
         return Err(ProxyError::invalid("普通 HTTP 发送不接受 CONNECT 隧道请求"));
     }
+    let effective_version = config.http.version.unwrap_or(request.version);
+    let has_req_trailers =
+        effective_version != HttpVersion::Http10 && !request.trailers.is_empty();
     let mut headers = header_map(&request.headers)?;
     normalize_headers_with_options(
         &mut headers,
         request.body.len(),
-        !request.trailers.is_empty(),
+        has_req_trailers,
         true,
         body::HeaderNormOptions {
             update_content_length: config.http.update_content_length,
@@ -75,7 +78,7 @@ fn validate_and_build_request_head(
             HeaderValue::from_str(&host_authority).map_err(ProxyError::invalid)?,
         );
     }
-    let effective_version = config.http.version.unwrap_or(request.version);
+    // effective_version computed above
     if !preserve_websocket_upgrade && effective_version != HttpVersion::Http2 {
         if !config.http.http1_keep_alive {
             headers.insert("connection", HeaderValue::from_static("close"));
@@ -155,6 +158,11 @@ pub(crate) fn to_request_with_config(
     config: &SendConfig,
 ) -> Result<Request, ProxyError> {
     let head = validate_and_build_request_head(request, config, false, false)?;
+    let req_trailers = if head.effective_version != HttpVersion::Http10 {
+        request.trailers.as_slice()
+    } else {
+        &[]
+    };
     let (body, raw_h1) = if let Some(raw_override) = config
         .http
         .raw_http1_override
@@ -177,11 +185,11 @@ pub(crate) fn to_request_with_config(
             )
         } else {
             (
-                outgoing_body(request.body.clone(), &request.trailers)?,
+                outgoing_body(request.body.clone(), req_trailers)?,
                 None,
             )
         }
-    } else if !config.http.update_content_length && request.trailers.is_empty() {
+    } else if !config.http.update_content_length && req_trailers.is_empty() {
         let suppressed = Arc::new(AtomicBool::new(false));
         let raw_h1 = if head.effective_version != HttpVersion::Http2 {
             Some(RawH1Request {
@@ -204,7 +212,7 @@ pub(crate) fn to_request_with_config(
         )
     } else {
         (
-            outgoing_body(request.body.clone(), &request.trailers)?,
+            outgoing_body(request.body.clone(), req_trailers)?,
             None,
         )
     };
@@ -245,10 +253,12 @@ pub(crate) fn to_response(
     let no_body =
         head || (100..200).contains(&response.status) || matches!(response.status, 204 | 304);
     let original_length = headers.get("content-length").cloned();
+    let has_resp_trailers =
+        !no_body && client_version != HttpVersion::Http10 && !response.trailers.is_empty();
     normalize_headers(
         &mut headers,
         response.body.len(),
-        !no_body && !response.trailers.is_empty(),
+        has_resp_trailers,
         false,
     );
     if no_body {
@@ -262,7 +272,14 @@ pub(crate) fn to_response(
     let body = if no_body {
         Body::empty()
     } else {
-        outgoing_body(response.body.clone(), &response.trailers)?
+        outgoing_body(
+            response.body.clone(),
+            if has_resp_trailers {
+                &response.trailers
+            } else {
+                &[]
+            },
+        )?
     };
     let mut result = Response::new(body);
     *result.status_mut() = StatusCode::from_u16(response.status).map_err(ProxyError::invalid)?;

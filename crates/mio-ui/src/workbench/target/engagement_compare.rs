@@ -192,16 +192,20 @@ impl Workbench {
             let read_path = path.clone();
             let read_result = cx
                 .background_executor()
-                .spawn(async move { mio_core::ui_files::read_file_bytes(&read_path) })
+                .spawn(async move {
+                    mio_core::ui_files::read_regular_file_bounded(
+                        &read_path,
+                        MAX_COMPARE_FILE_BYTES as u64,
+                        true,
+                        "站点地图对比文件",
+                    )
+                })
                 .await;
             let _ = this.update_in(cx, |view, _, cx| {
                 if view.project != Some(project) {
                     return;
                 }
                 match read_result {
-                    Ok(bytes) if bytes.len() > MAX_COMPARE_FILE_BYTES => {
-                        view.fail("站点地图对比文件超过 4 MB 上限。", cx);
-                    }
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(text) => match parse_external_site_map_file(&text) {
                             Ok(ext_map) => {

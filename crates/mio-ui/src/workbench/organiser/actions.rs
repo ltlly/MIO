@@ -667,18 +667,23 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!(
-                            "已导出集合「{collection_name}」（{} 条）到：{}",
-                            items.len(),
-                            path.display()
-                        );
-                        cx.notify();
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail(format!("写入集合导出文件失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!(
+                                "已导出集合「{collection_name}」（{} 条）到：{}",
+                                items.len(),
+                                path.display()
+                            );
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            view.fail(format!("写入集合导出文件失败：{err}"), cx);
+                        }
                     }
                 })
             });

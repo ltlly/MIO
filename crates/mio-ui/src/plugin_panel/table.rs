@@ -241,8 +241,10 @@ impl NativePanel {
                             })
                             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
-                                    this.tables[&id].focus.focus(window, cx);
-                                    this.select_row(id, index, event.modifiers, cx)
+                                    if let Some(table) = this.tables.get(&id) {
+                                        table.focus.focus(window, cx);
+                                    }
+                                    this.select_row(id, index, event.modifiers, cx);
                                 });
                             });
                         for (cell, column) in row.cells.iter().zip(&table.columns) {

@@ -93,6 +93,8 @@ impl Settings {
     ) -> gpui_kit::Div {
         let table = &self.listeners_tls.client_cert_table;
         let enabled = self.state.enabled && !self.listeners_tls.client_cert_saving;
+        let editor_open = self.listeners_tls.client_cert_editor_visible;
+        let mutate_enabled = enabled && !editor_open;
         let project = self.state.project;
         let remove_index = active_selected;
         let can_move_up = active_selected.is_some_and(|row| row > 0);
@@ -142,11 +144,17 @@ impl Settings {
                 mio_action_button(
                     "settings-client-cert-remove-btn",
                     "移除",
-                    !enabled || remove_index.is_none(),
+                    !mutate_enabled || remove_index.is_none(),
                 )
                 .w_full()
                 .tooltip("移除选中的客户端 TLS 证书规则")
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.state.enabled
+                        || this.listeners_tls.client_cert_saving
+                        || this.listeners_tls.client_cert_editor_visible
+                    {
+                        return;
+                    }
                     let Some(index) = remove_index else {
                         return;
                     };
@@ -174,10 +182,16 @@ impl Settings {
                 })),
             )
             .child(
-                mio_action_button("settings-client-cert-up", "上移", !enabled || !can_move_up)
+                mio_action_button("settings-client-cert-up", "上移", !mutate_enabled || !can_move_up)
                     .w_full()
                     .tooltip("将选中的客户端 TLS 证书向上移动一位")
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.state.enabled
+                            || this.listeners_tls.client_cert_saving
+                            || this.listeners_tls.client_cert_editor_visible
+                        {
+                            return;
+                        }
                         let Some(index) = active_selected.filter(|&row| row > 0) else {
                             return;
                         };
@@ -201,11 +215,17 @@ impl Settings {
                 mio_action_button(
                     "settings-client-cert-down",
                     "下移",
-                    !enabled || !can_move_down,
+                    !mutate_enabled || !can_move_down,
                 )
                 .w_full()
                 .tooltip("将选中的客户端 TLS 证书向下移动一位")
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.state.enabled
+                        || this.listeners_tls.client_cert_saving
+                        || this.listeners_tls.client_cert_editor_visible
+                    {
+                        return;
+                    }
                     let Some(index) = active_selected.filter(|&row| row + 1 < cert_count) else {
                         return;
                     };

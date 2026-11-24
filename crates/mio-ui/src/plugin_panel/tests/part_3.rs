@@ -1626,3 +1626,68 @@ fn removing_clean_editor_prunes_document_while_keeping_unsaved_recovery(cx: &mut
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn vanished_split_and_revision_or_selection_boundaries_do_not_panic_or_wrap(
+    cx: &mut TestAppContext,
+) {
+    let fixture = fixture(cx, model());
+    cx.update_window(fixture.window, |_, window, cx| {
+        fixture.view.update(cx, |panel, cx| {
+            // Stale resize state on a non-split / vanished node must clear safely without panicking.
+            panel.resize = Some(Resize {
+                node_id: 999_999,
+                original: 0.5,
+            });
+            panel.resize_split(point(px(120.), px(80.)), cx);
+            assert!(panel.resize.is_none());
+            panel.resize = Some(Resize {
+                node_id: 999_999,
+                original: 0.5,
+            });
+            let esc = KeyDownEvent {
+                keystroke: gpui_kit::Keystroke {
+                    modifiers: Modifiers::default(),
+                    key: "escape".into(),
+                    key_char: None,
+                },
+                is_held: false,
+                prefer_character_input: false,
+            };
+            panel.key(2, &esc, cx);
+            assert!(panel.resize.is_none());
+            assert!(!panel.overlays.contains_key(999_999));
+
+            // TableViewportTracker::request_page saturates at u64::MAX without wrapping.
+            let mut tracker = TableViewportTracker::new(u64::MAX);
+            assert_eq!(tracker.request_page(0, 1), u64::MAX);
+
+            // Revision overflow on capture_editor and replace rebase must return Err instead of wrapping to 0.
+            let doc = panel.documents.get_mut(&401).unwrap();
+            doc.snapshot.revision = u64::MAX;
+            doc.state
+                .update(cx, |state, cx| state.set_value("overflow edit", window, cx));
+            assert!(panel.capture_editor(401, window, cx).is_err());
+            assert_eq!(panel.documents[&401].snapshot.revision, u64::MAX);
+
+            let doc = panel.documents.get_mut(&401).unwrap();
+            doc.state
+                .update(cx, |state, cx| state.set_value("local dirty", window, cx));
+            doc.snapshot.contents = b"local dirty".to_vec();
+            doc.snapshot.revision = u64::MAX - 1;
+            doc.unsaved = true;
+            doc.pending_rebase = false;
+            assert!(
+                panel
+                    .replace(
+                        Arc::new(changed_raw(2, u64::MAX, b"worker max")),
+                        &[],
+                        window,
+                        cx,
+                    )
+                    .is_err()
+            );
+        });
+    })
+    .unwrap();
+}

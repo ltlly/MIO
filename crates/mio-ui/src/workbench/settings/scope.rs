@@ -620,12 +620,18 @@ impl Settings {
                 Ok(Ok(None)) => return,
                 Ok(Err(err)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.state.enabled {
+                            return;
+                        }
                         this.settings_error(format!("打开文件选择器失败：{err}"), cx);
                     });
                     return;
                 }
                 Err(_) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.state.enabled {
+                            return;
+                        }
                         this.settings_error("文件选择器通道意外关闭。", cx);
                     });
                     return;
@@ -639,6 +645,9 @@ impl Settings {
                 .spawn(async move { mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048) })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
+                if this.state.project != project || !this.state.enabled {
+                    return;
+                }
                 match result {
                     Ok(entries) => {
                         for trimmed in entries {
@@ -778,12 +787,18 @@ impl Settings {
                 Ok(Ok(None)) => return,
                 Ok(Err(err)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.state.enabled {
+                            return;
+                        }
                         this.settings_error(format!("打开文件选择器失败：{err}"), cx);
                     });
                     return;
                 }
                 Err(_) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.state.enabled {
+                            return;
+                        }
                         this.settings_error("文件选择器通道意外关闭。", cx);
                     });
                     return;
@@ -797,6 +812,9 @@ impl Settings {
                 .spawn(async move { mio_core::ui_files::read_utf8_rule_lines(&path, 256 * 1024, 2048) })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
+                if this.state.project != project || !this.state.enabled {
+                    return;
+                }
                 match result {
                     Ok(entries) => {
                         let _ = this.owner.update(cx, |view, cx| {

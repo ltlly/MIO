@@ -37,6 +37,40 @@ fn delete_and_clear_live_proxy_history_preserve_archive_repeater_and_pending_flo
     repeater_flow.summary.source = TrafficSource::Repeater;
     store.put(&repeater_flow).unwrap();
 
+    let mut audit_pinned = crate::store::tests::record();
+    audit_pinned.summary.source = TrafficSource::Proxy;
+    store.put(&audit_pinned).unwrap();
+    store
+        .write_audit_state(
+            &crate::AuditStateSnapshot {
+                revision: 1,
+                live_passive_enabled: true,
+                live_passive_crawl_enabled: true,
+                live_passive_suite_scope_only: false,
+                tasks: Vec::new(),
+                findings: vec![crate::AuditFinding {
+                    id: Uuid::new_v4(),
+                    issue_id: "0x00200300".into(),
+                    title: "审计引用保护".into(),
+                    severity_label: "信息".into(),
+                    severity_rank: 0,
+                    confidence: crate::IssueConfidence::Firm,
+                    phase: crate::AuditPhase::Passive,
+                    host: "127.0.0.1".into(),
+                    url: audit_pinned.summary.url.clone(),
+                    parameter: None,
+                    flow_id: Some(audit_pinned.summary.id),
+                    summary: "摘要".into(),
+                    evidence: "证据".into(),
+                    request_highlights: Vec::new(),
+                    response_highlights: Vec::new(),
+                    remediation: "修复".into(),
+                    detected_unix_ms: 1_700_000_000_000,
+                }],
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
     assert!(
         store
             .delete_live_proxy_flows(&[proxy_a.summary.id, repeater_flow.summary.id])
@@ -63,8 +97,14 @@ fn delete_and_clear_live_proxy_history_preserve_archive_repeater_and_pending_flo
     );
 
     let cleared = store.clear_live_proxy_history().unwrap();
-    assert_eq!(cleared, vec![proxy_b.summary.id]);
+    assert!(cleared.contains(&proxy_b.summary.id));
+    assert!(cleared.contains(&audit_pinned.summary.id));
+    assert_eq!(cleared.len(), 2);
     assert!(store.read_optional(proxy_b.summary.id).unwrap().is_none());
+    assert!(store.read_optional(audit_pinned.summary.id).unwrap().is_none());
+    let audit_after = store.read_audit_state().unwrap();
+    assert_eq!(audit_after.findings.len(), 1);
+    assert_eq!(audit_after.findings[0].flow_id, None);
     assert!(
         store
             .read_optional(proxy_pending.summary.id)

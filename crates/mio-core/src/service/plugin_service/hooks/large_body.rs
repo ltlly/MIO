@@ -56,6 +56,9 @@ impl HookSpillScope {
             path_str.len() <= protocol::MAX_BODY_SPILL_PATH_BYTES && !path_str.contains('\0'),
             "共享大报文文件路径超出协议限额"
         );
+        if self.input_paths.iter().any(|p| p == &file_path) && file_path.is_file() {
+            return Ok(path_str);
+        }
         fs::write(&file_path, bytes)?;
         #[cfg(unix)]
         {

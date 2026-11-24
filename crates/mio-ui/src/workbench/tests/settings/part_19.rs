@@ -718,6 +718,18 @@ Ndw8SgII/PUL8vOQWSdSxvK9ZHQQXJig3fX/P6ylD4tQnyOP674OdVhR\n\
             window.find("settings-client-cert-remove-btn").disabled(),
             None
         );
+        window.click("settings-client-cert-edit", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("settings-client-cert-remove-btn").disabled(),
+            Some(true)
+        );
+        window.click("settings-client-cert-cancel", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("settings-client-cert-remove-btn").disabled(),
+            None
+        );
         window.click("settings-client-cert-remove-btn", cx);
     })
     .unwrap();

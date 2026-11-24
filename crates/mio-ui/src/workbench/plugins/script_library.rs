@@ -39,6 +39,7 @@ impl Default for StoredScriptPresetLibrary {
 
 pub(super) struct ScriptPresetLibraryUi {
     pub(super) loaded: bool,
+    pub(super) generation: u64,
     pub(super) library_path: Option<PathBuf>,
     pub(super) scripts: Vec<ScriptLibraryItem>,
     pub(super) selected_name: Option<String>,
@@ -61,6 +62,7 @@ impl ScriptPresetLibraryUi {
         });
         Self {
             loaded: false,
+            generation: 0,
             library_path: None,
             scripts: Vec::new(),
             selected_name: None,
@@ -252,6 +254,8 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn reload_script_library(&mut self, cx: &mut Context<Self>) {
+        self.extensions.script_library.generation =
+            self.extensions.script_library.generation.saturating_add(1);
         self.extensions.script_library.loaded = false;
         self.ensure_script_library_loaded();
         if self
@@ -427,6 +431,8 @@ impl Workbench {
         });
         match result {
             Ok(updated) => {
+                self.extensions.script_library.generation =
+                    self.extensions.script_library.generation.saturating_add(1);
                 self.extensions.script_library.scripts = updated;
                 self.extensions.script_library.selected_name = Some(name.clone());
                 self.extensions.script_library.feedback =
@@ -461,6 +467,8 @@ impl Workbench {
         });
         match result {
             Ok(updated) => {
+                self.extensions.script_library.generation =
+                    self.extensions.script_library.generation.saturating_add(1);
                 self.extensions.script_library.scripts = updated;
                 if removed {
                     if self.extensions.script_library.selected_name.as_deref() == Some(name.as_str())
@@ -534,19 +542,26 @@ impl Workbench {
             let Some(path) = pending_path else {
                 return;
             };
-            let resolved_lib_path = this
+            let resolved_lib = this
                 .update_in(cx, |this, _, _| {
                     this.ensure_script_library_loaded();
-                    this.extensions.script_library.resolved_path()
+                    let current_gen = this.extensions.script_library.generation;
+                    (current_gen, this.extensions.script_library.resolved_path())
                 })
                 .ok();
-            let Some(resolved_lib_path) = resolved_lib_path else {
+            let Some((import_gen, resolved_lib_path)) = resolved_lib else {
                 return;
             };
             let bg_result: AnyResult<(usize, Vec<ScriptLibraryItem>)> = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = mio_core::ui_files::read_file_bytes(&path)?;
+                    let bytes = mio_core::ui_files::read_regular_file_bounded(
+                        &path,
+                        MAX_SCRIPT_LIBRARY_BYTES,
+                        false,
+                        "脚本库导入 JSON 文件",
+                    )
+                    .map_err(anyhow::Error::msg)?;
                     let imported = parse_imported_script_json(&bytes)?;
                     let count = imported.len();
                     let lib_path = resolved_lib_path?;
@@ -568,7 +583,14 @@ impl Workbench {
             let _ = this.update_in(cx, |this, _, cx| {
                 match bg_result {
                     Ok((count, updated)) => {
-                        this.extensions.script_library.scripts = updated;
+                        if this.extensions.script_library.generation == import_gen {
+                            this.extensions.script_library.generation =
+                                this.extensions.script_library.generation.saturating_add(1);
+                            this.extensions.script_library.scripts = updated;
+                        } else {
+                            this.extensions.script_library.loaded = false;
+                            this.ensure_script_library_loaded();
+                        }
                         this.extensions.script_library.feedback = Some((
                             true,
                             format!("已成功导入 {count} 个 脚本并写入本地脚本库。"),

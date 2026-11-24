@@ -315,6 +315,7 @@ fn host_matcher_and_ordered_selection_handle_wildcards_case_and_ipv6() {
     for invalid in [
         "",
         " ",
+        "*.",
         "*.127.0.0.1",
         "example.com:8443",
         "https://example.invalid",

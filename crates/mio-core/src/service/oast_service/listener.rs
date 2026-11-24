@@ -68,7 +68,7 @@ impl CollaboratorService {
         for (_, cancel) in self.active_polls.values() {
             cancel.cancel();
         }
-        if let Some((cancel, _)) = &self.auto_poll {
+        if let Some((cancel, _, _)) = &self.auto_poll {
             cancel.cancel();
         }
     }

@@ -47,6 +47,7 @@ impl Workbench {
         for (id, send) in ready {
             self.pending_sends.remove(&id);
             if !self.enqueue_send(id, send, cx) {
+                self.abort_sequential_group_queue_if_active_tab(id);
                 send_error = self.error.clone();
             }
         }
@@ -65,6 +66,7 @@ impl Workbench {
         if !obsolete.is_empty() {
             for id in obsolete {
                 self.pending_sends.remove(&id);
+                self.abort_sequential_group_queue_if_active_tab(id);
             }
             send_error = Some("等待保存时草稿已变更，未发送旧稿；请再次点击发送。".into());
         }

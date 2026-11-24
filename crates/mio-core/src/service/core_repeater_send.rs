@@ -405,14 +405,6 @@ impl State {
         if group_mode == crate::RepeaterGroupSendMode::SequentialSingleConnection {
             effective_proto_settings.enforce_http1_connection_close = false;
         }
-        let protocol_mutated = apply_repeater_protocol_options(
-            run_id,
-            &parsed_draft_request,
-            &mut request,
-            &effective_proto_settings,
-            draft.version,
-            &self.storage.provenance,
-        );
         let max_redirect_hops = settings.effective_max_redirect_hops();
         let (http1_keep_alive, http2_reuse, use_connection_pool) = match group_mode {
             crate::RepeaterGroupSendMode::SequentialSingleConnection => (true, true, true),
@@ -442,8 +434,11 @@ impl State {
             .map(|ws| ws.scope.clone())
             .unwrap_or_default();
         let plugin_events = self.events.clone();
-        let mut record =
-            pending_repeater_flow_record(run_id, request.clone(), crate::codec_util::now_unix_ms());
+        let mut record = pending_repeater_flow_record(
+            run_id,
+            parsed_draft_request.clone(),
+            crate::codec_util::now_unix_ms(),
+        );
         if let Err(error) = self
             .store
             .repeater_history_mut()
@@ -452,6 +447,17 @@ impl State {
             self.storage.recovery.push_back(record.clone().into());
             self.storage_failed(&error);
             return Err(error);
+        }
+        let protocol_mutated = apply_repeater_protocol_options(
+            run_id,
+            &parsed_draft_request,
+            &mut request,
+            &effective_proto_settings,
+            draft.version,
+            &self.storage.provenance,
+        );
+        if protocol_mutated {
+            plugin_service::hooks::sync_flow_request(&mut record, request.clone());
         }
         let task_cancel = cancel.clone();
         let flow_id = record.summary.id;

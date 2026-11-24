@@ -332,8 +332,18 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
             assert!(pretty.contains("<!DOCTYPE html>"));
             assert!(pretty.contains("\n      <p>Hi</p>"));
             assert_eq!(h.editor.bytes(window, cx).unwrap(), html);
+            let pretty_len = pretty.len();
+            assert_ne!(pretty_len, html.len());
+            assert_eq!(h.editor.current_byte_len(cx), html.len());
 
-            set_search_and_replace(&mut h.editor, "Hi", "Hello", window, cx);
+            set_search_and_replace(&mut h.editor, "Hi", "Yo", window, cx);
+            h.editor.update_search(None, window, cx).unwrap();
+            h.editor.replace_current(false, window, cx).unwrap();
+            assert!(h.editor.state().read(cx).value().contains("\n      <p>Yo</p>"));
+            assert_eq!(h.editor.state().read(cx).text().len(), pretty_len);
+            assert_eq!(h.editor.current_byte_len(cx), pretty_len);
+
+            set_search_and_replace(&mut h.editor, "Yo", "Hello", window, cx);
             h.editor.update_search(None, window, cx).unwrap();
             h.editor.replace_current(false, window, cx).unwrap();
             assert!(h.editor.state().read(cx).value().contains("\n      <p>Hello</p>"));
@@ -344,7 +354,9 @@ fn message_editor_pretty_formats_xml_html_and_preserves_raw_on_parse_errors(
         });
         window.render_frame(cx);
         window.press(crate::kbd!("z"), cx);
+        window.press(crate::kbd!("z"), cx);
         harness.update(cx, |h, cx| {
+            assert_eq!(h.editor.current_byte_len(cx), html.len());
             assert_eq!(h.editor.bytes(window, cx).unwrap(), html);
 
             let chunked_json = b"POST /api HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n9\r\n{\"k\":\"v\"}\r\n0\r\nX-Trailer: t1\r\n\r\n";

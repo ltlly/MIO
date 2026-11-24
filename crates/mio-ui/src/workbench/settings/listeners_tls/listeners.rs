@@ -768,6 +768,9 @@ impl ProxyListenerEditor {
                     .spawn(async move { read_bounded_pem_text(&path, label) })
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| {
+                    if this.config.certificate_mode != ProxyListenerCertMode::CustomCertificate {
+                        return;
+                    }
                     match loaded {
                         Ok(text) => {
                             let target = if is_key {
@@ -1457,6 +1460,9 @@ impl Settings {
                         (Some(path), None) => path,
                         _ => {
                             let _ = this.update_in(cx, |this, _, cx| {
+                                if this.state.project != project || !this.proxy_listeners_available() {
+                                    return;
+                                }
                                 this.listeners_tls.listener_error =
                                     Some("请选择单个 CA 证书 PEM 文件。".into());
                                 cx.notify();
@@ -1468,6 +1474,9 @@ impl Settings {
                 Ok(Ok(None)) => return,
                 Ok(Err(err)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.proxy_listeners_available() {
+                            return;
+                        }
                         this.listeners_tls.listener_error = Some(format!("无法选择 CA 证书文件：{err}"));
                         cx.notify();
                     });
@@ -1483,6 +1492,9 @@ impl Settings {
                 Ok(text) => text,
                 Err(err) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.proxy_listeners_available() {
+                            return;
+                        }
                         this.listeners_tls.listener_error = Some(err);
                         cx.notify();
                     });
@@ -1503,8 +1515,11 @@ impl Settings {
                 return;
             }
             let key_paths = this
-                .update_in(cx, |_, window, cx| {
-                    crate::native_terminate::prompt_for_paths(
+                .update_in(cx, |this, window, cx| {
+                    if this.state.project != project || !this.proxy_listeners_available() {
+                        return None;
+                    }
+                    Some(crate::native_terminate::prompt_for_paths(
                         window,
                         cx,
                         PathPromptOptions {
@@ -1513,9 +1528,10 @@ impl Settings {
                             multiple: false,
                             prompt: Some("选择 CA 私钥 PEM 文件".into()),
                         },
-                    )
+                    ))
                 })
-                .ok();
+                .ok()
+                .flatten();
             let Some(key_paths) = key_paths else {
                 return;
             };
@@ -1526,6 +1542,9 @@ impl Settings {
                         (Some(path), None) => path,
                         _ => {
                             let _ = this.update_in(cx, |this, _, cx| {
+                                if this.state.project != project || !this.proxy_listeners_available() {
+                                    return;
+                                }
                                 this.listeners_tls.listener_error =
                                     Some("请选择单个 CA 私钥 PEM 文件。".into());
                                 cx.notify();
@@ -1537,6 +1556,9 @@ impl Settings {
                 Ok(Ok(None)) => return,
                 Ok(Err(err)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        if this.state.project != project || !this.proxy_listeners_available() {
+                            return;
+                        }
                         this.listeners_tls.listener_error = Some(format!("无法选择 CA 私钥文件：{err}"));
                         cx.notify();
                     });
@@ -1578,6 +1600,7 @@ impl Settings {
         if !self.proxy_listeners_available() {
             return;
         }
+        let project = self.state.project;
         let title = format!("切换内置 CA 预置：{}", preset.display_name);
         let detail = format!(
             "{}\n\n切换后会覆盖当前持久化的 Proxy CA 证书与私钥；如需恢复本地自签 MIO Root CA，可随时点击“重新生成 CA 证书”。",
@@ -1593,6 +1616,9 @@ impl Settings {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await.ok() == Some(1) {
                 let _ = this.update_in(cx, |this, _, cx| {
+                    if this.state.project != project || !this.proxy_listeners_available() {
+                        return;
+                    }
                     this.listeners_tls.listener_error = None;
                     let _ = this
                         .owner
@@ -1790,7 +1816,11 @@ impl Settings {
                                 )
                                 .tooltip("重新生成本地 MIO Root CA 证书（需在浏览器中重新信任）")
                                 .tab_stop(false)
-                                .on_click(cx.listener(|_, _, window, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if !this.proxy_listeners_available() {
+                                        return;
+                                    }
+                                    let project = this.state.project;
                                     let answer = window.prompt(
                                         PromptLevel::Warning,
                                         "重新生成 CA 证书",
@@ -1801,6 +1831,11 @@ impl Settings {
                                     cx.spawn_in(window, async move |this, cx| {
                                         if answer.await.ok() == Some(1) {
                                             let _ = this.update_in(cx, |this, _, cx| {
+                                                if this.state.project != project
+                                                    || !this.proxy_listeners_available()
+                                                {
+                                                    return;
+                                                }
                                                 this.listeners_tls.listener_error = None;
                                                 let _ = this.owner.update(cx, |view, cx| {
                                                     view.regenerate_ca(cx)

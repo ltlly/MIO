@@ -43,6 +43,14 @@ impl State {
                     Ok(deleted_ids) => {
                         let count = deleted_ids.len();
                         if !deleted_ids.is_empty() {
+                            if let Ok(mut annotated) = self.storage.annotated_flows.write() {
+                                for id in &deleted_ids {
+                                    annotated.remove(id);
+                                }
+                            }
+                            for id in &deleted_ids {
+                                self.storage.provenance.remove(*id);
+                            }
                             self.history_changed().await;
                         }
                         self.emit(Event::HttpHistoryDeleted {

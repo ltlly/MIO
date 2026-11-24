@@ -484,16 +484,15 @@ impl MessageEditor {
     pub fn current_byte_len(&self, cx: &App) -> usize {
         if self.pretty_active() {
             let raw_state = self.raw.read(cx);
-            let text_len = raw_state.text().len();
             if self.pretty_baseline_revision == Some(raw_state.document_revision())
                 || self
                     .pretty_baseline_text
-                    .as_ref()
-                    .is_some_and(|baseline| baseline.len() == text_len)
+                    .as_deref()
+                    .is_some_and(|baseline| raw_state.value().as_ref() == baseline)
             {
                 return self.shared.borrow().wire_bytes.len();
             }
-            return text_len;
+            return raw_state.text().len();
         }
         match self.view() {
             MessageView::Raw => {
@@ -1127,6 +1126,7 @@ impl MessageEditor {
                     state.document_revision()
                 });
                 self.raw_baseline_revision = Some(rev);
+                self.pretty_baseline_text = None;
                 self.pretty_baseline_revision = None;
                 self.clear_hex_view(window, cx);
             }
@@ -1174,6 +1174,7 @@ impl MessageEditor {
                     state.document_revision()
                 });
                 self.raw_baseline_revision = Some(rev);
+                self.pretty_baseline_text = None;
                 self.pretty_baseline_revision = None;
                 self.clear_hex_view(window, cx);
             }
@@ -1192,6 +1193,7 @@ impl MessageEditor {
                 });
                 self.raw_baseline_text = None;
                 self.raw_baseline_revision = None;
+                self.pretty_baseline_text = None;
                 self.pretty_baseline_revision = None;
             }
         }

@@ -251,6 +251,21 @@ fn result_query_filters_and_reads_notes_and_highlight_overlays() {
         q.filter.only_highlighted = true;
         assert_eq!(ordinals(&fetch(&store, &q)), [1]);
         q.filter.only_highlighted = false;
+        let mut utf8_boundary_notes = vec![b'a'; 255];
+        utf8_boundary_notes.extend_from_slice("中尾".as_bytes());
+        store
+            .set_intruder_result_notes(
+                project,
+                run.id,
+                1,
+                0,
+                &utf8_boundary_notes,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let boundary_page = fetch(&store, &q);
+        assert_eq!(boundary_page.rows[1].notes_preview.len(), 255);
+        assert!(!boundary_page.rows[1].notes_preview.contains('\u{fffd}'));
         store.close().unwrap();
     }
 }

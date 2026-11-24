@@ -90,7 +90,10 @@ impl NativePanel {
                                 document.snapshot.revision = editor.revision;
                                 document.pending_rebase = true;
                             } else {
-                                document.snapshot.revision = editor.revision + 1;
+                                document.snapshot.revision = editor
+                                    .revision
+                                    .checked_add(1)
+                                    .ok_or("编辑器 revision 已溢出。")?;
                                 rebased.push((node.id, document.snapshot.clone()));
                             }
                         }

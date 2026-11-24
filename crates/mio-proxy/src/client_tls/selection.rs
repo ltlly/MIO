@@ -119,7 +119,11 @@ fn is_valid_glob_host(raw: &str) -> bool {
 }
 
 fn parse_host_pattern(raw: &str) -> Result<ParsedHostPattern, ProxyError> {
-    let raw = if raw.contains(':') { raw } else { raw.strip_suffix('.').unwrap_or(raw) };
+    let raw = if raw.contains(':') || raw == "*." {
+        raw
+    } else {
+        raw.strip_suffix('.').unwrap_or(raw)
+    };
     if raw.is_empty()
         || raw
             .bytes()

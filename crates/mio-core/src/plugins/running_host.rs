@@ -186,13 +186,17 @@ impl Running {
                         self.flush_pending_resyncs(outgoing)?;
                         self.flush_deferred_panel_commands(outgoing).await?;
                         self.check_fatal_timeouts(Instant::now(), outgoing)?;
-                    } else if panel_id == PANEL_ID && is_main_pointer_cancel {
+                    } else if panel_id == PANEL_ID && (is_main_resync || is_main_pointer_cancel) {
                         self.cancel_pending_request(
                             parent_req,
-                            "主面板指针手势取消操作超时",
+                            if is_main_resync {
+                                "主面板重同步操作超时"
+                            } else {
+                                "主面板指针手势取消操作超时"
+                            },
                             Some(outgoing),
                             true,
-                            true,
+                            !is_main_resync,
                         );
                         self.flush_pending_revokes(outgoing)?;
                         self.flush_pending_resyncs(outgoing)?;

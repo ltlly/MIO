@@ -69,6 +69,20 @@ pub(super) struct RawH1Io<S> {
 }
 
 impl<S: AsyncWrite + Unpin> RawH1Io<S> {
+    fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<bool>> {
+        if let Some((bytes, offset)) = &mut self.pending {
+            while *offset < bytes.len() {
+                let written = ready!(Pin::new(&mut self.inner).poll_write(cx, &bytes[*offset..]))?;
+                if written == 0 {
+                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                }
+                *offset += written;
+            }
+            return Poll::Ready(Ok(true));
+        }
+        Poll::Ready(Ok(false))
+    }
+
     fn poll_cookie_head(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.cookie_fields.is_some() && !self.cookie_head.is_empty() {
             return Poll::Ready(Err(io::Error::new(
@@ -171,14 +185,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RawH1Io<S> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if let Some((bytes, offset)) = &mut this.pending {
-            while *offset < bytes.len() {
-                let written = ready!(Pin::new(&mut this.inner).poll_write(cx, &bytes[*offset..]))?;
-                if written == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                }
-                *offset += written;
-            }
+        if ready!(this.poll_pending(cx))? {
             return Poll::Ready(Ok(buf.len()));
         }
         if this.cookie_fields.is_some() {
@@ -189,15 +196,16 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RawH1Io<S> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = ready!(self.poll_pending(cx))?;
         ready!(self.poll_cookie_head(cx))?;
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = ready!(self.poll_pending(cx))?;
         ready!(self.poll_cookie_head(cx))?;
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
-
     fn poll_write_vectored(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -1056,9 +1064,6 @@ impl EphemeralNtlmClient {
         let prepared = prepare_exchange(&mut request, config)?;
         let timing = Arc::new(Mutex::new(ResponseTiming::default()));
         attach_pooled_request_extensions(&mut request, &prepared, &timing, &cancel);
-        if let Some(barrier) = &config.group.single_packet_barrier {
-            barrier.wait_or_cancel(&cancel).await?;
-        }
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProxyError::Cancelled),

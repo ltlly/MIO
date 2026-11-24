@@ -391,7 +391,7 @@ pub(super) fn view_row(
     } else {
         connection
             .query_row(
-                "SELECT CASE WHEN typeof(notes)='blob' AND length(notes)<=?1 THEN substr(notes,1,256) END,
+                "SELECT CASE WHEN typeof(notes)='blob' AND length(notes)<=?1 THEN substr(notes,1,259) END,
                         notes_revision,highlight,highlight_revision
                  FROM intruder_results WHERE run=?2 AND ordinal=?3",
                 params![MAX_ERROR_BYTES, run.id.to_string(), ordinal],
@@ -409,7 +409,11 @@ pub(super) fn view_row(
     };
     let notes_preview = notes
         .as_deref()
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .map(|bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            let cut = text.floor_char_boundary(256.min(text.len()));
+            text[..cut].to_owned()
+        })
         .unwrap_or_default();
     Ok(Some(IntruderResultViewRow {
         ordinal,

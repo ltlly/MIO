@@ -234,11 +234,12 @@ impl FilterWindow {
             form::LibraryOverlay::Save { overwrite, .. } => {
                 panel = panel.child(div().font_weight(gpui_kit::FontWeight::BOLD).child("保存至脚本库"))
                     .child("脚本名称")
-                    .child(Input::new(&self.library_name_input).id("http-filter-library-name").small())
+                    .child(Input::new(&self.library_name_input).id("http-filter-library-name").small().disabled(self.submitting))
                     .when_some(overwrite.clone(), |panel, name| panel.child(div().id("http-filter-library-overwrite-warning")
                         .test_support().child(format!("脚本库已有“{name}”，确认后替换该脚本。"))))
                     .child(div().flex_1())
                     .child(dialog_button("http-filter-library-save", if overwrite.is_some() { "确认覆盖" } else { "保存" }, 100.)
+                        .disabled(self.submitting)
                         .on_click(cx.listener(|this, _, window, cx| this.save_library_script(window, cx))));
             }
         }
@@ -246,6 +247,7 @@ impl FilterWindow {
             .test_support().role(gpui_kit::accesskit::Role::Alert).aria_label(error.clone())
             .max_h(theme::scaled_px(80.)).overflow_y_scroll().text_color(theme::danger_fg()).child(error)))
             .child(div().flex().justify_end().child(dialog_button("http-filter-library-cancel", "取消", 84.)
+                .disabled(self.submitting)
                 .on_click(cx.listener(|this, _, window, cx| this.close_library(window, cx)))))
             .into_any_element()
     }

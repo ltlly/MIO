@@ -405,29 +405,37 @@ impl Workbench {
             &directory,
             Some(&suggested),
         );
+        let owner = self.owner_window;
         cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
-            let pending_path = this
-                .update_in(cx, |view, _, cx| {
-                    if !view.finish_file_picker(picker, cx) || view.project != Some(project) {
-                        return None;
-                    }
-                    match result {
-                        Ok(Ok(Some(path))) => Some(path),
-                        Ok(Ok(None)) => None,
-                        Ok(Err(err)) => {
-                            view.fail_collaborator(format!("无法选择保存路径：{err}"), cx);
-                            cx.notify();
-                            None
+            let pending_path = owner
+                .update(cx, |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        if !view.finish_file_picker(picker, cx) || !view.backend_available() {
+                            return None;
                         }
-                        Err(_) => {
-                            view.fail_collaborator("文件选择器已关闭。", cx);
-                            cx.notify();
-                            None
+                        if view.project != Some(project) {
+                            view.fail("项目已切换，交互详情保存未写入磁盘。", cx);
+                            return None;
                         }
-                    }
+                        match result {
+                            Ok(Ok(Some(path))) => Some(path),
+                            Ok(Ok(None)) => None,
+                            Ok(Err(err)) => {
+                                view.fail_collaborator(format!("无法选择保存路径：{err}"), cx);
+                                cx.notify();
+                                None
+                            }
+                            Err(_) => {
+                                view.fail_collaborator("文件选择器已关闭。", cx);
+                                cx.notify();
+                                None
+                            }
+                        }
+                    })
                 })
                 .ok()
+                .and_then(Result::ok)
                 .flatten();
             let Some(path) = pending_path else {
                 return;
@@ -439,20 +447,25 @@ impl Workbench {
                     mio_core::ui_files::write_export_file(&write_path, json.as_bytes())
                 })
                 .await;
-            let _ = this.update_in(cx, |view, _, cx| {
-                match write_result {
-                    Ok(()) => {
-                        view.collaborator_pane.error = None;
-                        let msg =
-                            format!("已保存 Collaborator 交互详情到 {}。", path.display());
-                        view.collaborator_pane.notice = Some(msg.clone());
-                        view.status = msg;
+            let _ = owner.update(cx, |_, _, cx| {
+                this.update(cx, |view, cx| {
+                    if view.project != Some(project) {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail_collaborator(format!("保存交互详情失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.collaborator_pane.error = None;
+                            let msg =
+                                format!("已保存 Collaborator 交互详情到 {}。", path.display());
+                            view.collaborator_pane.notice = Some(msg.clone());
+                            view.status = msg;
+                        }
+                        Err(err) => {
+                            view.fail_collaborator(format!("保存交互详情失败：{err}"), cx);
+                        }
                     }
-                }
-                cx.notify();
+                    cx.notify();
+                })
             });
         })
         .detach();

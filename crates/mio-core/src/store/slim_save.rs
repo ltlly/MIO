@@ -219,6 +219,7 @@ fn collect_pinned_flows(tx: &Transaction<'_>) -> Result<HashSet<FlowId>> {
         "SELECT flow FROM main.websocket_connections",
         "SELECT flow FROM main.websocket_messages",
         "SELECT flow FROM main.intruder_results WHERE flow IS NOT NULL",
+        "SELECT id FROM main.site_map_entries",
         "SELECT substr(owner,6) FROM main.site_map_entries WHERE owner GLOB 'live:*'",
     ] {
         let mut stmt = tx.prepare(query)?;

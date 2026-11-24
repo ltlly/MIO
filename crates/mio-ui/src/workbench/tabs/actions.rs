@@ -157,6 +157,7 @@ impl Workbench {
             return;
         }
         self.pending_sends.remove(&id);
+        self.abort_sequential_group_queue_if_active_tab(id);
         if let Some(send) = self.sending.get(&id) {
             let project = self.project;
             let run_id = send.run_id;

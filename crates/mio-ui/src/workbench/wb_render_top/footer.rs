@@ -222,10 +222,18 @@ impl Workbench {
                     ),
                 ))
             }
-            Event::PluginDiagnostic { message, .. } => Some((
-                FooterLogSeverity::Warning, "扩展诊断".into(), message.clone(),
-            )),
-            Event::PluginStopped { reason, .. } => {
+            Event::PluginDiagnostic { identity, message }
+                if self.project == Some(identity.project) =>
+            {
+                Some((
+                    FooterLogSeverity::Warning,
+                    "扩展诊断".into(),
+                    message.clone(),
+                ))
+            }
+            Event::PluginStopped { identity, reason }
+                if self.project == Some(identity.project) =>
+            {
                 let expected = crate::workbench::plugins::is_expected_plugin_stop_reason(reason);
                 Some((
                     if expected {
@@ -237,14 +245,20 @@ impl Workbench {
                     reason.clone(),
                 ))
             }
-            Event::PluginAutoLoaded { info, .. } => Some((
-                FooterLogSeverity::Info,
-                format!("已自动加载扩展：{}", info.manifest.id),
-                format!("{} · v{}", info.manifest.id, info.manifest.version),
-            )),
+            Event::PluginAutoLoaded { project, info, .. }
+                if self.project == Some(*project) =>
+            {
+                Some((
+                    FooterLogSeverity::Info,
+                    format!("已自动加载扩展：{}", info.manifest.id),
+                    format!("{} · v{}", info.manifest.id, info.manifest.version),
+                ))
+            }
             Event::PluginAutoLoadFailed {
-                plugin_id, message, ..
-            } => Some((
+                project,
+                plugin_id,
+                message,
+            } if self.project == Some(*project) => Some((
                 FooterLogSeverity::Error,
                 format!("扩展自动加载失败：{plugin_id}"),
                 message.clone(),

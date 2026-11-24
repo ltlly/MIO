@@ -132,6 +132,38 @@ fn slim_save_keeps_pinned_and_repeater_flows_compacts_uncompressed_ext_chunks_an
     );
     store.put(&oversized_proxy).unwrap();
 
+    let draft_for_site_map = crate::Draft {
+        revision: 1,
+        target: "https://example.com:443".into(),
+        raw: b"GET /draft-pinned.png HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+        version: HttpVersion::Http11,
+    };
+    let draft_detail = crate::SiteMapEntryDetail::from_draft(
+        Uuid::new_v4(),
+        TrafficSource::Repeater,
+        &draft_for_site_map,
+        Some(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\nPNG!".to_vec()),
+    )
+    .unwrap();
+    let ws_rev = store.workspace().unwrap().revision;
+    let site_map_receipt = store
+        .add_site_map_entry(
+            ws_rev,
+            "draft:Repeater:test-owner",
+            crate::HistoryRow::Live(draft_detail.record.summary.clone()),
+            draft_detail,
+            true,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let mut site_map_id_flow = make_flow(
+        TrafficSource::Proxy,
+        "https://example.com/draft-pinned.png",
+        "image/png",
+        vec![b'P'; 64 * 1024],
+    );
+    site_map_id_flow.summary.id = site_map_receipt.entry_id;
+    store.put(&site_map_id_flow).unwrap();
     let intr_draft = WorkTab::from_request(Some(&repeater_flow.request), "intr".into()).draft;
     let spec = IntruderSpec {
         revision: 1,
@@ -266,6 +298,12 @@ fn slim_save_keeps_pinned_and_repeater_flows_compacts_uncompressed_ext_chunks_an
     assert!(
         reopened
             .read_optional(repeater_flow.summary.id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .read_optional(site_map_id_flow.summary.id)
             .unwrap()
             .is_some()
     );

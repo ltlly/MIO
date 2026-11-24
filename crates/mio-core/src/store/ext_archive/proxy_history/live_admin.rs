@@ -225,6 +225,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         crate::store::plugin_storage::remove_live_http_annotations(&tx, &unique_ids)?;
         crate::store::provenance::remove_flow_provenance(&tx, &unique_ids)?;
+        unlink_deleted_audit_flows(&tx, &unique_ids)?;
         {
             let mut delete_meta =
                 tx.prepare("DELETE FROM main.metadata WHERE key = ?1 COLLATE BINARY")?;
@@ -308,6 +309,7 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         }
         crate::store::plugin_storage::remove_live_http_annotations(&tx, &deleted_ids)?;
         crate::store::provenance::remove_flow_provenance(&tx, &deleted_ids)?;
+        unlink_deleted_audit_flows(&tx, &deleted_ids)?;
         {
             let mut delete_meta =
                 tx.prepare("DELETE FROM main.metadata WHERE key = ?1 COLLATE BINARY")?;
@@ -322,6 +324,30 @@ impl crate::store::FlowsRepo<&mut ProjectStore> {
         self.0.advance_workspace_cache_changes(before_tc)?;
         Ok(deleted_ids)
     }
+}
+
+fn unlink_deleted_audit_flows(tx: &rusqlite::Transaction<'_>, deleted: &[FlowId]) -> Result<()> {
+    if deleted.is_empty() {
+        return Ok(());
+    }
+    let deleted_set: std::collections::HashSet<FlowId> = deleted.iter().copied().collect();
+    let mut state = crate::store::plugin_storage::read_audit_state(tx)?;
+    let mut changed = false;
+    for finding in &mut state.findings {
+        if finding.flow_id.is_some_and(|id| deleted_set.contains(&id)) {
+            finding.flow_id = None;
+            changed = true;
+        }
+    }
+    if changed {
+        state.revision = state.revision.saturating_add(1);
+        let encoded = serde_json::to_vec(&state)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO main.metadata(key, value) VALUES('audit_state', ?1)",
+            [encoded],
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

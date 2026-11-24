@@ -393,14 +393,19 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!("已保存{count_label}至：{}", dest.display());
-                        cx.notify();
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail(format!("保存 Repeater 历史失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!("已保存{count_label}至：{}", dest.display());
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            view.fail(format!("保存 Repeater 历史失败：{err}"), cx);
+                        }
                     }
                 })
             });

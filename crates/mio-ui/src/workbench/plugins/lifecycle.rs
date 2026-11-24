@@ -557,6 +557,7 @@ impl Workbench {
             || !self.pending_sends.is_empty()
             || !self.extensions.saved_commits.is_empty();
         self.pending_sends.clear();
+        self.sequential_group_queue = None;
         self.extensions.saved_commits.clear();
         for operation_id in commits {
             self.extensions.operations.remove(&operation_id);

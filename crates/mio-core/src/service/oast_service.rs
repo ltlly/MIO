@@ -54,7 +54,7 @@ pub(super) struct CollaboratorService {
     pending_events: VecDeque<CollaboratorEvent>,
     poll_jobs: JoinSet<PollJobOutput>,
     active_polls: HashMap<Uuid, (ProjectKey, CancellationToken)>,
-    auto_poll: Option<(CancellationToken, JoinHandle<()>)>,
+    auto_poll: Option<(CancellationToken, JoinHandle<()>, JoinHandle<()>)>,
     poll_telemetry: Arc<Mutex<RelayPollTelemetry>>,
 }
 

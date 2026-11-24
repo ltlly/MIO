@@ -203,7 +203,14 @@ impl Workbench {
                 .to_owned();
             let read_result = cx
                 .background_executor()
-                .spawn(async move { mio_core::ui_files::read_file_bytes(&path) })
+                .spawn(async move {
+                    mio_core::ui_files::read_regular_file_bounded(
+                        &path,
+                        MAX_COMPARER_ITEM_BYTES as u64,
+                        true,
+                        "对比文件",
+                    )
+                })
                 .await;
             let _ = this.update_in(cx, |view, window, cx| {
                 if view.project != Some(project) {
@@ -211,7 +218,7 @@ impl Workbench {
                 }
                 match read_result {
                     Ok(bytes) => view.add_comparer_item(&label, bytes, window, cx),
-                    Err(error) => view.fail(format!("读取对比文件失败：{error}"), cx),
+                    Err(error) => view.fail(error, cx),
                 }
             });
         })

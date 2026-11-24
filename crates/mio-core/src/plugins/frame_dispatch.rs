@@ -95,6 +95,7 @@ impl Running {
             panel_id == PANEL_ID || self.supports_panel_multiplexing,
             "插件未声明支持多路复用却使用了非主面板 panel_id"
         );
+        self.drain_urgent_controls(outgoing)?;
         let is_main_recovery_reply = panel_id == PANEL_ID
             && envelope.in_reply_to != 0
             && self

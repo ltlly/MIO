@@ -1044,9 +1044,12 @@ fn maybe_serve_local_ca_portal(request: &Request, state: &State) -> Option<Respo
             .headers()
             .get("host")
             .and_then(|v| v.to_str().ok())
-            .map(|h| std::borrow::Cow::Borrowed(h.split(':').next().unwrap_or(h)))
+            .map(|h| {
+                let trimmed = h.trim();
+                std::borrow::Cow::Borrowed(trimmed.split(':').next().unwrap_or(trimmed))
+            })
     })?;
-    let host = host_cow.trim_end_matches('.');
+    let host = host_cow.trim().trim_end_matches('.');
     if !host.eq_ignore_ascii_case("mio") {
         return None;
     }

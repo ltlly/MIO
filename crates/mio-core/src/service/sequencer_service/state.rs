@@ -260,8 +260,9 @@ impl SequencerService {
         }
         if timed_out {
             self.jobs.abort_all();
+            let abort_deadline = TokioInstant::now() + Duration::from_millis(500);
             while !self.jobs.is_empty() {
-                match timeout_at(deadline, self.jobs.join_next()).await {
+                match timeout_at(abort_deadline, self.jobs.join_next()).await {
                     Ok(Some(output)) => {
                         let events = self.accept_job(output);
                         self.pending_events.extend(events);

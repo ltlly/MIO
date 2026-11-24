@@ -157,80 +157,86 @@ impl IntruderResultsWindow {
         owner.update(cx, |wb, cx| {
             wb.file_picker = Some(picker);
             cx.notify();
-        });
-        let prompt = crate::native_terminate::prompt_for_new_path(
-            window,
-            cx,
-            &directory,
-            Some("intruder-results.csv"),
-        );
-        let target = self.target.clone();
-        cx.spawn_in(window, async move |_, cx| {
-            let result = prompt.await;
-            let pending_write = target
-                .owner
-                .update(cx, |_, window, cx| {
-                    let mut out = None;
-                    target.update(window, cx, |wb, _, cx| {
-                        if !wb.finish_file_picker(picker, cx) || !wb.backend_available() {
-                            return;
-                        }
-                        if wb.project != project {
-                            wb.fail("项目已切换，本次结果导出未写入。", cx);
-                            return;
-                        }
-                        match result {
-                            Ok(Ok(Some(path))) => {
-                                let use_csv = path
-                                    .extension()
-                                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("tsv"));
-                                let (payload, count) = if use_csv {
-                                    csv_pair.unwrap_or((tsv, 0))
-                                } else {
-                                    let cnt = tsv.lines().count().saturating_sub(1);
-                                    (tsv, cnt)
-                                };
-                                out = Some((path, payload, count));
+            let prompt = crate::native_terminate::prompt_for_new_path(
+                window,
+                cx,
+                &directory,
+                Some("intruder-results.csv"),
+            );
+            let owner_window = wb.owner_window;
+            cx.spawn_in(window, async move |this, cx| {
+                let result = prompt.await;
+                let pending_write = owner_window
+                    .update(cx, |_, _, cx| {
+                        this.update(cx, |wb, cx| {
+                            if !wb.finish_file_picker(picker, cx) || !wb.backend_available() {
+                                return None;
                             }
-                            Ok(Ok(None)) => {}
-                            Ok(Err(err)) => wb.fail(format!("无法选择结果导出路径：{err}"), cx),
-                            Err(_) => wb.fail("文件选择器已意外关闭。", cx),
+                            if wb.project != project {
+                                wb.fail("项目已切换，本次结果导出未写入。", cx);
+                                return None;
+                            }
+                            match result {
+                                Ok(Ok(Some(path))) => {
+                                    let use_csv = path
+                                        .extension()
+                                        .is_none_or(|ext| !ext.eq_ignore_ascii_case("tsv"));
+                                    let (payload, count) = if use_csv {
+                                        csv_pair.unwrap_or((tsv, 0))
+                                    } else {
+                                        let cnt = tsv.lines().count().saturating_sub(1);
+                                        (tsv, cnt)
+                                    };
+                                    Some((path, payload, count))
+                                }
+                                Ok(Ok(None)) => None,
+                                Ok(Err(err)) => {
+                                    wb.fail(format!("无法选择结果导出路径：{err}"), cx);
+                                    None
+                                }
+                                Err(_) => {
+                                    wb.fail("文件选择器已意外关闭。", cx);
+                                    None
+                                }
+                            }
+                        })
+                    })
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                let Some((path, payload, count)) = pending_write else {
+                    return;
+                };
+                let write_path = path.clone();
+                let write_result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        mio_core::ui_files::write_export_file(&write_path, payload.as_bytes())
+                    })
+                    .await;
+                let _ = owner_window.update(cx, |_, _, cx| {
+                    this.update(cx, |wb, cx| {
+                        if wb.project != project {
+                            return;
                         }
-                        cx.notify();
-                    });
-                    out
-                })
-                .ok()
-                .flatten();
-            let Some((path, payload, count)) = pending_write else {
-                return;
-            };
-            let write_path = path.clone();
-            let write_result = cx
-                .background_executor()
-                .spawn(async move {
-                    mio_core::ui_files::write_export_file(&write_path, payload.as_bytes())
-                })
-                .await;
-            let _ = target.owner.update(cx, |_, window, cx| {
-                target.update(window, cx, |wb, _, cx| {
-                    match write_result {
-                        Ok(()) => {
-                            wb.error = None;
-                            wb.status = format!(
-                                "已导出 {count} 条 Intruder 结果到 {}。",
-                                path.display()
-                            );
+                        match write_result {
+                            Ok(()) => {
+                                wb.error = None;
+                                wb.status = format!(
+                                    "已导出 {count} 条 Intruder 结果到 {}。",
+                                    path.display()
+                                );
+                                cx.notify();
+                            }
+                            Err(err) => {
+                                wb.fail(format!("导出 Intruder 结果失败：{err}"), cx);
+                            }
                         }
-                        Err(err) => {
-                            wb.fail(format!("导出 Intruder 结果失败：{err}"), cx);
-                        }
-                    }
-                    cx.notify();
+                    })
                 });
-            });
-        })
-        .detach();
+            })
+            .detach();
+        });
     }
 
     pub(super) fn render_results(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

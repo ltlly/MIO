@@ -544,6 +544,7 @@ impl Workbench {
                 }
             } else {
                 self.pending_sends.remove(&id);
+                self.abort_sequential_group_queue_if_active_tab(id);
                 self.fail("等待保存确认期间插件文本已改变或解绑；没有发送旧稿。", cx);
             }
         }

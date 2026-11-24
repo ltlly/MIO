@@ -185,6 +185,7 @@ impl Workbench {
                         .iter()
                         .any(|tab| tab.id == tab_id && tab.draft == *draft)
                 {
+                    self.abort_sequential_group_queue_if_active_tab(tab_id);
                     self.fail(
                         "插件提交结果已过期或输入仍在变化；没有覆盖草稿或发送旧请求。",
                         cx,

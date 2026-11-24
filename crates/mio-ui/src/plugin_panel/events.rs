@@ -328,9 +328,13 @@ impl NativePanel {
             .node(resize.node_id)
             .and_then(|node| node.kind.as_ref())
         else {
+            self.resize = None;
             return;
         };
-        let bounds = self.geometry[&resize.node_id].get();
+        let Some(bounds) = self.geometry.get(&resize.node_id).map(|cell| cell.get()) else {
+            self.resize = None;
+            return;
+        };
         let fraction = if split.axis == Axis::Horizontal as i32 {
             (position.x - bounds.origin.x).as_f32() / bounds.size.width.as_f32().max(1.)
         } else {
@@ -351,7 +355,12 @@ impl NativePanel {
     ) {
         if event.keystroke.key == "escape" {
             self.cancel_pointer(cx);
-            if let Some(resize) = self.resize.take() {
+            if let Some(resize) = self.resize.take()
+                && matches!(
+                    self.node(resize.node_id).and_then(|node| node.kind.as_ref()),
+                    Some(node::Kind::Split(_))
+                )
+            {
                 let seq = self.next_ui_seq();
                 self.overlays.push(
                     resize.node_id,

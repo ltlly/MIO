@@ -322,6 +322,16 @@ impl Workbench {
             .is_some_and(|q| q.project == project && (q.active_tab.is_some() || !q.remaining.is_empty()))
     }
 
+    pub(in crate::workbench) fn abort_sequential_group_queue_if_active_tab(&mut self, tab_id: TabId) {
+        if self
+            .sequential_group_queue
+            .as_ref()
+            .is_some_and(|q| q.active_tab == Some(tab_id))
+        {
+            self.sequential_group_queue = None;
+        }
+    }
+
     pub(in crate::workbench) fn can_send(&self, tab_id: TabId) -> bool {
         self.project.is_some()
             && self.backend_available()
@@ -669,8 +679,12 @@ impl Workbench {
                 return;
             }
             if self.begin_plugin_send(tab_id, window, cx) {
-                if let Some(state) = self.sequential_group_queue.as_mut() {
-                    state.active_tab = Some(tab_id);
+                if self.plugin_waiting(tab_id) {
+                    if let Some(state) = self.sequential_group_queue.as_mut() {
+                        state.active_tab = Some(tab_id);
+                    }
+                } else {
+                    self.sequential_group_queue = None;
                 }
                 return;
             }

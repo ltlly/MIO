@@ -1174,9 +1174,9 @@ fn populate_message_actions_menu(
     cx: &mut App,
 ) -> PopupMenu {
     let id = slot.id();
-    menu_owner.update(cx, |this, cx| {
+    let _ = menu_owner.update(cx, |this, cx| {
         this.focus_message_editor_by_id(slot, window, cx);
-    }).expect("消息菜单所属工作台必须存在");
+    });
     let o1 = menu_owner.clone();
     let o2 = menu_owner.clone();
     let o3 = menu_owner.clone();
@@ -1464,9 +1464,9 @@ fn populate_message_actions_menu(
             .action(Box::new(crate::OpenScanLauncher))
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
-                launcher_owner.update(cx, |this, cx| {
+                let _ = launcher_owner.update(cx, |this, cx| {
                     this.open_scan_launcher(window, cx);
-                }).expect("消息菜单所属工作台必须存在");
+                });
             }),
     )
     .item(
@@ -1676,9 +1676,9 @@ fn populate_message_actions_menu(
             .action(Box::new(crate::OpenResponseInBrowser))
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
-                browser_owner.update(cx, |this, cx| {
+                let _ = browser_owner.update(cx, |this, cx| {
                     this.open_current_response_in_browser(window, cx);
-                }).expect("消息菜单所属工作台必须存在");
+                });
             }),
     )
     .item(PopupMenuItem::submenu(
@@ -1696,9 +1696,9 @@ fn populate_message_actions_menu(
             .action(Box::new(gpui_kit::component::input::Copy))
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
-                copy_owner.update(cx, |this, cx| {
+                let _ = copy_owner.update(cx, |this, cx| {
                     this.copy_selected_editor_text(slot, window, cx);
-                }).expect("消息菜单所属工作台必须存在");
+                });
             }),
     )
     .item(
@@ -1774,8 +1774,7 @@ fn populate_message_actions_menu(
             .action(Box::new(crate::AddToSiteMap))
             .disabled(unavailable)
             .on_click(move |_, window, cx| {
-                o_site_map.update(cx, |this, cx| this.add_to_site_map(window, cx))
-                    .expect("消息菜单所属工作台必须存在");
+                let _ = o_site_map.update(cx, |this, cx| this.add_to_site_map(window, cx));
             }),
     )
     .compact()

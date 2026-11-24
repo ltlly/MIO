@@ -333,16 +333,20 @@ impl Workbench {
             };
             let read_result = cx
                 .background_executor()
-                .spawn(async move { mio_core::ui_files::read_file_bytes(&path) })
+                .spawn(async move {
+                    mio_core::ui_files::read_regular_file_bounded(
+                        &path,
+                        MAX_SCOPE_LOAD_FILE_BYTES as u64,
+                        false,
+                        "范围文件",
+                    )
+                })
                 .await;
             let _ = this.update_in(cx, |view, _, cx| {
                 if view.project != Some(project) {
                     return;
                 }
                 match read_result {
-                    Ok(bytes) if bytes.len() > MAX_SCOPE_LOAD_FILE_BYTES => {
-                        view.fail("范围文件超过 256 KB 上限，未导入。", cx);
-                    }
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(text) => {
                             let lines: Vec<String> = text

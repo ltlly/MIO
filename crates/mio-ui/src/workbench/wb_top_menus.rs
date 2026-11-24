@@ -183,6 +183,7 @@ impl Workbench {
                     if this.tool != Tool::Intruder {
                         this.select_tool(Tool::Intruder, window, cx);
                     }
+                    this.sync_intruder_editors(window, cx);
                     this.auto_intruder_positions(id, window, cx);
                 } else {
                     this.fail("当前没有打开的 Intruder 标签页。", cx);
@@ -195,6 +196,7 @@ impl Workbench {
                     if this.tool != Tool::Intruder {
                         this.select_tool(Tool::Intruder, window, cx);
                     }
+                    this.sync_intruder_editors(window, cx);
                     this.clear_intruder_positions(id, window, cx);
                 } else {
                     this.fail("当前没有打开的 Intruder 标签页。", cx);
@@ -203,10 +205,17 @@ impl Workbench {
         );
         r.on_action(
             cx.listener(|this, _: &crate::DuplicateActiveTab, window, cx| {
+                if this.tool != Tool::Repeater {
+                    return;
+                }
                 if let Some(id) = this.workspace.active {
                     this.duplicate_repeater_tab(id, window, cx);
                 } else if let Some(ws_id) = this.workspace.active_websocket_tab {
-                    if !this.flush_workspace(window, cx) {
+                    if this.project.is_none()
+                        || !this.backend_available()
+                        || this.transition.is_some()
+                        || !this.flush_workspace(window, cx)
+                    {
                         return;
                     }
                     this.duplicate_ws_repeater_tab(ws_id, cx);

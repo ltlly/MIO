@@ -218,6 +218,18 @@ fn footer_event_log_captures_real_events_and_bounds_retention(cx: &mut TestAppCo
         path: None,
         workspace: mio_core::Workspace::default(),
     }).unwrap();
+    f.events.try_send(Event::PluginDiagnostic {
+        identity: mio_core::protocol::ChannelIdentity {
+            instance_id: Uuid::new_v4(),
+            project: f.project,
+        },
+        message: "来自旧项目的诊断".into(),
+    }).unwrap();
+    f.events.try_send(Event::PluginAutoLoadFailed {
+        project: f.project,
+        plugin_id: "stale.ext".into(),
+        message: "来自旧项目的加载失败".into(),
+    }).unwrap();
     cx.run_until_parked();
     cx.read(|cx| {
         let drawer = &f.view.read(cx).footer_drawer;

@@ -201,6 +201,7 @@ impl Workbench {
             self.after_save = Some(action);
             self.transition = Some(TransitionPhase::Quiescing);
             self.pending_sends.clear();
+            self.sequential_group_queue = None;
             self.pending_project_save = None;
             self.status = "正在停止连接并收齐最后的响应；随后保存项目…".into();
             cx.notify();

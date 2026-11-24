@@ -307,7 +307,7 @@ impl TableViewportTracker {
     }
 
     pub(in crate::plugin_panel) fn request_page(&mut self, offset: u64, seq: u64) -> u64 {
-        self.next_revision += 1;
+        self.next_revision = self.next_revision.saturating_add(1);
         let revision = self.next_revision;
         if self.pending.len() >= MAX_UI_OVERLAY_HISTORY {
             self.pending.pop_front();
@@ -886,19 +886,26 @@ pub(in crate::plugin_panel) fn capture_document(
     cx: &mut App,
 ) -> Result<EditorSnapshot, String> {
     let value = editing::snapshot(&document.state, window, cx).map_err(str::to_owned)?;
-    let selection = document.state.read(cx).selected_range();
+    let raw_selection = document.state.read(cx).selected_range();
+    let start_idx = raw_selection.start.min(value.len());
+    let end_idx = raw_selection.end.min(value.len()).max(start_idx);
     let (contents, start, end) = match document.format {
-        EditorFormat::Utf8 => (value.as_bytes().to_vec(), selection.start, selection.end),
+        EditorFormat::Utf8 => {
+            if !value.is_char_boundary(start_idx) || !value.is_char_boundary(end_idx) {
+                return Err("编辑器选区无效".into());
+            }
+            (value.as_bytes().to_vec(), start_idx, end_idx)
+        }
         EditorFormat::Binary => {
             let contents = editing::hex_decode(&value)?;
-            let start = value[..selection.start]
-                .bytes()
-                .filter(u8::is_ascii_hexdigit)
+            let start = value.as_bytes()[..start_idx]
+                .iter()
+                .filter(|b| b.is_ascii_hexdigit())
                 .count()
                 / 2;
-            let end = value[..selection.end]
-                .bytes()
-                .filter(u8::is_ascii_hexdigit)
+            let end = value.as_bytes()[..end_idx]
+                .iter()
+                .filter(|b| b.is_ascii_hexdigit())
                 .count()
                 .div_ceil(2);
             (contents, start, end)
@@ -908,8 +915,15 @@ pub(in crate::plugin_panel) fn capture_document(
     if document.read_only && changed {
         return Err("只读插件编辑器拒绝修改。".into());
     }
-    let revision =
-        document.snapshot.revision + u64::from(changed || document.pending_rebase);
+    let revision = if changed || document.pending_rebase {
+        document
+            .snapshot
+            .revision
+            .checked_add(1)
+            .ok_or("编辑器 revision 已溢出。")?
+    } else {
+        document.snapshot.revision
+    };
     let snapshot = EditorSnapshot {
         document_id: document.snapshot.document_id,
         revision,

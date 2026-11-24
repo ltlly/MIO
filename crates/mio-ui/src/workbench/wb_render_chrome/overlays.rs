@@ -519,27 +519,43 @@ impl Workbench {
                     .child(error.clone())
                     .into_any_element(),
             };
-            overlays.push(div().id("global-search-overlay").test_support()
-                .occlude()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .on_scroll(|_, _, cx| cx.stop_propagation())
-                .absolute().top(px(12.)).left(px(24.)).right(px(24.)).bottom(px(24.))
-                .bg(theme::background()).border_1().border_color(theme::border()).rounded(px(6.))
-                .flex().flex_col().focus_trap("global-search-overlay", &self.global_search.focus)
-                .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" {
+            overlays.push(
+                div()
+                    .id("global-search-backdrop")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                         this.close_global_overlays(window, cx);
-                    }
-                }))
-                .child(toolbar()
-                    .child(div().w(px(320.)).child(Input::new(&input).id("global-search-input").aria_label("全局搜索").small()))
-                    .child(button("global-search-regex", "正则").selected(regex).on_click(cx.listener(|this, _, window, cx| { this.global_search.regex = !this.global_search.regex; this.query_global_search(window, cx); })))
-                    .child(button("global-search-case", "区分大小写").selected(case_sensitive).on_click(cx.listener(|this, _, window, cx| { this.global_search.case_sensitive = !this.global_search.case_sensitive; this.query_global_search(window, cx); })))
-                    .child(button("global-search-scope", "仅范围内").selected(in_scope_only).on_click(cx.listener(|this, _, window, cx| { this.global_search.in_scope_only = !this.global_search.in_scope_only; this.query_global_search(window, cx); })))
-                    .child(button("global-search-run", "搜索").disabled(loading).on_click(cx.listener(|this, _, window, cx| this.query_global_search(window, cx))))
-                    .child(button("global-search-close", "关闭").icon(gpui_kit::assets::IconName::Close).on_click(cx.listener(|this, _, window, cx| this.close_global_overlays(window, cx)))))
-                .child(if loading { div().id("global-search-loading").test_support().p(px(10.)).child("正在读取全部工具的原始与修改后内容…").into_any_element() } else { list_body })
-                .into_any_element());
+                        cx.stop_propagation();
+                    }))
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div().id("global-search-overlay").test_support()
+                            .occlude()
+                            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                            .on_scroll(|_, _, cx| cx.stop_propagation())
+                            .absolute().top(px(12.)).left(px(24.)).right(px(24.)).bottom(px(24.))
+                            .bg(theme::background()).border_1().border_color(theme::border()).rounded(px(6.))
+                            .flex().flex_col().focus_trap("global-search-overlay", &self.global_search.focus)
+                            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                                if event.keystroke.key == "escape" {
+                                    this.close_global_overlays(window, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(toolbar()
+                                .child(div().w(px(320.)).child(Input::new(&input).id("global-search-input").aria_label("全局搜索").small()))
+                                .child(button("global-search-regex", "正则").selected(regex).on_click(cx.listener(|this, _, window, cx| { this.global_search.regex = !this.global_search.regex; this.query_global_search(window, cx); })))
+                                .child(button("global-search-case", "区分大小写").selected(case_sensitive).on_click(cx.listener(|this, _, window, cx| { this.global_search.case_sensitive = !this.global_search.case_sensitive; this.query_global_search(window, cx); })))
+                                .child(button("global-search-scope", "仅范围内").selected(in_scope_only).on_click(cx.listener(|this, _, window, cx| { this.global_search.in_scope_only = !this.global_search.in_scope_only; this.query_global_search(window, cx); })))
+                                .child(button("global-search-run", "搜索").disabled(loading).on_click(cx.listener(|this, _, window, cx| this.query_global_search(window, cx))))
+                                .child(button("global-search-close", "关闭").icon(gpui_kit::assets::IconName::Close).on_click(cx.listener(|this, _, window, cx| this.close_global_overlays(window, cx)))))
+                            .child(if loading { div().id("global-search-loading").test_support().p(px(10.)).child("正在读取全部工具的原始与修改后内容…").into_any_element() } else { list_body }),
+                    )
+                    .into_any_element(),
+            );
         }
         if self.mio_ai_panel_open {
             overlays.push(self.render_mio_ai_control_center(window, cx));
@@ -664,15 +680,29 @@ impl Workbench {
         }
 
         div()
-            .id("mio-ai-control-center")
+            .id("mio-ai-control-center-backdrop")
             .test_support()
-            .role(gpui_kit::accesskit::Role::Dialog)
-            .aria_label("MioAT / Agent IPC 控制中心")
-            .occlude()
-            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .on_scroll(|_, _, cx| cx.stop_propagation())
             .absolute()
-            .top(px(12.))
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.mio_ai_panel_open = false;
+                this.focus.focus(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id("mio-ai-control-center")
+                    .test_support()
+                    .role(gpui_kit::accesskit::Role::Dialog)
+                    .aria_label("MioAT / Agent IPC 控制中心")
+                    .occlude()
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
+                    .absolute()
+                    .top(px(12.))
             .right(px(12.))
             .bottom(px(12.))
             .w(px(520.))
@@ -971,6 +1001,7 @@ impl Workbench {
                         )),
                     ),
             )
+            )
             .into_any_element()
     }
 
@@ -1039,14 +1070,19 @@ impl Workbench {
                 })
                 .await;
             let _ = owner.update(cx, |_, _, cx| {
-                this.update(cx, |view, cx| match write_result {
-                    Ok(()) => {
-                        view.error = None;
-                        view.status = format!("已保存 CSRF PoC HTML 至：{}", dest.display());
-                        cx.notify();
+                this.update(cx, |view, cx| {
+                    if view.project != project {
+                        return;
                     }
-                    Err(err) => {
-                        view.fail(format!("保存 CSRF PoC 失败：{err}"), cx);
+                    match write_result {
+                        Ok(()) => {
+                            view.error = None;
+                            view.status = format!("已保存 CSRF PoC HTML 至：{}", dest.display());
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            view.fail(format!("保存 CSRF PoC 失败：{err}"), cx);
+                        }
                     }
                 })
             });

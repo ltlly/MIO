@@ -349,14 +349,24 @@ impl Workbench {
                 return;
             }
         };
-        let script = self
+        let script = match self
             .extensions
             .custom_checks
             .script_editor
-            .read(cx)
-            .content()
-            .text()
-            .to_string();
+            .update(cx, |ed, cx| {
+                if ed.marked_text_range(window, cx).is_some() {
+                    Err(editing::COMPOSITION_PENDING.to_owned())
+                } else {
+                    Ok(ed.content().text().to_string())
+                }
+            }) {
+            Ok(v) => v,
+            Err(err) => {
+                self.extensions.custom_checks.feedback = Some((false, err));
+                cx.notify();
+                return;
+            }
+        };
         if name.is_empty() || name.len() > 256 || name.contains('\0') {
             self.extensions.custom_checks.feedback =
                 Some((false, "检查名称不能为空、包含 NUL 或超过 256 字节。".to_owned()));

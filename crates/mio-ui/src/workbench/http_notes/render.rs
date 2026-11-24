@@ -32,7 +32,9 @@ fn heading_label(source: &str, cursor: usize) -> &'static str {
             .iter()
             .find_map(|child| depth_at(child, cursor))
     }
-    let parsed = to_mdast(source, &ParseOptions::gfm()).expect("Markdown 备注能够解析");
+    let Ok(parsed) = to_mdast(source, &ParseOptions::gfm()) else {
+        return "Aa";
+    };
     match depth_at(&parsed, cursor) {
         Some(1) => "H1",
         Some(2) => "H2",

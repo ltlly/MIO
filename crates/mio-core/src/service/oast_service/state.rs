@@ -189,13 +189,14 @@ impl State {
 
 impl CollaboratorService {
     pub(super) async fn stop_auto_poll(&mut self) {
-        if let Some((cancel, mut handle)) = self.auto_poll.take() {
+        if let Some((cancel, mut fwd_handle, mut poll_handle)) = self.auto_poll.take() {
             cancel.cancel();
-            if timeout_at(TokioInstant::now() + POLL_JOIN_TIMEOUT, &mut handle)
-                .await
-                .is_err()
-            {
-                handle.abort();
+            let deadline = TokioInstant::now() + POLL_JOIN_TIMEOUT;
+            if timeout_at(deadline, &mut poll_handle).await.is_err() {
+                poll_handle.abort();
+            }
+            if timeout_at(deadline, &mut fwd_handle).await.is_err() {
+                fwd_handle.abort();
             }
         }
     }
@@ -215,24 +216,36 @@ impl CollaboratorService {
         self.rx = Some(merged_rx);
         let fwd_tx = merged_tx.clone();
         let fwd_cancel = cancel.clone();
-        tokio::spawn(async move {
+        let fwd_handle = tokio::spawn(async move {
             loop {
                 let next = tokio::select! {
                     biased;
-                    _ = fwd_cancel.cancelled() => None,
+                    _ = fwd_cancel.cancelled() => {
+                        while let Ok(item) = local_rx.try_recv() {
+                            let _ = fwd_tx.try_send(item);
+                        }
+                        None
+                    }
                     item = local_rx.recv() => item,
                 };
                 let Some(item) = next else {
                     break;
                 };
-                let sent = tokio::select! {
+                let permit = tokio::select! {
                     biased;
-                    _ = fwd_cancel.cancelled() => false,
-                    res = fwd_tx.send(item) => res.is_ok(),
+                    _ = fwd_cancel.cancelled() => {
+                        let _ = fwd_tx.try_send(item);
+                        while let Ok(pending) = local_rx.try_recv() {
+                            let _ = fwd_tx.try_send(pending);
+                        }
+                        break;
+                    }
+                    permit = fwd_tx.reserve() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    },
                 };
-                if !sent {
-                    break;
-                }
+                permit.send(item);
             }
         });
         let period = Duration::from_millis(poll_interval_ms.max(250));
@@ -310,6 +323,6 @@ impl CollaboratorService {
                 }
             }
         });
-        self.auto_poll = Some((cancel, handle));
+        self.auto_poll = Some((cancel, fwd_handle, handle));
     }
 }
