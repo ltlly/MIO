@@ -109,15 +109,18 @@ pub(crate) fn unpack_plugin_archive(
                 ensure!(size <= MAX_PAX_RECORD_BYTES as u64, "PAX 扩展头超过 64 KiB 限额");
                 let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
-                if let Some(path) = parse_pax_path(&data)? {
-                    next_pax_path = Some(path);
-                }
+                next_long_name = None;
+                next_pax_path = parse_pax_path(&data)?;
                 continue;
             }
             b'g' => {
                 ensure!(size <= MAX_PAX_RECORD_BYTES as u64, "PAX 全局头超过 64 KiB 限额");
-                let _ = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
+                let data = read_exact_bounded(&mut reader, size as usize, &mut total_unpacked)?;
                 discard_padding(&mut reader, pad, &mut total_unpacked)?;
+                ensure!(
+                    parse_pax_path(&data)?.is_none(),
+                    "PAX 全局头禁止覆盖条目的路径"
+                );
                 continue;
             }
             b'L' => {
@@ -128,6 +131,7 @@ pub(crate) fn unpack_plugin_archive(
                     Some(end) => &data[..end],
                     None => &data[..],
                 };
+                next_pax_path = None;
                 next_long_name = Some(
                     std::str::from_utf8(trimmed)
                         .context("归档长路径不是有效 UTF-8")?
@@ -206,6 +210,10 @@ pub(crate) fn unpack_plugin_archive(
         let _ = mode;
     }
 
+    ensure!(
+        next_pax_path.is_none() && next_long_name.is_none(),
+        "插件归档包含未关联目标条目的扩展头"
+    );
     verify_optional_sha256_manifest(&work_dir)?;
 
     Ok((
@@ -402,10 +410,13 @@ fn parse_pax_path(mut data: &[u8]) -> Result<Option<String>> {
         let record = &data[space_idx + 1..record_len];
         let content = record.strip_suffix(b"\n").unwrap_or(record);
         let text = std::str::from_utf8(content).context("PAX 扩展头非 UTF-8")?;
-        if let Some((key, val)) = text.split_once('=')
-            && key == "path"
-        {
-            found = Some(val.to_owned());
+        if let Some((key, val)) = text.split_once('=') {
+            if key == "linkpath" {
+                bail!("PAX 扩展头禁止包含链接目标属性");
+            }
+            if key == "path" {
+                found = Some(val.to_owned());
+            }
         }
         data = &data[record_len..];
     }

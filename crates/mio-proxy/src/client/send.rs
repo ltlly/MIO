@@ -117,14 +117,22 @@ fn build_request_with_proxy_auth(
     config: &SendConfig,
     proxy_auth: Option<&str>,
 ) -> Result<Request, ProxyError> {
-    let mut req = message::to_request_with_config(model, config)?;
     if let Some(val) = proxy_auth {
-        let header_val =
-            rama::http::header::HeaderValue::from_str(val).map_err(ProxyError::invalid)?;
-        req.headers_mut()
-            .insert(rama::http::header::PROXY_AUTHORIZATION, header_val);
+        let mut patched = model.clone();
+        if config.http.strip_proxy_headers {
+            patched.headers.retain(|h| {
+                !h.name
+                    .get(..6)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-"))
+            });
+        }
+        crate::auth::set_or_replace_header(&mut patched.headers, "Proxy-Authorization", val.to_owned());
+        let mut patched_cfg = config.clone();
+        patched_cfg.http.strip_proxy_headers = false;
+        patched_cfg.http.raw_http1_override = None;
+        return message::to_request_with_config(&patched, &patched_cfg);
     }
-    Ok(req)
+    message::to_request_with_config(model, config)
 }
 
 async fn drain_auth_challenge_body(

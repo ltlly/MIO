@@ -260,7 +260,10 @@ impl Running {
         if expired
             .iter()
             .any(|(_, panel_id, is_hook, resync_seq, is_pointer_cancel)| {
-                (*panel_id == PANEL_ID && resync_seq.is_none() && !*is_pointer_cancel) || *is_hook
+                *panel_id == PANEL_ID
+                    && !*is_hook
+                    && resync_seq.is_none()
+                    && !*is_pointer_cancel
             })
         {
             let expired_targets: Vec<_> = expired
@@ -272,7 +275,7 @@ impl Running {
         let mut cancels_to_send = Vec::new();
         let mut diagnostics = Vec::with_capacity(expired.len());
         let mut sync_panels = BTreeSet::new();
-        for (id, panel_id, _, resync_seq, is_pointer_cancel) in expired {
+        for (id, panel_id, is_hook, resync_seq, is_pointer_cancel) in expired {
             let is_resync = resync_seq.is_some();
             let is_destroy_close = self.requests.get(&id).is_some_and(|p| {
                 matches!(
@@ -315,7 +318,9 @@ impl Running {
             let (retracted_unsent, reverted_optimistic, cancel_to_send) =
                 self.cancel_pending_request_inner(
                     id,
-                    if is_resync {
+                    if is_hook {
+                        "插件 Hook 调用已超时"
+                    } else if is_resync {
                         "面板重同步操作超时"
                     } else if is_pointer_cancel {
                         "面板指针手势取消操作超时"
@@ -323,7 +328,7 @@ impl Running {
                         "插件子面板操作超时；已取消此面板请求，未影响共享实例"
                     },
                     !is_destroy_close && !already_confirmed_viewport,
-                    true,
+                    !is_hook,
                 );
             if reverted_optimistic || is_optimistic {
                 sync_panels.insert(panel_id);
@@ -347,17 +352,19 @@ impl Running {
                 self.schedule_panel_resync(panel_id);
             }
             self.settle_pointer_capture_on_failure(panel_id, pointer_capture, retracted_unsent);
-            let diag = Failure::new(
-                ErrorCode::Cancelled,
-                if is_resync {
-                    "面板重同步操作超时"
-                } else if is_pointer_cancel {
-                    "面板指针手势取消操作超时"
-                } else {
-                    "插件子面板操作超时"
-                },
-            );
-            diagnostics.push((panel_id, diag));
+            if !is_hook {
+                let diag = Failure::new(
+                    ErrorCode::Cancelled,
+                    if is_resync {
+                        "面板重同步操作超时"
+                    } else if is_pointer_cancel {
+                        "面板指针手势取消操作超时"
+                    } else {
+                        "插件子面板操作超时"
+                    },
+                );
+                diagnostics.push((panel_id, diag));
+            }
         }
         for (c_panel, c_req, for_resync, snap_rev) in cancels_to_send {
             self.send_cancel_best_effort(outgoing, c_panel, c_req, for_resync, snap_rev);

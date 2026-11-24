@@ -545,17 +545,16 @@ async fn serve_invisible_tls(
             Err(ProxyError::Cancelled) => return,
             Err(error) => {
                 let failed_host = crate::route::format_host_for_authority(&fallback_host);
+                let failed_port = state.config.network.redirect_to_port.unwrap_or(443);
                 let failed = HttpRequest {
                     method: "CONNECT".into(),
-                    url: format!(
-                        "{failed_host}:{}",
-                        state.config.network.redirect_to_port.unwrap_or(443)
-                    ),
+                    url: format!("{failed_host}:{failed_port}"),
                     version: HttpVersion::Http11,
                     headers: Vec::new(),
                     body: Vec::new(),
                     trailers: Vec::new(),
                 };
+                state.notify_client_tls_failure(fallback_host.clone(), failed_port);
                 state.failure(failed, &error).await;
                 return;
             }
@@ -861,13 +860,21 @@ async fn handle_entry(
                         && lead_byte == socks5::TLS_CLIENT_HELLO_LEAD_BYTE
                         && task_state.dynamic.borrow().ssl_pass_through.is_some()
                     {
-                        prefix = read_tls_client_hello_prefix(
+                        prefix = match read_tls_client_hello_prefix(
                             &mut upgraded,
                             prefix,
                             task_state.config.limits.request_timeout,
                             &task_state.cancel,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(bytes) => bytes,
+                            Err(ProxyError::Cancelled) => return Err(ProxyError::Cancelled),
+                            Err(err) => {
+                                task_state.notify_client_tls_failure(tls_host.clone(), tls_port);
+                                return Err(err);
+                            }
+                        };
                         parse_client_hello_sni(&prefix)
                     } else {
                         None
@@ -1462,7 +1469,7 @@ pub(in crate::server) async fn process_http(
     let deadline = tokio::time::Instant::now() + config.limits.timeout;
     let (sender, response) = oneshot::channel();
     // Keep the driver and request budget until cancellation has actually joined the socket.
-    let task_cancel = cancel.clone();
+    let task_cancel = cancel.child_token();
     state.tasks.spawn(async move {
         let _permit = permit;
         let shutdown = Shutdown::new(task_cancel.clone().cancelled_owned());
@@ -1502,11 +1509,17 @@ pub(in crate::server) async fn process_http(
                 }
             },
         };
-        if sender.send(result).is_ok() {
-            task_cancel.cancelled().await;
+        if result.is_ok() {
+            if sender.send(result).is_ok() {
+                task_cancel.cancelled().await;
+            }
+            task_cancel.cancel();
+            shutdown.shutdown().await;
+        } else {
+            task_cancel.cancel();
+            shutdown.shutdown().await;
+            let _ = sender.send(result);
         }
-        task_cancel.cancel();
-        shutdown.shutdown().await;
     });
     let (response, metrics) = tokio::select! {
         biased;

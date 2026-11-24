@@ -240,6 +240,7 @@ impl State {
                         workspace.revision += 1;
                         workspace.validate()?;
                         self.apply_save_workspace(self.project, workspace).await?;
+                        self.plugin_check_call(&call)?;
                     }
                     Ok(ServiceResult::Done)
                 }
@@ -492,6 +493,7 @@ impl State {
                     workspace.revision += 1;
                     workspace.validate()?;
                     self.apply_save_workspace(self.project, workspace).await?;
+                    self.plugin_check_call(&call)?;
                     Ok(ServiceResult::Resource {
                         id: item_id,
                         revision: item_number,

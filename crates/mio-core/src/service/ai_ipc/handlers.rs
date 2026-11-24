@@ -484,6 +484,7 @@ impl State {
         title: Option<String>,
         blank: bool,
     ) -> Result<AiIpcPayload> {
+        self.require_saved()?;
         ensure!(
             !self.quiesced,
             "项目正在切换或静默保存，暂无法打开 Repeater 标签"
@@ -518,18 +519,14 @@ impl State {
             },
         };
         let tab = WorkTab::from_request(request.as_ref(), resolved_title);
-        let mut persisted_workspace = None;
-        if self.unsaved_count() == 0 {
-            let next_rev = workspace.revision.saturating_add(1);
-            workspace.revision = next_rev;
-            workspace.active = Some(tab.id);
-            workspace.active_websocket_tab = None;
-            workspace.tabs.push(tab.clone());
-            if self.store.metadata_mut().save_workspace(&workspace).is_ok() {
-                self.ai_ipc.repeater_revisions.insert((tab.id, next_rev));
-                persisted_workspace = Some(workspace);
-            }
-        }
+        let next_rev = workspace.revision.saturating_add(1);
+        workspace.revision = next_rev;
+        workspace.active = Some(tab.id);
+        workspace.active_websocket_tab = None;
+        workspace.tabs.push(tab.clone());
+        self.store.metadata_mut().save_workspace(&workspace)?;
+        self.ai_ipc.repeater_revisions.insert((tab.id, next_rev));
+        let persisted_workspace = Some(workspace);
         let tab_id = tab.id;
         let tab_title = tab.title.clone();
         let tab_target = tab.draft.target.clone();
@@ -553,6 +550,7 @@ impl State {
     }
 
     async fn ipc_repeater_rename(&mut self, tab_id: TabId, title: String) -> Result<AiIpcPayload> {
+        self.require_saved()?;
         ensure!(
             !self.quiesced,
             "项目正在切换或静默保存，暂无法重命名 Repeater 标签"
@@ -576,6 +574,7 @@ impl State {
     }
 
     async fn ipc_repeater_close(&mut self, tab_id: TabId) -> Result<AiIpcPayload> {
+        self.require_saved()?;
         ensure!(
             !self.quiesced,
             "项目正在切换或静默保存，暂无法关闭 Repeater 标签"

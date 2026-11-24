@@ -147,6 +147,7 @@ pub(super) async fn serve_socks5(
                 Ok(bytes) => bytes,
                 Err(ProxyError::Cancelled) => return,
                 Err(error) => {
+                    state.notify_client_tls_failure(host.clone(), port);
                     state.failure(failed_request, &error).await;
                     return;
                 }

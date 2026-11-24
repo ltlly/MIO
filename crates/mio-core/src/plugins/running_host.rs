@@ -94,11 +94,19 @@ impl Running {
                     let (
                         is_main_resync,
                         is_main_pointer_cancel,
+                        is_hook,
                         is_destroy_close,
                         needs_new_resync,
                         pointer_capture,
                     ) = self.requests.get(&parent_req).map_or(
-                        (false, false, false, false, PointerCaptureTransition::None),
+                        (
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            PointerCaptureTransition::None,
+                        ),
                         |p| {
                             let is_main_resync = panel_id == PANEL_ID
                                 && matches!(
@@ -116,6 +124,7 @@ impl Running {
                                         ..
                                     }
                                 );
+                            let is_hook = matches!(p.kind, PendingKind::Hook { .. });
                             let is_destroy_close = matches!(
                                 p.kind,
                                 PendingKind::Close {
@@ -147,20 +156,37 @@ impl Running {
                             (
                                 is_main_resync,
                                 is_main_pointer_cancel,
+                                is_hook,
                                 is_destroy_close,
                                 needs_new_resync,
                                 pointer_capture,
                             )
                         },
                     );
-                    if panel_id == PANEL_ID && !is_main_resync && !is_main_pointer_cancel {
+                    if panel_id == PANEL_ID
+                        && !is_main_resync
+                        && !is_main_pointer_cancel
+                        && !is_hook
+                    {
                         return self.abort_fatal_timeout(
                             &[(panel_id, parent_req)],
                             outgoing,
                             Some((parent_req, "主面板操作已超时；已取消并回收实例")),
                         );
                     }
-                    if panel_id == PANEL_ID && is_main_pointer_cancel {
+                    if is_hook {
+                        self.cancel_pending_request(
+                            parent_req,
+                            "插件 Hook 调用已超时",
+                            Some(outgoing),
+                            true,
+                            false,
+                        );
+                        self.flush_pending_revokes(outgoing)?;
+                        self.flush_pending_resyncs(outgoing)?;
+                        self.flush_deferred_panel_commands(outgoing).await?;
+                        self.check_fatal_timeouts(Instant::now(), outgoing)?;
+                    } else if panel_id == PANEL_ID && is_main_pointer_cancel {
                         self.cancel_pending_request(
                             parent_req,
                             "主面板指针手势取消操作超时",

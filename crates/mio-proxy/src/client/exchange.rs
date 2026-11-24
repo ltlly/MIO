@@ -1237,12 +1237,10 @@ pub(crate) async fn exchange_with_metrics(
             None if prepared.is_direct => (None, PooledRouteKind::Direct),
             None => (None, PooledRouteKind::PlainProxy),
         };
-        let default_http_version_key = if prepared.force_http10 {
-            0
-        } else if prepared.allow_http2_alpn_override {
-            2
-        } else {
-            1
+        let default_http_version_key = match prepared.default_http_version {
+            Version::HTTP_10 => 0,
+            Version::HTTP_2 => 2,
+            _ => 1,
         };
         let pool_key = PooledClientKey {
             is_plain_http: !prepared.is_secure_scheme,

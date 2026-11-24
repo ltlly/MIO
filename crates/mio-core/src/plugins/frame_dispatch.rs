@@ -103,6 +103,7 @@ impl Running {
                 .is_some_and(|p| p.panel_id == PANEL_ID && p.kind.is_panel_recovery());
         let is_fatal_main_expired_frame = panel_id == PANEL_ID
             && !is_main_recovery_reply
+            && !is_hook_reply
             && ((expired
                 && (envelope.in_reply_to == 0
                     || self
@@ -669,6 +670,24 @@ impl Running {
         expired: bool,
         outgoing: &mpsc::Sender<Envelope>,
     ) -> Result<()> {
+        let is_hook = envelope.in_reply_to != 0
+            && self
+                .requests
+                .get(&envelope.in_reply_to)
+                .is_some_and(|p| matches!(p.kind, PendingKind::Hook { .. }));
+        if is_hook {
+            self.cancel_pending_request(
+                envelope.in_reply_to,
+                "插件 Hook 调用已超时",
+                Some(outgoing),
+                false,
+                false,
+            );
+            self.flush_pending_revokes(outgoing)?;
+            self.flush_pending_resyncs(outgoing)?;
+            self.flush_deferred_panel_commands(outgoing).await?;
+            return Ok(());
+        }
         let main_resync_seq = (envelope.in_reply_to != 0)
             .then(|| self.requests.get(&envelope.in_reply_to))
             .flatten()

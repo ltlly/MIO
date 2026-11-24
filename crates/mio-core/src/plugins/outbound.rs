@@ -172,8 +172,9 @@ impl Running {
     }
 
     pub(super) fn is_fatal_pending(pending: &Pending) -> bool {
-        (pending.panel_id == PANEL_ID && !pending.kind.is_panel_recovery())
-            || matches!(pending.kind, PendingKind::Hook { .. })
+        pending.panel_id == PANEL_ID
+            && !pending.kind.is_panel_recovery()
+            && !matches!(pending.kind, PendingKind::Hook { .. })
     }
 
     pub(super) fn has_expired_fatal_request(&self, now: Instant) -> bool {
