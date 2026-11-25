@@ -52,11 +52,17 @@ gpui-component = { path = "vendor/gpui-component" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 
-[profile.release]
-lto = "thin"
+[profile.dev]
+debug = 0
+strip = "debuginfo"
 
 [profile.dev.package.gpui-base]
 opt-level = 1
 
 [profile.dev.package.gpui-component]
 opt-level = 1
+
+[profile.release]
+lto = "thin"
+debug = 0
+strip = "debuginfo"

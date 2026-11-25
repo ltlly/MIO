@@ -15,10 +15,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_MIN_STACK: "33554432"
 
 jobs:
-  ci:
-    name: Workspace Check & Test
+  check-and-core-tests:
+    name: Workspace Check & Core/Proxy/Plugin/CLI Tests
     runs-on: macos-15
     steps:
       - name: Checkout repository
@@ -58,11 +60,60 @@ jobs:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: clippy, rustfmt
 
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-macos-core"
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Check workspace targets
         run: cargo check --workspace --tests --locked
 
       - name: Run core, proxy, plugin, and CLI tests
-        run: cargo test -p mio-plugin-api -p mio-plugin-sdk -p mio-proxy -p mio-core -p mio-cli -p mio-protocol-lab --locked
+        run: cargo nextest run -p mio-plugin-api -p mio-plugin-sdk -p mio-proxy -p mio-core -p mio-cli -p mio-protocol-lab --locked --no-fail-fast
 
-      - name: Run UI library tests
-        run: cargo test -p mio-ui --lib --locked
+      - name: Run workspace doc tests
+        run: cargo test --workspace --doc --locked --no-fail-fast
+
+  ui-tests:
+    name: UI Library Tests (${{ matrix.shard }}/2)
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read Rust toolchain channel
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          if [[ -z "$channel" ]]; then
+            echo "Failed to determine Rust toolchain channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-macos-ui"
+          save-if: ${{ matrix.shard == 1 }}
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run UI library tests (shard ${{ matrix.shard }}/2)
+        run: cargo nextest run -p mio-ui --lib --locked --partition count:${{ matrix.shard }}/2 --no-fail-fast
