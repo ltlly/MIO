@@ -203,14 +203,27 @@ impl CollaboratorService {
 
     pub(super) async fn stop_server(&mut self) -> Result<()> {
         self.stop_auto_poll().await;
-        self.drain_local_rx();
+        self.drain_local_rx_to_pending_events();
         let result = match self.server.take() {
             Some(server) => server.stop().await,
             None => Ok(()),
         };
-        self.drain_local_rx();
+        self.drain_local_rx_to_pending_events();
         self.rx = None;
         result
+    }
+
+    pub(super) fn drain_local_rx_to_pending_events(&mut self) {
+        let observed = self.drain_local_rx();
+        if let Some(project) = self.project {
+            for item in observed {
+                self.pending_events
+                    .push_back(CollaboratorEvent::InteractionObserved {
+                        project,
+                        interaction: Box::new(item),
+                    });
+            }
+        }
     }
 
     pub(in crate::service) fn drain_local_rx(&mut self) -> Vec<OastInteraction> {

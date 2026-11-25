@@ -285,13 +285,23 @@ impl Workbench {
             wizard.cancel_confirm_open = false;
         }
         if confirm_exit {
-            if self.quit_attempt.is_none() {
+            if self.cancel_expired_quit(cx) {
+                if let Some(wizard) = &mut self.startup_wizard {
+                    wizard.error = self.error.clone();
+                }
+                cx.notify();
+                return;
+            }
+            let minted_new_attempt = self.quit_attempt.is_none();
+            if minted_new_attempt {
                 self.quit_attempt = Some(Uuid::new_v4());
                 cx.global::<crate::native_terminate::NativeTerminate>()
                     .request();
             }
             if self.runtime_result.is_some() {
-                let _ = self.finish_joined_exit(cx);
+                if !self.finish_joined_exit(cx) && !minted_new_attempt {
+                    self.confirm_joined_exit(window, cx);
+                }
                 cx.notify();
                 return;
             }

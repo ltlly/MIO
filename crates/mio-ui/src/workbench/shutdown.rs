@@ -24,6 +24,10 @@ impl Workbench {
                     view.update(cx, |view, cx| match request {
                         NativeRequest::Requested(_) => {
                             if view.quit_attempt.is_some() {
+                                if view.runtime_result.is_some() && !view.quitting {
+                                    let _ = view.finish_joined_exit(cx);
+                                    cx.notify();
+                                }
                                 return;
                             }
                             if view.transition.is_some() || view.file_picker_pending() {

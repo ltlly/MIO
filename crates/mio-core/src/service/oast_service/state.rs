@@ -204,16 +204,7 @@ impl CollaboratorService {
             let fwd_deadline = TokioInstant::now() + Duration::from_secs(1);
             match timeout_at(fwd_deadline, &mut fwd_handle).await {
                 Ok(Ok((unsent, local_rx))) => {
-                    let observed = self.drain_local_rx();
-                    if let Some(project) = self.project {
-                        for item in observed {
-                            self.pending_events
-                                .push_back(CollaboratorEvent::InteractionObserved {
-                                    project,
-                                    interaction: Box::new(item),
-                                });
-                        }
-                    }
+                    self.drain_local_rx_to_pending_events();
                     if let Some(mut item) = unsent
                         && self.record_interaction(&mut item)
                         && let Some(project) = self.project
@@ -226,9 +217,12 @@ impl CollaboratorService {
                     }
                     self.rx = local_rx;
                 }
-                Ok(Err(_)) => {}
+                Ok(Err(_)) => {
+                    self.drain_local_rx_to_pending_events();
+                }
                 Err(_) => {
                     fwd_handle.abort();
+                    self.drain_local_rx_to_pending_events();
                 }
             }
         }

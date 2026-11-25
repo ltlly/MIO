@@ -259,8 +259,11 @@ impl Workbench {
                     .decoder_output
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 self.extra_tools.decoder_output_bytes = None;
+                self.extra_tools.decoder_output_hex_view = false;
                 self.extra_tools.decoder_mode = "".into();
                 self.extra_tools.steps.clear();
+                self.extra_tools.decoder_chain_start = 0;
+                self.extra_tools.decoder_chain_continuing = false;
                 self.cancel_plugin_interactions(cx);
                 self.tool = Tool::Decoder;
                 self.focus.focus(window, cx);

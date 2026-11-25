@@ -312,7 +312,7 @@ fn unpack_pkcs12_windows_native(
             pcb_result: *mut u32,
             dw_flags: u32,
         ) -> i32;
-        fn NCryptDeleteKey(h_key: usize, dw_flags: u32) -> i32;
+        fn NCryptFreeObject(h_object: usize) -> i32;
     }
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -397,7 +397,7 @@ fn unpack_pkcs12_windows_native(
     let _store_guard = StoreGuard(store);
 
     let mut pem_out = String::new();
-    let mut exported_key = false;
+    let mut exported_key_der: Option<ZeroizeBytes> = None;
     let mut export_err: Option<ProxyError> = None;
     let mut prev: *const CertContext = std::ptr::null();
     loop {
@@ -431,10 +431,10 @@ fn unpack_pkcs12_windows_native(
             )
         };
         if acquired != 0 && h_key != 0 {
-            if exported_key || export_err.is_some() {
+            if export_err.is_some() {
                 if caller_free != 0 {
                     unsafe {
-                        let _ = NCryptDeleteKey(h_key, 0);
+                        let _ = NCryptFreeObject(h_key);
                     }
                 }
                 continue;
@@ -591,16 +591,24 @@ fn unpack_pkcs12_windows_native(
 
             if caller_free != 0 {
                 unsafe {
-                    let _ = NCryptDeleteKey(h_key, 0);
+                    let _ = NCryptFreeObject(h_key);
                 }
             }
             match export_res {
                 Ok(pkcs8) => {
-                    let mut b64 = ZeroizeBytes(STANDARD.encode(&pkcs8.0).into_bytes());
-                    let b64_str = std::str::from_utf8(&b64.0).unwrap_or_default();
-                    crate::tls::append_pem_block_b64(&mut pem_out, "PRIVATE KEY", b64_str);
-                    b64.0.fill(0);
-                    exported_key = true;
+                    if let Some(existing) = &exported_key_der {
+                        if existing.0 != pkcs8.0 {
+                            export_err = Some(ProxyError::Tls(
+                                "PKCS#12 包含多把不同的私钥；仅支持单个客户端身份".into(),
+                            ));
+                        }
+                    } else {
+                        let mut b64 = ZeroizeBytes(STANDARD.encode(&pkcs8.0).into_bytes());
+                        let b64_str = std::str::from_utf8(&b64.0).unwrap_or_default();
+                        crate::tls::append_pem_block_b64(&mut pem_out, "PRIVATE KEY", b64_str);
+                        b64.0.fill(0);
+                        exported_key_der = Some(pkcs8);
+                    }
                 }
                 Err(err) => {
                     export_err = Some(err);

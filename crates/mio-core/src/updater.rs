@@ -1144,6 +1144,7 @@ where
                     .and_then(|()| temp_file.as_file_mut().seek(SeekFrom::Start(0)))
                     .context("重置更新包临时文件失败")?;
                 received_so_far = 0;
+                expected_total = hint_total_bytes;
                 hasher = Sha256::new();
                 etag = None;
                 "服务器拒绝 Range 请求（HTTP 416），将从头重新下载".to_owned()
