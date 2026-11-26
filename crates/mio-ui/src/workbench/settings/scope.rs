@@ -21,7 +21,7 @@ type SimpleScopeMeta = (
 );
 const SIMPLE_META: [SimpleScopeMeta; 2] = [
     (
-        "Include in scope",
+        "包含在范围内",
         "settings-scope-include-input",
         "包含规则前缀",
         "settings-scope-include-add",
@@ -32,7 +32,7 @@ const SIMPLE_META: [SimpleScopeMeta; 2] = [
         "settings-scope-include-load",
     ),
     (
-        "Exclude from scope",
+        "排除在范围外",
         "settings-scope-exclude-input",
         "排除规则前缀",
         "settings-scope-exclude-add",
@@ -45,9 +45,9 @@ const SIMPLE_META: [SimpleScopeMeta; 2] = [
 ];
 
 const SIMPLE_SCOPE_COLUMNS: [(&str, f32); 3] = [
-    ("Enabled", 74.),
-    ("Prefix", 410.),
-    ("Include subdomains", 148.),
+    ("启用", 74.),
+    ("前缀", 410.),
+    ("包含子域名", 148.),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -218,9 +218,9 @@ impl TableDelegate for SimpleScopeTable {
         };
         let rule = rules.get(row)?;
         Some(match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            0 => if rule.enabled { "是" } else { "否" }.into(),
             1 => rule.prefix.clone().into(),
-            _ => if rule.include_subdomains { "Yes" } else { "No" }.into(),
+            _ => if rule.include_subdomains { "是" } else { "否" }.into(),
         })
     }
 }
@@ -1251,7 +1251,7 @@ impl Settings {
                         .child(
                             listeners_tls::indexed_checkbox(
                                 "settings-scope-oos-custom-sub-cb",
-                                "Include subdomains",
+                                "包含子域名",
                                 self.scope_oos_custom_subdomains,
                                 enabled,
                             )
@@ -1480,7 +1480,7 @@ impl Settings {
                                 } else {
                                     "settings-scope-exclude-sub-cb"
                                 },
-                                "Include subdomains",
+                                "包含子域名",
                                 editor_subdomains,
                                 enabled,
                             )

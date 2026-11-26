@@ -31,24 +31,24 @@ pub(super) fn intercept_set_mut(
 
 pub(super) fn intercept_type_label(match_type: ProxyInterceptType) -> &'static str {
     match match_type {
-        ProxyInterceptType::DomainName => "Domain name",
-        ProxyInterceptType::IpAddress => "IP address",
-        ProxyInterceptType::Protocol => "Protocol",
-        ProxyInterceptType::HttpMethod => "HTTP method",
-        ProxyInterceptType::FileExtension => "File extension",
+        ProxyInterceptType::DomainName => "域名",
+        ProxyInterceptType::IpAddress => "IP 地址",
+        ProxyInterceptType::Protocol => "协议",
+        ProxyInterceptType::HttpMethod => "HTTP 方法",
+        ProxyInterceptType::FileExtension => "文件扩展名",
         ProxyInterceptType::Url => "URL",
-        ProxyInterceptType::Header => "Any header",
-        ProxyInterceptType::Request => "Request",
-        ProxyInterceptType::CookieName => "Cookie name",
-        ProxyInterceptType::CookieValue => "Cookie value",
-        ProxyInterceptType::Body => "Body",
-        ProxyInterceptType::ParamName => "Param name",
-        ProxyInterceptType::ParamValue => "Param value",
-        ProxyInterceptType::ContentTypeHeader => "Content type header",
-        ProxyInterceptType::MimeType => "Mime type",
-        ProxyInterceptType::PageTitle => "Page title",
-        ProxyInterceptType::StatusCode => "Status code",
-        ProxyInterceptType::ListenerPort => "Listener port",
+        ProxyInterceptType::Header => "任意标头",
+        ProxyInterceptType::Request => "请求",
+        ProxyInterceptType::CookieName => "Cookie 名称",
+        ProxyInterceptType::CookieValue => "Cookie 值",
+        ProxyInterceptType::Body => "正文",
+        ProxyInterceptType::ParamName => "参数名称",
+        ProxyInterceptType::ParamValue => "参数值",
+        ProxyInterceptType::ContentTypeHeader => "Content-Type 标头",
+        ProxyInterceptType::MimeType => "MIME 类型",
+        ProxyInterceptType::PageTitle => "页面标题",
+        ProxyInterceptType::StatusCode => "状态码",
+        ProxyInterceptType::ListenerPort => "监听端口",
     }
 }
 
@@ -81,48 +81,48 @@ pub(super) fn intercept_relation_label(
     match_type: ProxyInterceptType,
 ) -> &'static str {
     match relationship {
-        ProxyInterceptRelation::Matches => "Matches",
-        ProxyInterceptRelation::DoesNotMatch => "Does not match",
+        ProxyInterceptRelation::Matches => "匹配",
+        ProxyInterceptRelation::DoesNotMatch => "不匹配",
         ProxyInterceptRelation::RequestMatches => {
             if match_type == ProxyInterceptType::Body {
-                "Of request matches"
+                "请求中的正文匹配"
             } else {
-                "In request matches"
+                "请求中匹配"
             }
         }
         ProxyInterceptRelation::RequestDoesNotMatch => {
             if match_type == ProxyInterceptType::Body {
-                "Of request does not match"
+                "请求中的正文不匹配"
             } else {
-                "In request does not match"
+                "请求中不匹配"
             }
         }
         ProxyInterceptRelation::ResponseMatches => {
             if match_type == ProxyInterceptType::Body {
-                "Of response matches"
+                "响应中的正文匹配"
             } else {
-                "In response matches"
+                "响应中匹配"
             }
         }
         ProxyInterceptRelation::ResponseDoesNotMatch => {
             if match_type == ProxyInterceptType::Body {
-                "Of response does not match"
+                "响应中的正文不匹配"
             } else {
-                "In response does not match"
+                "响应中不匹配"
             }
         }
-        ProxyInterceptRelation::IsHttp => "Is HTTP",
-        ProxyInterceptRelation::IsHttps => "Is HTTPS",
-        ProxyInterceptRelation::ContainsParameters => "Contains parameters",
-        ProxyInterceptRelation::DoesNotContainParameters => "Does not contain parameters",
-        ProxyInterceptRelation::WasModified => "Was modified",
-        ProxyInterceptRelation::WasNotModified => "Was not modified",
-        ProxyInterceptRelation::WasIntercepted => "Was intercepted",
-        ProxyInterceptRelation::WasNotIntercepted => "Was not intercepted",
-        ProxyInterceptRelation::WasAnnotated => "Was annotated",
-        ProxyInterceptRelation::WasNotAnnotated => "Was not annotated",
-        ProxyInterceptRelation::InScope => "Is in target scope",
-        ProxyInterceptRelation::NotInScope => "Is not in target scope",
+        ProxyInterceptRelation::IsHttp => "为 HTTP",
+        ProxyInterceptRelation::IsHttps => "为 HTTPS",
+        ProxyInterceptRelation::ContainsParameters => "包含参数",
+        ProxyInterceptRelation::DoesNotContainParameters => "不包含参数",
+        ProxyInterceptRelation::WasModified => "已被修改",
+        ProxyInterceptRelation::WasNotModified => "未被修改",
+        ProxyInterceptRelation::WasIntercepted => "已被拦截",
+        ProxyInterceptRelation::WasNotIntercepted => "未被拦截",
+        ProxyInterceptRelation::WasAnnotated => "已添加批注",
+        ProxyInterceptRelation::WasNotAnnotated => "未添加批注",
+        ProxyInterceptRelation::InScope => "在目标范围内",
+        ProxyInterceptRelation::NotInScope => "不在目标范围内",
     }
 }
 
@@ -168,11 +168,11 @@ pub(super) struct InterceptionTable {
 }
 
 const INTERCEPT_COLUMNS: [(&str, f32); 5] = [
-    ("Enabled", 72.),
-    ("Operator", 74.),
-    ("Match type", 144.),
-    ("Relationship", 166.),
-    ("Condition", 360.),
+    ("启用", 72.),
+    ("逻辑", 74.),
+    ("匹配类型", 144.),
+    ("匹配关系", 166.),
+    ("匹配条件", 360.),
 ];
 
 impl InterceptionTable {
@@ -189,9 +189,9 @@ impl InterceptionTable {
         self.row(row, cx)
             .map_or_else(String::new, |rule| match column {
                 1 if row > 0 => if rule.operator == ProxyInterceptOperator::And {
-                    "And"
+                    "且"
                 } else {
-                    "Or"
+                    "或"
                 }
                 .into(),
                 2 => intercept_type_label(rule.match_type).into(),
@@ -290,8 +290,8 @@ impl TableDelegate for InterceptionTable {
                 rule.id
             )))
             .accessibility_label(format!(
-                "{} rule enabled",
-                if response { "Response" } else { "Request" }
+                "启用{}拦截规则",
+                if response { "响应" } else { "请求" }
             ))
             .checked(rule.enabled)
             .disabled(!available)

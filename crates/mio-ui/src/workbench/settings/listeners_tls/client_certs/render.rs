@@ -24,7 +24,7 @@ impl Settings {
             .h(px(132.))
             .flex_shrink_0()
             .child(side_buttons)
-            .child(mio_table_frame(table, "Client TLS certificates"));
+            .child(mio_table_frame(table, "客户端 TLS 证书"));
 
         let mut content = div()
             .pl(px(30.))

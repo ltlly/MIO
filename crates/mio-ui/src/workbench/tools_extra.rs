@@ -137,13 +137,13 @@ pub(in crate::workbench) struct ComparerItem {
 }
 
 pub(in crate::workbench) const MR_TARGET_LABELS: [&str; 7] = [
-    "Request header",
-    "Request body",
-    "Response header",
-    "Response body",
-    "Request param name",
-    "Request param value",
-    "Request first line",
+    "请求头",
+    "请求体",
+    "响应头",
+    "响应体",
+    "请求参数名",
+    "请求参数值",
+    "请求首行",
 ];
 
 pub(super) fn mr_target_index(target: MatchReplaceTarget) -> usize {
@@ -162,35 +162,48 @@ pub(super) fn mr_target_index(target: MatchReplaceTarget) -> usize {
 
 pub(in crate::workbench) fn mr_target_from_label(label: &str) -> MatchReplaceTarget {
     match label {
-        "Request header" => MatchReplaceTarget::RequestHeader,
-        "Request body" => MatchReplaceTarget::RequestBody,
-        "Response header" => MatchReplaceTarget::ResponseHeader,
-        "Response body" => MatchReplaceTarget::ResponseBody,
-        "Request param name" => MatchReplaceTarget::RequestParamName,
-        "Request param value" => MatchReplaceTarget::RequestParamValue,
-        "Request first line" => MatchReplaceTarget::RequestFirstLine,
-        "Request script" => MatchReplaceTarget::RequestScript,
-        "Response script" => MatchReplaceTarget::ResponseScript,
+        "请求头" | "Request header" => MatchReplaceTarget::RequestHeader,
+        "请求体" | "Request body" => MatchReplaceTarget::RequestBody,
+        "响应头" | "Response header" => MatchReplaceTarget::ResponseHeader,
+        "响应体" | "Response body" => MatchReplaceTarget::ResponseBody,
+        "请求参数名" | "Request param name" => MatchReplaceTarget::RequestParamName,
+        "请求参数值" | "Request param value" => MatchReplaceTarget::RequestParamValue,
+        "请求首行" | "Request first line" => MatchReplaceTarget::RequestFirstLine,
+        "请求脚本" | "Request script" => MatchReplaceTarget::RequestScript,
+        "响应脚本" | "Response script" => MatchReplaceTarget::ResponseScript,
         _ => unreachable!("validated HTTP rule type"),
+    }
+}
+
+pub(in crate::workbench) fn mr_target_label(target: MatchReplaceTarget) -> &'static str {
+    match target {
+        MatchReplaceTarget::RequestHeader => "请求头",
+        MatchReplaceTarget::RequestBody => "请求体",
+        MatchReplaceTarget::ResponseHeader => "响应头",
+        MatchReplaceTarget::ResponseBody => "响应体",
+        MatchReplaceTarget::RequestParamName => "请求参数名",
+        MatchReplaceTarget::RequestParamValue => "请求参数值",
+        MatchReplaceTarget::RequestFirstLine => "请求首行",
+        MatchReplaceTarget::RequestScript => "请求脚本",
+        MatchReplaceTarget::ResponseScript => "响应脚本",
     }
 }
 
 pub(in crate::workbench) fn mr_rule_cell(rule: &MatchAndReplaceRule, column: usize) -> String {
     match column {
-        0 => if rule.enabled { "Yes" } else { "No" }.into(),
-        1 => rule.item_type.display_name().into(),
+        0 => if rule.enabled { "是" } else { "否" }.into(),
+        1 => mr_target_label(rule.item_type).into(),
         2 => if rule.item_type.is_script() { rule.script_name.clone() } else { String::new() },
         3 => if rule.item_type.is_script() { String::new() } else { rule.match_pattern.clone() },
         4 => if rule.item_type.is_script() {
             rule.filter_script.lines().next().unwrap_or_default().to_owned()
         } else { rule.replace_with.clone() },
-        5 => if rule.item_type.is_script() { "Script" } else if rule.regex { "Regex" } else { "Literal" }.into(),
+        5 => if rule.item_type.is_script() { "脚本" } else if rule.regex { "正则" } else { "字面" }.into(),
         _ => rule.comment.clone(),
     }
 }
 
-pub(super) const WS_MR_DIRECTION_LABELS: [&str; 3] = ["Both", "Client to server", "Server to client"];
-
+pub(super) const WS_MR_DIRECTION_LABELS: [&str; 3] = ["双向", "客户端到服务器", "服务器到客户端"];
 pub(super) fn ws_mr_direction_index(direction: WsReplaceDirection) -> usize {
     match direction {
         WsReplaceDirection::Both => 0,
@@ -201,8 +214,8 @@ pub(super) fn ws_mr_direction_index(direction: WsReplaceDirection) -> usize {
 
 pub(super) fn ws_mr_direction_from_label(label: &str) -> WsReplaceDirection {
     match label {
-        "Client to server" => WsReplaceDirection::ClientToServer,
-        "Server to client" => WsReplaceDirection::ServerToClient,
+        "客户端到服务器" | "Client to server" => WsReplaceDirection::ClientToServer,
+        "服务器到客户端" | "Server to client" => WsReplaceDirection::ServerToClient,
         _ => WsReplaceDirection::Both,
     }
 }
@@ -414,7 +427,7 @@ impl HttpMatchReplaceEditor {
         });
         let target_select = cx.new(|cx| SelectState::new(MR_TARGET_LABELS.to_vec(),
             Some(gpui_kit::component::IndexPath::new(if rule.item_type.is_script() { 0 } else { mr_target_index(rule.item_type) })), window, cx));
-        let script_select = cx.new(|cx| SelectState::new(vec!["Request script", "Response script"],
+        let script_select = cx.new(|cx| SelectState::new(vec!["请求脚本", "响应脚本"],
             Some(gpui_kit::component::IndexPath::new(usize::from(rule.item_type.is_response()))), window, cx));
         for selector in [&target_select, &script_select] {
             cx.subscribe_in(selector, window, |this, _, event, window, cx| {
@@ -455,13 +468,13 @@ impl HttpMatchReplaceEditor {
         .detach();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        window.set_window_title(if original.is_some() { "Edit match/replace rule" } else { "Add match/replace rule" });
+        window.set_window_title(if original.is_some() { "编辑匹配与替换规则" } else { "添加匹配与替换规则" });
         let mut editor = Self {
             owner, owner_window, project, original,
             match_input: cx.new(|cx| InputState::new(window, cx).default_value(rule.match_pattern.clone())),
             replace_input: cx.new(|cx| InputState::new(window, cx).default_value(rule.replace_with.clone())),
             comment: cx.new(|cx| InputState::new(window, cx).default_value(rule.comment.clone())),
-            script_name: cx.new(|cx| InputState::new(window, cx).default_value(rule.script_name.clone()).placeholder("Sign request header")),
+            script_name: cx.new(|cx| InputState::new(window, cx).default_value(rule.script_name.clone()).placeholder("如：签名请求头")),
             rule, prefix, target_select, script_select, script, test_original, test_modified, error: None, focus,
         };
         editor.update_placeholders(window, cx);
@@ -562,12 +575,12 @@ impl Render for HttpMatchReplaceEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let script_mode = self.rule.item_type.is_script();
         let response = self.rule.item_type.is_response();
-        let title = if self.original.is_some() { "Edit match/replace rule" } else { "Add match/replace rule" };
+        let title = if self.original.is_some() { "编辑匹配与替换规则" } else { "添加匹配与替换规则" };
         let mut form = div().flex().flex_col().gap(px(8.)).child(
             div().flex().gap(px(8.))
-                .child(button(self.id("mode-settings"), "Settings mode").selected(!script_mode).on_click(cx.listener(|this, _, window, cx| this.switch_mode(false, window, cx))))
-                .child(button(self.id("mode-script"), "Script mode (MioScript)").selected(script_mode).on_click(cx.listener(|this, _, window, cx| this.switch_mode(true, window, cx))))
-                .when(script_mode, |row| row.child(button(self.id("load-template"), "Load template").on_click(cx.listener(|this, _, window, cx| {
+                .child(button(self.id("mode-settings"), "配置模式").selected(!script_mode).on_click(cx.listener(|this, _, window, cx| this.switch_mode(false, window, cx))))
+                .child(button(self.id("mode-script"), "脚本模式 (MioScript)").selected(script_mode).on_click(cx.listener(|this, _, window, cx| this.switch_mode(true, window, cx))))
+                .when(script_mode, |row| row.child(button(self.id("load-template"), "载入模板").on_click(cx.listener(|this, _, window, cx| {
                     let template = if this.rule.item_type.is_response() { mio_core::DEFAULT_RESPONSE_SCRIPT_TEMPLATE } else { mio_core::DEFAULT_REQUEST_SCRIPT_TEMPLATE };
                     this.script.update(cx, |state, cx| state.set_value(template, window, cx));
                     this.error = None; cx.notify();
@@ -575,23 +588,23 @@ impl Render for HttpMatchReplaceEditor {
         );
         if script_mode {
             form = form
-                .child(div().flex().gap(px(8.)).items_center().child("Type").child(Select::new(&self.script_select).id(self.id("script-type-select")).small().w(px(220.))))
-                .child(Input::new(&self.script_name).id(self.id("script-name-input")).aria_label("Script name").small())
-                .child(div().id(self.id("script-editor")).test_support().h(px(140.)).child(Editor::new(&self.script).aria_label("MioScript script").size_full()))
+                .child(div().flex().gap(px(8.)).items_center().child("类型").child(Select::new(&self.script_select).id(self.id("script-type-select")).small().w(px(220.))))
+                .child(Input::new(&self.script_name).id(self.id("script-name-input")).aria_label("脚本名称").small())
+                .child(div().id(self.id("script-editor")).test_support().h(px(140.)).child(Editor::new(&self.script).aria_label("MioScript 脚本").size_full()))
                 .child("Rhai：request / response 提供 headers、body；支持 sha256_hex、regex_replace、base64_encode。返回修改后的 request / response。")
                 .child(div().id(self.id("compilation-errors")).test_support().role(gpui_kit::accesskit::Role::Status).child(
                     match mio_core::validate_filter_script(self.script.read(cx).value().as_ref()) {
-                        Ok(()) => "Compilation errors: None".to_owned(),
-                        Err(error) => format!("Compilation errors: {error}"),
+                        Ok(()) => "编译错误：无".to_owned(),
+                        Err(error) => format!("编译错误：{error}"),
                     }
                 ));
         } else {
             form = form
-                .child(div().flex().gap(px(8.)).items_center().child("Type").child(Select::new(&self.target_select).id(self.id("type-select")).small().w(px(240.))))
-                .child(Input::new(&self.match_input).id(self.id("match-input")).aria_label("Match").small())
-                .child(Input::new(&self.replace_input).id(self.id("replace-input")).aria_label("Replace").small())
+                .child(div().flex().gap(px(8.)).items_center().child("类型").child(Select::new(&self.target_select).id(self.id("type-select")).small().w(px(240.))))
+                .child(Input::new(&self.match_input).id(self.id("match-input")).aria_label("匹配").small())
+                .child(Input::new(&self.replace_input).id(self.id("replace-input")).aria_label("替换").small())
                 .child(
-                    mr_checkbox(self.id("regex"), "Regex match", "Regex match", self.rule.regex, true)
+                    mr_checkbox(self.id("regex"), "正则匹配", "正则匹配", self.rule.regex, true)
                         .on_change({
                             let entity = cx.entity();
                             move |state, _, _, cx| {
@@ -603,15 +616,15 @@ impl Render for HttpMatchReplaceEditor {
                         }),
                 );
         }
-        form = form.child(Input::new(&self.comment).id(self.id("comment-input")).aria_label("Comment").small());
+        form = form.child(Input::new(&self.comment).id(self.id("comment-input")).aria_label("备注").small());
         let test_panel = div().flex().gap(px(10.)).h(px(200.))
             .child(div().flex_1().min_w_0().flex().flex_col()
-                .child(div().flex().justify_between().items_center().child(if response { "Original response" } else { "Original request" })
-                    .child(button(self.id("test-restore"), "Restore default").on_click(cx.listener(|this, _, window, cx| this.restore_test(window, cx)))))
-                .child(div().id(self.id("test-original")).test_support().flex_1().min_h_0().child(Editor::new(&self.test_original).aria_label("Original HTTP message").size_full())))
-            .child(div().flex().items_center().child(button(self.id("test-btn"), "Test").on_click(cx.listener(|this, _, window, cx| this.test_rule(window, cx)))))
-            .child(div().flex_1().min_w_0().flex().flex_col().child(if response { "Auto-modified response" } else { "Auto-modified request" })
-                .child(div().id(self.id("test-modified")).test_support().flex_1().min_h_0().child(Editor::new(&self.test_modified).aria_label("Auto-modified HTTP message").readonly(true).size_full())));
+                .child(div().flex().justify_between().items_center().child(if response { "原始响应" } else { "原始请求" })
+                    .child(button(self.id("test-restore"), "恢复默认").on_click(cx.listener(|this, _, window, cx| this.restore_test(window, cx)))))
+                .child(div().id(self.id("test-original")).test_support().flex_1().min_h_0().child(Editor::new(&self.test_original).aria_label("原始 HTTP 消息").size_full())))
+            .child(div().flex().items_center().child(button(self.id("test-btn"), "测试").on_click(cx.listener(|this, _, window, cx| this.test_rule(window, cx)))))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(if response { "自动修改后的响应" } else { "自动修改后的请求" })
+                .child(div().id(self.id("test-modified")).test_support().flex_1().min_h_0().child(Editor::new(&self.test_modified).aria_label("自动修改后的 HTTP 消息").readonly(true).size_full())));
         let close_owner = self.owner.clone();
         let close_owner_window = self.owner_window;
         let close_is_wb = self.prefix == "mr";
@@ -635,8 +648,8 @@ impl Render for HttpMatchReplaceEditor {
                 .child(form).child(test_panel)
                 .when_some(self.error.clone(), |this, error| this.child(div().id(self.id("error")).test_support().role(gpui_kit::accesskit::Role::Alert).aria_label(error.clone()).text_color(theme::danger_fg()).child(error)))
                 .child(div().flex().justify_end().gap(px(8.))
-                    .child(button(self.id("submit"), "OK").primary().on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))))
-                    .child(button(self.id("cancel-edit"), "Cancel").on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx))))))
+                    .child(button(self.id("submit"), "确定").primary().on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))))
+                    .child(button(self.id("cancel-edit"), "取消").on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx))))))
     }
 }
 
@@ -653,13 +666,13 @@ pub(super) struct WorkbenchMatchReplaceTable {
 }
 
 pub(super) const WB_MR_COLUMNS: [(&str, f32); 7] = [
-    ("Enabled", 68.),
-    ("Item", 132.),
-    ("Name", 174.),
-    ("Match", 182.),
-    ("Replace", 224.),
-    ("Type", 68.),
-    ("Comment", 206.),
+    ("启用", 68.),
+    ("匹配项", 132.),
+    ("名称", 174.),
+    ("匹配", 182.),
+    ("替换", 224.),
+    ("类型", 68.),
+    ("备注", 206.),
 ];
 
 impl WorkbenchMatchReplaceTable {
@@ -767,12 +780,12 @@ pub(super) struct WorkbenchWsMatchReplaceTable {
 }
 
 pub(super) const WB_WS_MR_COLUMNS: [(&str, f32); 6] = [
-    ("Enabled", 68.),
-    ("Direction", 132.),
-    ("Match", 174.),
-    ("Replace", 224.),
-    ("Type", 68.),
-    ("Comment", 212.),
+    ("启用", 68.),
+    ("方向", 132.),
+    ("匹配", 174.),
+    ("替换", 224.),
+    ("类型", 68.),
+    ("备注", 212.),
 ];
 
 impl WorkbenchWsMatchReplaceTable {
@@ -861,7 +874,7 @@ impl TableDelegate for WorkbenchWsMatchReplaceTable {
             2 => div().truncate().child(rule.match_pattern).into_any_element(),
             3 => div().truncate().child(rule.replace_with).into_any_element(),
             4 => div()
-                .child(if rule.is_regex { "Regex" } else { "Literal" })
+                .child(if rule.is_regex { "正则" } else { "字面" })
                 .into_any_element(),
             _ => div().truncate().child(rule.comment).into_any_element(),
         }
@@ -870,11 +883,11 @@ impl TableDelegate for WorkbenchWsMatchReplaceTable {
         let rules = self.ws_rules(cx);
         let rule = rules.get(row)?;
         Some(match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            0 => if rule.enabled { "是" } else { "否" }.into(),
             1 => ws_mr_direction_label(rule.direction).into(),
             2 => rule.match_pattern.clone().into(),
             3 => rule.replace_with.clone().into(),
-            4 => if rule.is_regex { "Regex" } else { "Literal" }.into(),
+            4 => if rule.is_regex { "正则" } else { "字面" }.into(),
             _ => rule.comment.clone().into(),
         })
     }

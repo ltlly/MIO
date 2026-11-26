@@ -191,7 +191,7 @@ impl Workbench {
             .w(theme::scaled_px(20.))
             .h(theme::scaled_px(20.))
             .tab_stop(false)
-            .accessibility_label("HTTP match and replace rules 设置")
+            .accessibility_label("HTTP 匹配与替换规则设置")
             .tooltip("HTTP 匹配与替换规则选项")
             .child(
                 gpui_kit::component::Icon::new(IconName::Settings)
@@ -277,7 +277,7 @@ impl Workbench {
                     .child(mr_help_popover(
                         "mr-http-help-popover",
                         "mr-http-help",
-                        "HTTP match and replace rules",
+                        "HTTP 匹配与替换规则",
                         &[
                             "按列表顺序自动匹配并替换流经 Proxy 的 HTTP 请求头、请求体、响应头、响应体与参数内容。",
                             "点击左侧“添加”或“编辑”可配置普通文本、正则表达式或 脚本规则。",
@@ -288,11 +288,11 @@ impl Workbench {
                             .id("mr-http-heading")
                             .test_support()
                             .role(gpui_kit::accesskit::Role::Heading)
-                            .aria_label("HTTP match and replace rules")
+                            .aria_label("HTTP 匹配与替换规则")
                             .text_size(theme::scaled_px(15.))
                             .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(p.title_color)
-                            .child("HTTP match and replace rules"),
+                            .child("HTTP 匹配与替换规则"),
                     ),
             )
             .child(
@@ -314,7 +314,7 @@ impl Workbench {
                     mr_checkbox(
                         "proxy-http-mr-in-scope-only",
                         "仅应用于范围内的项目",
-                        "Only apply to in-scope items",
+                        "仅应用于范围内的项目",
                         in_scope_only,
                         editable,
                     )
@@ -363,7 +363,7 @@ impl Workbench {
                                             .stripe(true)
                                             .scroll_bounce(false)
                                             .scrollbar_visible(true, false)
-                                            .accessibility_label("HTTP match and replace rules"),
+                                            .accessibility_label("HTTP 匹配与替换规则"),
                                     ),
                             )
                             .child(mr_table_right_triangle(p.dark)),
@@ -488,7 +488,7 @@ impl Workbench {
             .w(theme::scaled_px(20.))
             .h(theme::scaled_px(20.))
             .tab_stop(false)
-            .accessibility_label("WebSocket match and replace rules 设置")
+            .accessibility_label("WebSocket 匹配与替换规则设置")
             .tooltip("WebSocket 匹配与替换规则选项")
             .child(
                 gpui_kit::component::Icon::new(IconName::Settings)
@@ -599,8 +599,8 @@ impl Workbench {
                                     .child(
                                         mr_checkbox(
                                             "ws-mr-regex-toggle",
-                                            "Regex match",
-                                            "Regex match",
+                                            "正则匹配",
+                                            "正则匹配",
                                             ws_regex,
                                             editable,
                                         )
@@ -749,7 +749,7 @@ impl Workbench {
                     .child(mr_help_popover(
                         "mr-ws-help-popover",
                         "mr-ws-help",
-                        "WebSocket match and replace rules",
+                        "WebSocket 匹配与替换规则",
                         &[
                             "按列表顺序自动匹配并替换流经 Proxy 的 WebSocket 文本消息内容（自动跳过二进制帧）。",
                             "支持限定双向、客户端到服务端或服务端到客户端方向，以及正则表达式替换。",
@@ -760,11 +760,11 @@ impl Workbench {
                             .id("mr-ws-heading")
                             .test_support()
                             .role(gpui_kit::accesskit::Role::Heading)
-                            .aria_label("WebSocket match and replace rules")
+                            .aria_label("WebSocket 匹配与替换规则")
                             .text_size(theme::scaled_px(15.))
                             .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(p.title_color)
-                            .child("WebSocket match and replace rules"),
+                            .child("WebSocket 匹配与替换规则"),
                     ),
             )
             .child(
@@ -786,7 +786,7 @@ impl Workbench {
                     mr_checkbox(
                         "proxy-ws-mr-in-scope-only",
                         "仅应用于范围内的项目",
-                        "Only apply to in-scope items",
+                        "仅应用于范围内的项目",
                         ws_in_scope_only,
                         editable,
                     )
@@ -839,7 +839,7 @@ impl Workbench {
                                             .stripe(true)
                                             .scroll_bounce(false)
                                             .scrollbar_visible(true, false)
-                                            .accessibility_label("WebSocket match and replace rules"),
+                                            .accessibility_label("WebSocket 匹配与替换规则"),
                                     ),
                             )
                             .child(mr_table_right_triangle(p.dark)),

@@ -6,7 +6,7 @@ use gpui_kit::component::{
     select::{SelectEvent, SelectState},
     table::{Column, TableDelegate},
 };
-use mio_core::{UpstreamProxyProtocol, Uuid};
+use mio_core::{UpstreamAuthType, UpstreamProxyProtocol, Uuid};
 
 use super::*;
 
@@ -157,7 +157,7 @@ impl ConnectionsUi {
         });
         let rule_protocol = cx.new(|scx| {
             SelectState::new(
-                vec!["HTTP", "HTTPS", "Direct"],
+                vec!["HTTP", "HTTPS", "直连"],
                 Some(IndexPath::new(0)),
                 window,
                 scx,
@@ -165,7 +165,7 @@ impl ConnectionsUi {
         });
         let rule_auth = cx.new(|scx| {
             SelectState::new(
-                vec!["None", "Basic", "Digest", "NTLM v1", "NTLM v2"],
+                vec!["无", "Basic", "Digest", "NTLM v1", "NTLM v2"],
                 Some(IndexPath::new(0)),
                 window,
                 scx,
@@ -281,26 +281,26 @@ pub(in crate::workbench::settings) struct ConnectionsTable {
 }
 
 const UPSTREAM_COLUMNS: [(&str, f32); 7] = [
-    ("Enabled", 72.),
-    ("Destination host", 160.),
-    ("Proxy host", 160.),
-    ("Proxy port", 90.),
-    ("Auth type", 78.),
-    ("Username", 82.),
-    ("Description", 180.),
+    ("启用", 72.),
+    ("目标主机", 160.),
+    ("代理主机", 160.),
+    ("代理端口", 90.),
+    ("认证类型", 78.),
+    ("用户名", 82.),
+    ("描述", 180.),
 ];
 const HOSTNAME_COLUMNS: [(&str, f32); 3] = [
-    ("Enabled", 76.),
-    ("Hostname", 373.),
-    ("IP address", 373.),
+    ("启用", 76.),
+    ("主机名", 373.),
+    ("IP 地址", 373.),
 ];
 const PLATFORM_AUTH_COLUMNS: [(&str, f32); 6] = [
-    ("Enabled", 72.),
-    ("Destination host", 180.),
-    ("Auth type", 100.),
-    ("Username", 150.),
-    ("Domain", 150.),
-    ("Hostname", 170.),
+    ("启用", 72.),
+    ("目标主机", 180.),
+    ("认证类型", 100.),
+    ("用户名", 150.),
+    ("域", 150.),
+    ("主机名", 170.),
 ];
 
 impl ConnectionsTable {
@@ -328,7 +328,7 @@ impl ConnectionsTable {
             ConnectionsTableKind::Hostname => {
                 let entry = settings.state.upstream_proxy.hostname_resolutions.get(row)?;
                 Some(match column {
-                    0 => if entry.enabled { "Yes" } else { "No" }.into(),
+                    0 => if entry.enabled { "是" } else { "否" }.into(),
                     1 => entry.hostname.clone(),
                     _ => entry.ip_address.clone(),
                 })
@@ -336,7 +336,7 @@ impl ConnectionsTable {
             ConnectionsTableKind::PlatformAuth => {
                 let rule = settings.state.upstream_proxy.platform_auth.rules.get(row)?;
                 Some(match column {
-                    0 => if rule.enabled { "Yes" } else { "No" }.into(),
+                    0 => if rule.enabled { "是" } else { "否" }.into(),
                     1 => rule.destination_host.clone(),
                     2 => rule.auth_type.label().into(),
                     3 => rule.username.clone(),
@@ -348,11 +348,11 @@ impl ConnectionsTable {
                 let rule = settings.state.upstream_proxy.rules.get(row)?;
                 let is_direct = rule.protocol == UpstreamProxyProtocol::Direct;
                 Some(match column {
-                    0 => if rule.enabled { "Yes" } else { "No" }.into(),
+                    0 => if rule.enabled { "是" } else { "否" }.into(),
                     1 => rule.destination_host.clone(),
                     2 => {
                         if is_direct {
-                            "(直连 / Direct)".into()
+                            "（直连）".into()
                         } else {
                             rule.host.clone()
                         }
@@ -366,7 +366,9 @@ impl ConnectionsTable {
                     }
                     4 => {
                         if is_direct {
-                            "Direct".into()
+                            "直连".into()
+                        } else if rule.auth_type == UpstreamAuthType::None {
+                            "无".into()
                         } else {
                             rule.auth_type.label().into()
                         }
@@ -378,7 +380,7 @@ impl ConnectionsTable {
                         } else if rule.protocol == UpstreamProxyProtocol::Https {
                             "HTTPS".into()
                         } else if is_direct {
-                            "Direct".into()
+                            "直连".into()
                         } else {
                             String::new()
                         }

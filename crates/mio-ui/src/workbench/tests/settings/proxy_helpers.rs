@@ -99,29 +99,29 @@ pub(super) fn proxy_rule_choose_type(
     cx: &mut TestAppContext,
 ) {
     let mut types = vec![
-        "Domain name",
-        "IP address",
-        "Protocol",
-        "HTTP method",
+        "域名",
+        "IP 地址",
+        "协议",
+        "HTTP 方法",
         "URL",
-        "File extension",
-        "Request",
-        "Cookie name",
-        "Cookie value",
-        "Any header",
-        "Body",
-        "Param name",
-        "Param value",
+        "文件扩展名",
+        "请求",
+        "Cookie 名称",
+        "Cookie 值",
+        "任意标头",
+        "正文",
+        "参数名称",
+        "参数值",
     ];
     if response {
         types.extend([
-            "Status code",
-            "Content type header",
-            "Mime type",
-            "Page title",
+            "状态码",
+            "Content-Type 标头",
+            "MIME 类型",
+            "页面标题",
         ]);
     }
-    types.push("Listener port");
+    types.push("监听端口");
     proxy_rule_open_dropdown(dialog, "proxy-rule-editor-type", cx);
     let current = cx
         .update_window(dialog, |_, window, _| {

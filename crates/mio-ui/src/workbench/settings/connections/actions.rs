@@ -265,7 +265,7 @@ impl Settings {
         {
             "HTTP" => UpstreamProxyProtocol::Http,
             "HTTPS" => UpstreamProxyProtocol::Https,
-            "Direct" => UpstreamProxyProtocol::Direct,
+            "直连" | "Direct" => UpstreamProxyProtocol::Direct,
             _ => unreachable!(),
         };
         let is_direct = protocol == UpstreamProxyProtocol::Direct;
@@ -290,7 +290,7 @@ impl Settings {
                 .copied()
                 .expect("认证类型已选择")
             {
-                "None" => UpstreamAuthType::None,
+                "无" | "None" => UpstreamAuthType::None,
                 "Basic" => UpstreamAuthType::Basic,
                 "Digest" => UpstreamAuthType::Digest,
                 "NTLM v1" => UpstreamAuthType::NtlmV1,

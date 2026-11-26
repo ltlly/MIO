@@ -193,13 +193,13 @@ pub(super) fn describe_action(
             add_new_cookies,
             update_existing_cookies,
         } => match (*add_new_cookies, *update_existing_cookies) {
-            (true, true) => "Use cookies from MIO's cookie jar".into(),
-            (true, false) => "Use cookies from MIO's cookie jar (仅新增)".into(),
-            (false, true) => "Use cookies from MIO's cookie jar (仅更新)".into(),
-            (false, false) => "Use cookies from MIO's cookie jar (不修改)".into(),
+            (true, true) => "使用 MIO Cookie Jar 中的 Cookie".into(),
+            (true, false) => "使用 MIO Cookie Jar 中的 Cookie (仅新增)".into(),
+            (false, true) => "使用 MIO Cookie Jar 中的 Cookie (仅更新)".into(),
+            (false, false) => "使用 MIO Cookie Jar 中的 Cookie (不修改)".into(),
         },
-        SessionRuleAction::SetHeader { name, value, .. } => format!("SetHeader({name}: {value})"),
-        SessionRuleAction::SetCookie { name, value, .. } => format!("SetCookie({name}={value})"),
+        SessionRuleAction::SetHeader { name, value, .. } => format!("设置标头({name}: {value})"),
+        SessionRuleAction::SetCookie { name, value, .. } => format!("设置 Cookie({name}={value})"),
         SessionRuleAction::RewriteUrlParam {
             name,
             value,
@@ -207,9 +207,9 @@ pub(super) fn describe_action(
             ..
         } => {
             if *remove {
-                format!("RemoveParam({name})")
+                format!("移除参数({name})")
             } else {
-                format!("Param({name}={value})")
+                format!("设置参数({name}={value})")
             }
         }
         SessionRuleAction::ReplaceRequestText {
@@ -218,17 +218,17 @@ pub(super) fn describe_action(
             regex,
         } => {
             if *regex {
-                format!("ReplaceRegex({match_pattern} -> {replace_with})")
+                format!("正则替换({match_pattern} -> {replace_with})")
             } else {
-                format!("Replace({match_pattern} -> {replace_with})")
+                format!("文本替换({match_pattern} -> {replace_with})")
             }
         }
         SessionRuleAction::RunMacro { macro_id, .. } => {
             let m_name = macros
                 .iter()
                 .find(|m| m.id == *macro_id)
-                .map_or("unknown", |m| m.name.as_str());
-            format!("RunMacro({m_name})")
+                .map_or("未知", |m| m.name.as_str());
+            format!("运行宏({m_name})")
         }
     }
 }
@@ -433,7 +433,7 @@ impl Settings {
                                             .header_row_height(theme::scaled_px(24.).max(px(22.)))
                                             .bordered(false)
                                             .scroll_bounce(false)
-                                            .accessibility_label("Session handling rules"),
+                                            .accessibility_label("会话处理规则"),
                                     )),
                             ),
                     )

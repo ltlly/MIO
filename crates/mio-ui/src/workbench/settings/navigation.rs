@@ -685,6 +685,19 @@ impl Settings {
                 "解包",
                 "直通",
                 "替换",
+                "透传",
+                "匹配",
+                "响应修改",
+                "表单",
+                "杂项",
+                "miscellaneous",
+                "历史记录",
+                "实时任务",
+                "keep-alive",
+                "http/1.0",
+                "connection",
+                "accept-encoding",
+                "http://mio",
             ],
             SettingsPage::Intruder => &[
                 "tools",
@@ -695,6 +708,9 @@ impl Settings {
                 "finished",
                 "攻击",
                 "关闭结果窗口",
+                "工具",
+                "侧边栏",
+                "载荷",
             ],
             SettingsPage::Repeater => &[
                 "tools",
@@ -713,6 +729,9 @@ impl Settings {
                 "布局",
                 "换行",
                 "解包",
+                "工具",
+                "消息修改",
+                "连接复用",
             ],
             SettingsPage::Sessions => &[
                 "sessions",
@@ -728,6 +747,7 @@ impl Settings {
                 "会话",
                 "宏",
                 "令牌",
+                "范围",
             ],
             SettingsPage::ProjectTasks => &[
                 "project",
@@ -743,6 +763,9 @@ impl Settings {
                 "任务",
                 "资源池",
                 "并发",
+                "项目",
+                "定时任务",
+                "自动启动",
             ],
             SettingsPage::ProjectScope => &[
                 "project",
@@ -759,6 +782,9 @@ impl Settings {
                 "包含",
                 "排除",
                 "网段",
+                "项目",
+                "范围",
+                "子域名",
             ],
             SettingsPage::NetworkConnections => &[
                 "network",
@@ -788,6 +814,7 @@ impl Settings {
                 "解析",
                 "端口",
                 "连接",
+                "网络",
             ],
             SettingsPage::NetworkHttp => &[
                 "network",
@@ -803,6 +830,9 @@ impl Settings {
                 "流式",
                 "长连接",
                 "重定向",
+                "网络",
+                "换行符",
+                "标头",
             ],
             SettingsPage::NetworkTls => &[
                 "network",
@@ -827,10 +857,17 @@ impl Settings {
                 "协议",
                 "验证",
                 "双向",
+                "网络",
+                "服务端证书",
+                "自定义",
             ],
             SettingsPage::UserDisplay => &[
                 "user", "display", "dark", "light", "theme", "font", "scale", "zoom", "preview",
                 "显示", "外观", "深色", "浅色", "主题", "字号", "缩放",
+                "用户界面",
+                "表格",
+                "斑马纹",
+                "问题展示",
             ],
             SettingsPage::UserMessageEditor => &[
                 "user",
@@ -854,6 +891,10 @@ impl Settings {
                 "格式化",
                 "标头",
                 "隐藏",
+                "用户界面",
+                "消息编辑器",
+                "字符集",
+                "搜索",
             ],
             SettingsPage::UserMisc => &[
                 "user",
@@ -863,6 +904,7 @@ impl Settings {
                 "hotkeys",
                 "快捷键",
                 "热键",
+                "用户界面",
             ],
             SettingsPage::SuiteUpdates => &[
                 "suite",
@@ -887,6 +929,7 @@ impl Settings {
                 "通用行为",
                 "杂项",
                 "脱敏",
+                "行为",
             ],
         }
     }

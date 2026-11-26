@@ -29,7 +29,7 @@ fn proxy_interception_rules_stage_dropdowns_disable_condition_only_for_boolean_r
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-relationship").value(),
-            Some("Was intercepted")
+            Some("已被拦截")
         );
     })
     .unwrap();
@@ -38,24 +38,14 @@ fn proxy_interception_rules_stage_dropdowns_disable_condition_only_for_boolean_r
 
     proxy_rule_click(settings, "proxy-request-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
-    proxy_rule_click(dialog, "proxy-rule-editor-operator", cx);
-    cx.simulate_keystrokes(dialog, "enter");
-    cx.run_until_parked();
-    cx.update_window(dialog, |_, window, cx| {
-        window.render_frame(cx);
-        assert_eq!(
-            window.find("proxy-rule-editor-operator").expanded(),
-            Some(true)
-        );
-    })
-    .unwrap();
+    proxy_rule_open_dropdown(dialog, "proxy-rule-editor-operator", cx);
     cx.simulate_keystrokes(dialog, "down enter");
     cx.run_until_parked();
     cx.update_window(dialog, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-operator").value(),
-            Some("Or")
+            Some("或")
         );
     })
     .unwrap();
@@ -87,7 +77,7 @@ fn proxy_interception_rules_stage_dropdowns_disable_condition_only_for_boolean_r
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-type").value(),
-            Some("HTTP method")
+            Some("HTTP 方法")
         );
     })
     .unwrap();
@@ -308,9 +298,9 @@ fn installed_settings_menu_zero_tabs_mouse_keyboard_close_reopen(cx: &mut TestAp
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
         for label in [
-            "Tools",
+            "工具",
             "Repeater",
-            "Message modification",
+            "消息修改",
             "项目设置",
             "更新 Content-Length",
             "解包压缩响应",

@@ -197,7 +197,7 @@ impl SessionsUi {
         .detach();
         let url_scope_select = cx.new(|scx| {
             SelectState::new(
-                vec!["All URLs", "Use suite scope", "Include custom URL prefixes"],
+                vec!["所有 URL", "使用套件范围", "包含自定义 URL 前缀"],
                 Some(IndexPath::new(0)),
                 window,
                 scx,
@@ -208,8 +208,8 @@ impl SessionsUi {
                 return;
             };
             this.sessions.rule_url_mode = match *value {
-                "Use suite scope" => 1,
-                "Include custom URL prefixes" => 2,
+                "使用套件范围" | "Use suite scope" => 1,
+                "包含自定义 URL 前缀" | "Include custom URL prefixes" => 2,
                 _ => 0,
             };
             cx.notify();
@@ -218,12 +218,12 @@ impl SessionsUi {
         let action_kind_select = cx.new(|scx| {
             SelectState::new(
                 vec![
-                    "Use cookies from session cookie jar",
-                    "Set a specific header",
-                    "Set a specific URL parameter",
-                    "Run a macro",
-                    "Set a specific cookie",
-                    "Replace matching part of the request",
+                    "使用会话 Cookie Jar 中的 Cookie",
+                    "设置指定标头",
+                    "设置指定 URL 参数",
+                    "运行 Macro",
+                    "设置指定 Cookie",
+                    "替换请求中匹配的内容",
                 ],
                 Some(IndexPath::new(0)),
                 window,
@@ -235,11 +235,15 @@ impl SessionsUi {
                 return;
             };
             this.sessions.draft_action_kind = match *value {
-                "Set a specific header" => DraftActionKind::SetHeader,
-                "Set a specific cookie" => DraftActionKind::SetCookie,
-                "Set a specific URL parameter" => DraftActionKind::RewriteUrlParam,
-                "Replace matching part of the request" => DraftActionKind::ReplaceRequestText,
-                "Run a macro" => DraftActionKind::RunMacro,
+                "设置指定标头" | "Set a specific header" => DraftActionKind::SetHeader,
+                "设置指定 Cookie" | "Set a specific cookie" => DraftActionKind::SetCookie,
+                "设置指定 URL 参数" | "Set a specific URL parameter" => {
+                    DraftActionKind::RewriteUrlParam
+                }
+                "替换请求中匹配的内容" | "Replace matching part of the request" => {
+                    DraftActionKind::ReplaceRequestText
+                }
+                "运行 Macro" | "Run a macro" => DraftActionKind::RunMacro,
                 _ => DraftActionKind::UseCookieJar,
             };
             cx.notify();
@@ -303,8 +307,8 @@ impl SessionsUi {
             action_kind_select,
             action_jar_add_new: true,
             action_jar_update_existing: true,
-            action_header_name: cx.new(|cx| InputState::new(window, cx).placeholder("Header 名称")),
-            action_header_val: cx.new(|cx| InputState::new(window, cx).placeholder("Header 值")),
+            action_header_name: cx.new(|cx| InputState::new(window, cx).placeholder("标头名称")),
+            action_header_val: cx.new(|cx| InputState::new(window, cx).placeholder("标头值")),
             action_cookie_name: cx.new(|cx| InputState::new(window, cx).placeholder("Cookie 名称")),
             action_cookie_val: cx.new(|cx| InputState::new(window, cx).placeholder("Cookie 值")),
             action_only_present: false,

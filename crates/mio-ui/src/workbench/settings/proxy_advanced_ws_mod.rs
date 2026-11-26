@@ -7,12 +7,12 @@ pub(crate) struct WsMatchReplaceTable {
 }
 
 const WS_MR_COLUMNS: [(&str, f32); 6] = [
-    ("Enabled", 66.),
-    ("Direction", 126.),
-    ("Match", 192.),
-    ("Replace", 192.),
-    ("Regex", 80.),
-    ("Comment", 160.),
+    ("启用", 66.),
+    ("方向", 126.),
+    ("匹配", 192.),
+    ("替换", 192.),
+    ("正则", 80.),
+    ("备注", 160.),
 ];
 
 impl TableDelegate for WsMatchReplaceTable {
@@ -116,7 +116,7 @@ impl TableDelegate for WsMatchReplaceTable {
             3 => div().px(px(6.)).truncate().child(rule.replace_with).into_any_element(),
             4 => div()
                 .px(px(6.))
-                .child(if rule.is_regex { "Yes" } else { "No" })
+                .child(if rule.is_regex { "是" } else { "否" })
                 .into_any_element(),
             _ => div().px(px(6.)).truncate().child(rule.comment).into_any_element(),
         }
@@ -125,11 +125,11 @@ impl TableDelegate for WsMatchReplaceTable {
         let owner = self.owner.upgrade()?;
         let rule = owner.read(cx).proxy_advanced.ws_rules.get(row)?;
         Some(match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            0 => if rule.enabled { "是" } else { "否" }.into(),
             1 => ws_direction_label(rule.direction).into(),
             2 => rule.match_pattern.clone().into(),
             3 => rule.replace_with.clone().into(),
-            4 => if rule.is_regex { "Yes" } else { "No" }.into(),
+            4 => if rule.is_regex { "是" } else { "否" }.into(),
             _ => rule.comment.clone().into(),
         })
     }
@@ -297,7 +297,7 @@ impl Settings {
             .gap(px(9.))
             .child(settings_section_heading(
                 "proxy-ws-match-replace-heading",
-                "WebSocket match and replace rules",
+                "WebSocket 匹配与替换规则",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(
@@ -312,7 +312,7 @@ impl Settings {
                     .child(
                         adv_checkbox(
                             "proxy-ws-mr-in-scope-only",
-                            "Only apply to in-scope items",
+                            "仅应用于目标范围内的项目",
                             ws_in_scope_only,
                             self.state.enabled,
                         )
@@ -342,7 +342,7 @@ impl Settings {
                                     .stripe(false)
                                     .scrollbar_visible(true, false)
                                     .scroll_bounce(false)
-                                    .accessibility_label("WebSocket match and replace rules"),
+                                    .accessibility_label("WebSocket 匹配与替换规则"),
                                 true,
                             )),
                     ),
@@ -370,7 +370,7 @@ impl Settings {
                                     div()
                                         .w(theme::scaled_px(88.).max(px(88.)))
                                         .flex_shrink_0()
-                                        .child("Direction:"),
+                                        .child("方向："),
                                 )
                                 .child(
                                     div().flex_1().min_w_0().child(
@@ -386,7 +386,7 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Match:"))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("匹配："))
                                 .child(
                                     div().flex_1().min_w_0().child(
                                         Input::new(&self.proxy_advanced.ws_match)
@@ -401,7 +401,7 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Replace:"))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("替换："))
                                 .child(
                                     div().flex_1().min_w_0().child(
                                         Input::new(&self.proxy_advanced.ws_replace)
@@ -416,7 +416,7 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("Comment:"))
+                                .child(div().w(theme::scaled_px(88.).max(px(88.))).child("备注："))
                                 .child(
                                     div().flex_1().min_w_0().child(
                                         Input::new(&self.proxy_advanced.ws_comment)
@@ -429,7 +429,7 @@ impl Settings {
                         .child(
                             adv_checkbox(
                                 "proxy-ws-mr-regex",
-                                "Regex match",
+                                "正则匹配",
                                 self.proxy_advanced.ws_is_regex,
                                 true,
                             )
@@ -457,7 +457,7 @@ impl Settings {
                                 .justify_end()
                                 .gap(px(8.))
                                 .child(
-                                    button("proxy-ws-mr-submit", "OK")
+                                    button("proxy-ws-mr-submit", "确定")
                                         .primary()
                                         .tab_stop(false)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -465,7 +465,7 @@ impl Settings {
                                         })),
                                 )
                                 .child(
-                                    settings_action_button("proxy-ws-mr-cancel", "Cancel", false)
+                                    settings_action_button("proxy-ws-mr-cancel", "取消", false)
                                         .tab_stop(false)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.proxy_advanced.ws_editing = None;
@@ -494,47 +494,47 @@ impl Settings {
         for (idx, (id, label, checked)) in [
             (
                 "proxy-resp-mod-unhide-hidden",
-                "Unhide hidden form fields",
+                "显示隐藏的表单字段",
                 mods.unhide_hidden_form_fields,
             ),
             (
                 "proxy-resp-mod-highlight-unhidden",
-                "Prominently highlight unhidden fields",
+                "醒目高亮已取消隐藏的字段",
                 mods.highlight_unhidden_fields,
             ),
             (
                 "proxy-resp-mod-enable-disabled",
-                "Enable disabled form fields",
+                "启用已禁用的表单字段",
                 mods.enable_disabled_form_fields,
             ),
             (
                 "proxy-resp-mod-remove-length-limits",
-                "Remove input field length limits",
+                "移除输入字段的长度限制",
                 mods.remove_input_field_length_limits,
             ),
             (
                 "proxy-resp-mod-remove-js-validation",
-                "Remove JavaScript form validation",
+                "移除 JavaScript 表单校验",
                 mods.remove_javascript_form_validation,
             ),
             (
                 "proxy-resp-mod-remove-all-js",
-                "Remove all JavaScript",
+                "移除所有 JavaScript",
                 mods.remove_all_javascript,
             ),
             (
                 "proxy-resp-mod-remove-object-tags",
-                "Remove <object> tags",
+                "移除 <object> 标签",
                 mods.remove_object_tags,
             ),
             (
                 "proxy-resp-mod-convert-https-links",
-                "Convert HTTPS links to HTTP",
+                "将 HTTPS 链接转换为 HTTP",
                 mods.convert_https_links_to_http,
             ),
             (
                 "proxy-resp-mod-remove-cookie-secure",
-                "Remove secure flag from cookies",
+                "移除 Cookie 中的 Secure 标志",
                 mods.remove_secure_flag_from_cookies,
             ),
         ]
@@ -587,7 +587,7 @@ impl Settings {
             .gap(px(9.))
             .child(settings_section_heading(
                 "proxy-response-modification-heading",
-                "Response modification",
+                "响应修改",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(
@@ -641,62 +641,62 @@ impl Settings {
         for (idx, (id, label, checked)) in [
             (
                 "proxy-misc-http10-requests",
-                "Use HTTP/1.0 in requests to server",
+                "向服务器发送请求时使用 HTTP/1.0",
                 misc.use_http10_in_requests,
             ),
             (
                 "proxy-misc-http10-responses",
-                "Use HTTP/1.0 in responses to client",
+                "向客户端返回响应时使用 HTTP/1.0",
                 misc.use_http10_in_responses,
             ),
             (
                 "proxy-misc-http1-keep-alive",
-                "Use keep-alive for HTTP/1 if the server supports it",
+                "若服务器支持，在 HTTP/1 中使用 keep-alive",
                 misc.use_http1_keep_alive,
             ),
             (
                 "proxy-misc-resp-connection-close",
-                "Set response header \"Connection: close\"",
+                "设置响应头 \"Connection: close\"",
                 misc.set_response_connection_close,
             ),
             (
                 "proxy-misc-req-connection-header",
-                "Set \"Connection\" header on incoming requests when using HTTP/1",
+                "使用 HTTP/1 时为传入请求设置 \"Connection\" 标头",
                 misc.set_request_connection_header,
             ),
             (
                 "proxy-misc-strip-proxy-headers",
-                "Strip Proxy-* headers in incoming requests",
+                "剥离传入请求中的 Proxy-* 标头",
                 misc.strip_proxy_headers,
             ),
             (
                 "proxy-misc-remove-unsupported-encodings",
-                "Remove unsupported encodings from Accept-Encoding headers in incoming requests",
+                "从传入请求的 Accept-Encoding 标头中移除不支持的编码",
                 misc.remove_unsupported_accept_encodings,
             ),
             (
                 "proxy-misc-strip-ws-extensions",
-                "Strip Sec-WebSocket-Extensions headers in incoming requests",
+                "剥离传入请求中的 Sec-WebSocket-Extensions 标头",
                 misc.strip_sec_websocket_extensions,
             ),
             (
                 "proxy-misc-disable-web-interface",
-                "Disable web interface at http://mio",
+                "禁用 http://mio 的网页界面",
                 misc.disable_web_interface,
             ),
             (
                 "proxy-misc-suppress-browser-errors",
-                "Suppress MIO error messages in browser",
+                "在浏览器中屏蔽 MIO 错误信息",
                 misc.suppress_browser_error_messages,
             ),
             (
                 "proxy-misc-disable-history-logging",
-                "Don't send items to Proxy history or live tasks",
+                "不将项目发送到 Proxy 历史记录或实时任务",
                 misc.disable_history_logging,
             ),
             (
                 "proxy-misc-disable-out-of-scope-logging",
-                "Don't send items to Proxy history or live tasks, if out of scope",
+                "超出目标范围时，不将项目发送到 Proxy 历史记录或实时任务",
                 misc.disable_out_of_scope_history_logging,
             ),
         ]
@@ -739,7 +739,7 @@ impl Settings {
             .gap(px(9.))
             .child(settings_section_heading(
                 "proxy-miscellaneous-heading",
-                "Miscellaneous",
+                "杂项",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(

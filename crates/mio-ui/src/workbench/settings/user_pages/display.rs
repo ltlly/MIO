@@ -126,7 +126,7 @@ fn render_table_preview_card(id: &'static str, zebra: bool, selected: bool) -> g
                                 .bg(cell_bg)
                                 .text_size(px(11.5))
                                 .text_color(text_col)
-                                .child("Data"),
+                                .child("数据"),
                         )
                         .child(
                             div()
@@ -137,7 +137,7 @@ fn render_table_preview_card(id: &'static str, zebra: bool, selected: bool) -> g
                                 .bg(if zebra { zebra_bg } else { cell_bg })
                                 .text_size(px(11.5))
                                 .text_color(text_col)
-                                .child("Data"),
+                                .child("数据"),
                         )
                         .child(
                             div()
@@ -148,7 +148,7 @@ fn render_table_preview_card(id: &'static str, zebra: bool, selected: bool) -> g
                                 .bg(cell_bg)
                                 .text_size(px(11.5))
                                 .text_color(text_col)
-                                .child("Data"),
+                                .child("数据"),
                         ),
                 ),
         )
@@ -439,15 +439,15 @@ impl Settings {
             .id("settings-user-theme-group")
             .test_support()
             .role(Role::RadioGroup)
-            .aria_label("Theme")
+            .aria_label("主题")
             .flex()
             .items_center()
             .gap(px(14.))
-            .child(div().flex_shrink_0().child("Theme:"))
+            .child(div().flex_shrink_0().child("主题："))
             .child(
                 settings_radio(
                     "settings-user-theme-light",
-                    "Light",
+                    "浅色",
                     display.theme == UserThemeMode::Light,
                     enabled,
                     window,
@@ -462,7 +462,7 @@ impl Settings {
             .child(
                 settings_radio(
                     "settings-user-theme-dark",
-                    "Dark",
+                    "深色",
                     display.theme == UserThemeMode::Dark,
                     enabled,
                     window,

@@ -633,7 +633,7 @@ impl IntruderResultsWindow {
                     .border_color(theme::border())
                     .text_size(theme::scaled_px(13.5))
                     .font_weight(gpui_kit::FontWeight::BOLD)
-                    .child("Settings"),
+                    .child("设置"),
             )
             .child(
                 div()

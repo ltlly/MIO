@@ -99,7 +99,7 @@ impl InterceptionEditor {
             .owner_window;
         let operator = cx.new(|cx| {
             SelectState::new(
-                vec!["And", "Or"],
+                vec!["且", "或"],
                 Some(gpui_kit::component::IndexPath::new(usize::from(
                     rule.operator == ProxyInterceptOperator::Or,
                 ))),
@@ -149,7 +149,7 @@ impl InterceptionEditor {
         let operator_change = cx.subscribe_in(&operator, window, |this, _, event, _, cx| {
             let SelectEvent::Confirm(value) = event;
             if let Some(value) = value {
-                this.rule.operator = if *value == "Or" {
+                this.rule.operator = if *value == "或" {
                     ProxyInterceptOperator::Or
                 } else {
                     ProxyInterceptOperator::And
@@ -161,24 +161,24 @@ impl InterceptionEditor {
             let SelectEvent::Confirm(value) = event;
             let Some(value) = value else { return };
             let match_type = match *value {
-                "Domain name" => ProxyInterceptType::DomainName,
-                "IP address" => ProxyInterceptType::IpAddress,
-                "Protocol" => ProxyInterceptType::Protocol,
-                "HTTP method" => ProxyInterceptType::HttpMethod,
-                "File extension" => ProxyInterceptType::FileExtension,
+                "域名" => ProxyInterceptType::DomainName,
+                "IP 地址" => ProxyInterceptType::IpAddress,
+                "协议" => ProxyInterceptType::Protocol,
+                "HTTP 方法" => ProxyInterceptType::HttpMethod,
+                "文件扩展名" => ProxyInterceptType::FileExtension,
                 "URL" => ProxyInterceptType::Url,
-                "Any header" => ProxyInterceptType::Header,
-                "Request" => ProxyInterceptType::Request,
-                "Cookie name" => ProxyInterceptType::CookieName,
-                "Cookie value" => ProxyInterceptType::CookieValue,
-                "Body" => ProxyInterceptType::Body,
-                "Param name" => ProxyInterceptType::ParamName,
-                "Param value" => ProxyInterceptType::ParamValue,
-                "Content type header" => ProxyInterceptType::ContentTypeHeader,
-                "Mime type" => ProxyInterceptType::MimeType,
-                "Page title" => ProxyInterceptType::PageTitle,
-                "Status code" => ProxyInterceptType::StatusCode,
-                "Listener port" => ProxyInterceptType::ListenerPort,
+                "任意标头" => ProxyInterceptType::Header,
+                "请求" => ProxyInterceptType::Request,
+                "Cookie 名称" => ProxyInterceptType::CookieName,
+                "Cookie 值" => ProxyInterceptType::CookieValue,
+                "正文" => ProxyInterceptType::Body,
+                "参数名称" => ProxyInterceptType::ParamName,
+                "参数值" => ProxyInterceptType::ParamValue,
+                "Content-Type 标头" => ProxyInterceptType::ContentTypeHeader,
+                "MIME 类型" => ProxyInterceptType::MimeType,
+                "页面标题" => ProxyInterceptType::PageTitle,
+                "状态码" => ProxyInterceptType::StatusCode,
+                "监听端口" => ProxyInterceptType::ListenerPort,
                 _ => {
                     this.error = Some("未知拦截匹配类型；规则输入保留，未应用。".into());
                     cx.notify();
@@ -375,7 +375,7 @@ impl Render for InterceptionEditor {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().w(label_w).flex_shrink_0().child("Boolean operator:"))
+                    .child(div().w(label_w).flex_shrink_0().child("逻辑运算符："))
                     .child(
                         Select::new(&self.operator)
                             .id("proxy-rule-editor-operator")
@@ -389,7 +389,7 @@ impl Render for InterceptionEditor {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().w(label_w).flex_shrink_0().child("Match type:"))
+                    .child(div().w(label_w).flex_shrink_0().child("匹配类型："))
                     .child(
                         Select::new(&self.match_type)
                             .id("proxy-rule-editor-type")
@@ -407,7 +407,7 @@ impl Render for InterceptionEditor {
                         div()
                             .w(label_w)
                             .flex_shrink_0()
-                            .child("Match relationship:"),
+                            .child("匹配关系："),
                     )
                     .child(
                         Select::new(&self.relationship)
@@ -422,11 +422,11 @@ impl Render for InterceptionEditor {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().w(label_w).flex_shrink_0().child("Match condition:"))
+                    .child(div().w(label_w).flex_shrink_0().child("匹配条件："))
                     .child(
                         Input::new(&self.condition)
                             .id("proxy-rule-editor-condition")
-                            .aria_label("Match condition")
+                            .aria_label("匹配条件")
                             .small()
                             .w(field_w)
                             .disabled(busy || !condition_enabled),
@@ -461,7 +461,7 @@ impl Render for InterceptionEditor {
                     .justify_end()
                     .gap(px(8.))
                     .child(
-                        button("proxy-rule-editor-ok", "OK")
+                        button("proxy-rule-editor-ok", "确定")
                             .icon(gpui_kit::assets::IconName::Check)
                             .tooltip("确认并保存此拦截规则")
                             .primary()

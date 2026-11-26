@@ -10,8 +10,8 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
     for response in [false, true] {
         let stage = if response { "response" } else { "request" };
         for (match_type, label, relation, relation_label) in [
-            (ParamName, "Param name", Matches, "Matches"),
-            (ParamValue, "Param value", DoesNotMatch, "Does not match"),
+            (ParamName, "参数名称", Matches, "匹配"),
+            (ParamValue, "参数值", DoesNotMatch, "不匹配"),
         ] {
             let original = cx.read(|cx| (*fixture.view.read(cx).workspace).clone());
             let id = if response {
@@ -35,7 +35,7 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
             );
             let dialog = proxy_rule_dialog(settings, &fixture, cx);
             if response && match_type == ParamName {
-                proxy_rule_choose_type(dialog, "Body", true, cx);
+                proxy_rule_choose_type(dialog, "正文", true, cx);
                 proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
                 cx.simulate_keystrokes(dialog, "down down enter");
                 cx.run_until_parked();
@@ -43,7 +43,7 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
                     window.render_frame(cx);
                     assert_eq!(
                         window.find("proxy-rule-editor-relationship").value(),
-                        Some("Of response matches")
+                        Some("响应中的正文匹配")
                     );
                 })
                 .unwrap();
@@ -51,9 +51,9 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
             proxy_rule_choose_type(dialog, label, response, cx);
             proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
             let expected_initial = if !response && match_type == ParamName {
-                "Does not match"
+                "不匹配"
             } else {
-                "Matches"
+                "匹配"
             };
             let current = cx
                 .update_window(dialog, |_, window, cx| {
@@ -63,24 +63,24 @@ fn proxy_interception_rules_param_name_and_value_normalize_from_body_and_save_ex
                         Some(expected_initial),
                         "switching to {label} must preserve compatible relationships or normalize incompatible Body relationships to Matches"
                     );
-                    for expected in ["Matches", "Does not match"] {
+                    for expected in ["匹配", "不匹配"] {
                         assert!(!window.find_all_by_label(expected).is_empty());
                     }
                     for unexpected in [
-                        "In request matches",
-                        "In request does not match",
-                        "In response matches",
-                        "In response does not match",
-                        "Of request matches",
-                        "Of request does not match",
-                        "Of response matches",
-                        "Of response does not match",
+                        "请求中匹配",
+                        "请求中不匹配",
+                        "响应中匹配",
+                        "响应中不匹配",
+                        "请求中的正文匹配",
+                        "请求中的正文不匹配",
+                        "响应中的正文匹配",
+                        "响应中的正文不匹配",
                     ] {
                         assert!(window.find_all_by_label(unexpected).is_empty());
                     }
                     usize::from(
                         window.find("proxy-rule-editor-relationship").value()
-                            == Some("Does not match"),
+                            == Some("不匹配"),
                     )
                 })
                 .unwrap();
@@ -191,25 +191,25 @@ fn proxy_interception_rules_cookie_and_body_relation_choices_save_actual_input_a
     let (mut fixture, settings) = proxy_rule_settings(cx);
     for response in [false, true] {
         for (match_type, label) in [
-            (CookieName, "Cookie name"),
-            (CookieValue, "Cookie value"),
-            (Body, "Body"),
+            (CookieName, "Cookie 名称"),
+            (CookieValue, "Cookie 值"),
+            (Body, "正文"),
         ] {
             let relations = if !response {
-                vec![(Matches, "Matches"), (DoesNotMatch, "Does not match")]
+                vec![(Matches, "匹配"), (DoesNotMatch, "不匹配")]
             } else if match_type == Body {
                 vec![
-                    (RequestMatches, "Of request matches"),
-                    (RequestDoesNotMatch, "Of request does not match"),
-                    (ResponseMatches, "Of response matches"),
-                    (ResponseDoesNotMatch, "Of response does not match"),
+                    (RequestMatches, "请求中的正文匹配"),
+                    (RequestDoesNotMatch, "请求中的正文不匹配"),
+                    (ResponseMatches, "响应中的正文匹配"),
+                    (ResponseDoesNotMatch, "响应中的正文不匹配"),
                 ]
             } else {
                 vec![
-                    (RequestMatches, "In request matches"),
-                    (RequestDoesNotMatch, "In request does not match"),
-                    (ResponseMatches, "In response matches"),
-                    (ResponseDoesNotMatch, "In response does not match"),
+                    (RequestMatches, "请求中匹配"),
+                    (RequestDoesNotMatch, "请求中不匹配"),
+                    (ResponseMatches, "响应中匹配"),
+                    (ResponseDoesNotMatch, "响应中不匹配"),
                 ]
             };
             for (destination, (relationship, relationship_label)) in relations.iter().enumerate() {
@@ -245,24 +245,24 @@ fn proxy_interception_rules_cookie_and_body_relation_choices_save_actual_input_a
                         }
                         for unexpected in if !response {
                             [
-                                "In request matches",
-                                "In response matches",
-                                "Of request matches",
-                                "Of response matches",
+                                "请求中匹配",
+                                "响应中匹配",
+                                "请求中的正文匹配",
+                                "响应中的正文匹配",
                             ]
                         } else if match_type == Body {
                             [
-                                "Matches",
-                                "Does not match",
-                                "In request matches",
-                                "In response matches",
+                                "匹配",
+                                "不匹配",
+                                "请求中匹配",
+                                "响应中匹配",
                             ]
                         } else {
                             [
-                                "Matches",
-                                "Does not match",
-                                "Of request matches",
-                                "Of response matches",
+                                "匹配",
+                                "不匹配",
+                                "请求中的正文匹配",
+                                "响应中的正文匹配",
                             ]
                         } {
                             assert!(window.find_all_by_label(unexpected).is_empty());

@@ -23,9 +23,9 @@ pub(super) use proxy_advanced_ws_mod::WsMatchReplaceTable;
 use gpui_kit::component::button::ButtonVariants;
 
 pub(super) const WS_DIRECTION_LABELS: [&str; 3] = [
-    "Both",
-    "Client to server",
-    "Server to client",
+    "双向",
+    "客户端到服务器",
+    "服务器到客户端",
 ];
 
 pub(super) fn ws_direction_to_index(direction: WsReplaceDirection) -> usize {
@@ -38,8 +38,8 @@ pub(super) fn ws_direction_to_index(direction: WsReplaceDirection) -> usize {
 
 pub(super) fn ws_direction_from_label(label: &str) -> WsReplaceDirection {
     match label {
-        "Client to server" => WsReplaceDirection::ClientToServer,
-        "Server to client" => WsReplaceDirection::ServerToClient,
+        "客户端到服务器" | "Client to server" => WsReplaceDirection::ClientToServer,
+        "服务器到客户端" | "Server to client" => WsReplaceDirection::ServerToClient,
         _ => WsReplaceDirection::Both,
     }
 }
@@ -514,7 +514,7 @@ impl Settings {
             Ok(Err(err)) => self.proxy_advanced.ssl_error = Some(err),
             Err(_) => {
                 self.proxy_advanced.ssl_error =
-                    Some("主工作台已关闭；SSL Pass Through 规则未保存。".into())
+                    Some("主工作台已关闭；TLS 透传规则未保存。".into())
             }
         }
         cx.notify();
@@ -586,7 +586,7 @@ impl Settings {
             }
             Err(_) => {
                 self.proxy_advanced.ssl_error =
-                    Some("主工作台已关闭；SSL Pass Through 规则未保存。".into());
+                    Some("主工作台已关闭；TLS 透传规则未保存。".into());
             }
         }
         cx.notify();

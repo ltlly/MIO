@@ -21,7 +21,7 @@ impl TableDelegate for CertificateTable {
 
     fn column(&self, _: usize, _: &App) -> Column {
         let scale = theme::ui_scale();
-        Column::new("name", "Name")
+        Column::new("name", "名称")
             .width((CUSTOM_CA_COL_WIDTH * scale).round())
             .p_0()
             .movable(false)
@@ -45,7 +45,7 @@ impl TableDelegate for CertificateTable {
             .text_color(theme::foreground())
             .text_size(theme::scaled_px(12.5))
             .truncate()
-            .child("Name")
+            .child("名称")
     }
 
     fn render_tr(
@@ -96,11 +96,11 @@ pub(super) struct ServerCertTable {
 }
 
 const SERVER_CERT_COLUMNS: [(&str, f32); 5] = [
-    ("Host", 156.),
-    ("Port", 60.),
-    ("Subject", 184.),
-    ("Issuer", 184.),
-    ("Valid To", 128.),
+    ("主机", 156.),
+    ("端口", 60.),
+    ("主题", 184.),
+    ("颁发者", 184.),
+    ("有效期至", 128.),
 ];
 
 impl TableDelegate for ServerCertTable {
@@ -864,7 +864,7 @@ impl Settings {
                         .stripe(false)
                         .scrollbar_visible(!server_certs_empty, false)
                         .scroll_bounce(false)
-                        .accessibility_label("Server TLS certificates");
+                        .accessibility_label("服务端 TLS 证书");
                     if !server_certs_empty {
                         server_table_el = server_table_el.scrollbar_mode(ScrollbarMode::Always);
                     }
@@ -1031,13 +1031,13 @@ impl Settings {
                                     ),
                             ),
                     )
-                    .child(detail_row("Subject", entry.subject.clone(), false))
-                    .child(detail_row("Issuer", entry.issuer.clone(), false))
-                    .child(detail_row("Valid From", entry.valid_from.clone(), false))
-                    .child(detail_row("Valid To", entry.valid_to.clone(), false))
+                    .child(detail_row("主题", entry.subject.clone(), false))
+                    .child(detail_row("颁发者", entry.issuer.clone(), false))
+                    .child(detail_row("生效时间", entry.valid_from.clone(), false))
+                    .child(detail_row("有效期至", entry.valid_to.clone(), false))
                     .child(detail_row("SANs", sans_text, true))
                     .child(detail_row(
-                        "SHA-256 Fingerprint",
+                        "SHA-256 指纹",
                         entry.sha256_fingerprint.clone(),
                         true,
                     )),
@@ -1066,7 +1066,7 @@ impl Settings {
             .gap(px(8.))
             .child(listeners_tls::mio_section_heading(
                 "settings-tls-custom-ca-heading",
-                "Custom CA certificates",
+                "自定义 CA 证书",
                 listeners_tls::mio_user_pill_with_id("settings-tls-user-scope"),
             ))
             .child(listeners_tls::mio_desc_row(
@@ -1113,7 +1113,7 @@ impl Settings {
                     )
                     .child(listeners_tls::mio_table_frame(
                         &self.tls_table,
-                        "Custom CA certificates",
+                        "自定义 CA 证书",
                     )),
             )
             .child(

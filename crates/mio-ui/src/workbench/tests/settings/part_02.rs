@@ -186,14 +186,14 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
     cx.update_window(dialog, |_, window, cx| {
         window.render_frame(cx);
         for label in [
-            "Contains parameters",
-            "Does not contain parameters",
-            "Was intercepted",
-            "Was not intercepted",
-            "Was modified",
-            "Was not modified",
-            "Was annotated",
-            "Was not annotated",
+            "包含参数",
+            "不包含参数",
+            "已被拦截",
+            "未被拦截",
+            "已被修改",
+            "未被修改",
+            "已添加批注",
+            "未添加批注",
         ] {
             assert!(
                 !window.find_all_by_label(label).is_empty(),
@@ -208,7 +208,7 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-relationship").value(),
-            Some("Contains parameters")
+            Some("包含参数")
         );
     })
     .unwrap();
@@ -247,10 +247,10 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
     cx.update_window(dialog, |_, window, cx| {
         window.render_frame(cx);
         for label in [
-            "Matches",
-            "Does not match",
-            "Is in target scope",
-            "Is not in target scope",
+            "匹配",
+            "不匹配",
+            "在目标范围内",
+            "不在目标范围内",
         ] {
             assert!(!window.find_all_by_label(label).is_empty());
         }
@@ -263,7 +263,7 @@ fn proxy_interception_rules_response_request_parameters_and_url_relations_follow
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-relationship").value(),
-            Some("Does not match")
+            Some("不匹配")
         );
         assert_eq!(
             window.find("proxy-rule-editor-condition").value(),

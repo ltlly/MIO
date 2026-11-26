@@ -288,7 +288,7 @@ impl Settings {
                                                         )
                                                         .bordered(false)
                                                         .scroll_bounce(false)
-                                                        .accessibility_label("Cookie jar entries"),
+                                                        .accessibility_label("Cookie Jar 条目"),
                                                 )),
                                         ),
                                 )
@@ -314,7 +314,7 @@ impl Settings {
                                                         .child(
                                                             Input::new(&self.sessions.cookie_domain)
                                                                 .id("settings-cookie-domain")
-                                                                .aria_label("Cookie Domain")
+                                                                .aria_label("Cookie 域名")
                                                                 .small()
                                                                 .disabled(!enabled),
                                                         ),
@@ -340,7 +340,7 @@ impl Settings {
                                                         .child(
                                                             Input::new(&self.sessions.cookie_path)
                                                                 .id("settings-cookie-path")
-                                                                .aria_label("Cookie Path")
+                                                                .aria_label("Cookie 路径")
                                                                 .small()
                                                                 .disabled(!enabled),
                                                         ),
@@ -351,7 +351,7 @@ impl Settings {
                                                         .child(
                                                             Input::new(&self.sessions.cookie_name)
                                                                 .id("settings-cookie-name")
-                                                                .aria_label("Cookie Name")
+                                                                .aria_label("Cookie 名称")
                                                                 .small()
                                                                 .disabled(!enabled),
                                                         ),
@@ -362,7 +362,7 @@ impl Settings {
                                                         .child(
                                                             Input::new(&self.sessions.cookie_value)
                                                                 .id("settings-cookie-value")
-                                                                .aria_label("Cookie Value")
+                                                                .aria_label("Cookie 值")
                                                                 .small()
                                                                 .disabled(!enabled),
                                                         ),
@@ -412,7 +412,7 @@ impl Settings {
                                                                 &self.sessions.cookie_expires,
                                                             )
                                                             .id("settings-cookie-expires")
-                                                            .aria_label("Cookie Expires")
+                                                            .aria_label("Cookie 过期时间")
                                                             .small()
                                                             .disabled(!enabled),
                                                         ),

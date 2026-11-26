@@ -15,14 +15,14 @@ pub(super) struct ClientCertTable {
 }
 
 const CLIENT_CERT_COLUMNS: [(&str, f32); 8] = [
-    ("Enabled", 72.),
-    ("Host", 110.),
-    ("Type", 58.),
-    ("Alias", 84.),
-    ("Subject", 136.),
-    ("Issuer", 136.),
-    ("Intermediate CA", 144.),
-    ("Key", 82.),
+    ("启用", 72.),
+    ("主机", 110.),
+    ("类型", 58.),
+    ("别名", 84.),
+    ("主题", 136.),
+    ("颁发者", 136.),
+    ("中间 CA", 144.),
+    ("私钥", 82.),
 ];
 
 impl TableDelegate for ClientCertTable {
@@ -155,7 +155,7 @@ fn client_cert_cell(
     column: usize,
 ) -> String {
     match column {
-        0 => if rule.enabled { "Yes" } else { "No" }.into(),
+        0 => if rule.enabled { "是" } else { "否" }.into(),
         1 => rule.host_pattern.clone(),
         2 => match rule.format {
             ClientCertificateFormat::Pem => "PEM",

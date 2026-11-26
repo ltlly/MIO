@@ -27,15 +27,15 @@ impl Settings {
             .selected_value()
             .copied()
             .unwrap_or("HTTP");
-        let is_direct = selected_protocol == "Direct";
+        let is_direct = selected_protocol == "直连";
         let selected_auth = self
             .connections
             .rule_auth
             .read(cx)
             .selected_value()
             .copied()
-            .unwrap_or("None");
-        let auth = !is_direct && selected_auth != "None";
+            .unwrap_or("无");
+        let auth = !is_direct && selected_auth != "无";
         let is_ntlm = !is_direct && matches!(selected_auth, "NTLM v1" | "NTLM v2");
         let mut editor = div()
             .ml(px(30.))
@@ -66,49 +66,49 @@ impl Settings {
         for (id, label, input, field_enabled) in [
             (
                 "settings-upstream-destination",
-                "Destination host",
+                "目标主机",
                 &self.connections.rule_destination,
                 true,
             ),
             (
                 "settings-upstream-rule-host",
-                "Proxy host",
+                "代理主机",
                 &self.connections.rule_host,
                 !is_direct,
             ),
             (
                 "settings-upstream-rule-port",
-                "Proxy port",
+                "代理端口",
                 &self.connections.rule_port,
                 !is_direct,
             ),
             (
                 "settings-upstream-rule-username",
-                "Username",
+                "用户名",
                 &self.connections.rule_username,
                 auth,
             ),
             (
                 "settings-upstream-rule-password",
-                "Password",
+                "密码",
                 &self.connections.rule_password,
                 auth,
             ),
             (
                 "settings-upstream-rule-domain",
-                "Domain",
+                "域",
                 &self.connections.rule_domain,
                 is_ntlm,
             ),
             (
                 "settings-upstream-rule-workstation",
-                "Workstation",
+                "工作站",
                 &self.connections.rule_workstation,
                 is_ntlm,
             ),
             (
                 "settings-upstream-rule-description",
-                "Description",
+                "描述",
                 &self.connections.rule_description,
                 true,
             ),
@@ -250,7 +250,7 @@ impl Settings {
                 &self.connections.rules_table,
                 upstream_actions,
                 144.,
-                "Upstream proxy servers",
+                "上游代理服务器",
             )));
         if self.connections.rule_editor_visible {
             section = section.child(self.render_connections_upstream_editor(enabled, cx));
@@ -283,7 +283,7 @@ impl Settings {
                         210.,
                         Input::new(&self.upstream_host)
                             .id("settings-upstream-host")
-                            .aria_label("SOCKS proxy host")
+                            .aria_label("SOCKS 代理主机")
                             .small()
                             .disabled(!enabled),
                     ))
@@ -293,7 +293,7 @@ impl Settings {
                         110.,
                         Input::new(&self.upstream_port)
                             .id("settings-upstream-port")
-                            .aria_label("SOCKS proxy port")
+                            .aria_label("SOCKS 代理端口")
                             .small()
                             .disabled(!enabled),
                     )),
@@ -310,7 +310,7 @@ impl Settings {
                         210.,
                         Input::new(&self.upstream_username)
                             .id("settings-upstream-username")
-                            .aria_label("Username")
+                            .aria_label("用户名")
                             .small()
                             .disabled(!enabled),
                     ))
@@ -320,7 +320,7 @@ impl Settings {
                         210.,
                         Input::new(&self.upstream_password)
                             .id("settings-upstream-password")
-                            .aria_label("Password")
+                            .aria_label("密码")
                             .small()
                             .mask_toggle()
                             .disabled(!enabled),
@@ -729,7 +729,7 @@ impl Settings {
                 &self.connections.dns_table,
                 hostname_actions,
                 124.,
-                "Hostname resolution",
+                "主机名解析",
             )));
 
         if self.connections.dns_editor_visible {
@@ -745,14 +745,14 @@ impl Settings {
                     .flex_col()
                     .gap(px(8.))
                     .child(connection_field(
-                        "Hostname",
+                        "主机名",
                         Input::new(&self.connections.dns_hostname_input)
                             .id("settings-hostname-input")
                             .small()
                             .disabled(!enabled),
                     ))
                     .child(connection_field(
-                        "IP address",
+                        "IP 地址",
                         Input::new(&self.connections.dns_ip_input)
                             .id("settings-hostname-ip-input")
                             .small()
@@ -808,15 +808,15 @@ impl Settings {
             .flex_col()
             .gap(px(8.))
             .child(connection_field(
-                "Destination host",
+                "目标主机",
                 Input::new(&self.connections.platform_destination)
                     .id("settings-platform-auth-destination")
-                    .aria_label("Destination host")
+                    .aria_label("目标主机")
                     .small()
                     .disabled(!enabled),
             ))
             .child(connection_field(
-                "Auth type",
+                "认证类型",
                 Select::new(&self.connections.platform_auth_type)
                     .id("settings-platform-auth-type")
                     .small()
@@ -834,25 +834,25 @@ impl Settings {
         for (id, label, input, field_enabled) in [
             (
                 "settings-platform-auth-username",
-                "Username",
+                "用户名",
                 &self.connections.platform_username,
                 true,
             ),
             (
                 "settings-platform-auth-password",
-                "Password",
+                "密码",
                 &self.connections.platform_password,
                 true,
             ),
             (
                 "settings-platform-auth-domain",
-                "Domain",
+                "域",
                 &self.connections.platform_domain,
                 is_ntlm,
             ),
             (
                 "settings-platform-auth-hostname",
-                "Hostname",
+                "主机名",
                 &self.connections.platform_hostname,
                 is_ntlm,
             ),
@@ -1008,7 +1008,7 @@ impl Settings {
                     .gap(px(6.))
                     .child(sleek_mio_switch(
                         "settings-platform-auth-enabled",
-                        "执行平台认证 (Do platform authentication)",
+                        "执行平台认证",
                         plat_enabled,
                         enabled,
                         cx.listener(|this, checked: &bool, _, cx| {
@@ -1028,7 +1028,7 @@ impl Settings {
                             })
                             .child(sleek_mio_switch(
                                 "settings-platform-auth-prompt",
-                                "平台认证失败时提示输入凭据 (Prompt for credentials on platform authentication failure)",
+                                "平台认证失败时提示输入凭据",
                                 plat_prompt,
                                 enabled,
                                 cx.listener(|this, checked: &bool, _, cx| {
@@ -1042,7 +1042,7 @@ impl Settings {
                         &self.connections.platform_table,
                         plat_actions,
                         144.,
-                        "Platform authentication",
+                        "平台认证",
                     )),
             );
 

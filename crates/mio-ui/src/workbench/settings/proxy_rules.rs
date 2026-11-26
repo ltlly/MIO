@@ -61,9 +61,9 @@ impl Settings {
             PromptLevel::Warning,
             "恢复默认设置",
             Some(if response {
-                "是否恢复 Response interception rules 默认设置？"
+                "是否恢复「响应拦截规则」默认设置？"
             } else {
-                "是否恢复 Request interception rules 默认设置？"
+                "是否恢复「请求拦截规则」默认设置？"
             }),
             &["否", "是"],
             cx,
@@ -120,9 +120,9 @@ impl Settings {
             let project = self.state.project;
             let change_owner = cx.weak_entity();
             let title = if response {
-                "Response interception rules"
+                "响应拦截规则"
             } else {
-                "Request interception rules"
+                "请求拦截规则"
             };
             let mut actions = div()
                 .w(theme::scaled_px(84.).max(px(84.)))
@@ -306,7 +306,7 @@ impl Settings {
                                         .child(
                                             super::proxy_advanced::adv_checkbox(
                                                 "proxy-req-auto-fix-newlines",
-                                                "Automatically fix missing or superfluous new lines at end of request",
+                                                "自动修复请求末尾缺失或多余的换行符",
                                                 req_nl,
                                                 self.state.enabled,
                                             )
@@ -326,7 +326,7 @@ impl Settings {
                                         .child(
                                             super::proxy_advanced::adv_checkbox(
                                                 "proxy-req-auto-content-length",
-                                                "Automatically update Content-Length header when the request is edited",
+                                                "编辑请求时自动更新 Content-Length 标头",
                                                 req_cl,
                                                 self.state.enabled,
                                             )
@@ -353,7 +353,7 @@ impl Settings {
                                 this.child(
                                     super::proxy_advanced::adv_checkbox(
                                         "proxy-resp-auto-content-length",
-                                        "Automatically update Content-Length header when the response is edited",
+                                        "编辑响应时自动更新 Content-Length 标头",
                                         resp_cl,
                                         self.state.enabled,
                                     )
@@ -393,7 +393,7 @@ impl Settings {
             ),
             (
                 "proxy-ws-intercept-in-scope-only",
-                "仅拦截 Target Scope 内的消息",
+                "仅拦截目标范围内的消息",
                 self.state
                     .proxy_websocket_interception
                     .intercept_in_scope_only,
@@ -439,7 +439,7 @@ impl Settings {
             .border_color(theme::border())
             .child(settings_section_heading(
                 "proxy-ws-rules-heading",
-                "WebSocket interception rules",
+                "WebSocket 拦截规则",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(

@@ -166,7 +166,7 @@ const HOTKEY_TABLE: [HotkeyRowSpec; 34] = [
         action_id: "add_to_scope",
         icon: AssetIconName::CirclePlus,
         action: "添加到目标范围",
-        category: "Scope",
+        category: "范围",
         default_key: "",
     },
     HotkeyRowSpec {
@@ -1561,7 +1561,7 @@ impl Settings {
             .child(user_section_heading(
                 Some("settings-user-misc-heading"),
                 Some("settings-user-misc-scope"),
-                "Hotkeys",
+                "快捷键",
             ))
             .child(user_desc_row_with_icon(
                 hotkeys_gear,

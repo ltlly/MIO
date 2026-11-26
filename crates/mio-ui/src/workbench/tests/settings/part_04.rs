@@ -75,11 +75,11 @@ fn proxy_interception_rules_protocol_selects_https_without_condition_and_waits_f
             window.render_frame(cx);
             assert_eq!(
                 window.find("proxy-rule-editor-type").value(),
-                Some("Protocol")
+                Some("协议")
             );
             assert_eq!(
                 window.find("proxy-rule-editor-relationship").value(),
-                Some("Is HTTP")
+                Some("为 HTTP")
             );
             assert_eq!(
                 window.find("proxy-rule-editor-condition").value(),
@@ -91,10 +91,10 @@ fn proxy_interception_rules_protocol_selects_https_without_condition_and_waits_f
         proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
         cx.update_window(dialog, |_, window, cx| {
             window.render_frame(cx);
-            for label in ["Is HTTP", "Is HTTPS"] {
+            for label in ["为 HTTP", "为 HTTPS"] {
                 assert!(!window.find_all_by_label(label).is_empty());
             }
-            for label in ["Matches", "Does not match", "Contains parameters"] {
+            for label in ["匹配", "不匹配", "包含参数"] {
                 assert!(window.find_all_by_label(label).is_empty());
             }
         })
@@ -105,7 +105,7 @@ fn proxy_interception_rules_protocol_selects_https_without_condition_and_waits_f
             window.render_frame(cx);
             assert_eq!(
                 window.find("proxy-rule-editor-relationship").value(),
-                Some("Is HTTPS")
+                Some("为 HTTPS")
             );
         })
         .unwrap();
@@ -187,7 +187,7 @@ fn proxy_interception_rules_listener_port_selects_last_type_and_saves_latest_reg
                 window.render_frame(cx);
                 assert_eq!(
                     window.find("proxy-rule-editor-type").value(),
-                    Some("Listener port")
+                    Some("监听端口")
                 );
                 let editor = window
                     .root::<gpui_kit::base::Root>()
@@ -234,11 +234,11 @@ fn proxy_interception_rules_listener_port_selects_last_type_and_saves_latest_reg
         proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
         cx.update_window(dialog, |_, window, cx| {
             window.render_frame(cx);
-            for label in ["Matches", "Does not match"] {
+            for label in ["匹配", "不匹配"] {
                 assert!(!window.find_all_by_label(label).is_empty());
             }
-            assert!(window.find_all_by_label("Is HTTP").is_empty());
-            assert!(window.find_all_by_label("Is HTTPS").is_empty());
+            assert!(window.find_all_by_label("为 HTTP").is_empty());
+            assert!(window.find_all_by_label("为 HTTPS").is_empty());
         })
         .unwrap();
         cx.simulate_keystrokes(dialog, "down enter");

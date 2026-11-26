@@ -23,7 +23,7 @@ const HEADERS: [(&str, f32); 7] = [
     ("自动节流", 110.),
 ];
 
-const DEFAULT_POOL_FALLBACK: [&str; 7] = ["Default resource pool", "0", "10", "", "", "", "Yes"];
+const DEFAULT_POOL_FALLBACK: [&str; 7] = ["默认资源池", "0", "10", "", "", "", "是"];
 
 impl PoolTable {
     fn uses_fallback(&self, cx: &App) -> bool {
@@ -168,10 +168,10 @@ pub(in crate::workbench::settings) struct ScheduledTasksTable {
 }
 
 const SCHEDULE_COLUMNS: [(&str, f32); 4] = [
-    ("Enabled", 64.),
-    ("Time", 120.),
-    ("Repeat", 110.),
-    ("Task", 234.),
+    ("启用", 64.),
+    ("时间", 120.),
+    ("重复", 110.),
+    ("任务", 234.),
 ];
 
 fn scheduled_action_label(action: ScheduledTaskAction) -> &'static str {
@@ -317,7 +317,7 @@ impl TableDelegate for ScheduledTasksTable {
         let task = settings.state.scheduled_tasks.get(row)?;
         let (time, repeat) = split_trigger_spec(&task.trigger_spec);
         Some(match column {
-            0 => if task.enabled { "Yes" } else { "No" }.into(),
+            0 => if task.enabled { "是" } else { "否" }.into(),
             1 => time.to_owned().into(),
             2 => repeat.to_owned().into(),
             _ => scheduled_task_summary(task).into(),
@@ -578,7 +578,7 @@ impl Settings {
                     .flex_col()
                     .gap(px(9.))
                     .child(settings_section_heading_plain(
-                        "Resource pools",
+                        "资源池",
                         project_scope_badge(),
                     ))
                     .child(settings_desc_row(

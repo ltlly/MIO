@@ -60,13 +60,13 @@ pub(crate) struct ProxyListenersTable {
 }
 
 const LISTENER_COLUMNS: [(&str, f32); 7] = [
-    ("Running", 68.),
-    ("Interface", 150.),
-    ("Invisible", 70.),
-    ("Redirect", 96.),
-    ("Certificate", 116.),
-    ("TLS Protocols", 208.),
-    ("Support HTTP/2", 112.),
+    ("运行中", 68.),
+    ("监听接口", 150.),
+    ("隐形代理", 70.),
+    ("重定向", 96.),
+    ("证书", 116.),
+    ("TLS 协议", 208.),
+    ("支持 HTTP/2", 112.),
 ];
 
 impl TableDelegate for ProxyListenersTable {
@@ -307,7 +307,7 @@ impl TableDelegate for ProxyListenersTable {
                 } else {
                     row == 0 && state.active_proxy_address.is_some()
                 };
-                if running { "Yes" } else { "No" }.into()
+                if running { "是" } else { "否" }.into()
             }
             1 => item.bind_address.clone().into(),
             _ => listener_column_text(item, column).into(),
@@ -317,7 +317,7 @@ impl TableDelegate for ProxyListenersTable {
 
 fn listener_column_text(item: &ProxyListenerConfig, column: usize) -> String {
     match column {
-        2 => if item.invisible_proxying { "Yes" } else { "" }.into(),
+        2 => if item.invisible_proxying { "是" } else { "" }.into(),
         3 => {
             if item.redirect_to_host.is_empty() && item.redirect_to_port.is_none() {
                 String::new()
@@ -327,13 +327,20 @@ fn listener_column_text(item: &ProxyListenerConfig, column: usize) -> String {
                 item.redirect_to_host.clone()
             }
         }
-        4 => item.certificate_mode.label().into(),
-        5 => if item.tls_protocols_label.is_empty() {
-            "Default".into()
-        } else {
-            item.tls_protocols_label.clone()
+        4 => match item.certificate_mode {
+            ProxyListenerCertMode::PerHostCaSigned => "按主机签发",
+            ProxyListenerCertMode::SelfSigned => "自签名",
+            ProxyListenerCertMode::SpecificHostname => "指定主机名",
+            ProxyListenerCertMode::CustomCertificate => "自定义",
+        }
+        .into(),
+        5 => match item.tls_protocols_label.as_str() {
+            "" => "默认".into(),
+            "TLSv1.3 only" => "仅 TLSv1.3".into(),
+            "TLSv1.2 only" => "仅 TLSv1.2".into(),
+            other => other.to_owned(),
         },
-        _ => if item.enable_http2 { "Yes" } else { "No" }.into(),
+        _ => if item.enable_http2 { "是" } else { "否" }.into(),
     }
 }
 
@@ -993,18 +1000,18 @@ impl ProxyListenerEditor {
                 let r_all = cx.entity();
                 let r_spec = cx.entity();
                 body = body
-                    .child(listener_input_row("Bind to port:", "proxy-listener-editor-address", &self.address))
+                    .child(listener_input_row("绑定端口：", "proxy-listener-editor-address", &self.address))
                     .child(
                         div()
                             .text_size(theme::scaled_px(12.))
                             .text_color(theme::muted_foreground())
                             .child("输入监听端口（0 自动分配空闲端口），或直接输入完整 IP:端口。"),
                     )
-                    .child("Bind to address:")
+                    .child("绑定地址：")
                     .child(
                         settings_radio(
                             "proxy-listener-bind-loopback",
-                            "Loopback only (127.0.0.1)",
+                            "仅回环地址 (127.0.0.1)",
                             self.bind_mode == ListenerBindMode::Loopback,
                             true,
                             window,
@@ -1021,7 +1028,7 @@ impl ProxyListenerEditor {
                     .child(
                         settings_radio(
                             "proxy-listener-bind-all",
-                            "All interfaces (0.0.0.0)",
+                            "所有网络接口 (0.0.0.0)",
                             self.bind_mode == ListenerBindMode::AllInterfaces,
                             true,
                             window,
@@ -1038,7 +1045,7 @@ impl ProxyListenerEditor {
                     .child(
                         settings_radio(
                             "proxy-listener-bind-specific",
-                            "Specific address:",
+                            "指定地址：",
                             specific,
                             true,
                             window,
@@ -1096,7 +1103,7 @@ impl ProxyListenerEditor {
                                 .child("注意：绑定非回环地址（如 0.0.0.0 或局域网 IP）后，同一网络内的其他设备可连接到此代理监听器。"),
                         )
                     })
-                    .child(indexed_checkbox("proxy-listener-editor-enabled", "Enable listener", self.enabled, true)
+                    .child(indexed_checkbox("proxy-listener-editor-enabled", "启用监听器", self.enabled, true)
                         .on_change(move |state, _, _, cx| {
                             e1.update(cx, |this, cx| {
                                 this.enabled = state == CheckboxState::Checked;
@@ -1106,16 +1113,16 @@ impl ProxyListenerEditor {
             }
             1 => {
                 body = body
-                    .child(listener_input_row("Redirect to host:", "proxy-listener-redirect-host", &self.redirect_host))
-                    .child(listener_input_row("Redirect to port:", "proxy-listener-redirect-port", &self.redirect_port))
-                    .child(indexed_checkbox("proxy-listener-force-tls", "Force use of TLS", self.config.force_use_of_tls, true)
+                    .child(listener_input_row("重定向到主机：", "proxy-listener-redirect-host", &self.redirect_host))
+                    .child(listener_input_row("重定向到端口：", "proxy-listener-redirect-port", &self.redirect_port))
+                    .child(indexed_checkbox("proxy-listener-force-tls", "强制使用 TLS", self.config.force_use_of_tls, true)
                         .on_change(move |state, _, _, cx| {
                             e2.update(cx, |this, cx| {
                                 this.config.force_use_of_tls = state == CheckboxState::Checked;
                                 cx.notify();
                             });
                         }))
-                    .child(indexed_checkbox("proxy-listener-invisible", "Support invisible proxying (enable only if needed)", self.config.invisible_proxying, true)
+                    .child(indexed_checkbox("proxy-listener-invisible", "支持隐形代理（仅在需要时启用）", self.config.invisible_proxying, true)
                         .on_change(move |state, _, _, cx| {
                             e3.update(cx, |this, cx| {
                                 this.config.invisible_proxying = state == CheckboxState::Checked;
@@ -1125,10 +1132,10 @@ impl ProxyListenerEditor {
             }
             2 => {
                 for (id, label, mode) in [
-                    ("proxy-listener-cert-per-host", "Generate CA-signed per-host certificates", ProxyListenerCertMode::PerHostCaSigned),
-                    ("proxy-listener-cert-self-signed", "Use a self-signed certificate", ProxyListenerCertMode::SelfSigned),
-                    ("proxy-listener-cert-fixed-host", "Generate a CA-signed certificate with a specific hostname", ProxyListenerCertMode::SpecificHostname),
-                    ("proxy-listener-cert-custom", "Use a custom certificate", ProxyListenerCertMode::CustomCertificate),
+                    ("proxy-listener-cert-per-host", "为每个主机生成由 CA 签发的证书", ProxyListenerCertMode::PerHostCaSigned),
+                    ("proxy-listener-cert-self-signed", "使用自签名证书", ProxyListenerCertMode::SelfSigned),
+                    ("proxy-listener-cert-fixed-host", "使用指定主机名生成由 CA 签发的证书", ProxyListenerCertMode::SpecificHostname),
+                    ("proxy-listener-cert-custom", "使用自定义证书", ProxyListenerCertMode::CustomCertificate),
                 ] {
                     let cert_ent = cx.entity();
                     body = body.child(settings_radio(id, label, self.config.certificate_mode == mode, true, window, cx)
@@ -1148,12 +1155,12 @@ impl ProxyListenerEditor {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .child(div().w(theme::scaled_px(140.)).flex_shrink_0().child("Hostname:"))
+                        .child(div().w(theme::scaled_px(140.)).flex_shrink_0().child("主机名："))
                         .child(
                             div().flex_1().min_w_0().child(
                                 Input::new(&self.cert_hostname)
                                     .id("proxy-listener-cert-hostname")
-                                    .aria_label("Hostname:")
+                                    .aria_label("主机名")
                                     .small()
                                     .disabled(!specific_host_enabled),
                             ),
@@ -1244,11 +1251,11 @@ impl ProxyListenerEditor {
                 }
             }
             _ => {
-                body = body.child("TLS Protocols:");
+                body = body.child("TLS 协议：");
                 for (id, label, value) in [
-                    ("proxy-listener-tls-default", "Default (TLSv1.2, TLSv1.3)", ""),
-                    ("proxy-listener-tls13", "TLSv1.3 only", "TLSv1.3 only"),
-                    ("proxy-listener-tls12", "TLSv1.2 only", "TLSv1.2 only"),
+                    ("proxy-listener-tls-default", "默认 (TLSv1.2, TLSv1.3)", ""),
+                    ("proxy-listener-tls13", "仅 TLSv1.3", "TLSv1.3 only"),
+                    ("proxy-listener-tls12", "仅 TLSv1.2", "TLSv1.2 only"),
                 ] {
                     let tls_ent = cx.entity();
                     body = body.child(settings_radio(id, label, self.config.tls_protocols_label == value, true, window, cx)
@@ -1261,7 +1268,7 @@ impl ProxyListenerEditor {
                             }
                         }));
                 }
-                body = body.child(indexed_checkbox("proxy-listener-http2", "Support HTTP/2", self.config.enable_http2, true)
+                body = body.child(indexed_checkbox("proxy-listener-http2", "支持 HTTP/2", self.config.enable_http2, true)
                     .on_change(move |state, _, _, cx| {
                         e4.update(cx, |this, cx| {
                             this.config.enable_http2 = state == CheckboxState::Checked;
@@ -1296,9 +1303,9 @@ impl Render for ProxyListenerEditor {
         );
         let mut tabs = div().flex().gap(px(6.)).pb(px(8.)).border_b_1().border_color(theme::border());
         for (tab, id, label) in [
-            (0, "proxy-listener-tab-binding", "Binding"),
-            (1, "proxy-listener-tab-request-handling", "Request handling"),
-            (2, "proxy-listener-tab-certificate", "Certificate"),
+            (0, "proxy-listener-tab-binding", "绑定"),
+            (1, "proxy-listener-tab-request-handling", "请求处理"),
+            (2, "proxy-listener-tab-certificate", "证书"),
             (3, "proxy-listener-tab-tls", "TLS"),
         ] {
             tabs = tabs.child(button(id, label).selected(self.tab == tab)
@@ -1342,14 +1349,14 @@ impl Render for ProxyListenerEditor {
                     .justify_end()
                     .gap(px(8.))
                     .child(
-                        button("proxy-listener-editor-ok", "OK")
+                        button("proxy-listener-editor-ok", "确定")
                             .icon(IconName::Check)
                             .primary()
                             .min_w(theme::scaled_px(82.).max(px(82.)))
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     )
                     .child(
-                        button("proxy-listener-editor-cancel", "Cancel")
+                        button("proxy-listener-editor-cancel", "取消")
                             .icon(IconName::Close)
                             .min_w(theme::scaled_px(82.).max(px(82.)))
                             .on_click(|_, window, _| window.remove_window()),
@@ -1818,7 +1825,7 @@ impl Settings {
             .border_color(theme::border())
             .child(settings_section_heading(
                 "proxy-listeners-heading",
-                "Proxy listeners",
+                "Proxy 监听器",
                 project_scope_badge(),
             ))
             .child(settings_desc_row_with_action(
@@ -1845,7 +1852,7 @@ impl Settings {
                                     .stripe(false)
                                     .scrollbar_visible(true, false)
                                     .scroll_bounce(false)
-                                    .accessibility_label("Proxy listeners"),
+                                    .accessibility_label("Proxy 监听器"),
                                 false,
                             )),
                     )

@@ -149,7 +149,7 @@ impl Workbench {
             rgb(0xeeeeee).into()
         };
         let proxy_settings_btn = flat_button("proxy-settings", true, window, cx)
-            .accessibility_label("Proxy settings")
+            .accessibility_label("Proxy 设置")
             .w(theme::scaled_px(111.))
             .h(px(35.))
             .self_start()
@@ -183,7 +183,7 @@ impl Workbench {
                     .size(theme::scaled_px(14.))
                     .text_color(theme::foreground()),
             )
-            .child("Proxy settings");
+            .child("Proxy 设置");
         let content = match self.proxy_page {
             ProxyPage::Intercept => self.render_intercept(cx),
             ProxyPage::History => self.render_history(window, cx),

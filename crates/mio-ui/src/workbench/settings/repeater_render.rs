@@ -105,7 +105,7 @@ impl Settings {
                                 .pt(px(2.))
                                 .text_size(theme::scaled_px(12.))
                                 .text_color(theme::muted_foreground())
-                                .child("提示：当前已启用强制 HTTP/1 Connection: close（可在 Network > HTTP 或 Repeater 菜单修改），将覆盖 HTTP/1 连接复用。"),
+                                .child("提示：当前已启用强制 HTTP/1 Connection: close（可在 网络 > HTTP 或 Repeater 菜单修改），将覆盖 HTTP/1 连接复用。"),
                         )
                     })
                     .child(
@@ -335,7 +335,7 @@ impl Settings {
                     .gap(px(5.))
                     .child(settings_section_heading(
                         "settings-message-modification",
-                        "Message modification",
+                        "消息修改",
                         project_scope_badge_with_id("settings-project-scope"),
                     ))
                     .child(settings_desc_row(

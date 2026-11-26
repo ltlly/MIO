@@ -176,8 +176,8 @@ impl Workbench {
                             .small()
                             .ghost()
                             .icon(IconName::Undo2)
-                            .accessibility_label("恢复 Attack results 默认设置")
-                            .tooltip("恢复 Attack results 为默认配置")
+                            .accessibility_label("恢复「攻击结果」默认设置")
+                            .tooltip("恢复「攻击结果」为默认配置")
                             .disabled(
                                 !editable
                                     || !self.backend_available()
@@ -191,7 +191,7 @@ impl Workbench {
                         div()
                             .text_size(theme::scaled_px(13.))
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Attack results"),
+                            .child("攻击结果"),
                     ),
             )
             .child(
@@ -675,7 +675,7 @@ impl Workbench {
                     .border_color(theme::border())
                     .text_size(theme::scaled_px(13.5))
                     .font_weight(gpui_kit::FontWeight::BOLD)
-                    .child("Settings"),
+                    .child("设置"),
             )
             .child(
                 div()
@@ -781,11 +781,11 @@ impl Workbench {
                         div()
                             .text_size(theme::scaled_px(13.))
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Request Engine / HTTP Headers"),
+                            .child("请求引擎 / HTTP 标头"),
                     )
                     .child(
                         Checkbox::new("intruder-settings-update-content-length")
-                            .label("Update Content-Length header")
+                            .label("更新 Content-Length 标头")
                             .checked(attack_settings.update_content_length)
                             .disabled(!editable)
                             .on_click(cx.listener(move |this, value, window, cx| {
@@ -799,7 +799,7 @@ impl Workbench {
                     )
                     .child(
                         Checkbox::new("intruder-settings-connection-close")
-                            .label("Set Connection: close")
+                            .label("设置 Connection: close")
                             .checked(attack_settings.set_connection_close)
                             .disabled(!editable)
                             .on_click(cx.listener(move |this, value, window, cx| {
@@ -875,29 +875,29 @@ impl Workbench {
                         div()
                             .text_size(theme::scaled_px(13.))
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Redirections"),
+                            .child("重定向"),
                     )
                     .child(
                         div().flex().flex_wrap().gap(px(6.)).children(
                             [
                                 (
                                     "intruder-redirect-never",
-                                    "Never",
+                                    "从不",
                                     RepeaterRedirectMode::Never,
                                 ),
                                 (
                                     "intruder-redirect-on-site",
-                                    "On-site only",
+                                    "仅同站",
                                     RepeaterRedirectMode::OnSiteOnly,
                                 ),
                                 (
                                     "intruder-redirect-in-scope",
-                                    "In-scope only",
+                                    "仅范围内",
                                     RepeaterRedirectMode::InScopeOnly,
                                 ),
                                 (
                                     "intruder-redirect-always",
-                                    "Always",
+                                    "始终",
                                     RepeaterRedirectMode::Always,
                                 ),
                             ]
@@ -919,7 +919,7 @@ impl Workbench {
                     )
                     .child(
                         Checkbox::new("intruder-settings-process-cookies")
-                            .label("Process cookies in redirections")
+                            .label("在重定向中处理 Cookie")
                             .checked(attack_settings.process_cookies_in_redirections)
                             .disabled(!editable)
                             .on_click(cx.listener(move |this, value, window, cx| {

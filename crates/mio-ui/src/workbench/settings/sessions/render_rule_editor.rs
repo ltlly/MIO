@@ -80,7 +80,7 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child("Use cookies from MIO's cookie jar：从当前项目 Cookie Jar 匹配域、路径、Secure 与未过期条目注入请求。")
+                    .child("使用 MIO Cookie Jar 中的 Cookie：从当前项目 Cookie Jar 匹配域、路径、Secure 与未过期条目注入请求。")
                     .child(
                         div()
                             .flex()
@@ -147,7 +147,7 @@ impl Settings {
                         div().w(theme::scaled_px(160.).max(px(160.))).child(
                             Input::new(&self.sessions.action_header_name)
                                 .id("settings-sessions-act-hdr-name")
-                                .aria_label("Header 名称")
+                                .aria_label("标头名称")
                                 .small()
                                 .disabled(!enabled),
                         ),
@@ -156,7 +156,7 @@ impl Settings {
                         div().w(theme::scaled_px(220.).max(px(220.))).child(
                             Input::new(&self.sessions.action_header_val)
                                 .id("settings-sessions-act-hdr-val")
-                                .aria_label("Header 值")
+                                .aria_label("标头值")
                                 .small()
                                 .disabled(!enabled),
                         ),
@@ -303,7 +303,7 @@ impl Settings {
                     .child(
                         inline_checkbox(
                             "settings-sessions-act-replace-regex",
-                            "Regex",
+                            "正则",
                             self.sessions.action_replace_regex,
                             enabled,
                         )
@@ -325,7 +325,7 @@ impl Settings {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child("Target macro:")
+                    .child("目标 Macro：")
                     .child(
                         div()
                             .w(theme::scaled_px(240.).max(px(240.)))
@@ -392,7 +392,7 @@ impl Settings {
                         div().w(theme::scaled_px(210.).max(px(210.))).child(
                             Input::new(&self.sessions.rule_name)
                                 .id("settings-sessions-rule-name")
-                                .aria_label("Session 规则名称")
+                                .aria_label("会话规则名称")
                                 .small()
                                 .disabled(!enabled),
                         ),
@@ -525,7 +525,7 @@ impl Settings {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child("URL scope:")
+                    .child("URL 范围：")
                     .child(
                         div()
                             .w(theme::scaled_px(230.).max(px(230.)))
@@ -589,7 +589,7 @@ impl Settings {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child("Action type:")
+                    .child("动作类型：")
                     .child(
                         div()
                             .w(theme::scaled_px(290.).max(px(290.)))
@@ -644,7 +644,7 @@ impl Settings {
                                 "套用默认 Cookie Jar 模板",
                                 !enabled,
                             )
-                            .tooltip("填充「Use cookies from MIO's cookie jar」默认规则模板")
+                            .tooltip("填充「使用 MIO Cookie Jar 中的 Cookie」默认规则模板")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.apply_default_cookie_jar_template(window, cx);
                             })),

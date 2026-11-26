@@ -110,7 +110,7 @@ impl Workbench {
                     .text_size(px(15.))
                     .font_weight(gpui_kit::FontWeight::BOLD)
                     .text_color(theme::foreground())
-                    .child("扩展设置 (Extensions settings)"),
+                    .child("扩展设置"),
             )
             .child(
                 div()
@@ -192,12 +192,12 @@ impl Workbench {
                     .child(
                         div()
                             .text_color(theme::muted_foreground())
-                            .child("• 已启用的持久化扩展会在启动或切换项目时按保存的权限与顺序自动加载；若启用「Disable extensions」则跳过自动加载（仍可卸载移除）。"),
+                            .child("• 已启用的持久化扩展会在启动或切换项目时按保存的权限与顺序自动加载；若启用「禁用扩展」则跳过自动加载（仍可卸载移除）。"),
                     )
                     .child(
                         div()
                             .text_color(theme::muted_foreground())
-                            .child("• 取消勾选「Loaded」仅停用插件而不删除文件；点击「移除」才会彻底卸载并清理磁盘文件。"),
+                            .child("• 取消勾选「已加载」仅停用插件而不删除文件；点击「移除」才会彻底卸载并清理磁盘文件。"),
                     )
                     .child(
                         div()

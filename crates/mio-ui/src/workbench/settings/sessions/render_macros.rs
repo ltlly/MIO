@@ -38,7 +38,7 @@ impl Settings {
                     .border_color(theme::border())
                     .bg(theme::toolbar_surface())
                     .child(format!(
-                        "Step {}: {} {} (提取 {} 项)",
+                        "步骤 {}: {} {} (提取 {} 项)",
                         idx + 1,
                         step.method,
                         step.url,
@@ -99,7 +99,7 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(sessions_section_heading("settings-macros-heading", "Macros"))
+            .child(sessions_section_heading("settings-macros-heading", "宏 (Macros)"))
             .child(sessions_desc_row(
                 "Macro 是一组按顺序执行的 HTTP 请求序列。您可以在会话处理规则中使用 Macro 来执行登录应用、获取反 CSRF 令牌等任务。使用以下设置管理您的 Macro。",
             ))
@@ -169,7 +169,7 @@ impl Settings {
                                     .id("settings-session-macros-list")
                                     .test_support()
                                     .role(Role::List)
-                                    .aria_label("Session macros")
+                                    .aria_label("会话 Macro 列表")
                                     .w(theme::scaled_px(692.).max(px(692.)))
                                     .max_w_full()
                                     .h_full()

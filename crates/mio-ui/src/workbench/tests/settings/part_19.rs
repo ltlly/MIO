@@ -374,7 +374,7 @@ fn proxy_interception_ip_mime_page_title_and_was_annotated_save_with_ack(cx: &mu
 
     proxy_rule_click(settings, "proxy-request-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
-    proxy_rule_choose_type(dialog, "IP address", false, cx);
+    proxy_rule_choose_type(dialog, "IP 地址", false, cx);
     proxy_rule_condition(dialog, "^127\\.0\\.0\\.1$", cx);
     proxy_rule_click(dialog, "proxy-rule-editor-ok", cx);
     let saved_ip = saved(&mut fixture.commands);
@@ -385,8 +385,8 @@ fn proxy_interception_ip_mime_page_title_and_was_annotated_save_with_ack(cx: &mu
     acknowledge(&fixture, saved_ip, cx);
 
     for (label, expected_type, relation_down, expected_rel, cond) in [
-        ("Mime type", MimeType, false, Matches, "^html$"),
-        ("Page title", PageTitle, true, DoesNotMatch, "^Login$"),
+        ("MIME 类型", MimeType, false, Matches, "^html$"),
+        ("页面标题", PageTitle, true, DoesNotMatch, "^Login$"),
     ] {
         proxy_rule_click(settings, "proxy-response-rule-add", cx);
         let dialog = proxy_rule_dialog(settings, &fixture, cx);
@@ -409,7 +409,7 @@ fn proxy_interception_ip_mime_page_title_and_was_annotated_save_with_ack(cx: &mu
     proxy_rule_click(settings, "proxy-response-rule-add", cx);
     let dialog = proxy_rule_dialog(settings, &fixture, cx);
     proxy_rule_condition(dialog, "^cleared-when-boolean$", cx);
-    proxy_rule_choose_type(dialog, "Request", true, cx);
+    proxy_rule_choose_type(dialog, "请求", true, cx);
     proxy_rule_open_dropdown(dialog, "proxy-rule-editor-relationship", cx);
     cx.simulate_keystrokes(dialog, "down down down down down down enter");
     cx.run_until_parked();
@@ -417,7 +417,7 @@ fn proxy_interception_ip_mime_page_title_and_was_annotated_save_with_ack(cx: &mu
         window.render_frame(cx);
         assert_eq!(
             window.find("proxy-rule-editor-relationship").value(),
-            Some("Was annotated")
+            Some("已添加批注")
         );
     })
     .unwrap();

@@ -11,7 +11,7 @@ fn websocket_interception_rules_defaults_and_persistence_clicks(cx: &mut TestApp
         window.render_frame(cx);
         let heading = window.find("proxy-ws-rules-heading");
         assert_eq!(heading.role(), Some(gpui_kit::accesskit::Role::Heading));
-        assert_eq!(heading.label(), Some("WebSocket interception rules"));
+        assert_eq!(heading.label(), Some("WebSocket 拦截规则"));
         let c2s = window.find("proxy-ws-intercept-client-to-server");
         let s2c = window.find("proxy-ws-intercept-server-to-client");
         let scope = window.find("proxy-ws-intercept-in-scope-only");
@@ -208,7 +208,7 @@ fn proxy_message_unpack_defaults_clicks_and_exact_workspace_acknowledgment(
         window.render_frame(cx);
         let heading = window.find("proxy-miscellaneous-heading");
         assert_eq!(heading.role(), Some(gpui_kit::accesskit::Role::Heading));
-        assert_eq!(heading.label(), Some("Miscellaneous"));
+        assert_eq!(heading.label(), Some("杂项"));
         let requests = window.find("proxy-unpack-requests");
         let responses = window.find("proxy-unpack-responses");
         assert!(heading.bounds().bottom() <= requests.bounds().top());
@@ -320,7 +320,7 @@ fn proxy_message_unpack_pending_rule_ack_recovers_only_its_snapshot_error(cx: &m
     for unrelated in [false, true] {
         proxy_rule_click(settings, "proxy-request-rule-add", cx);
         let dialog = proxy_rule_dialog(settings, &fixture, cx);
-        proxy_rule_choose_type(dialog, "Body", false, cx);
+        proxy_rule_choose_type(dialog, "正文", false, cx);
         let condition = format!("^preserved-pending-body-{unrelated}$");
         proxy_rule_condition(dialog, &condition, cx);
         proxy_rule_click(dialog, "proxy-rule-editor-ok", cx);

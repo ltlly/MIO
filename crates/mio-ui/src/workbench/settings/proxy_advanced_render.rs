@@ -5,13 +5,13 @@ pub(crate) struct HttpMatchReplaceTable {
 }
 
 const HTTP_MR_COLUMNS: [(&str, f32); 7] = [
-    ("Enabled", 64.),
-    ("Item", 110.),
-    ("Name", 110.),
-    ("Match", 164.),
-    ("Replace", 164.),
-    ("Type", 86.),
-    ("Comment", 118.),
+    ("启用", 64.),
+    ("匹配项", 110.),
+    ("名称", 110.),
+    ("匹配", 164.),
+    ("替换", 164.),
+    ("类型", 86.),
+    ("备注", 118.),
 ];
 
 impl TableDelegate for HttpMatchReplaceTable {
@@ -113,10 +113,10 @@ pub(crate) struct SslPassThroughTable {
 }
 
 const SSL_PT_COLUMNS: [(&str, f32); 4] = [
-    ("Enabled", 72.),
-    ("Host / IP range", 516.),
-    ("Port", 114.),
-    ("Regex", 114.),
+    ("启用", 72.),
+    ("主机 / IP 范围", 516.),
+    ("端口", 114.),
+    ("正则", 114.),
 ];
 
 impl TableDelegate for SslPassThroughTable {
@@ -190,7 +190,7 @@ impl TableDelegate for SslPassThroughTable {
                     adv_checkbox(("proxy-ssl-pt-toggle", row), "", rule.enabled, enabled)
                         .p_0()
                         .gap_0()
-                        .accessibility_label(format!("启用 TLS pass through {}", rule.host_pattern))
+                        .accessibility_label(format!("启用 TLS 透传 {}", rule.host_pattern))
                         .on_change(move |state, _, _, cx| {
                             let checked = state == CheckboxState::Checked;
                             let _ = wb.update(cx, |view, cx| {
@@ -211,11 +211,11 @@ impl TableDelegate for SslPassThroughTable {
             1 => div().px(px(6.)).truncate().child(rule.host_pattern).into_any_element(),
             2 => div()
                 .px(px(6.))
-                .child(rule.port.map_or_else(|| "Any".into(), |p| p.to_string()))
+                .child(rule.port.map_or_else(|| "任意".into(), |p| p.to_string()))
                 .into_any_element(),
             _ => div()
                 .px(px(6.))
-                .child(if rule.is_regex { "Yes" } else { "No" })
+                .child(if rule.is_regex { "是" } else { "否" })
                 .into_any_element(),
         }
     }
@@ -223,10 +223,10 @@ impl TableDelegate for SslPassThroughTable {
         let owner = self.owner.upgrade()?;
         let rule = owner.read(cx).proxy_advanced.ssl_rules.get(row)?;
         Some(match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            0 => if rule.enabled { "是" } else { "否" }.into(),
             1 => rule.host_pattern.clone().into(),
-            2 => rule.port.map_or_else(|| "Any".into(), |p| p.to_string()).into(),
-            _ => if rule.is_regex { "Yes" } else { "No" }.into(),
+            2 => rule.port.map_or_else(|| "任意".into(), |p| p.to_string()).into(),
+            _ => if rule.is_regex { "是" } else { "否" }.into(),
         })
     }
 }
@@ -359,7 +359,7 @@ impl Settings {
             .gap(px(9.))
             .child(settings_section_heading(
                 "proxy-http-match-replace-heading",
-                "HTTP match and replace rules",
+                "HTTP 匹配与替换规则",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(
@@ -374,7 +374,7 @@ impl Settings {
                     .child(
                         adv_checkbox(
                             "proxy-http-mr-in-scope-only",
-                            "Only apply to in-scope items",
+                            "仅应用于目标范围内的项目",
                             in_scope_only,
                             self.state.enabled,
                         )
@@ -404,7 +404,7 @@ impl Settings {
                                     .stripe(false)
                                     .scrollbar_visible(true, false)
                                     .scroll_bounce(false)
-                                    .accessibility_label("HTTP match and replace rules"),
+                                    .accessibility_label("HTTP 匹配与替换规则"),
                                 true,
                             )),
                     ),
@@ -430,11 +430,11 @@ impl Settings {
             .flex_col()
             .gap(px(5.));
         for (id, label, tip, available, action) in [
-            ("proxy-ssl-pt-add", "添加", "新增 TLS pass through 目标", enabled, 0u8),
-            ("proxy-ssl-pt-edit", "编辑", "编辑选中的 TLS pass through 目标", enabled && selected.is_some(), 1u8),
-            ("proxy-ssl-pt-remove", "移除", "移除选中的 TLS pass through 目标", enabled && selected.is_some(), 2u8),
+            ("proxy-ssl-pt-add", "添加", "新增 TLS 透传目标", enabled, 0u8),
+            ("proxy-ssl-pt-edit", "编辑", "编辑选中的 TLS 透传目标", enabled && selected.is_some(), 1u8),
+            ("proxy-ssl-pt-remove", "移除", "移除选中的 TLS 透传目标", enabled && selected.is_some(), 2u8),
             ("proxy-ssl-pt-paste-url", "粘贴 URL", "从剪贴板解析 URL 并添加主机与端口", enabled, 3u8),
-            ("proxy-ssl-pt-clear", "清空", "清空全部 TLS pass through 规则", enabled && !ssl_rules.is_empty(), 4u8),
+            ("proxy-ssl-pt-clear", "清空", "清空全部 TLS 透传规则", enabled && !ssl_rules.is_empty(), 4u8),
         ] {
             let rule = selected.and_then(|i| ssl_rules.get(i)).cloned();
             actions = actions.child(
@@ -516,7 +516,7 @@ impl Settings {
             .gap(px(9.))
             .child(settings_section_heading(
                 "proxy-ssl-passthrough-heading",
-                "TLS pass through",
+                "TLS 透传",
                 project_scope_badge(),
             ))
             .child(settings_desc_row(
@@ -531,7 +531,7 @@ impl Settings {
                     .child(
                         adv_checkbox(
                             "proxy-ssl-pt-auto-add",
-                            "Automatically add entries on client TLS negotiation failure",
+                            "客户端 TLS 协商失败时自动添加条目",
                             ssl_auto_add,
                             self.state.enabled,
                         )
@@ -561,7 +561,7 @@ impl Settings {
                                     .stripe(false)
                                     .scrollbar_visible(true, false)
                                     .scroll_bounce(false)
-                                    .accessibility_label("TLS pass through"),
+                                    .accessibility_label("TLS 透传"),
                                 true,
                             )),
                     ),
@@ -585,12 +585,12 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("Host / IP range:"))
+                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("主机 / IP 范围："))
                                 .child(
                                     div().flex_1().min_w_0().child(
                                         Input::new(&self.proxy_advanced.ssl_host)
                                             .id("proxy-ssl-pt-host-input")
-                                            .aria_label("TLS pass through 主机模式")
+                                            .aria_label("TLS 透传主机模式")
                                             .small(),
                                     ),
                                 ),
@@ -600,12 +600,12 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("Port:"))
+                                .child(div().w(theme::scaled_px(110.).max(px(110.))).child("端口："))
                                 .child(
                                     div().w(theme::scaled_px(140.).max(px(140.))).child(
                                         Input::new(&self.proxy_advanced.ssl_port)
                                             .id("proxy-ssl-pt-port-input")
-                                            .aria_label("TLS pass through 端口")
+                                            .aria_label("TLS 透传端口")
                                             .small(),
                                     ),
                                 ),
@@ -613,7 +613,7 @@ impl Settings {
                         .child(
                             adv_checkbox(
                                 "proxy-ssl-pt-regex",
-                                "Regex match",
+                                "正则匹配",
                                 self.proxy_advanced.ssl_is_regex,
                                 true,
                             )
@@ -641,7 +641,7 @@ impl Settings {
                                 .justify_end()
                                 .gap(px(8.))
                                 .child(
-                                    button("proxy-ssl-pt-submit", "OK")
+                                    button("proxy-ssl-pt-submit", "确定")
                                         .primary()
                                         .tab_stop(false)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -649,7 +649,7 @@ impl Settings {
                                         })),
                                 )
                                 .child(
-                                    settings_action_button("proxy-ssl-pt-cancel", "Cancel", false)
+                                    settings_action_button("proxy-ssl-pt-cancel", "取消", false)
                                         .tab_stop(false)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.proxy_advanced.ssl_editing = None;

@@ -3,7 +3,7 @@ use gpui_kit::component::table::{Column, TableDelegate};
 
 use super::*;
 
-pub(super) const DEFAULT_RULE_DESCRIPTION: &str = "使用 External Cookie Jar 中的 Cookie";
+pub(super) const DEFAULT_RULE_DESCRIPTION: &str = "使用 MIO Cookie Jar 中的 Cookie";
 
 fn mio_table_zebra_bg() -> gpui_kit::Rgba {
     rgb(if theme::is_dark() { 0x282b30 } else { 0xf4f5f7 })
@@ -95,13 +95,13 @@ impl TableDelegate for SessionRulesTable {
     fn column(&self, column: usize, _: &App) -> Column {
         let scale = theme::ui_scale();
         match column {
-            0 => Column::new("enabled", "Enabled")
+            0 => Column::new("enabled", "启用")
                 .width((76. * scale).round())
                 .movable(false),
-            1 => Column::new("description", "Description")
+            1 => Column::new("description", "描述")
                 .width((316. * scale).round())
                 .movable(false),
-            _ => Column::new("tools", "Tools")
+            _ => Column::new("tools", "工具")
                 .width((298. * scale).round())
                 .movable(false),
         }
@@ -246,9 +246,9 @@ impl TableDelegate for SessionRulesTable {
         if s.state.sessions.rules.is_empty() && !s.sessions.default_rule_dismissed && row == 0 {
             let text = match column {
                 0 => if s.sessions.default_rule_enabled {
-                    "Yes"
+                    "是"
                 } else {
-                    "No"
+                    "否"
                 }
                 .to_owned(),
                 1 => DEFAULT_RULE_DESCRIPTION.to_owned(),
@@ -258,7 +258,7 @@ impl TableDelegate for SessionRulesTable {
         }
         let rule = s.state.sessions.rules.get(row)?;
         let text = match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.to_owned(),
+            0 => if rule.enabled { "是" } else { "否" }.to_owned(),
             1 => rule.name.clone(),
             _ => format_rule_tools(&rule.tools),
         };
@@ -278,22 +278,22 @@ impl TableDelegate for CookieJarTable {
     fn column(&self, column: usize, _: &App) -> Column {
         let scale = theme::ui_scale();
         match column {
-            0 => Column::new("domain", "Domain")
+            0 => Column::new("domain", "域名")
                 .width((150. * scale).round())
                 .movable(false),
-            1 => Column::new("path", "Path")
+            1 => Column::new("path", "路径")
                 .width((100. * scale).round())
                 .movable(false),
-            2 => Column::new("name", "Name")
+            2 => Column::new("name", "名称")
                 .width((130. * scale).round())
                 .movable(false),
-            3 => Column::new("value", "Value")
+            3 => Column::new("value", "值")
                 .width((160. * scale).round())
                 .movable(false),
-            4 => Column::new("flags", "Flags")
+            4 => Column::new("flags", "标志")
                 .width((110. * scale).round())
                 .movable(false),
-            _ => Column::new("expires", "Expires")
+            _ => Column::new("expires", "过期时间")
                 .width((110. * scale).round())
                 .movable(false),
         }
@@ -373,7 +373,7 @@ impl TableDelegate for CookieJarTable {
             }
             _ => entry
                 .expires_unix_ms
-                .map_or_else(|| "Session".into(), |ms| ms.to_string()),
+                .map_or_else(|| "会话".into(), |ms| ms.to_string()),
         };
         div().truncate().child(text).into_any_element()
     }
@@ -404,7 +404,7 @@ impl TableDelegate for CookieJarTable {
             }
             _ => entry
                 .expires_unix_ms
-                .map_or_else(|| "Session".into(), |ms| ms.to_string()),
+                .map_or_else(|| "会话".into(), |ms| ms.to_string()),
         };
         Some(text.into())
     }
@@ -422,16 +422,16 @@ impl TableDelegate for SessionMacrosTable {
     fn column(&self, column: usize, _: &App) -> Column {
         let scale = theme::ui_scale();
         match column {
-            0 => Column::new("name", "Description")
+            0 => Column::new("name", "描述")
                 .width((260. * scale).round())
                 .movable(false),
-            1 => Column::new("steps", "Steps")
+            1 => Column::new("steps", "步骤数")
                 .width((100. * scale).round())
                 .movable(false),
-            2 => Column::new("policy", "Failure")
+            2 => Column::new("policy", "失败策略")
                 .width((165. * scale).round())
                 .movable(false),
-            _ => Column::new("timeout", "Timeout")
+            _ => Column::new("timeout", "超时")
                 .width((165. * scale).round())
                 .movable(false),
         }
@@ -492,9 +492,9 @@ impl TableDelegate for SessionMacrosTable {
             0 => mac.name.clone(),
             1 => format!("{}", mac.steps.len()),
             2 => match mac.failure_policy {
-                MacroFailurePolicy::Abort => "Abort".into(),
+                MacroFailurePolicy::Abort => "中止".into(),
                 MacroFailurePolicy::Retry { max_retries } => {
-                    format!("Retry({max_retries})")
+                    format!("重试({max_retries})")
                 }
             },
             _ => format!("{} ms", mac.timeout_ms),
@@ -509,8 +509,8 @@ impl TableDelegate for SessionMacrosTable {
             0 => mac.name.clone(),
             1 => format!("{}", mac.steps.len()),
             2 => match mac.failure_policy {
-                MacroFailurePolicy::Abort => "Abort".into(),
-                MacroFailurePolicy::Retry { max_retries } => format!("Retry({max_retries})"),
+                MacroFailurePolicy::Abort => "中止".into(),
+                MacroFailurePolicy::Retry { max_retries } => format!("重试({max_retries})"),
             },
             _ => format!("{} ms", mac.timeout_ms),
         };

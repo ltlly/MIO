@@ -87,7 +87,7 @@ pub(super) fn verify_http_filter_and_user_tls_certificates(
         assert!(
             window
                 .within("settings-tls-custom-ca-section")
-                .find_by_label("Name")
+                .find_by_label("名称")
                 .visible()
         );
         assert_eq!(window.find("settings-tls-ca-remove").disabled(), Some(true));

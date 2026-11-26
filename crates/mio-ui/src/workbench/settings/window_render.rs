@@ -19,9 +19,9 @@ pub(super) struct HttpStreamingScopeTable {
 }
 
 const HTTP_STREAMING_COLUMNS: [(&str, f32); 3] = [
-    ("Enabled", 74.),
-    ("Prefix", 410.),
-    ("Include subdomains", 148.),
+    ("启用", 74.),
+    ("前缀", 410.),
+    ("包含子域名", 148.),
 ];
 
 impl TableDelegate for HttpStreamingScopeTable {
@@ -181,9 +181,9 @@ impl TableDelegate for HttpStreamingScopeTable {
             .streaming_scope_rules
             .get(row)?;
         Some(match column {
-            0 => if rule.enabled { "Yes" } else { "No" }.into(),
+            0 => if rule.enabled { "是" } else { "否" }.into(),
             1 => rule.prefix.clone().into(),
-            _ => if rule.include_subdomains { "Yes" } else { "No" }.into(),
+            _ => if rule.include_subdomains { "是" } else { "否" }.into(),
         })
     }
 }
@@ -325,7 +325,7 @@ impl Settings {
                             "用户",
                             scope == SettingsScopeFilter::User,
                         )
-                        .accessibility_label("筛选 User 设置")
+                        .accessibility_label("筛选用户设置")
                         .tooltip("仅显示跨项目生效的用户级偏好设置项")
                         .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -338,7 +338,7 @@ impl Settings {
                             "项目",
                             scope == SettingsScopeFilter::Project,
                         )
-                        .accessibility_label("筛选 Project 设置")
+                        .accessibility_label("筛选项目设置")
                         .tooltip("仅显示当前项目专属的设置项")
                         .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -409,7 +409,7 @@ impl Settings {
             .when(vis_tools, |this| {
                 this.child(self.render_nav_group_header(
                     "settings-tools",
-                    "Tools",
+                    "工具",
                     0,
                     tools_collapsed,
                     true,
@@ -461,7 +461,7 @@ impl Settings {
             .when(vis_project, |this| {
                 this.child(self.render_nav_group_header(
                     "settings-project",
-                    "Project",
+                    "项目",
                     1,
                     project_collapsed,
                     !vis_tools,
@@ -472,7 +472,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-project-scope-nav",
-                        "Scope",
+                        "范围",
                         self.page == SettingsPage::ProjectScope,
                         window,
                         cx,
@@ -487,7 +487,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-project-tasks",
-                        "Tasks",
+                        "任务",
                         self.page == SettingsPage::ProjectTasks,
                         window,
                         cx,
@@ -502,7 +502,7 @@ impl Settings {
                     div().mt(px(4.)).child(
                         settings_navigation(
                             "settings-sessions-nav",
-                            "Sessions",
+                            "会话",
                             self.page == SettingsPage::Sessions,
                             window,
                             cx,
@@ -518,7 +518,7 @@ impl Settings {
             .when(vis_network, |this| {
                 this.child(self.render_nav_group_header(
                     "settings-network",
-                    "Network",
+                    "网络",
                     3,
                     network_collapsed,
                     false,
@@ -529,7 +529,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-network-connections",
-                        "Connections",
+                        "连接",
                         self.page == SettingsPage::NetworkConnections,
                         window,
                         cx,
@@ -573,7 +573,7 @@ impl Settings {
             .when(vis_user, |this| {
                 this.child(self.render_nav_group_header(
                     "settings-user",
-                    "User interface",
+                    "用户界面",
                     4,
                     user_collapsed,
                     false,
@@ -584,7 +584,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-user-message-editor",
-                        "Message editor",
+                        "消息编辑器",
                         self.page == SettingsPage::UserMessageEditor,
                         window,
                         cx,
@@ -599,7 +599,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-user-misc",
-                        "Hotkeys",
+                        "快捷键",
                         self.page == SettingsPage::UserMisc,
                         window,
                         cx,
@@ -614,7 +614,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-user-display",
-                        "Display",
+                        "显示",
                         self.page == SettingsPage::UserDisplay,
                         window,
                         cx,
@@ -628,7 +628,7 @@ impl Settings {
             .when(vis_suite, |this| {
                 this.child(self.render_nav_group_header(
                     "settings-suite",
-                    "Suite",
+                    "套件",
                     5,
                     suite_collapsed,
                     false,
@@ -639,7 +639,7 @@ impl Settings {
                 this.child(
                     settings_navigation(
                         "settings-suite-updates",
-                        "Updates",
+                        "更新",
                         self.page == SettingsPage::SuiteUpdates,
                         window,
                         cx,
@@ -672,19 +672,19 @@ impl Settings {
 
     fn render_content_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let breadcrumb: (&'static str, Option<&'static str>) = match self.page {
-            SettingsPage::Proxy => ("Tools", Some("Proxy")),
-            SettingsPage::Intruder => ("Tools", Some("Intruder")),
-            SettingsPage::Repeater => ("Tools", Some("Repeater")),
-            SettingsPage::Sessions => ("Sessions", None),
-            SettingsPage::ProjectScope => ("Project", Some("Scope")),
-            SettingsPage::ProjectTasks => ("Project", Some("Tasks")),
-            SettingsPage::NetworkConnections => ("Network", Some("Connections")),
-            SettingsPage::NetworkHttp => ("Network", Some("HTTP")),
-            SettingsPage::NetworkTls => ("Network", Some("TLS")),
-            SettingsPage::UserDisplay => ("User interface", Some("Display")),
-            SettingsPage::UserMessageEditor => ("User interface", Some("Message editor")),
-            SettingsPage::UserMisc => ("User interface", Some("Hotkeys")),
-            SettingsPage::SuiteUpdates => ("Suite", Some("Updates")),
+            SettingsPage::Proxy => ("工具", Some("Proxy")),
+            SettingsPage::Intruder => ("工具", Some("Intruder")),
+            SettingsPage::Repeater => ("工具", Some("Repeater")),
+            SettingsPage::Sessions => ("会话", None),
+            SettingsPage::ProjectScope => ("项目", Some("范围")),
+            SettingsPage::ProjectTasks => ("项目", Some("任务")),
+            SettingsPage::NetworkConnections => ("网络", Some("连接")),
+            SettingsPage::NetworkHttp => ("网络", Some("HTTP")),
+            SettingsPage::NetworkTls => ("网络", Some("TLS")),
+            SettingsPage::UserDisplay => ("用户界面", Some("显示")),
+            SettingsPage::UserMessageEditor => ("用户界面", Some("消息编辑器")),
+            SettingsPage::UserMisc => ("用户界面", Some("快捷键")),
+            SettingsPage::SuiteUpdates => ("套件", Some("更新")),
         };
         let enabled = self.state.enabled;
         let owner = cx.weak_entity();
@@ -1194,7 +1194,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-http1-keep-alive",
-                                "Use keep-alive for HTTP/1 if the server supports it",
+                                "若服务器支持，在 HTTP/1 中使用 keep-alive",
                                 !self.state.enforce_http1_connection_close,
                             )
                             .on_change(move |st, _, _, cx| {
@@ -1210,7 +1210,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-http1-normalize-line-endings",
-                                "Normalize HTTP/1 line endings",
+                                "规范化 HTTP/1 换行符",
                                 self.state.normalize_http1_line_endings,
                             )
                             .on_change(move |st, _, _, cx| {
@@ -1242,7 +1242,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-http2-default",
-                                "Default to HTTP/2 if the server supports it",
+                                "若服务器支持，默认使用 HTTP/2",
                                 nh.default_to_http2,
                             )
                             .on_change(move |st, _, _, cx| {
@@ -1258,7 +1258,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-http2-strip-connection",
-                                "Strip Connection header over HTTP/2",
+                                "通过 HTTP/2 发送时剥离 Connection 标头",
                                 self.state.strip_connection_headers_over_http2,
                             )
                             .on_change(move |st, _, _, cx| {
@@ -1396,7 +1396,7 @@ impl Settings {
                                 .text_size(theme::scaled_px(12.5))
                                 .child("MIO 对不同工具处理流式响应的方式如下：")
                                 .child("• Proxy 在收到数据时直接将响应透传给客户端。")
-                                .child("• Repeater 在收到数据时实时更新响应面板；可在 Tools > Repeater > 流式响应 中设置超时。")
+                                .child("• Repeater 在收到数据时实时更新响应面板；可在 工具 > Repeater > 流式响应 中设置超时。")
                                 .child("• 其他工具忽略流式响应并关闭连接。"),
                         )
                         .child(
@@ -1458,7 +1458,7 @@ impl Settings {
                                     .child(
                                         listeners_tls::indexed_checkbox(
                                             "settings-streaming-scope-sub-cb",
-                                            "Include subdomains",
+                                            "包含子域名",
                                             self.http_streaming_scope_subdomains,
                                             enabled,
                                         )
@@ -1649,7 +1649,7 @@ impl Settings {
             .child(
                 section(
                     "settings-network-100-continue-heading",
-                    "Status 100 响应处理",
+                    "100 状态响应处理",
                     "配置 100 Continue 临时状态响应及 Expect 请求头处理。",
                     false,
                 )
@@ -1663,7 +1663,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-100-understand",
-                                "Understand 100 Continue responses",
+                                "识别 100 Continue 响应",
                                 nh.understand_100_continue,
                             )
                             .on_change(move |st, _, _, cx| {
@@ -1682,7 +1682,7 @@ impl Settings {
                         .child(
                             cb(
                                 "settings-100-remove-headers",
-                                "Remove 100 Continue headers",
+                                "移除 100 Continue 标头",
                                 nh.remove_100_continue_headers,
                             )
                             .on_change(move |st, _, _, cx| {

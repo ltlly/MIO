@@ -8,18 +8,18 @@ use mio_core::{AdvancedScopeRule, ScopeProtocol, Uuid};
 use super::*;
 
 const ADV_INC_FIELDS: [(&str, &str); 3] = [
-    ("settings-scope-adv-host", "Host / IP range"),
-    ("settings-scope-adv-port", "Port"),
-    ("settings-scope-adv-file", "File"),
+    ("settings-scope-adv-host", "主机 / IP 范围"),
+    ("settings-scope-adv-port", "端口"),
+    ("settings-scope-adv-file", "文件路径"),
 ];
 const ADV_EXC_FIELDS: [(&str, &str); 3] = [
-    ("settings-scope-adv-exc-host", "Host / IP range"),
-    ("settings-scope-adv-exc-port", "Port"),
-    ("settings-scope-adv-exc-file", "File"),
+    ("settings-scope-adv-exc-host", "主机 / IP 范围"),
+    ("settings-scope-adv-exc-port", "端口"),
+    ("settings-scope-adv-exc-file", "文件路径"),
 ];
 const ADV_META: [(&str, &str, &str, &str, &str, &str, &str); 2] = [
     (
-        "Include in scope",
+        "包含在范围内",
         "settings-scope-adv-include-add",
         "settings-scope-adv-include-cancel",
         "settings-scope-adv-include-toggle",
@@ -28,7 +28,7 @@ const ADV_META: [(&str, &str, &str, &str, &str, &str, &str); 2] = [
         "settings-scope-adv-include-paste",
     ),
     (
-        "Exclude from scope",
+        "排除在范围外",
         "settings-scope-adv-exclude-add",
         "settings-scope-adv-exclude-cancel",
         "settings-scope-adv-exclude-toggle",
@@ -44,11 +44,11 @@ pub(super) struct AdvScopeTable {
 }
 
 const ADV_COLUMNS: [(&str, f32); 5] = [
-    ("Enabled", 68.),
-    ("Protocol", 80.),
-    ("Host / IP range", 214.),
-    ("Port", 84.),
-    ("File", 186.),
+    ("启用", 68.),
+    ("协议", 80.),
+    ("主机 / IP 范围", 214.),
+    ("端口", 84.),
+    ("文件路径", 186.),
 ];
 
 impl TableDelegate for AdvScopeTable {
@@ -177,9 +177,9 @@ impl TableDelegate for AdvScopeTable {
 
 fn adv_scope_cell(rule: &AdvancedScopeRule, column: usize) -> String {
     match column {
-        0 => if rule.enabled { "Yes" } else { "No" }.into(),
+        0 => if rule.enabled { "是" } else { "否" }.into(),
         1 => match rule.protocol {
-            ScopeProtocol::Any => "Any",
+            ScopeProtocol::Any => "任意",
             ScopeProtocol::Http => "HTTP",
             ScopeProtocol::Https => "HTTPS",
         }
@@ -207,15 +207,15 @@ impl SettingsAdvScopeState {
     ) -> Self {
         let mk = |window: &mut Window, cx: &mut App| {
             [
-                cx.new(|cx| InputState::new(window, cx).placeholder("Host / IP 段 / 正则")),
-                cx.new(|cx| InputState::new(window, cx).placeholder("Port 正则")),
-                cx.new(|cx| InputState::new(window, cx).placeholder("File 正则")),
+                cx.new(|cx| InputState::new(window, cx).placeholder("主机 / IP 段 / 正则")),
+                cx.new(|cx| InputState::new(window, cx).placeholder("端口正则")),
+                cx.new(|cx| InputState::new(window, cx).placeholder("文件路径正则")),
             ]
         };
         let make_select = |window: &mut Window, cx: &mut App| {
             cx.new(|scx| {
                 SelectState::new(
-                    vec!["Any", "HTTP", "HTTPS"],
+                    vec!["任意", "HTTP", "HTTPS"],
                     Some(IndexPath::new(0)),
                     window,
                     scx,
@@ -722,7 +722,7 @@ impl Settings {
             .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(title))
             .child(
                 toolbar()
-                    .child("Protocol:")
+                    .child("协议：")
                     .child(
                         Select::new(&proto_select_bar)
                             .id(proto_id)
